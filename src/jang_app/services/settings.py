@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from jang_app.config import DEFAULT_RVC_ROOT, SEPARATION_OUTPUT_DIR, SETTINGS_FILE
+
+
+@dataclass(frozen=True)
+class RvcSettings:
+    root: Path = DEFAULT_RVC_ROOT
+    voice_model: str = ""
+    index_file: str = ""
+    pitch: int = 0
+    device: str = "cuda:0"
+    f0_method: str = "rmvpe"
+
+
+@dataclass(frozen=True)
+class AppSettings:
+    output_root: Path = SEPARATION_OUTPUT_DIR
+    rvc: RvcSettings = field(default_factory=RvcSettings)
+    theme_mode: str = "white"
+
+
+def load_app_settings() -> AppSettings:
+    if not SETTINGS_FILE.exists():
+        return AppSettings()
+
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return AppSettings()
+
+    default_settings = AppSettings()
+    output_root = _path_from_data(data.get("output_root"), default_settings.output_root)
+    theme_mode = _theme_mode_from_data(data.get("theme_mode"), default_settings.theme_mode)
+    rvc_data = data.get("rvc") if isinstance(data.get("rvc"), dict) else {}
+    rvc = RvcSettings(
+        root=_path_from_data(rvc_data.get("root"), default_settings.rvc.root),
+        voice_model=_string_from_data(rvc_data.get("voice_model"), default_settings.rvc.voice_model),
+        index_file=_string_from_data(rvc_data.get("index_file"), default_settings.rvc.index_file),
+        pitch=_int_from_data(rvc_data.get("pitch"), default_settings.rvc.pitch),
+        device=_string_from_data(rvc_data.get("device"), default_settings.rvc.device),
+        f0_method="rmvpe",
+    )
+    return AppSettings(output_root=output_root, rvc=rvc, theme_mode=theme_mode)
+
+
+def save_app_settings(settings: AppSettings) -> None:
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "output_root": str(settings.output_root.expanduser()),
+        "theme_mode": settings.theme_mode,
+        "rvc": {
+            "root": str(settings.rvc.root.expanduser()),
+            "voice_model": settings.rvc.voice_model,
+            "index_file": settings.rvc.index_file,
+            "pitch": settings.rvc.pitch,
+            "device": settings.rvc.device,
+            "f0_method": settings.rvc.f0_method,
+        },
+    }
+    SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _path_from_data(value: object, default: Path) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        return default
+    return Path(value).expanduser()
+
+
+def _string_from_data(value: object, default: str) -> str:
+    if not isinstance(value, str):
+        return default
+    return value.strip()
+
+
+def _int_from_data(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _theme_mode_from_data(value: object, default: str) -> str:
+    if isinstance(value, str) and value in {"dark", "white"}:
+        return value
+    return default
