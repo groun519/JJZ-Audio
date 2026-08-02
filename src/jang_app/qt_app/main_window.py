@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizeGrip,
     QSizePolicy,
-    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -44,15 +43,11 @@ from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.player_bar import GlobalPlayerBar
 from jang_app.qt_app.processing_queue_panel import ProcessingQueuePanel
 from jang_app.qt_app.segmented_stack import SegmentedStack
-from jang_app.qt_app.studio_master_panel import StudioMasterPanel
-from jang_app.qt_app.studio_range_editor import StudioRangeEditor
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
 from jang_app.qt_app.toast_stack import ToastStack
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
-from jang_app.qt_app.video_source_panel import VideoSourcePanel
 from jang_app.qt_app.video_preview_panel import VideoPreviewPanel
-from jang_app.qt_app.video_render_panel import VideoRenderPanel
 from jang_app.qt_app.work_context_bar import WorkContextBar
 from jang_app.qt_app.widgets import (
     FeedbackButton,
@@ -68,7 +63,6 @@ from jang_app.qt_app.widgets import (
     make_list_item,
 )
 from jang_app.qt_app.workers import TaskProgressTarget, TaskWorker
-from jang_app.services.audio_effects import MasterProcessing
 from jang_app.services.audio_export import export_audio_file
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.audio_player import AudioPlaybackError, AudioPlayer
@@ -86,12 +80,7 @@ from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabili
 from jang_app.services.work_song import WorkSongStore
 from jang_app.services.video_source import VideoSource
 from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion
-from jang_app.services.studio_session import (
-    StudioMasterState,
-    StudioSession,
-    StudioTimelineState,
-    StudioTrackState,
-)
+from jang_app.services.studio_session import StudioSession, StudioTrackState
 from jang_app.services.youtube_download import YouTubeDownloadResult, download_youtube_audio
 
 
@@ -434,73 +423,33 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
 
-        left_panel = QFrame()
-        left_panel.setObjectName("Panel")
-        left_panel.setMinimumWidth(380)
-        left_panel.setMaximumWidth(460)
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(20, 20, 20, 20)
-        left_layout.setSpacing(16)
-
-        self.studio_steps = SegmentedStack(
-            (
-                ("Mix", self._build_mix_step_page()),
-                ("Video", self._build_video_step_page()),
-            )
-        )
-        self.studio_steps.current_changed.connect(self._on_studio_step_changed)
-
-        left_layout.addWidget(self.studio_steps, 1)
-
         self.video_preview_panel = VideoPreviewPanel()
-        self.video_preview_panel.hide()
+        self.video_preview_panel.browse_requested.connect(self._choose_video_file)
+        self.video_preview_panel.files_dropped.connect(self._attach_video_files)
+        self.video_preview_panel.url_requested.connect(self._attach_video_url)
+        self.video_preview_panel.open_location_requested.connect(self._open_video_location)
+        self.video_preview_panel.clear_requested.connect(self._clear_video_source)
+        self.video_preview_panel.download_requested.connect(self._start_video_download)
         self.studio_output_panel = self._build_output_panel()
-        self.studio_right_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.studio_right_splitter.setObjectName("StudioRightSplitter")
-        self.studio_right_splitter.setChildrenCollapsible(False)
-        self.studio_right_splitter.addWidget(self.video_preview_panel)
-        self.studio_right_splitter.addWidget(self.studio_output_panel)
-        self.studio_right_splitter.setStretchFactor(0, 3)
-        self.studio_right_splitter.setStretchFactor(1, 2)
+        self.video_preview_panel.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.studio_output_panel.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
 
-        layout.addWidget(left_panel, 0)
-        layout.addWidget(self.studio_right_splitter, 1)
+        layout.addWidget(self.video_preview_panel, 5)
+        layout.addWidget(self.studio_output_panel, 7)
         return page
 
     def _build_export_page(self) -> QWidget:
         self.export_page = ExportPage()
-        self.export_page.export_requested.connect(self._start_audio_mix_export)
+        self.export_page.audio_export_requested.connect(self._start_audio_mix_export)
+        self.export_page.video_export_requested.connect(self._start_video_render)
         self.export_page.open_location_requested.connect(self._open_export_location)
         return self.export_page
-
-    def _build_video_step_page(self) -> QWidget:
-        self.video_source_panel = VideoSourcePanel()
-        self.video_source_panel.browse_requested.connect(self._choose_video_file)
-        self.video_source_panel.files_dropped.connect(self._attach_video_files)
-        self.video_source_panel.url_requested.connect(self._attach_video_url)
-        self.video_source_panel.open_location_requested.connect(self._open_video_location)
-        self.video_source_panel.clear_requested.connect(self._clear_video_source)
-        self.video_source_panel.download_requested.connect(self._start_video_download)
-
-        self.video_render_panel = VideoRenderPanel()
-        self.video_render_panel.range_changed.connect(self._on_video_range_changed)
-        self.video_render_panel.render_requested.connect(self._start_video_render)
-        self.video_render_panel.open_location_requested.connect(self._open_video_location)
-
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(14)
-        content_layout.addWidget(self.video_source_panel, 0)
-        content_layout.addWidget(self.video_render_panel, 0)
-        content_layout.addStretch(1)
-
-        scroll = QScrollArea()
-        scroll.setObjectName("StudioStepScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(content)
-        return scroll
 
     def _build_models_page(self) -> QWidget:
         self.model_workspace_page = ModelWorkspacePage(self.settings.rvc.root)
@@ -594,20 +543,6 @@ class MainWindow(QMainWindow):
         rvc_layout.addStretch(1)
         return rvc_panel
 
-    def _build_mix_step_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
-        self.studio_range_editor = StudioRangeEditor()
-        self.studio_range_editor.range_changed.connect(self._on_studio_range_changed)
-        self.studio_master_panel = StudioMasterPanel()
-        self.studio_master_panel.processing_changed.connect(self._on_studio_master_changed)
-        layout.addWidget(self.studio_range_editor, 0)
-        layout.addWidget(self.studio_master_panel, 0)
-        layout.addStretch(1)
-        return page
-
     def _build_output_panel(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("Panel")
@@ -687,14 +622,8 @@ class MainWindow(QMainWindow):
             self.library_details_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "export_page"):
             self.export_page.set_theme_mode(self.settings.theme_mode)
-        if hasattr(self, "studio_range_editor"):
-            self.studio_range_editor.set_theme_mode(self.settings.theme_mode)
-        if hasattr(self, "studio_master_panel"):
-            self.studio_master_panel.set_theme_mode(self.settings.theme_mode)
-        if hasattr(self, "video_source_panel"):
-            self.video_source_panel.set_theme_mode(self.settings.theme_mode)
-        if hasattr(self, "video_render_panel"):
-            self.video_render_panel.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "video_preview_panel"):
+            self.video_preview_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "library_details_button"):
             self.library_details_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "song_list"):
@@ -720,11 +649,7 @@ class MainWindow(QMainWindow):
         self.vocal_results_panel.apply_language()
         self.library_details_panel.apply_language()
         self.export_page.apply_language()
-        self.studio_range_editor.apply_language()
-        self.studio_master_panel.apply_language()
-        self.video_source_panel.apply_language()
         self.video_preview_panel.apply_language()
-        self.video_render_panel.apply_language()
         self._populate_library_source_filter()
         set_translated_tooltip(self.library_details_button, "Open song details")
 
@@ -810,24 +735,15 @@ class MainWindow(QMainWindow):
         if index == PAGE_EXPORT:
             self._refresh_export_page()
         self._sync_playback_queue_for_page(index)
-        self._apply_preview_master_processing()
         self._sync_video_workspace()
 
     def _navigate_to_vocal_step(self, index: int) -> None:
         self.vocal_steps.set_current_index(index)
 
-    def _navigate_to_studio_step(self, index: int) -> None:
-        self.studio_steps.set_current_index(index)
-        self._sync_video_workspace()
-
-    def _on_studio_step_changed(self, _index: int) -> None:
-        self._sync_video_workspace()
-
     def _open_current_song_in_studio(self, *_args) -> None:
         if self.current_output_set is None:
             return
         self._navigate_to_page(PAGE_STUDIO)
-        self._navigate_to_studio_step(0)
 
     def _choose_audio_files(self, *_args) -> None:
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_AUDIO_EXTENSIONS))
@@ -859,26 +775,26 @@ class MainWindow(QMainWindow):
             if Path(path).suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
         ] if isinstance(paths, (list, tuple)) else []
         if not candidates:
-            self.video_source_panel.set_status("Select a supported video file.")
+            self.video_preview_panel.set_status("Select a supported video file.")
             return
         self._start_video_file_import(candidates[0])
 
     def _start_video_file_import(self, source: Path) -> None:
         item = self.current_work_item
         if item is None:
-            self.video_source_panel.set_status("Select a song.")
+            self.video_preview_panel.set_status("Select a song.")
             return
         scope = WorkTaskScope(item.id)
         source = source.expanduser().resolve()
-        self.video_source_panel.set_running(True)
-        self.video_source_panel.set_progress(1)
-        self.video_source_panel.set_status("Importing video")
+        self.video_preview_panel.set_running(True)
+        self.video_preview_panel.set_progress(1)
+        self.video_preview_panel.set_status("Importing video")
         worker = TaskWorker(lambda progress: self.library.set_video_file(scope.song_id, source, progress))
         self._run_worker(
             worker,
             lambda result: self._on_video_source_attached(scope, result),
             lambda error: self._on_video_source_failed(scope, error),
-            self.video_source_panel,
+            self.video_preview_panel,
             task_title="Import Video",
             task_detail=source.name,
             action_scope=lambda: scope.is_current(self.current_work_item),
@@ -887,32 +803,32 @@ class MainWindow(QMainWindow):
     def _attach_video_url(self, url: str) -> None:
         item = self.current_work_item
         if item is None:
-            self.video_source_panel.set_status("Select a song.")
+            self.video_preview_panel.set_status("Select a song.")
             return
         try:
             source = self.library.set_video_url(item.id, url)
         except (KeyError, ValueError) as exc:
-            self.video_source_panel.set_status(str(exc))
+            self.video_preview_panel.set_status(str(exc))
             return
         self._set_video_source(source, enabled=True)
-        self.video_source_panel.set_status("Video attached")
+        self.video_preview_panel.set_status("Video attached")
         self._refresh_open_library_details(item.id)
 
     def _start_video_download(self) -> None:
         item = self.current_work_item
         if item is None:
-            self.video_source_panel.set_status("Select a song.")
+            self.video_preview_panel.set_status("Select a song.")
             return
         scope = WorkTaskScope(item.id)
-        self.video_source_panel.set_running(True)
-        self.video_source_panel.set_progress(1)
-        self.video_source_panel.set_status("Downloading video")
+        self.video_preview_panel.set_running(True)
+        self.video_preview_panel.set_progress(1)
+        self.video_preview_panel.set_status("Downloading video")
         worker = TaskWorker(lambda progress: self.library.download_video_source(scope.song_id, progress))
         self._run_worker(
             worker,
             lambda result: self._on_video_downloaded(scope, result),
             lambda error: self._on_video_source_failed(scope, error),
-            self.video_source_panel,
+            self.video_preview_panel,
             task_title="Download Video",
             task_detail=item.title,
             action_scope=lambda: scope.is_current(self.current_work_item),
@@ -927,7 +843,7 @@ class MainWindow(QMainWindow):
         except KeyError:
             return
         self._set_video_source(source, enabled=True)
-        self.video_source_panel.set_status("Video source cleared")
+        self.video_preview_panel.set_status("Video source cleared")
         self._refresh_open_library_details(item.id)
 
     def _on_video_source_attached(self, scope: WorkTaskScope, result: object) -> None:
@@ -935,43 +851,43 @@ class MainWindow(QMainWindow):
         if not scope.is_current(self.current_work_item) or not isinstance(result, VideoSource):
             return
         self._set_video_source(result, enabled=True)
-        self.video_source_panel.set_status("Video attached")
+        self.video_preview_panel.set_status("Video attached")
 
     def _on_video_downloaded(self, scope: WorkTaskScope, result: object) -> None:
         self._refresh_open_library_details(scope.song_id)
         if not scope.is_current(self.current_work_item) or not isinstance(result, VideoSource):
             return
         self._set_video_source(result, enabled=True)
-        self.video_source_panel.set_progress(100)
-        self.video_source_panel.set_status("Video downloaded")
+        self.video_preview_panel.set_progress(100)
+        self.video_preview_panel.set_status("Video downloaded")
 
     def _on_video_source_failed(self, scope: WorkTaskScope, error: str) -> None:
         if scope.is_current(self.current_work_item):
-            self.video_source_panel.set_status(f"Video failed: {_last_error_line(error)}", error)
+            self.video_preview_panel.set_status(f"Video failed: {_last_error_line(error)}", error)
 
     def _open_video_location(self, path: Path) -> None:
         try:
             open_in_file_browser(path)
         except Exception as exc:
-            self.video_source_panel.set_status(f"Open failed: {_last_error_line(str(exc))}")
+            self.video_preview_panel.set_status(f"Open failed: {_last_error_line(str(exc))}")
 
-    def _start_video_render(self) -> None:
-        item = self.current_work_item
+    def _start_video_render(self, song_id: str) -> None:
+        item = self._song_items_by_id.get(song_id)
         if item is None:
-            self.video_render_panel.set_status("Select a song.")
+            self.export_page.set_video_status("Select a song.")
             return
         self._queue_current_studio_session_save()
         self.studio_session_autosave.flush()
         scope = WorkTaskScope(item.id)
-        self.video_render_panel.set_running(True)
-        self.video_render_panel.set_progress(1)
-        self.video_render_panel.set_status("Rendering video")
+        self.export_page.set_video_running(True)
+        self.export_page.set_video_progress(1)
+        self.export_page.set_video_status("Rendering video")
         worker = TaskWorker(lambda progress: self.library.render_video(scope.song_id, progress))
         self._run_worker(
             worker,
             lambda result: self._on_video_rendered(scope, result),
             lambda error: self._on_video_render_failed(scope, error),
-            self.video_render_panel,
+            self.export_page.video_action,
             task_title="Render Video",
             task_detail=item.title,
             action_scope=lambda: scope.is_current(self.current_work_item),
@@ -983,14 +899,13 @@ class MainWindow(QMainWindow):
         if not scope.is_current(self.current_work_item):
             return
         path = result if isinstance(result, Path) else None
-        self.video_render_panel.set_progress(100)
-        self.video_render_panel.set_result(path)
-        self.video_render_panel.set_status("Video rendered", str(path) if path is not None else "")
+        self.export_page.set_video_progress(100)
+        self.export_page.set_video_status("Video rendered", str(path) if path is not None else "")
 
     def _on_video_render_failed(self, scope: WorkTaskScope, error: str) -> None:
         if not scope.is_current(self.current_work_item):
             return
-        self.video_render_panel.set_status(f"Render failed: {_last_error_line(error)}", error)
+        self.export_page.set_video_status(f"Render failed: {_last_error_line(error)}", error)
 
     def _refresh_open_library_details(self, song_id: str) -> None:
         if self.library_content_stack.currentIndex() == 1 and self.library_details_panel.song_id == song_id:
@@ -1289,8 +1204,6 @@ class MainWindow(QMainWindow):
         )
         self.separation_action.set_action_enabled(capabilities.can_separate)
         self.rvc_action.set_action_enabled(capabilities.can_convert)
-        self.studio_master_panel.set_processing_enabled(capabilities.can_edit_studio)
-        self._sync_video_render_capability()
 
     def _current_output_matches_work_song(self) -> bool:
         item = self.current_work_item
@@ -1314,49 +1227,30 @@ class MainWindow(QMainWindow):
         self._set_video_source(source, enabled=True)
 
     def _set_video_source(self, source: VideoSource, *, enabled: bool) -> None:
-        self.video_source_panel.set_source(source, enabled=enabled)
-        self.video_preview_panel.set_source(source)
-        self.video_render_panel.set_result(None)
-        self._sync_video_render_capability(source)
+        item = self.current_work_item
+        original_url = (
+            item.source_url
+            if item is not None and item.source_type == "youtube"
+            else ""
+        )
+        self.video_preview_panel.set_source(
+            source,
+            enabled=enabled,
+            original_song_url=original_url,
+        )
         self._sync_video_workspace()
-
-    def _sync_video_render_capability(self, source: VideoSource | None = None) -> None:
-        active_source = source
-        if active_source is None and self.current_work_item is not None:
-            try:
-                active_source = self.library.video_source(self.current_work_item.id)
-            except KeyError:
-                active_source = None
-        has_local_video = (
-            active_source is not None
-            and active_source.path is not None
-            and active_source.path.is_file()
-        )
-        self.video_render_panel.set_action_enabled(
-            has_local_video and self._current_output_matches_work_song()
-        )
 
     def _sync_video_workspace(self) -> None:
         if not hasattr(self, "video_preview_panel"):
             return
-        video_active = (
-            self.page_stack.currentIndex() == PAGE_STUDIO
-            and self.studio_steps.current_index() == 1
-        )
-        visibility_changed = self.video_preview_panel.isVisible() != video_active
-        self.video_preview_panel.setVisible(video_active)
+        video_active = self.page_stack.currentIndex() == PAGE_STUDIO
         self.video_preview_panel.set_active(video_active)
-        if video_active and visibility_changed:
-            self.studio_right_splitter.setSizes([360, 300])
         self._sync_video_playback(self.player.is_playing())
 
     def _sync_video_playback(self, is_playing: bool) -> None:
         if not hasattr(self, "video_preview_panel"):
             return
-        video_active = (
-            self.page_stack.currentIndex() == PAGE_STUDIO
-            and self.studio_steps.current_index() == 1
-        )
+        video_active = self.page_stack.currentIndex() == PAGE_STUDIO
         self.video_preview_panel.sync_playback(
             self._playback_position_ms,
             video_active and is_playing and self._current_playback_context() == "output",
@@ -1555,7 +1449,6 @@ class MainWindow(QMainWindow):
             return
         _set_optional_label(self.library_status_label, "Loaded")
         self._navigate_to_page(PAGE_STUDIO)
-        self._navigate_to_studio_step(0)
 
     def _select_output_set(self, job_dir: Path) -> None:
         resolved = job_dir.expanduser().resolve()
@@ -1800,11 +1693,9 @@ class MainWindow(QMainWindow):
             preview_paths = [prepare_preview_audio(path) for path in queue.paths]
             duration_ms = max(self.player.duration_ms(path) for path in preview_paths)
             queue = queue.with_duration(duration_ms)
-            range_start, range_end = self._studio_playback_bounds(queue)
-            start_ms = max(range_start, min(start_ms, range_end))
-            if start_ms >= range_end:
-                start_ms = range_start
-            self._apply_preview_master_processing(queue)
+            start_ms = max(0, min(start_ms, queue.duration_ms))
+            if start_ms >= queue.duration_ms:
+                start_ms = 0
             self.player.play(preview_paths, start_ms=start_ms, volumes=queue.volumes)
         except Exception as exc:
             self._handle_playback_error(queue, exc)
@@ -1831,10 +1722,9 @@ class MainWindow(QMainWindow):
         queue = self.current_playback_queue
         if queue is None:
             return
-        range_start, range_end = self._studio_playback_bounds(queue)
-        self._playback_position_ms = max(range_start, min(position_ms, range_end))
+        self._playback_position_ms = max(0, min(position_ms, queue.duration_ms))
         was_playing = self.player.is_playing()
-        if was_playing and self._playback_position_ms >= range_end:
+        if was_playing and self._playback_position_ms >= queue.duration_ms:
             self.player.pause()
             self.playback_timer.stop()
             was_playing = False
@@ -1898,20 +1788,8 @@ class MainWindow(QMainWindow):
                 muted=session.converted_vocal.muted,
                 volume_percent=session.converted_vocal.volume_percent,
             )
-            self.studio_master_panel.set_state(session.master)
-            self.studio_range_editor.set_timeline(
-                self._loaded_output_duration_ms(),
-                session.timeline.start_ms,
-                session.timeline.end_ms,
-            )
-            self.video_render_panel.set_timeline(
-                self._loaded_output_duration_ms(),
-                session.timeline.start_ms,
-                session.timeline.end_ms,
-            )
         finally:
             self._is_loading_studio_session = False
-        self._apply_preview_master_processing()
 
     def _queue_current_studio_session_save(self) -> None:
         if self._is_loading_studio_session or self.current_output_set is None:
@@ -1922,32 +1800,11 @@ class MainWindow(QMainWindow):
         self.studio_session_autosave.queue(item.id, self._studio_session_from_tracks())
 
     def _studio_session_from_tracks(self) -> StudioSession:
-        start_ms, end_ms = self.studio_range_editor.session_values()
         return StudioSession(
             original_vocal=_studio_track_state(self.vocal_track),
             instrumental=_studio_track_state(self.instrumental_track),
             converted_vocal=_studio_track_state(self.converted_track),
-            timeline=StudioTimelineState(start_ms, end_ms),
-            master=self.studio_master_panel.state(),
         )
-
-    def _on_studio_range_changed(self, start_ms: int, end_ms: int) -> None:
-        self.video_render_panel.set_timeline(self._loaded_output_duration_ms(), start_ms, end_ms)
-        self._queue_current_studio_session_save()
-        if self._current_playback_context() != "output" or self.page_stack.currentIndex() != PAGE_STUDIO:
-            return
-        position_ms = self.player.position_ms() if self.player.is_playing() else self._playback_position_ms
-        if position_ms < start_ms or position_ms >= end_ms:
-            self._seek_global_playback(start_ms)
-
-    def _on_video_range_changed(self, start_ms: int, end_ms: int) -> None:
-        self.studio_range_editor.set_timeline(self._loaded_output_duration_ms(), start_ms, end_ms)
-        self._on_studio_range_changed(start_ms, end_ms)
-
-    def _on_studio_master_changed(self, state: StudioMasterState) -> None:
-        self._queue_current_studio_session_save()
-        if self._current_playback_context() == "output" and self.page_stack.currentIndex() == PAGE_STUDIO:
-            self.player.set_master_processing(_master_processing(state))
 
     def _on_studio_session_save_failed(self, error: str) -> None:
         _set_optional_label(self.output_status_label, f"Session failed: {_last_error_line(error)}")
@@ -1965,13 +1822,12 @@ class MainWindow(QMainWindow):
             return
 
         self._playback_position_ms = self.player.position_ms()
-        _range_start, range_end = self._studio_playback_bounds(queue)
-        if self._playback_position_ms >= range_end:
+        if self._playback_position_ms >= queue.duration_ms:
             self.player.pause()
             self.playback_timer.stop()
-            self._playback_position_ms = range_end
+            self._playback_position_ms = queue.duration_ms
             self._refresh_player_bar(is_playing=False)
-            self._update_output_playheads(range_end, queue.duration_ms)
+            self._update_output_playheads(queue.duration_ms, queue.duration_ms)
             return
         self._refresh_player_bar(is_playing=True)
         self._update_output_playheads(self._playback_position_ms, queue.duration_ms)
@@ -1992,8 +1848,7 @@ class MainWindow(QMainWindow):
             self._update_output_playheads(0, 0)
             return
 
-        range_start, range_end = self._studio_playback_bounds(queue)
-        self._playback_position_ms = max(range_start, min(position_ms, range_end))
+        self._playback_position_ms = max(0, min(position_ms, queue.duration_ms))
         self._refresh_player_bar(is_playing=False)
         self._update_output_playheads(self._playback_position_ms, queue.duration_ms)
         if auto_play:
@@ -2027,8 +1882,7 @@ class MainWindow(QMainWindow):
 
         if self._current_playback_context() == "output":
             self.current_playback_queue = queue
-            range_start, range_end = self._studio_playback_bounds(queue)
-            self._playback_position_ms = max(range_start, min(position_ms, range_end))
+            self._playback_position_ms = max(0, min(position_ms, queue.duration_ms))
             self._refresh_player_bar(is_playing=was_playing)
             self._update_output_playheads(self._playback_position_ms, queue.duration_ms)
             if was_playing:
@@ -2113,30 +1967,6 @@ class MainWindow(QMainWindow):
     def _loaded_output_duration_ms(self) -> int:
         return self._duration_ms_for_paths(self._loaded_track_paths())
 
-    def _studio_playback_bounds(self, queue: PlaybackQueue) -> tuple[int, int]:
-        duration_ms = max(0, queue.duration_ms)
-        if (
-            queue.context != "output"
-            or self.page_stack.currentIndex() != PAGE_STUDIO
-            or duration_ms <= 0
-        ):
-            return 0, duration_ms
-        start_ms, end_ms = self.studio_range_editor.playback_bounds()
-        start_ms = max(0, min(start_ms, duration_ms))
-        end_ms = max(start_ms, min(end_ms, duration_ms))
-        return (start_ms, end_ms) if end_ms > start_ms else (0, duration_ms)
-
-    def _apply_preview_master_processing(self, queue: PlaybackQueue | None = None) -> None:
-        active_queue = queue or self.current_playback_queue
-        state = StudioMasterState()
-        if (
-            active_queue is not None
-            and active_queue.context == "output"
-            and self.page_stack.currentIndex() == PAGE_STUDIO
-        ):
-            state = self.studio_master_panel.state()
-        self.player.set_master_processing(_master_processing(state))
-
     def _duration_ms_for_paths(self, paths: list[Path]) -> int:
         durations = []
         for path in paths:
@@ -2151,32 +1981,41 @@ class MainWindow(QMainWindow):
             return
         song = self.current_work_item
         if song is None:
-            self.export_page.set_exports((), None)
-            self.export_page.set_work_song("", export_enabled=False)
+            self.export_page.set_exports((), (), None)
+            self.export_page.set_work_song("", audio_enabled=False, video_enabled=False)
             return
         try:
-            exports = self.library.audio_exports(song.id)
-            export_dir = self.library.audio_export_dir(song.id)
+            audio_exports = self.library.audio_exports(song.id)
+            video_exports = self.library.video_exports(song.id)
+            export_dir = self.library.audio_export_dir(song.id).parent
+            video_source = self.library.video_source(song.id)
         except KeyError:
-            exports = ()
+            audio_exports = ()
+            video_exports = ()
             export_dir = None
+            video_source = VideoSource()
         capabilities = build_work_song_capabilities(
             song,
             output_available=self._current_output_matches_work_song(),
         )
-        self.export_page.set_exports(exports, export_dir)
-        self.export_page.set_work_song(song.id, export_enabled=capabilities.can_export)
+        has_local_video = video_source.path is not None and video_source.path.is_file()
+        self.export_page.set_exports(audio_exports, video_exports, export_dir)
+        self.export_page.set_work_song(
+            song.id,
+            audio_enabled=capabilities.can_export,
+            video_enabled=capabilities.can_export and has_local_video,
+        )
 
     def _start_audio_mix_export(self, song_id: str) -> None:
         song = self._song_items_by_id.get(song_id)
         if song is None:
-            self.export_page.set_status("Select a song.")
+            self.export_page.set_audio_status("Select a song.")
             return
 
         self.studio_session_autosave.flush()
-        self.export_page.set_running(True)
-        self.export_page.set_progress(0)
-        self.export_page.set_status("Exporting audio mix")
+        self.export_page.set_audio_running(True)
+        self.export_page.set_audio_progress(0)
+        self.export_page.set_audio_status("Exporting audio mix")
         scope = WorkTaskScope(song_id)
         worker = TaskWorker(
             lambda progress: _run_with_progress(lambda: self.library.export_audio_mix(song_id), progress)
@@ -2185,7 +2024,7 @@ class MainWindow(QMainWindow):
             worker,
             lambda result: self._on_audio_mix_export_succeeded(scope, result),
             lambda error: self._on_audio_mix_export_failed(scope, error),
-            self.export_page.action,
+            self.export_page.audio_action,
             task_title="Export Mix",
             task_detail=song.title,
             action_scope=lambda: scope.is_current(self.current_work_item),
@@ -2196,14 +2035,17 @@ class MainWindow(QMainWindow):
         if not scope.is_current(self.current_work_item):
             return
         exported = result if isinstance(result, Path) else None
-        self.export_page.set_progress(100)
-        self.export_page.set_status("Audio mix exported", str(exported) if exported is not None else "")
+        self.export_page.set_audio_progress(100)
+        self.export_page.set_audio_status(
+            "Audio mix exported",
+            str(exported) if exported is not None else "",
+        )
 
     def _on_audio_mix_export_failed(self, scope: WorkTaskScope, error: str) -> None:
         self._refresh_export_page()
         if not scope.is_current(self.current_work_item):
             return
-        self.export_page.set_status(f"Export failed: {_last_error_line(error)}", error)
+        self.export_page.set_audio_status(f"Export failed: {_last_error_line(error)}", error)
 
     def _export_track(self, path: Path) -> None:
         item = self.current_song or self.current_work_item
@@ -2253,7 +2095,7 @@ class MainWindow(QMainWindow):
         try:
             open_in_file_browser(path if path.exists() else path.parent)
         except Exception as exc:
-            self.export_page.set_status(f"Open failed: {_last_error_line(str(exc))}")
+            self.export_page.set_audio_status(f"Open failed: {_last_error_line(str(exc))}")
 
     def _use_model_in_convert(self, record: RvcModelRecord) -> None:
         inference_model = record.inference_model
@@ -2378,13 +2220,6 @@ def _studio_track_state(track: TrackRow) -> StudioTrackState:
     return StudioTrackState(
         muted=track.is_muted(),
         volume_percent=track.volume_percent(),
-    )
-
-
-def _master_processing(state: StudioMasterState) -> MasterProcessing:
-    return MasterProcessing(
-        gain_db=state.gain_db,
-        stereo_width_percent=state.stereo_width_percent,
     )
 
 

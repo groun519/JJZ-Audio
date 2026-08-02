@@ -271,17 +271,34 @@ def _stylesheet(
             border-radius: 12px;
         }}
 
-        QLabel#VideoEmptyState {{
-            color: {faint};
-            background: transparent;
-            border: 0;
-            font-size: 12px;
-            font-weight: 700;
+        QFrame#VideoSourceCanvas {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
         }}
 
-        QSplitter#StudioRightSplitter::handle {{
+        QFrame#VideoSourceCard {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 13px;
+        }}
+
+        QFrame#VideoUrlField {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 11px;
+        }}
+
+        QFrame#VideoUrlField:focus-within {{
+            border-color: {focus};
+        }}
+
+        QLineEdit#VideoUrlEdit {{
             background: transparent;
-            height: 8px;
+            border: 0;
+            border-radius: 0;
+            padding: 0;
+            min-height: 28px;
         }}
 
         QScrollArea#StudioStepScroll {{
@@ -559,30 +576,6 @@ def _stylesheet(
             padding: 28px;
             font-size: 12px;
             font-weight: 700;
-        }}
-
-        QLabel#StudioRangeCaption {{
-            color: {muted};
-            font-size: 10px;
-            font-weight: 800;
-        }}
-
-        QLabel#StudioRangeValue {{
-            color: {text};
-            font-size: 11px;
-            font-weight: 900;
-        }}
-
-        QLabel#StudioMasterLabel {{
-            color: {muted};
-            font-size: 11px;
-            font-weight: 800;
-        }}
-
-        QLabel#StudioMasterValue {{
-            color: {text};
-            font-size: 11px;
-            font-weight: 900;
         }}
 
         QLabel#SourceBadge {{

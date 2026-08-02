@@ -9,10 +9,12 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLay
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
 from jang_app.qt_app.widgets import SvgIconButton, TaskActionWidget
 from jang_app.services.song_export import SongAudioExport
+from jang_app.services.song_video_export import SongVideoExport
 
 
 class ExportPage(QWidget):
-    export_requested = Signal(str)
+    audio_export_requested = Signal(str)
+    video_export_requested = Signal(str)
     open_location_requested = Signal(object)
 
     def __init__(self) -> None:
@@ -20,7 +22,7 @@ class ExportPage(QWidget):
         self._export_dir: Path | None = None
         self._work_song_id = ""
         self._theme_mode = "white"
-        self.export_rows: list[_AudioExportRow] = []
+        self.export_rows: list[_ExportRow] = []
 
         left_panel = QFrame()
         left_panel.setObjectName("Panel")
@@ -28,12 +30,16 @@ class ExportPage(QWidget):
         left_panel.setMaximumWidth(460)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(20, 20, 20, 20)
-        left_layout.setSpacing(16)
+        left_layout.setSpacing(14)
 
-        self.action = TaskActionWidget("Audio Mix", "Export")
-        self.action.triggered.connect(self._request_export)
-        self.action.set_action_enabled(False)
-        left_layout.addWidget(self.action, 0)
+        self.audio_action = TaskActionWidget("Audio Mix", "Export")
+        self.audio_action.triggered.connect(self._request_audio_export)
+        self.audio_action.set_action_enabled(False)
+        self.video_action = TaskActionWidget("Video Export", "Render")
+        self.video_action.triggered.connect(self._request_video_export)
+        self.video_action.set_action_enabled(False)
+        left_layout.addWidget(self.audio_action, 0)
+        left_layout.addWidget(self.video_action, 0)
         left_layout.addStretch(1)
 
         results_panel = QFrame()
@@ -73,12 +79,21 @@ class ExportPage(QWidget):
         layout.setSpacing(18)
         layout.addWidget(left_panel, 0)
         layout.addWidget(results_panel, 1)
-        self.set_exports((), None)
+        self.set_exports((), (), None)
 
-    def set_exports(self, exports: tuple[SongAudioExport, ...], export_dir: Path | None) -> None:
+    def set_exports(
+        self,
+        audio_exports: tuple[SongAudioExport, ...],
+        video_exports: tuple[SongVideoExport, ...],
+        export_dir: Path | None,
+    ) -> None:
         self._clear_rows()
         self._export_dir = export_dir
         self.open_folder_button.setEnabled(export_dir is not None)
+        exports: list[tuple[SongAudioExport | SongVideoExport, str]] = [
+            (exported, "AUDIO") for exported in audio_exports
+        ] + [(exported, "VIDEO") for exported in video_exports]
+        exports.sort(key=lambda item: item[0].modified_at, reverse=True)
         if not exports:
             empty_label = QLabel()
             empty_label.setObjectName("ExportEmptyState")
@@ -87,34 +102,49 @@ class ExportPage(QWidget):
             self.export_layout.addWidget(empty_label, 1)
             return
 
-        for exported in exports:
-            row = _AudioExportRow(exported)
+        for exported, export_kind in exports:
+            row = _ExportRow(exported, export_kind)
             row.set_theme_mode(self._theme_mode)
             row.open_location_requested.connect(self.open_location_requested.emit)
             self.export_rows.append(row)
             self.export_layout.addWidget(row, 0)
         self.export_layout.addStretch(1)
 
-    def set_export_enabled(self, enabled: bool) -> None:
-        self.action.set_action_enabled(enabled)
-
-    def set_work_song(self, song_id: str, *, export_enabled: bool) -> None:
+    def set_work_song(
+        self,
+        song_id: str,
+        *,
+        audio_enabled: bool,
+        video_enabled: bool,
+    ) -> None:
         changed = song_id != self._work_song_id
         self._work_song_id = song_id
         if changed:
-            self.action.set_progress(0)
-            self.set_status("")
-        self.set_export_enabled(export_enabled)
+            for action in (self.audio_action, self.video_action):
+                action.set_progress(0)
+                action.set_status("")
+        self.audio_action.set_action_enabled(audio_enabled)
+        self.video_action.set_action_enabled(video_enabled)
 
-    def set_running(self, running: bool) -> None:
-        self.action.set_running(running)
+    def set_audio_running(self, running: bool) -> None:
+        self.audio_action.set_running(running)
 
-    def set_progress(self, progress: int) -> None:
-        self.action.set_progress(progress)
+    def set_audio_progress(self, progress: int) -> None:
+        self.audio_action.set_progress(progress)
 
-    def set_status(self, status: str, detail: str = "") -> None:
-        self.action.set_status(status)
-        self.action.status_label.setToolTip(detail)
+    def set_audio_status(self, status: str, detail: str = "") -> None:
+        self.audio_action.set_status(status)
+        self.audio_action.status_label.setToolTip(detail)
+
+    def set_video_running(self, running: bool) -> None:
+        self.video_action.set_running(running)
+
+    def set_video_progress(self, progress: int) -> None:
+        self.video_action.set_progress(progress)
+
+    def set_video_status(self, status: str, detail: str = "") -> None:
+        self.video_action.set_status(status)
+        self.video_action.status_label.setToolTip(detail)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
@@ -126,8 +156,11 @@ class ExportPage(QWidget):
         apply_widget_language(self)
         set_translated_tooltip(self.open_folder_button, "Open export location")
 
-    def _request_export(self) -> None:
-        self.export_requested.emit(self._work_song_id)
+    def _request_audio_export(self) -> None:
+        self.audio_export_requested.emit(self._work_song_id)
+
+    def _request_video_export(self) -> None:
+        self.video_export_requested.emit(self._work_song_id)
 
     def _open_export_location(self) -> None:
         if self._export_dir is not None:
@@ -143,12 +176,18 @@ class ExportPage(QWidget):
                 widget.deleteLater()
 
 
-class _AudioExportRow(QFrame):
+class _ExportRow(QFrame):
     open_location_requested = Signal(object)
 
-    def __init__(self, exported: SongAudioExport) -> None:
+    def __init__(self, exported: SongAudioExport | SongVideoExport, export_kind: str) -> None:
         super().__init__()
         self.setObjectName("ExportRow")
+
+        badge = QLabel(export_kind)
+        badge.setObjectName("SourceBadge")
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setFixedWidth(58)
+        badge.setProperty("sourceType", "output" if export_kind == "VIDEO" else "local")
 
         name_label = QLabel(exported.path.name)
         name_label.setObjectName("ExportName")
@@ -170,6 +209,7 @@ class _AudioExportRow(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
+        layout.addWidget(badge, 0)
         layout.addLayout(text_layout, 1)
         layout.addWidget(self.open_button, 0)
 

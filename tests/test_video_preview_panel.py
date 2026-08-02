@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from PySide6.QtMultimedia import QMediaPlayer
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.video_preview_panel import VideoPlaybackSynchronizer, VideoPreviewPanel
@@ -36,14 +37,33 @@ class VideoPreviewPanelTests(unittest.TestCase):
             video.write_bytes(b"video")
             panel = VideoPreviewPanel()
 
-            panel.set_source(VideoSource(kind=VIDEO_KIND_FILE, path=video, original_name="video.mp4"))
+            panel.set_source(
+                VideoSource(kind=VIDEO_KIND_FILE, path=video, original_name="video.mp4"),
+                enabled=True,
+            )
             self.assertTrue(panel.has_local_source)
             self.assertIs(panel.stack.currentWidget(), panel.video_widget)
 
-            panel.set_source(VideoSource(kind=VIDEO_KIND_YOUTUBE, url="https://youtu.be/source"))
+            panel.set_source(
+                VideoSource(kind=VIDEO_KIND_YOUTUBE, url="https://youtu.be/source"),
+                enabled=True,
+            )
             self.assertFalse(panel.has_local_source)
-            self.assertIs(panel.stack.currentWidget(), panel.empty_widget)
+            self.assertIs(panel.stack.currentWidget(), panel.source_editor)
             panel.close()
+
+    def test_original_youtube_url_action_attaches_the_work_song_source(self) -> None:
+        panel = VideoPreviewPanel()
+        requested = QSignalSpy(panel.url_requested)
+        source_url = "https://youtube.com/watch?v=source"
+
+        panel.set_source(VideoSource(), enabled=True, original_song_url=source_url)
+        panel.url_field.original_button.show()
+        panel.url_field.original_button.click()
+
+        self.assertEqual(panel.url_field.edit.text(), source_url)
+        self.assertEqual(requested.at(0)[0], source_url)
+        panel.close()
 
 
 class _FakePlayer:

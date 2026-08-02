@@ -1,36 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.services.audio_export import AudioExportError, AudioMixSource, export_mix
-from jang_app.services.audio_effects import MasterProcessing
+from jang_app.services.export_catalog import ExportedFile, list_exported_files
 from jang_app.services.output_catalog import load_output_sound_set
 from jang_app.services.song_package import EXPORT_STAGE, VOCAL_STAGE, SongPackage
 from jang_app.services.studio_session import StudioSession, StudioTrackState
 
 
-@dataclass(frozen=True)
-class SongAudioExport:
-    path: Path
-    size_bytes: int
-    modified_at: float
+SongAudioExport = ExportedFile
 
 
 def export_song_mix(package: SongPackage, session: StudioSession) -> Path:
     sources = build_song_mix_sources(package, session)
     output_path = _next_mix_path(song_audio_export_dir(package))
-    return export_mix(
-        sources,
-        output_path,
-        start_ms=session.timeline.start_ms,
-        end_ms=session.timeline.end_ms,
-        master_processing=MasterProcessing(
-            gain_db=session.master.gain_db,
-            stereo_width_percent=session.master.stereo_width_percent,
-        ),
-    )
+    return export_mix(sources, output_path)
 
 
 def build_song_mix_sources(package: SongPackage, session: StudioSession) -> tuple[AudioMixSource, ...]:
@@ -62,18 +48,7 @@ def build_song_mix_sources(package: SongPackage, session: StudioSession) -> tupl
 
 
 def list_song_audio_exports(package: SongPackage) -> tuple[SongAudioExport, ...]:
-    output_dir = song_audio_export_dir(package)
-    if not output_dir.is_dir():
-        return ()
-
-    exports: list[SongAudioExport] = []
-    for path in output_dir.glob("*.wav"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        exports.append(SongAudioExport(path.resolve(), stat.st_size, stat.st_mtime))
-    return tuple(sorted(exports, key=lambda item: item.modified_at, reverse=True))
+    return list_exported_files(song_audio_export_dir(package), "*.wav")
 
 
 def song_audio_export_dir(package: SongPackage) -> Path:

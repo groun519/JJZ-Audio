@@ -9,9 +9,6 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from jang_app.services.audio_effects import MasterProcessing, process_master_audio
-
-
 class AudioExportError(RuntimeError):
     """Raised when preview audio cannot be exported."""
 
@@ -29,10 +26,6 @@ class AudioMixSource:
 def export_mix(
     sources: Sequence[AudioMixSource],
     output_path: Path,
-    *,
-    start_ms: int = 0,
-    end_ms: int = 0,
-    master_processing: MasterProcessing = MasterProcessing(),
 ) -> Path:
     if not sources:
         raise AudioExportError("Select at least one unmuted track before exporting a mix.")
@@ -57,9 +50,6 @@ def export_mix(
     mix = np.zeros((max_frames, max_channels), dtype=np.float32)
     for audio in audio_arrays:
         mix[: audio.shape[0], :] += _match_channels(audio, max_channels)
-
-    mix = _trim_audio(mix, sample_rate or 44100, start_ms, end_ms)
-    mix = process_master_audio(mix, master_processing)
 
     sf.write(output_path, np.clip(mix, -1.0, 1.0), sample_rate or 44100, subtype="PCM_16")
     return output_path
@@ -125,14 +115,6 @@ def _resample_audio(audio: np.ndarray, source_sample_rate: int, target_sample_ra
 
 def _clamp_volume(volume: float) -> float:
     return max(0.0, min(2.0, volume))
-
-
-def _trim_audio(audio: np.ndarray, sample_rate: int, start_ms: int, end_ms: int) -> np.ndarray:
-    start_frame = max(0, round(start_ms * sample_rate / 1000))
-    end_frame = audio.shape[0] if end_ms <= 0 else min(audio.shape[0], round(end_ms * sample_rate / 1000))
-    if start_frame >= audio.shape[0] or end_frame <= start_frame:
-        raise AudioExportError("The selected output range is empty.")
-    return audio[start_frame:end_frame]
 
 
 def _slugify(value: str) -> str:

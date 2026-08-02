@@ -8,8 +8,6 @@ from pathlib import Path
 from jang_app.services.song_package import SongPackageStore
 from jang_app.services.studio_session import (
     StudioSession,
-    StudioMasterState,
-    StudioTimelineState,
     StudioTrackState,
     load_studio_session,
     save_studio_session,
@@ -29,8 +27,6 @@ class StudioSessionTests(unittest.TestCase):
                 original_vocal=StudioTrackState(muted=True, volume_percent=125),
                 instrumental=StudioTrackState(muted=False, volume_percent=80),
                 converted_vocal=StudioTrackState(muted=False, volume_percent=175),
-                timeline=StudioTimelineState(start_ms=12_000, end_ms=94_000),
-                master=StudioMasterState(gain_db=-4, stereo_width_percent=135),
             )
 
             saved_path = save_studio_session(package, session)
@@ -40,10 +36,11 @@ class StudioSessionTests(unittest.TestCase):
             self.assertEqual(restored.original_vocal, session.original_vocal)
             self.assertEqual(restored.instrumental, session.instrumental)
             self.assertEqual(restored.converted_vocal, session.converted_vocal)
-            self.assertEqual(restored.timeline, session.timeline)
-            self.assertEqual(restored.master, session.master)
             self.assertTrue(restored.updated_at)
             self.assertEqual(source.read_bytes(), b"source")
+            saved_data = json.loads(saved_path.read_text(encoding="utf-8"))
+            self.assertNotIn("timeline", saved_data)
+            self.assertNotIn("master", saved_data)
 
     def test_invalid_or_out_of_range_session_data_uses_safe_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -74,8 +71,6 @@ class StudioSessionTests(unittest.TestCase):
             self.assertEqual(restored.original_vocal, StudioTrackState(True, 200))
             self.assertEqual(restored.instrumental, StudioTrackState(False, 0))
             self.assertEqual(restored.converted_vocal, StudioTrackState(False, 100))
-            self.assertEqual(restored.timeline, StudioTimelineState())
-            self.assertEqual(restored.master, StudioMasterState(gain_db=12, stereo_width_percent=0))
 
             session_path.write_text("not-json", encoding="utf-8")
             self.assertEqual(load_studio_session(package), StudioSession())

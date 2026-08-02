@@ -10,7 +10,6 @@ from jang_app.services.song_library import SongItem
 class WorkSongCapabilities:
     can_separate: bool = False
     can_convert: bool = False
-    can_edit_studio: bool = False
     can_export: bool = False
 
 
@@ -23,7 +22,6 @@ def build_work_song_capabilities(
     return WorkSongCapabilities(
         can_separate=item is not None and item.kind == "source",
         can_convert=has_output,
-        can_edit_studio=has_output,
         can_export=has_output,
     )
 

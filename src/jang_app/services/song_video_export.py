@@ -8,11 +8,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.config import FFMPEG_BIN_DIR
-from jang_app.services.audio_effects import MasterProcessing
 from jang_app.services.audio_export import export_mix
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.command import run_command
 from jang_app.services.environment import MissingExecutableError, require_executable
+from jang_app.services.export_catalog import ExportedFile, list_exported_files
 from jang_app.services.song_export import build_song_mix_sources
 from jang_app.services.song_package import EXPORT_STAGE, SongPackage
 from jang_app.services.studio_session import StudioSession
@@ -21,6 +21,9 @@ from jang_app.services.video_source import VideoSource
 
 class SongVideoExportError(RuntimeError):
     """Raised when a Studio video cannot be rendered."""
+
+
+SongVideoExport = ExportedFile
 
 
 def render_song_video(
@@ -54,12 +57,6 @@ def render_song_video(
             export_mix(
                 build_song_mix_sources(package, session),
                 mix_path,
-                start_ms=session.timeline.start_ms,
-                end_ms=session.timeline.end_ms,
-                master_processing=MasterProcessing(
-                    gain_db=session.master.gain_db,
-                    stereo_width_percent=session.master.stereo_width_percent,
-                ),
             )
             if progress is not None:
                 progress(12)
@@ -70,7 +67,6 @@ def render_song_video(
                     video_path,
                     mix_path,
                     temporary_output,
-                    session.timeline.start_ms,
                     duration_ms,
                 ),
                 output_callback=_ffmpeg_progress(duration_ms, progress),
@@ -90,12 +86,15 @@ def song_video_export_dir(package: SongPackage) -> Path:
     return package.folder / EXPORT_STAGE / "video"
 
 
+def list_song_video_exports(package: SongPackage) -> tuple[SongVideoExport, ...]:
+    return list_exported_files(song_video_export_dir(package), "*.mp4")
+
+
 def _render_command(
     executable: str,
     video_path: Path,
     mix_path: Path,
     output_path: Path,
-    start_ms: int,
     duration_ms: int,
 ) -> list[str]:
     return [
@@ -104,8 +103,6 @@ def _render_command(
         "-hide_banner",
         "-loglevel",
         "error",
-        "-ss",
-        f"{max(0, start_ms) / 1000:.3f}",
         "-i",
         str(video_path),
         "-i",

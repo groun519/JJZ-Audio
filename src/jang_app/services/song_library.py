@@ -11,7 +11,12 @@ from jang_app.config import DOWNLOAD_OUTPUT_DIR, SONG_LIBRARY_FILE, SUPPORTED_AU
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set
 from jang_app.services.song_assets import SongAssetDetails, build_song_asset_details
 from jang_app.services.song_package import SongOutputReference, SongPackage, SongPackageStore, VOCAL_STAGE
-from jang_app.services.song_video_export import render_song_video, song_video_export_dir
+from jang_app.services.song_video_export import (
+    SongVideoExport,
+    list_song_video_exports,
+    render_song_video,
+    song_video_export_dir,
+)
 from jang_app.services.song_export import (
     SongAudioExport,
     export_song_mix,
@@ -225,6 +230,9 @@ class SongLibrary:
 
     def video_export_dir(self, item_id: str) -> Path:
         return song_video_export_dir(self._store.require(item_id))
+
+    def video_exports(self, item_id: str) -> tuple[SongVideoExport, ...]:
+        return list_song_video_exports(self._store.require(item_id))
 
     def vocal_separation_root(self, item_id: str) -> Path:
         return self._store.vocal_separation_root(item_id)

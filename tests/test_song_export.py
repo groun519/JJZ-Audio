@@ -18,9 +18,7 @@ from jang_app.services.song_export import (
 from jang_app.services.song_package import SongPackageStore
 from jang_app.services.song_library import SongLibrary
 from jang_app.services.studio_session import (
-    StudioMasterState,
     StudioSession,
-    StudioTimelineState,
     StudioTrackState,
 )
 
@@ -85,8 +83,6 @@ class SongExportTests(unittest.TestCase):
                 StudioSession(
                     original_vocal=StudioTrackState(muted=True),
                     instrumental=StudioTrackState(volume_percent=50),
-                    timeline=StudioTimelineState(start_ms=20, end_ms=70),
-                    master=StudioMasterState(gain_db=-6),
                 ),
             )
 
@@ -95,8 +91,8 @@ class SongExportTests(unittest.TestCase):
 
             self.assertEqual(exported.parent, package.folder / "04_exports" / "audio")
             self.assertEqual(sample_rate, 16000)
-            self.assertEqual(len(audio), 800)
-            self.assertAlmostEqual(float(np.max(audio)), 0.025, places=2)
+            self.assertEqual(len(audio), 1600)
+            self.assertAlmostEqual(float(np.max(audio)), 0.05, places=2)
 
 
 def _package_with_output(root: Path):

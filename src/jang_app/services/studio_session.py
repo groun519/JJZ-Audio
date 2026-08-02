@@ -23,25 +23,11 @@ class StudioTrackState:
 
 
 @dataclass(frozen=True)
-class StudioTimelineState:
-    start_ms: int = 0
-    end_ms: int = 0
-
-
-@dataclass(frozen=True)
-class StudioMasterState:
-    gain_db: int = 0
-    stereo_width_percent: int = 100
-
-
-@dataclass(frozen=True)
 class StudioSession:
     original_vocal: StudioTrackState = field(default_factory=StudioTrackState)
     instrumental: StudioTrackState = field(default_factory=StudioTrackState)
     converted_vocal: StudioTrackState = field(default_factory=StudioTrackState)
     updated_at: str = ""
-    timeline: StudioTimelineState = field(default_factory=StudioTimelineState)
-    master: StudioMasterState = field(default_factory=StudioMasterState)
 
     def state_for(self, track_key: str) -> StudioTrackState:
         if track_key == TRACK_ORIGINAL_VOCAL:
@@ -73,8 +59,6 @@ def load_studio_session(package: SongPackage) -> StudioSession:
         instrumental=_track_state_from_data(tracks.get(TRACK_INSTRUMENTAL)),
         converted_vocal=_track_state_from_data(tracks.get(TRACK_CONVERTED_VOCAL)),
         updated_at=str(data.get("updated_at", "")),
-        timeline=_timeline_state_from_data(data.get("timeline")),
-        master=_master_state_from_data(data.get("master")),
     )
 
 
@@ -85,8 +69,6 @@ def save_studio_session(package: SongPackage, session: StudioSession) -> Path:
         instrumental=_normalize_track_state(session.instrumental),
         converted_vocal=_normalize_track_state(session.converted_vocal),
         updated_at=datetime.now(UTC).isoformat(),
-        timeline=_normalize_timeline_state(session.timeline),
-        master=_normalize_master_state(session.master),
     )
     write_json_atomic(
         path,
@@ -94,14 +76,6 @@ def save_studio_session(package: SongPackage, session: StudioSession) -> Path:
             "version": STUDIO_SESSION_VERSION,
             "song_id": package.song_id,
             "updated_at": normalized.updated_at,
-            "timeline": {
-                "start_ms": normalized.timeline.start_ms,
-                "end_ms": normalized.timeline.end_ms,
-            },
-            "master": {
-                "gain_db": normalized.master.gain_db,
-                "stereo_width_percent": normalized.master.stereo_width_percent,
-            },
             "tracks": {
                 TRACK_ORIGINAL_VOCAL: _track_state_to_data(normalized.original_vocal),
                 TRACK_INSTRUMENTAL: _track_state_to_data(normalized.instrumental),
@@ -136,59 +110,8 @@ def _track_state_to_data(state: StudioTrackState) -> dict[str, object]:
     }
 
 
-def _timeline_state_from_data(value: object) -> StudioTimelineState:
-    if not isinstance(value, dict):
-        return StudioTimelineState()
-    return _normalize_timeline_state(
-        StudioTimelineState(
-            start_ms=_nonnegative_int(value.get("start_ms")),
-            end_ms=_nonnegative_int(value.get("end_ms")),
-        )
-    )
-
-
-def _normalize_timeline_state(state: StudioTimelineState) -> StudioTimelineState:
-    start_ms = _nonnegative_int(state.start_ms)
-    end_ms = _nonnegative_int(state.end_ms)
-    if end_ms and end_ms <= start_ms:
-        return StudioTimelineState()
-    return StudioTimelineState(start_ms, end_ms)
-
-
-def _master_state_from_data(value: object) -> StudioMasterState:
-    if not isinstance(value, dict):
-        return StudioMasterState()
-    return _normalize_master_state(
-        StudioMasterState(
-            gain_db=_int_value(value.get("gain_db")),
-            stereo_width_percent=_int_value(value.get("stereo_width_percent"), fallback=100),
-        )
-    )
-
-
-def _normalize_master_state(state: StudioMasterState) -> StudioMasterState:
-    return StudioMasterState(
-        gain_db=max(-24, min(12, _int_value(state.gain_db))),
-        stereo_width_percent=max(0, min(200, _int_value(state.stereo_width_percent, fallback=100))),
-    )
-
-
 def _volume_percent(value: object) -> int:
     try:
         return max(0, min(200, int(value)))
     except (TypeError, ValueError):
         return 100
-
-
-def _nonnegative_int(value: object) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _int_value(value: object, *, fallback: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return fallback

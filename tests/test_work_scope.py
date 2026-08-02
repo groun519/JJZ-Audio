@@ -17,7 +17,6 @@ class WorkSongCapabilitiesTests(unittest.TestCase):
 
         self.assertTrue(capabilities.can_separate)
         self.assertFalse(capabilities.can_convert)
-        self.assertFalse(capabilities.can_edit_studio)
         self.assertFalse(capabilities.can_export)
 
     def test_loaded_output_enables_downstream_workflows(self) -> None:
@@ -25,7 +24,6 @@ class WorkSongCapabilitiesTests(unittest.TestCase):
 
         self.assertFalse(capabilities.can_separate)
         self.assertTrue(capabilities.can_convert)
-        self.assertTrue(capabilities.can_edit_studio)
         self.assertTrue(capabilities.can_export)
 
 

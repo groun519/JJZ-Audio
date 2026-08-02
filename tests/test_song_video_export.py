@@ -10,13 +10,17 @@ import soundfile as sf
 
 from jang_app.services.command import CommandResult
 from jang_app.services.song_package import SongPackageStore
-from jang_app.services.song_video_export import SongVideoExportError, render_song_video
-from jang_app.services.studio_session import StudioSession, StudioTimelineState
+from jang_app.services.song_video_export import (
+    SongVideoExportError,
+    list_song_video_exports,
+    render_song_video,
+)
+from jang_app.services.studio_session import StudioSession
 from jang_app.services.video_source import VIDEO_KIND_FILE, VideoSource
 
 
 class SongVideoExportTests(unittest.TestCase):
-    def test_renders_selected_range_with_studio_mix_as_the_only_audio(self) -> None:
+    def test_renders_the_full_studio_mix_as_the_only_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             package = _package_with_output(root)
@@ -24,7 +28,7 @@ class SongVideoExportTests(unittest.TestCase):
             video.parent.mkdir(parents=True, exist_ok=True)
             video.write_bytes(b"video")
             source = VideoSource(kind=VIDEO_KIND_FILE, path=video, original_name=video.name)
-            session = StudioSession(timeline=StudioTimelineState(250, 1250))
+            session = StudioSession()
             captured: dict[str, object] = {}
             progress = []
 
@@ -49,13 +53,14 @@ class SongVideoExportTests(unittest.TestCase):
             command = captured["command"]
             self.assertEqual(rendered.parent, package.folder / "04_exports" / "video")
             self.assertEqual(rendered.read_bytes(), b"rendered")
-            self.assertEqual(captured["mix_options"]["start_ms"], 250)
-            self.assertEqual(captured["mix_options"]["end_ms"], 1250)
-            self.assertEqual(command[command.index("-ss") + 1], "0.250")
+            self.assertNotIn("start_ms", captured["mix_options"])
+            self.assertNotIn("end_ms", captured["mix_options"])
+            self.assertNotIn("-ss", command)
             self.assertEqual(command[command.index("-t") + 1], "1.000")
             self.assertIn("0:v:0", command)
             self.assertIn("1:a:0", command)
             self.assertEqual(progress[-1], 100)
+            self.assertEqual(list_song_video_exports(package)[0].path, rendered)
 
     def test_rejects_a_source_without_a_local_video(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
