@@ -7,7 +7,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
-from jang_app.qt_app.selected_song_card import SelectedSongCard
 from jang_app.qt_app.widgets import SvgIconButton, TaskActionWidget
 from jang_app.services.song_export import SongAudioExport
 
@@ -19,6 +18,7 @@ class ExportPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._export_dir: Path | None = None
+        self._work_song_id = ""
         self._theme_mode = "white"
         self.export_rows: list[_AudioExportRow] = []
 
@@ -30,11 +30,9 @@ class ExportPage(QWidget):
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(16)
 
-        self.song_card = SelectedSongCard()
         self.action = TaskActionWidget("Audio Mix", "Export")
         self.action.triggered.connect(self._request_export)
         self.action.set_action_enabled(False)
-        left_layout.addWidget(self.song_card, 0)
         left_layout.addWidget(self.action, 0)
         left_layout.addStretch(1)
 
@@ -100,6 +98,14 @@ class ExportPage(QWidget):
     def set_export_enabled(self, enabled: bool) -> None:
         self.action.set_action_enabled(enabled)
 
+    def set_work_song(self, song_id: str, *, export_enabled: bool) -> None:
+        changed = song_id != self._work_song_id
+        self._work_song_id = song_id
+        if changed:
+            self.action.set_progress(0)
+            self.set_status("")
+        self.set_export_enabled(export_enabled)
+
     def set_running(self, running: bool) -> None:
         self.action.set_running(running)
 
@@ -118,11 +124,10 @@ class ExportPage(QWidget):
 
     def apply_language(self) -> None:
         apply_widget_language(self)
-        self.song_card.apply_language()
         set_translated_tooltip(self.open_folder_button, "Open export location")
 
     def _request_export(self) -> None:
-        self.export_requested.emit(self.song_card.selected_song_id())
+        self.export_requested.emit(self._work_song_id)
 
     def _open_export_location(self) -> None:
         if self._export_dir is not None:

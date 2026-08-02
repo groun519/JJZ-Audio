@@ -43,7 +43,6 @@ from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.player_bar import GlobalPlayerBar
 from jang_app.qt_app.processing_queue_panel import ProcessingQueuePanel
 from jang_app.qt_app.segmented_stack import SegmentedStack
-from jang_app.qt_app.selected_song_card import SelectedSongCard
 from jang_app.qt_app.studio_master_panel import StudioMasterPanel
 from jang_app.qt_app.studio_range_editor import StudioRangeEditor
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
@@ -79,6 +78,7 @@ from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.settings import AppSettings, RvcSettings, save_app_settings
 from jang_app.services.song_metadata import build_song_display_metadata
 from jang_app.services.work_context import build_work_context_display
+from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
 from jang_app.services.work_song import WorkSongStore
 from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion
 from jang_app.services.studio_session import (
@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self.player = AudioPlayer()
         self.processing_queue = ProcessingQueue()
         self._workers: list[TaskWorker] = []
+        self._action_task_ids: dict[int, str] = {}
         self._song_items_by_id: dict[str, SongItem] = {}
         self.current_song: SongItem | None = None
         self.current_work_item: SongItem | None = None
@@ -188,6 +189,7 @@ class MainWindow(QMainWindow):
         content_layout.setContentsMargins(16, 16, 16, 8)
         content_layout.setSpacing(12)
         self.work_context_bar = WorkContextBar()
+        self.work_context_bar.song_changed.connect(self._on_global_work_song_changed)
         content_layout.addWidget(self.work_context_bar, 0)
         content_layout.addWidget(self.page_stack, 1)
 
@@ -365,7 +367,7 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.library_source_filter, 0)
 
         self.song_list = QListWidget()
-        self.song_list.currentItemChanged.connect(self._on_song_selection_changed)
+        self.song_list.currentItemChanged.connect(self._on_library_selection_changed)
         self.song_list.itemDoubleClicked.connect(lambda _item: self._open_selected_library_details())
 
         list_layout.addLayout(list_header)
@@ -400,9 +402,6 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(16)
 
-        self.vocal_song_card = SelectedSongCard()
-        self.vocal_song_combo = self.vocal_song_card.combo
-        self.vocal_song_card.song_changed.connect(self._on_workspace_song_changed)
         self.vocal_steps = SegmentedStack(
             (
                 ("Separate", self._build_separate_step_page()),
@@ -410,7 +409,6 @@ class MainWindow(QMainWindow):
             )
         )
 
-        left_layout.addWidget(self.vocal_song_card, 0)
         left_layout.addWidget(self.vocal_steps, 1)
 
         self.vocal_results_panel = VocalResultsPanel()
@@ -439,9 +437,6 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(16)
 
-        self.studio_song_card = SelectedSongCard()
-        self.studio_song_combo = self.studio_song_card.combo
-        self.studio_song_card.song_changed.connect(self._on_workspace_song_changed)
         self.studio_steps = SegmentedStack(
             (
                 ("Mix", self._build_mix_step_page()),
@@ -449,7 +444,6 @@ class MainWindow(QMainWindow):
             )
         )
 
-        left_layout.addWidget(self.studio_song_card, 0)
         left_layout.addWidget(self.studio_steps, 1)
 
         layout.addWidget(left_panel, 0)
@@ -458,15 +452,8 @@ class MainWindow(QMainWindow):
 
     def _build_export_page(self) -> QWidget:
         self.export_page = ExportPage()
-        self.export_song_card = self.export_page.song_card
-        self.export_song_card.song_changed.connect(self._on_workspace_song_changed)
         self.export_page.export_requested.connect(self._start_audio_mix_export)
         self.export_page.open_location_requested.connect(self._open_export_location)
-        self.song_selector_cards = (
-            self.vocal_song_card,
-            self.studio_song_card,
-            self.export_song_card,
-        )
         return self.export_page
 
     def _build_video_step_page(self) -> QWidget:
@@ -701,8 +688,6 @@ class MainWindow(QMainWindow):
         set_translated_tooltip(self.language_button, "Language")
         for language, action in self.language_actions.items():
             action.setChecked(language == self.settings.language)
-        for card in getattr(self, "song_selector_cards", ()):
-            card.apply_language()
         self.player_bar.apply_language()
         self.processing_queue_panel.apply_language()
         self.toast_stack.apply_language()
@@ -845,7 +830,7 @@ class MainWindow(QMainWindow):
             return
 
         _set_optional_label(self.library_status_label, f"Added {len(added)}")
-        self._select_song(added[0].id)
+        self._select_library_song(added[0].id)
 
     def _start_youtube_download(self, url: str) -> None:
         if not url:
@@ -879,7 +864,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_song_list()
         if song is not None:
-            self._select_song(song.id)
+            self._select_library_song(song.id)
         self.youtube_card.url_edit.clear()
         self.youtube_card.set_progress(100)
         self.youtube_card.set_status("Done")
@@ -890,7 +875,7 @@ class MainWindow(QMainWindow):
         self.youtube_card.status_label.setToolTip(f"{LOG_FILE}\n{_last_error_line(error)}")
 
     def _refresh_song_list(self) -> None:
-        selected_id = self._current_song_id()
+        selected_id = self._browsed_song_id()
         detail_song_id = self.library_details_panel.song_id
         detail_is_open = self.library_content_stack.currentIndex() == 1
         work_item_id = self.current_work_item.id if self.current_work_item is not None else ""
@@ -916,21 +901,21 @@ class MainWindow(QMainWindow):
             self.song_list.addItem(list_item)
             self.song_list.setItemWidget(list_item, row)
         self.song_list.blockSignals(False)
-        if selected_id and self._select_song(selected_id):
+        if selected_id and self._select_library_song(selected_id):
             pass
         elif self.song_list.count() > 0:
             self.song_list.setCurrentRow(0)
         else:
-            self._on_song_selection_changed()
+            self._on_library_selection_changed()
         self._sync_song_row_selection()
         self._apply_library_filters()
-        self._refresh_song_selectors()
+        self._refresh_work_song_selector()
         if detail_is_open and detail_song_id in self._song_items_by_id:
             self._open_library_details(detail_song_id)
         elif detail_is_open:
             self._close_library_details()
 
-    def _select_song(self, song_id: str) -> bool:
+    def _select_library_song(self, song_id: str) -> bool:
         for index in range(self.song_list.count()):
             item = self.song_list.item(index)
             if item.data(Qt.ItemDataRole.UserRole) == song_id:
@@ -938,8 +923,8 @@ class MainWindow(QMainWindow):
                 return True
         return False
 
-    def _on_song_selection_changed(self, *_args) -> None:
-        song = self._selected_song()
+    def _on_library_selection_changed(self, *_args) -> None:
+        song = self._browsed_song()
         self.library_details_button.setEnabled(song is not None)
         self._sync_song_row_selection()
         if self.player.is_playing() and self._current_playback_context() != "library":
@@ -982,10 +967,10 @@ class MainWindow(QMainWindow):
         current = self.song_list.currentItem()
         if current is not None and current.isHidden():
             self.song_list.setCurrentItem(visible_items[0] if visible_items else None)
-        self.library_details_button.setEnabled(self._selected_song() is not None)
+        self.library_details_button.setEnabled(self._browsed_song() is not None)
 
     def _open_selected_library_details(self, *_args) -> None:
-        song = self._selected_song()
+        song = self._browsed_song()
         if song is not None:
             self._open_library_details(song.id)
 
@@ -1007,20 +992,20 @@ class MainWindow(QMainWindow):
             _set_optional_label(self.library_status_label, f"Open failed: {_last_error_line(str(exc))}")
 
     def _sync_song_row_selection(self) -> None:
-        selected_id = self._current_song_id()
+        selected_id = self._browsed_song_id()
         for index in range(self.song_list.count()):
             item = self.song_list.item(index)
             row = self.song_list.itemWidget(item)
             if hasattr(row, "set_selected"):
                 row.set_selected(item.data(Qt.ItemDataRole.UserRole) == selected_id)
 
-    def _selected_song(self) -> SongItem | None:
+    def _browsed_song(self) -> SongItem | None:
         current_item = self.song_list.currentItem()
         if current_item is None:
             return None
         return self._song_items_by_id.get(current_item.data(Qt.ItemDataRole.UserRole))
 
-    def _current_song_id(self) -> str:
+    def _browsed_song_id(self) -> str:
         current_item = self.song_list.currentItem()
         return current_item.data(Qt.ItemDataRole.UserRole) if current_item is not None else ""
 
@@ -1035,11 +1020,9 @@ class MainWindow(QMainWindow):
 
         _set_optional_label(self.library_status_label, "Renamed")
         self._refresh_song_list()
-        self._select_song(song_id)
+        self._select_library_song(song_id)
         if self.current_work_item is not None and self.current_work_item.id == song_id:
             self._assign_work_item(self._song_items_by_id.get(song_id), persist=False)
-        if self.current_song is not None and self.current_song.id == song_id:
-            self._refresh_song_selectors(preferred_song_id=song_id)
         self._sync_work_context_bar()
 
     def _remove_library_item(self, song_id: str) -> None:
@@ -1049,8 +1032,8 @@ class MainWindow(QMainWindow):
 
         was_current_song = self.current_song is not None and self.current_song.id == song_id
         was_work_item = self.current_work_item is not None and self.current_work_item.id == song_id
-        was_selected_song = self._current_song_id() == song_id
-        if was_selected_song and self._current_playback_context() == "library":
+        was_browsed_song = self._browsed_song_id() == song_id
+        if was_browsed_song and self._current_playback_context() == "library":
             self._stop_playback(clear_queue=True)
         if not self.library.remove_item(song_id):
             return
@@ -1060,39 +1043,28 @@ class MainWindow(QMainWindow):
         _set_optional_label(self.library_status_label, "Removed")
         self._refresh_song_list()
 
-    def _refresh_song_selectors(self, preferred_song_id: str | None = None) -> None:
-        if not all(
-            hasattr(self, name)
-            for name in ("vocal_song_card", "studio_song_card", "export_song_card")
-        ):
+    def _refresh_work_song_selector(self) -> None:
+        if not hasattr(self, "work_context_bar"):
             return
-
-        selected_id = preferred_song_id or (self.current_song.id if self.current_song is not None else "")
-        source_songs = self._source_song_items()
-        song_options = tuple((song.id, song.title) for song in source_songs)
-        self.song_selector_cards = (
-            self.vocal_song_card,
-            self.studio_song_card,
-            self.export_song_card,
+        selected_id = self.current_work_item.id if self.current_work_item is not None else ""
+        songs = sorted(
+            self._song_items_by_id.values(),
+            key=lambda item: (item.title.casefold(), item.id),
         )
-        for card in self.song_selector_cards:
-            card.set_songs(song_options, selected_id)
-        if selected_id and selected_id not in self._song_items_by_id:
+        self.work_context_bar.set_songs(
+            ((song.id, song.title) for song in songs),
+            selected_id,
+        )
+        if selected_id and self.work_context_bar.selected_song_id() != selected_id:
             self._set_current_song(None)
         self._sync_work_context_bar()
 
-    def _source_song_items(self) -> list[SongItem]:
-        return sorted(
-            [item for item in self._song_items_by_id.values() if item.kind == "source"],
-            key=lambda item: item.title.casefold(),
-        )
-
-    def _on_workspace_song_changed(self, song_id: str) -> None:
+    def _on_global_work_song_changed(self, song_id: str) -> None:
         song = self._song_items_by_id.get(song_id) if song_id else None
-        self._set_current_song(song)
-        for card in self.song_selector_cards:
-            card.select_song(song_id)
-        self._refresh_export_page()
+        if song is not None and song.kind == "output":
+            self._set_output_work_song(song)
+        else:
+            self._set_current_song(song)
 
     def _set_current_song(self, song: SongItem | None, *, persist: bool = True) -> None:
         self._assign_work_item(song, persist=persist)
@@ -1119,18 +1091,40 @@ class MainWindow(QMainWindow):
     def _assign_work_item(self, item: SongItem | None, *, persist: bool = True) -> None:
         self.current_work_item = item
         self.current_song = item if item is not None and item.kind == "source" else None
-        self.separation_action.set_action_enabled(self.current_song is not None)
         self.separation_action.set_progress(0)
         self.separation_action.set_status("")
-        selected_source_id = self.current_song.id if self.current_song is not None else ""
-        for card in getattr(self, "song_selector_cards", ()):
-            card.select_song(selected_source_id)
+        if hasattr(self, "work_context_bar"):
+            selected_id = item.id if item is not None else ""
+            if selected_id and not self.work_context_bar.has_song(selected_id):
+                self._refresh_work_song_selector()
+            else:
+                self.work_context_bar.select_song(selected_id)
         if persist and self._work_song_ready:
             try:
                 self.work_song_store.save(item.id if item is not None else "")
             except OSError as exc:
                 _set_optional_label(self.output_status_label, f"Work song failed: {_last_error_line(str(exc))}")
+        self._sync_work_song_capabilities()
         self._sync_work_context_bar()
+
+    def _sync_work_song_capabilities(self) -> None:
+        capabilities = build_work_song_capabilities(
+            self.current_work_item,
+            output_available=self._current_output_matches_work_song(),
+        )
+        self.separation_action.set_action_enabled(capabilities.can_separate)
+        self.rvc_action.set_action_enabled(capabilities.can_convert)
+        self.studio_master_panel.set_processing_enabled(capabilities.can_edit_studio)
+
+    def _current_output_matches_work_song(self) -> bool:
+        item = self.current_work_item
+        sound_set = self.current_output_set
+        if item is None or item.output_job_dir is None or sound_set is None:
+            return False
+        try:
+            return item.output_job_dir.expanduser().resolve() == sound_set.job_dir.expanduser().resolve()
+        except OSError:
+            return False
 
     def _restore_work_song(self) -> None:
         state = self.work_song_store.load()
@@ -1152,16 +1146,15 @@ class MainWindow(QMainWindow):
         )
 
     def _select_work_song(self, song: SongItem) -> None:
-        self._refresh_song_selectors(preferred_song_id=song.id)
-        self._set_current_song(song)
-
-    def _use_selected_song(self, *_args) -> None:
-        self._use_library_item(self._current_song_id())
+        if song.kind == "output":
+            self._set_output_work_song(song)
+        else:
+            self._set_current_song(song)
 
     def _use_library_item(self, song_id: str) -> None:
         if song_id:
-            self._select_song(song_id)
-        song = self._selected_song()
+            self._select_library_song(song_id)
+        song = self._browsed_song()
         if song is None:
             _set_optional_label(self.library_status_label, "Select song.")
             return
@@ -1224,6 +1217,7 @@ class MainWindow(QMainWindow):
         self.separation_action.set_progress(3)
         self.separation_action.set_status("Separating")
         song = self.current_song
+        scope = WorkTaskScope(song.id)
         output_root = self.library.create_vocal_separation_run(song.id)
         worker = TaskWorker(
             lambda progress: separate_audio(
@@ -1234,31 +1228,48 @@ class MainWindow(QMainWindow):
         )
         self._run_worker(
             worker,
-            lambda result: self._on_separation_succeeded(song.id, result),
-            self._on_separation_failed,
+            lambda result: self._on_separation_succeeded(scope, result),
+            lambda error: self._on_separation_failed(scope, error),
             self.separation_action,
             task_title="Separate Audio",
             task_detail=song.title,
+            action_scope=lambda: scope.is_current(self.current_work_item),
         )
 
-    def _on_separation_succeeded(self, song_id: str, result: object) -> None:
+    def _on_separation_succeeded(self, scope: WorkTaskScope, result: object) -> None:
         separation_result = result if isinstance(result, SeparationResult) else None
         if separation_result is None:
-            self.separation_action.set_status("Failed")
+            if scope.is_current(self.current_work_item):
+                self.separation_action.set_status("Failed")
             return
 
-        self.separation_action.set_progress(100)
-        self.separation_action.set_status("Done")
         self.library.register_output(
-            song_id,
+            scope.song_id,
             separation_result.job_dir,
             separation_result.job_dir.parent.name,
         )
-        self._refresh_output_sets(preferred_job_dir=separation_result.job_dir)
+        self._refresh_output_sets_after_task(scope, separation_result.job_dir)
+        if scope.is_current(self.current_work_item):
+            self.separation_action.set_progress(100)
+            self.separation_action.set_status("Done")
 
-    def _on_separation_failed(self, error: str) -> None:
+    def _on_separation_failed(self, scope: WorkTaskScope, error: str) -> None:
+        if not scope.is_current(self.current_work_item):
+            return
         self.separation_action.set_status("Failed")
         self.separation_action.status_label.setToolTip(f"{LOG_FILE}\n{_last_error_line(error)}")
+
+    def _refresh_output_sets_after_task(self, scope: WorkTaskScope, completed_job_dir: Path) -> None:
+        current_output_dir = self.current_output_set.job_dir if self.current_output_set is not None else None
+        target = scope.output_refresh_target(
+            completed_job_dir,
+            self.current_work_item,
+            current_output_dir,
+        )
+        self._refresh_output_sets(
+            preferred_job_dir=target.preferred_job_dir,
+            select_fallback=target.select_fallback,
+        )
 
     def _refresh_output_sets(
         self,
@@ -1377,12 +1388,11 @@ class MainWindow(QMainWindow):
             self.instrumental_track.set_single_path(None)
             self.converted_track.set_options([])
             self._apply_studio_session(StudioSession())
-            self.studio_master_panel.set_processing_enabled(False)
             self.vocal_results_panel.set_versions((), None)
-            self.rvc_action.set_action_enabled(False)
             self.rvc_action.set_status("")
             _set_optional_label(self.output_status_label, "")
             self._refresh_output_playback_queue()
+            self._sync_work_song_capabilities()
             self._sync_work_context_bar()
             self._refresh_export_page()
             return
@@ -1397,13 +1407,12 @@ class MainWindow(QMainWindow):
         selected_converted = selected_version.active_converted_path if selected_version is not None else None
         self.converted_track.set_options(list(sound_set.converted_vocal_paths), selected_converted)
         self._restore_current_studio_session()
-        self.studio_master_panel.set_processing_enabled(True)
         self.vocal_results_panel.set_versions(versions, sound_set.job_dir)
-        self.rvc_action.set_action_enabled(True)
         self.rvc_action.set_progress(0)
         self.rvc_action.set_status("")
         _set_optional_label(self.output_status_label, "")
         self._refresh_output_playback_queue()
+        self._sync_work_song_capabilities()
         self._sync_work_context_bar()
         self._refresh_export_page()
 
@@ -1476,7 +1485,7 @@ class MainWindow(QMainWindow):
         save_app_settings(self.settings)
 
     def _start_rvc_conversion(self, *_args) -> None:
-        if self.current_output_set is None:
+        if self.current_output_set is None or self.current_work_item is None:
             self.rvc_action.set_status("No output.")
             return
         if not self.settings.rvc.voice_model:
@@ -1487,6 +1496,7 @@ class MainWindow(QMainWindow):
         self.rvc_action.set_progress(8)
         self.rvc_action.set_status("Converting")
         sound_set = self.current_output_set
+        scope = WorkTaskScope(self.current_work_item.id)
         settings = self.settings.rvc
         worker = TaskWorker(
             lambda progress: _convert_with_progress(
@@ -1498,25 +1508,28 @@ class MainWindow(QMainWindow):
         )
         self._run_worker(
             worker,
-            lambda result: self._on_rvc_succeeded(sound_set.job_dir, result),
-            self._on_rvc_failed,
+            lambda result: self._on_rvc_succeeded(scope, sound_set.job_dir, result),
+            lambda error: self._on_rvc_failed(scope, error),
             self.rvc_action,
             task_title="Convert Vocal",
             task_detail=sound_set.label,
+            action_scope=lambda: scope.is_current(self.current_work_item),
         )
 
-    def _on_rvc_succeeded(self, job_dir: Path, result: object) -> None:
-        self.rvc_action.set_progress(100)
-        self.rvc_action.set_status("Done")
+    def _on_rvc_succeeded(self, scope: WorkTaskScope, job_dir: Path, result: object) -> None:
         output_path = getattr(result, "output_path", None)
         if isinstance(output_path, Path):
             updated = self.library.activate_converted_output(job_dir, output_path)
             if updated is not None:
                 self._song_items_by_id[updated.id] = updated
-        preferred = self.current_output_set.job_dir if self.current_output_set is not None else job_dir
-        self._refresh_output_sets(preferred_job_dir=preferred)
+        self._refresh_output_sets_after_task(scope, job_dir)
+        if scope.is_current(self.current_work_item):
+            self.rvc_action.set_progress(100)
+            self.rvc_action.set_status("Done")
 
-    def _on_rvc_failed(self, error: str) -> None:
+    def _on_rvc_failed(self, scope: WorkTaskScope, error: str) -> None:
+        if not scope.is_current(self.current_work_item):
+            return
         self.rvc_action.set_status("Failed")
         self.rvc_action.status_label.setToolTip(f"{LOG_FILE}\n{_last_error_line(error)}")
 
@@ -1792,7 +1805,7 @@ class MainWindow(QMainWindow):
         if self.player.is_playing() and not force:
             return
         if index == PAGE_LIBRARY:
-            self._load_library_playback_queue(self._selected_song())
+            self._load_library_playback_queue(self._browsed_song())
         elif index in {PAGE_VOCAL, PAGE_STUDIO}:
             self._refresh_output_playback_queue()
 
@@ -1888,10 +1901,10 @@ class MainWindow(QMainWindow):
     def _refresh_export_page(self) -> None:
         if not hasattr(self, "export_page"):
             return
-        song = self.current_song
+        song = self.current_work_item
         if song is None:
             self.export_page.set_exports((), None)
-            self.export_page.set_export_enabled(False)
+            self.export_page.set_work_song("", export_enabled=False)
             return
         try:
             exports = self.library.audio_exports(song.id)
@@ -1899,8 +1912,12 @@ class MainWindow(QMainWindow):
         except KeyError:
             exports = ()
             export_dir = None
+        capabilities = build_work_song_capabilities(
+            song,
+            output_available=self._current_output_matches_work_song(),
+        )
         self.export_page.set_exports(exports, export_dir)
-        self.export_page.set_export_enabled(song.output_job_dir is not None)
+        self.export_page.set_work_song(song.id, export_enabled=capabilities.can_export)
 
     def _start_audio_mix_export(self, song_id: str) -> None:
         song = self._song_items_by_id.get(song_id)
@@ -1912,29 +1929,31 @@ class MainWindow(QMainWindow):
         self.export_page.set_running(True)
         self.export_page.set_progress(0)
         self.export_page.set_status("Exporting audio mix")
+        scope = WorkTaskScope(song_id)
         worker = TaskWorker(
             lambda progress: _run_with_progress(lambda: self.library.export_audio_mix(song_id), progress)
         )
         self._run_worker(
             worker,
-            lambda result: self._on_audio_mix_export_succeeded(song_id, result),
-            lambda error: self._on_audio_mix_export_failed(song_id, error),
+            lambda result: self._on_audio_mix_export_succeeded(scope, result),
+            lambda error: self._on_audio_mix_export_failed(scope, error),
             self.export_page.action,
             task_title="Export Mix",
             task_detail=song.title,
+            action_scope=lambda: scope.is_current(self.current_work_item),
         )
 
-    def _on_audio_mix_export_succeeded(self, song_id: str, result: object) -> None:
+    def _on_audio_mix_export_succeeded(self, scope: WorkTaskScope, result: object) -> None:
         self._refresh_export_page()
-        if self.export_song_card.selected_song_id() != song_id:
+        if not scope.is_current(self.current_work_item):
             return
         exported = result if isinstance(result, Path) else None
         self.export_page.set_progress(100)
         self.export_page.set_status("Audio mix exported", str(exported) if exported is not None else "")
 
-    def _on_audio_mix_export_failed(self, song_id: str, error: str) -> None:
+    def _on_audio_mix_export_failed(self, scope: WorkTaskScope, error: str) -> None:
         self._refresh_export_page()
-        if self.export_song_card.selected_song_id() != song_id:
+        if not scope.is_current(self.current_work_item):
             return
         self.export_page.set_status(f"Export failed: {_last_error_line(error)}", error)
 
@@ -1949,26 +1968,31 @@ class MainWindow(QMainWindow):
         except KeyError:
             _set_optional_label(self.output_status_label, "No output.")
             return
+        scope = WorkTaskScope(item.id)
         _set_optional_label(self.output_status_label, "Exporting track")
         worker = TaskWorker(
             lambda progress: _run_with_progress(lambda: export_audio_file(path.stem, path, output_dir), progress)
         )
         self._run_worker(
             worker,
-            self._on_track_export_succeeded,
-            self._on_track_export_failed,
+            lambda result: self._on_track_export_succeeded(scope, result),
+            lambda error: self._on_track_export_failed(scope, error),
             None,
             task_title="Export Track",
             task_detail=path.name,
         )
 
-    def _on_track_export_succeeded(self, result: object) -> None:
+    def _on_track_export_succeeded(self, scope: WorkTaskScope, result: object) -> None:
+        if not scope.is_current(self.current_work_item):
+            return
         exported = result if isinstance(result, Path) else None
         _set_optional_label(self.output_status_label, "Track exported")
         self.output_status_label.setToolTip(str(exported) if exported is not None else "")
         self._refresh_export_page()
 
-    def _on_track_export_failed(self, error: str) -> None:
+    def _on_track_export_failed(self, scope: WorkTaskScope, error: str) -> None:
+        if not scope.is_current(self.current_work_item):
+            return
         _set_optional_label(self.output_status_label, f"Track failed: {_last_error_line(error)}")
 
     def _open_track_location(self, path: Path) -> None:
@@ -2024,19 +2048,33 @@ class MainWindow(QMainWindow):
         *,
         task_title: str,
         task_detail: str = "",
+        action_scope: Callable[[], bool] | None = None,
     ) -> None:
         task_id = self.processing_queue.start(task_title, task_detail)
         self._workers.append(worker)
+        action_key = id(action_widget) if action_widget is not None else None
+        if action_key is not None:
+            self._action_task_ids[action_key] = task_id
+
+        def owns_action() -> bool:
+            return action_key is not None and self._action_task_ids.get(action_key) == task_id
+
+        def action_is_visible() -> bool:
+            return owns_action() and (action_scope is None or action_scope())
+
+        def release_action() -> None:
+            if not owns_action() or action_widget is None:
+                return
+            action_widget.set_running(False)
+            self._action_task_ids.pop(action_key, None)
 
         def handle_success(result: object) -> None:
-            if action_widget is not None:
-                action_widget.set_running(False)
+            release_action()
             self.processing_queue.complete(task_id)
             on_success(result)
 
         def handle_failure(error: str) -> None:
-            if action_widget is not None:
-                action_widget.set_running(False)
+            release_action()
             self.processing_queue.fail(task_id, error)
             on_failed(error)
 
@@ -2046,7 +2084,9 @@ class MainWindow(QMainWindow):
             worker.deleteLater()
 
         if action_widget is not None:
-            worker.progress_changed.connect(action_widget.set_progress)
+            worker.progress_changed.connect(
+                lambda progress: action_widget.set_progress(progress) if action_is_visible() else None
+            )
         worker.progress_changed.connect(lambda progress: self.processing_queue.update_progress(task_id, progress))
         worker.succeeded.connect(handle_success)
         worker.failed.connect(handle_failure)

@@ -64,6 +64,8 @@ _KOREAN = {
     "Instrumental": "반주",
     "Converted Vocal": "변환 보컬",
     "Select": "선택",
+    "Select work song": "작업곡 선택",
+    "Search work songs": "작업곡 검색",
     "Select model": "모델 선택",
     "Select a model": "모델을 선택하세요",
     "No index": "인덱스 없음",

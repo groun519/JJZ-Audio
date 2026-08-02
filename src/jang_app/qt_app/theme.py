@@ -212,6 +212,25 @@ def _stylesheet(
             min-height: 22px;
         }}
 
+        QComboBox#WorkSongCombo {{
+            min-height: 32px;
+            max-height: 32px;
+            font-size: 13px;
+            font-weight: 850;
+            background: {raised};
+        }}
+
+        QComboBox#WorkSongCombo QLineEdit {{
+            min-height: 30px;
+            max-height: 30px;
+            padding: 0 8px;
+            background: transparent;
+            border: 0;
+            border-radius: 0;
+            font-size: 13px;
+            font-weight: 850;
+        }}
+
         QWidget#TitleBarCenter, QWidget#TitleBarActions {{
             background: transparent;
             border: 0;

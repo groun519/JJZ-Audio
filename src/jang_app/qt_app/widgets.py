@@ -433,6 +433,8 @@ class TaskActionWidget(QFrame):
     def __init__(self, title: str, button_text: str) -> None:
         super().__init__()
         self.setObjectName("Card")
+        self._action_enabled = True
+        self._running = False
 
         self.title_label = QLabel(title)
         self.title_label.setObjectName("CardTitle")
@@ -473,7 +475,8 @@ class TaskActionWidget(QFrame):
         set_translated_text(self.button, text)
 
     def set_running(self, is_running: bool) -> None:
-        self.button.setDisabled(is_running)
+        self._running = is_running
+        self._sync_button_enabled()
 
     def set_progress(self, value: int) -> None:
         progress = max(0, min(100, value))
@@ -487,7 +490,11 @@ class TaskActionWidget(QFrame):
         self.status_label.setVisible(bool(value))
 
     def set_action_enabled(self, is_enabled: bool) -> None:
-        self.button.setEnabled(is_enabled)
+        self._action_enabled = is_enabled
+        self._sync_button_enabled()
+
+    def _sync_button_enabled(self) -> None:
+        self.button.setEnabled(self._action_enabled and not self._running)
 
 
 class WaveformView(QWidget):
