@@ -259,6 +259,40 @@ def _stylesheet(
             border-radius: 18px;
         }}
 
+        QFrame#VideoPreviewPanel {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 18px;
+        }}
+
+        QWidget#VideoCanvas, QFrame#VideoCanvas {{
+            background: #080808;
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QLabel#VideoEmptyState {{
+            color: {faint};
+            background: transparent;
+            border: 0;
+            font-size: 12px;
+            font-weight: 700;
+        }}
+
+        QSplitter#StudioRightSplitter::handle {{
+            background: transparent;
+            height: 8px;
+        }}
+
+        QScrollArea#StudioStepScroll {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QScrollArea#StudioStepScroll > QWidget > QWidget {{
+            background: transparent;
+        }}
+
         QFrame#Card, QFrame#TrackCard {{
             background: {card};
             border: 1px solid {border};
@@ -1249,12 +1283,6 @@ def _stylesheet(
             color: {muted};
             font-size: 12px;
             font-weight: 800;
-        }}
-
-        QFrame#VideoPreviewSurface {{
-            background: #000000;
-            border: 1px solid {border};
-            border-radius: 18px;
         }}
 
         QFrame#TrackActionGroup {{

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from jang_app.services.output_catalog import load_output_sound_set
 from jang_app.services.song_package import EXPORT_STAGE, SOURCE_STAGE, STUDIO_STAGE, VOCAL_STAGE, SongPackage
+from jang_app.services.video_source import VideoSourceStore
 
 
 STAGE_SOURCE = "source"
@@ -47,6 +48,11 @@ def build_song_asset_details(package: SongPackage) -> SongAssetDetails:
     if package.source_path is not None and package.source_path.is_file():
         assets.append(_asset(package, STAGE_SOURCE, "Source", package.source_path, is_active=True))
         known_paths.add(package.source_path.resolve())
+
+    video_source = VideoSourceStore().load(package)
+    if video_source.path is not None and video_source.path.is_file():
+        assets.append(_asset(package, STAGE_SOURCE, "Source Video", video_source.path, is_active=True))
+        known_paths.add(video_source.path.resolve())
 
     for output in package.outputs:
         sound_set = load_output_sound_set(output.job_dir, package.folder / VOCAL_STAGE)

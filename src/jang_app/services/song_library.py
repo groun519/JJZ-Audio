@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from jang_app.config import DOWNLOAD_OUTPUT_DIR, SONG_LIBRARY_FILE, SUPPORTED_AU
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set
 from jang_app.services.song_assets import SongAssetDetails, build_song_asset_details
 from jang_app.services.song_package import SongOutputReference, SongPackage, SongPackageStore, VOCAL_STAGE
+from jang_app.services.song_video_export import render_song_video, song_video_export_dir
 from jang_app.services.song_export import (
     SongAudioExport,
     export_song_mix,
@@ -21,6 +23,7 @@ from jang_app.services.studio_session import (
     load_studio_session as load_package_studio_session,
     save_studio_session as save_package_studio_session,
 )
+from jang_app.services.video_source import VideoSource, VideoSourceStore
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,7 @@ class SongLibrary:
     ) -> None:
         self._library_file = library_file
         self._store = package_store or SongPackageStore()
+        self._video_sources = VideoSourceStore()
         self._legacy_titles: dict[str, str] = {}
         self._legacy_hidden_outputs: set[Path] = set()
         self._legacy_paths: tuple[Path, ...] = ()
@@ -170,6 +174,32 @@ class SongLibrary:
     def save_studio_session(self, item_id: str, session: StudioSession) -> Path:
         return save_package_studio_session(self._store.require(item_id), session)
 
+    def video_source(self, item_id: str) -> VideoSource:
+        return self._video_sources.resolve(self._store.require(item_id))
+
+    def set_video_file(
+        self,
+        item_id: str,
+        source: Path,
+        progress: Callable[[int], None] | None = None,
+    ) -> VideoSource:
+        return self._video_sources.import_file(self._store.require(item_id), source, progress)
+
+    def set_video_url(self, item_id: str, url: str) -> VideoSource:
+        return self._video_sources.set_url(self._store.require(item_id), url)
+
+    def download_video_source(
+        self,
+        item_id: str,
+        progress: Callable[[int], None] | None = None,
+    ) -> VideoSource:
+        return self._video_sources.materialize(self._store.require(item_id), progress)
+
+    def clear_video_source(self, item_id: str) -> VideoSource:
+        package = self._store.require(item_id)
+        self._video_sources.clear(package)
+        return self._video_sources.resolve(package)
+
     def export_audio_mix(self, item_id: str) -> Path:
         package = self._store.require(item_id)
         return export_song_mix(package, load_package_studio_session(package))
@@ -179,6 +209,22 @@ class SongLibrary:
 
     def audio_export_dir(self, item_id: str) -> Path:
         return song_audio_export_dir(self._store.require(item_id))
+
+    def render_video(
+        self,
+        item_id: str,
+        progress: Callable[[int], None] | None = None,
+    ) -> Path:
+        package = self._store.require(item_id)
+        return render_song_video(
+            package,
+            self._video_sources.resolve(package),
+            load_package_studio_session(package),
+            progress,
+        )
+
+    def video_export_dir(self, item_id: str) -> Path:
+        return song_video_export_dir(self._store.require(item_id))
 
     def vocal_separation_root(self, item_id: str) -> Path:
         return self._store.vocal_separation_root(item_id)

@@ -11,13 +11,13 @@ from jang_app.qt_app.widgets import SvgIconButton
 class StudioRangeEditor(QFrame):
     range_changed = Signal(int, int)
 
-    def __init__(self) -> None:
+    def __init__(self, title: str = "Output Range") -> None:
         super().__init__()
         self.setObjectName("Card")
         self._theme_mode = "white"
 
-        title = QLabel("Output Range")
-        title.setObjectName("SectionTitle")
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("SectionTitle")
         self.reset_button = SvgIconButton("refresh", size=30)
         self.reset_button.setObjectName("ControlIconButton")
         set_translated_tooltip(self.reset_button, "Reset output range")
@@ -25,7 +25,7 @@ class StudioRangeEditor(QFrame):
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.addWidget(title, 1)
+        header.addWidget(self.title_label, 1)
         header.addWidget(self.reset_button, 0)
 
         self.slider = TimelineRangeSlider()
