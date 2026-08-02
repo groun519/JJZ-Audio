@@ -9,6 +9,8 @@ import soundfile as sf
 from PySide6.QtCore import QElapsedTimer, QTimer
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink
 
+from jang_app.services.audio_effects import MasterProcessing, process_master_audio
+
 
 class AudioPlaybackError(RuntimeError):
     """Raised when an audio preview cannot be played."""
@@ -28,6 +30,7 @@ class AudioPlayer:
         self._elapsed_timer = QElapsedTimer()
         self._tracks: list[np.ndarray] = []
         self._volumes: list[float] = []
+        self._master_processing = MasterProcessing()
         self._frame_index = 0
         self._duration_frames = 0
         self._duration_ms = 0
@@ -67,6 +70,9 @@ class AudioPlayer:
         if not self._tracks:
             return
         self._volumes = _resolve_volumes(len(self._tracks), volumes)
+
+    def set_master_processing(self, processing: MasterProcessing) -> None:
+        self._master_processing = processing
 
     def pause(self) -> None:
         if not self.is_playing():
@@ -124,6 +130,7 @@ class AudioPlayer:
             if frame_count <= 0:
                 return
             chunk = _mix_chunk(self._tracks, self._volumes, self._frame_index, frame_count)
+            chunk = process_master_audio(chunk, self._master_processing)
             self._audio_device.write(_float_to_pcm16(chunk))
             self._frame_index += frame_count
 

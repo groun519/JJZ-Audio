@@ -393,6 +393,145 @@ def _stylesheet(
             font-weight: 700;
         }}
 
+        QLabel#LibraryDetailTitle {{
+            color: {text};
+            font-size: 18px;
+            font-weight: 900;
+        }}
+
+        QLabel#LibraryDetailMeta, QLabel#LibraryStageSummary {{
+            color: {muted};
+            font-size: 11px;
+            font-weight: 700;
+        }}
+
+        QScrollArea#LibraryAssetScroll {{
+            background: {surface};
+            border: 0;
+        }}
+
+        QScrollArea#LibraryAssetScroll > QWidget > QWidget,
+        QWidget#LibraryAssetViewport,
+        QWidget#LibraryAssetContent {{
+            background: {surface};
+        }}
+
+        QFrame#LibraryAssetRow {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QFrame#LibraryAssetRow:hover {{
+            background: {hover};
+        }}
+
+        QLabel#LibraryAssetRole {{
+            color: {text};
+            font-size: 11px;
+            font-weight: 900;
+        }}
+
+        QLabel#LibraryAssetName {{
+            color: {text};
+            font-size: 12px;
+            font-weight: 800;
+        }}
+
+        QLabel#LibraryAssetMeta {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QLabel#LibraryAssetBadge {{
+            color: {muted};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 8px;
+            min-height: 22px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#LibraryAssetBadge[active="true"] {{
+            color: {tab_active_text};
+            background: {tab_active};
+            border-color: {tab_active_border};
+        }}
+
+        QLabel#LibraryEmptyState {{
+            color: {muted};
+            background: {raised};
+            border: 1px dashed {border};
+            border-radius: 14px;
+            padding: 28px;
+            font-size: 12px;
+            font-weight: 700;
+        }}
+
+        QScrollArea#ExportScroll,
+        QScrollArea#ExportScroll > QWidget > QWidget {{
+            background: {surface};
+            border: 0;
+        }}
+
+        QFrame#ExportRow {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QFrame#ExportRow:hover {{
+            background: {hover};
+        }}
+
+        QLabel#ExportName {{
+            color: {text};
+            font-size: 12px;
+            font-weight: 800;
+        }}
+
+        QLabel#ExportMeta {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QLabel#ExportEmptyState {{
+            color: {muted};
+            background: {raised};
+            border: 1px dashed {border};
+            border-radius: 14px;
+            padding: 28px;
+            font-size: 12px;
+            font-weight: 700;
+        }}
+
+        QLabel#StudioRangeCaption {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QLabel#StudioRangeValue {{
+            color: {text};
+            font-size: 11px;
+            font-weight: 900;
+        }}
+
+        QLabel#StudioMasterLabel {{
+            color: {muted};
+            font-size: 11px;
+            font-weight: 800;
+        }}
+
+        QLabel#StudioMasterValue {{
+            color: {text};
+            font-size: 11px;
+            font-weight: 900;
+        }}
+
         QLabel#SourceBadge {{
             color: {text};
             background: {background};

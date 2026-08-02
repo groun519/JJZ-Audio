@@ -842,6 +842,22 @@ class TrackRow(QFrame):
     def volume(self) -> float:
         return self.volume_slider.value() / 100
 
+    def volume_percent(self) -> int:
+        return self.volume_slider.value()
+
+    def set_mix_state(self, *, muted: bool, volume_percent: int) -> None:
+        self._is_loading = True
+        self.mute_button.setChecked(muted)
+        self.waveform.set_muted(muted)
+        set_translated_tooltip(
+            self.mute_button,
+            "Unmute this track" if muted else "Mute this track",
+        )
+        volume = max(0, min(200, volume_percent))
+        self.volume_slider.setValue(volume)
+        self.volume_label.setText(f"{volume}%")
+        self._is_loading = False
+
     def set_playhead_ratio(self, ratio: float) -> None:
         self.waveform.set_playhead_ratio(ratio)
 
@@ -914,12 +930,19 @@ def make_list_item(row: QWidget) -> QListWidgetItem:
     return item
 
 
-class VolumeSlider(ScrollSafeSlider):
-    def __init__(self) -> None:
+class ValueSlider(ScrollSafeSlider):
+    def __init__(
+        self,
+        *,
+        unity_value: int = 0,
+        width: int = 180,
+        object_name: str = "ValueSlider",
+    ) -> None:
         super().__init__(Qt.Orientation.Horizontal)
         self._theme_mode = "white"
-        self.setObjectName("TrackVolumeSlider")
-        self.setFixedWidth(180)
+        self._unity_value = unity_value
+        self.setObjectName(object_name)
+        self.setFixedWidth(width)
         self.setFixedHeight(24)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -945,7 +968,7 @@ class VolumeSlider(ScrollSafeSlider):
         painter.setBrush(QBrush(palette["track"]))
         painter.drawRoundedRect(track, 2, 2)
 
-        unity_ratio = (100 - self.minimum()) / max(1, self.maximum() - self.minimum())
+        unity_ratio = (self._unity_value - self.minimum()) / max(1, self.maximum() - self.minimum())
         unity_x = left + width * max(0.0, min(1.0, unity_ratio))
         painter.setPen(QPen(palette["unity"], 1))
         painter.drawLine(QPointF(unity_x, center_y - 5), QPointF(unity_x, center_y + 5))
@@ -980,6 +1003,11 @@ class VolumeSlider(ScrollSafeSlider):
         width = max(1, self.width() - radius * 2)
         ratio = max(0.0, min(1.0, (x_position - left) / width))
         self.setValue(round(self.minimum() + ratio * (self.maximum() - self.minimum())))
+
+
+class VolumeSlider(ValueSlider):
+    def __init__(self) -> None:
+        super().__init__(unity_value=100, object_name="TrackVolumeSlider")
 
 
 def _track_action_divider() -> QFrame:
@@ -1439,6 +1467,15 @@ _TRACK_ICON_SVGS = {
         '<path d="M5 5h14"/>'
         '<path d="M5 12h14"/>'
         '<path d="M5 19h10"/>'
+        "</svg>"
+    ),
+    "database": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.1" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<ellipse cx="12" cy="5" rx="8" ry="3"/>'
+        '<path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/>'
+        '<path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>'
         "</svg>"
     ),
     "refresh": (

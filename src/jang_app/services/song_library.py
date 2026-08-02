@@ -8,7 +8,19 @@ from pathlib import Path
 
 from jang_app.config import DOWNLOAD_OUTPUT_DIR, SONG_LIBRARY_FILE, SUPPORTED_AUDIO_EXTENSIONS
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set
+from jang_app.services.song_assets import SongAssetDetails, build_song_asset_details
 from jang_app.services.song_package import SongOutputReference, SongPackage, SongPackageStore, VOCAL_STAGE
+from jang_app.services.song_export import (
+    SongAudioExport,
+    export_song_mix,
+    list_song_audio_exports,
+    song_audio_export_dir,
+)
+from jang_app.services.studio_session import (
+    StudioSession,
+    load_studio_session as load_package_studio_session,
+    save_studio_session as save_package_studio_session,
+)
 
 
 @dataclass(frozen=True)
@@ -148,6 +160,25 @@ class SongLibrary:
 
     def items(self) -> list[SongItem]:
         return [_item_from_package(package) for package in self._store.packages()]
+
+    def asset_details(self, item_id: str) -> SongAssetDetails:
+        return build_song_asset_details(self._store.require(item_id))
+
+    def studio_session(self, item_id: str) -> StudioSession:
+        return load_package_studio_session(self._store.require(item_id))
+
+    def save_studio_session(self, item_id: str, session: StudioSession) -> Path:
+        return save_package_studio_session(self._store.require(item_id), session)
+
+    def export_audio_mix(self, item_id: str) -> Path:
+        package = self._store.require(item_id)
+        return export_song_mix(package, load_package_studio_session(package))
+
+    def audio_exports(self, item_id: str) -> tuple[SongAudioExport, ...]:
+        return list_song_audio_exports(self._store.require(item_id))
+
+    def audio_export_dir(self, item_id: str) -> Path:
+        return song_audio_export_dir(self._store.require(item_id))
 
     def vocal_separation_root(self, item_id: str) -> Path:
         return self._store.vocal_separation_root(item_id)

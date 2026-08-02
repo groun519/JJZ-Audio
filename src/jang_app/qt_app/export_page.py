@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+
+from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
+from jang_app.qt_app.selected_song_card import SelectedSongCard
+from jang_app.qt_app.widgets import SvgIconButton, TaskActionWidget
+from jang_app.services.song_export import SongAudioExport
+
+
+class ExportPage(QWidget):
+    export_requested = Signal(str)
+    open_location_requested = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._export_dir: Path | None = None
+        self._theme_mode = "white"
+        self.export_rows: list[_AudioExportRow] = []
+
+        left_panel = QFrame()
+        left_panel.setObjectName("Panel")
+        left_panel.setMinimumWidth(380)
+        left_panel.setMaximumWidth(460)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(20, 20, 20, 20)
+        left_layout.setSpacing(16)
+
+        self.song_card = SelectedSongCard()
+        self.action = TaskActionWidget("Audio Mix", "Export")
+        self.action.triggered.connect(self._request_export)
+        self.action.set_action_enabled(False)
+        left_layout.addWidget(self.song_card, 0)
+        left_layout.addWidget(self.action, 0)
+        left_layout.addStretch(1)
+
+        results_panel = QFrame()
+        results_panel.setObjectName("Panel")
+        results_layout = QVBoxLayout(results_panel)
+        results_layout.setContentsMargins(20, 20, 20, 20)
+        results_layout.setSpacing(14)
+
+        title = QLabel("Exports")
+        title.setObjectName("SectionTitle")
+        self.open_folder_button = SvgIconButton("folder", size=34)
+        self.open_folder_button.setObjectName("ControlIconButton")
+        set_translated_tooltip(self.open_folder_button, "Open export location")
+        self.open_folder_button.clicked.connect(self._open_export_location)
+        self.open_folder_button.setEnabled(False)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(title, 1)
+        header.addWidget(self.open_folder_button, 0)
+
+        self.export_content = QWidget()
+        self.export_layout = QVBoxLayout(self.export_content)
+        self.export_layout.setContentsMargins(0, 0, 0, 0)
+        self.export_layout.setSpacing(8)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("ExportScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.export_content)
+
+        results_layout.addLayout(header)
+        results_layout.addWidget(scroll, 1)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+        layout.addWidget(left_panel, 0)
+        layout.addWidget(results_panel, 1)
+        self.set_exports((), None)
+
+    def set_exports(self, exports: tuple[SongAudioExport, ...], export_dir: Path | None) -> None:
+        self._clear_rows()
+        self._export_dir = export_dir
+        self.open_folder_button.setEnabled(export_dir is not None)
+        if not exports:
+            empty_label = QLabel()
+            empty_label.setObjectName("ExportEmptyState")
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            set_translated_text(empty_label, "No exports yet.")
+            self.export_layout.addWidget(empty_label, 1)
+            return
+
+        for exported in exports:
+            row = _AudioExportRow(exported)
+            row.set_theme_mode(self._theme_mode)
+            row.open_location_requested.connect(self.open_location_requested.emit)
+            self.export_rows.append(row)
+            self.export_layout.addWidget(row, 0)
+        self.export_layout.addStretch(1)
+
+    def set_export_enabled(self, enabled: bool) -> None:
+        self.action.set_action_enabled(enabled)
+
+    def set_running(self, running: bool) -> None:
+        self.action.set_running(running)
+
+    def set_progress(self, progress: int) -> None:
+        self.action.set_progress(progress)
+
+    def set_status(self, status: str, detail: str = "") -> None:
+        self.action.set_status(status)
+        self.action.status_label.setToolTip(detail)
+
+    def set_theme_mode(self, theme_mode: str) -> None:
+        self._theme_mode = theme_mode
+        self.open_folder_button.set_theme_mode(theme_mode)
+        for row in self.export_rows:
+            row.set_theme_mode(theme_mode)
+
+    def apply_language(self) -> None:
+        apply_widget_language(self)
+        self.song_card.apply_language()
+        set_translated_tooltip(self.open_folder_button, "Open export location")
+
+    def _request_export(self) -> None:
+        self.export_requested.emit(self.song_card.selected_song_id())
+
+    def _open_export_location(self) -> None:
+        if self._export_dir is not None:
+            self.open_location_requested.emit(self._export_dir)
+
+    def _clear_rows(self) -> None:
+        self.export_rows = []
+        while self.export_layout.count():
+            item = self.export_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+
+
+class _AudioExportRow(QFrame):
+    open_location_requested = Signal(object)
+
+    def __init__(self, exported: SongAudioExport) -> None:
+        super().__init__()
+        self.setObjectName("ExportRow")
+
+        name_label = QLabel(exported.path.name)
+        name_label.setObjectName("ExportName")
+        name_label.setToolTip(str(exported.path))
+
+        meta_label = QLabel(f"{_size_label(exported.size_bytes)}  /  {_timestamp(exported.modified_at)}")
+        meta_label.setObjectName("ExportMeta")
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(3)
+        text_layout.addWidget(name_label)
+        text_layout.addWidget(meta_label)
+
+        self.open_button = SvgIconButton("folder", size=30)
+        set_translated_tooltip(self.open_button, "Open file location")
+        self.open_button.clicked.connect(lambda: self.open_location_requested.emit(exported.path))
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+        layout.addLayout(text_layout, 1)
+        layout.addWidget(self.open_button, 0)
+
+    def set_theme_mode(self, theme_mode: str) -> None:
+        self.open_button.set_theme_mode(theme_mode)
+
+
+def _size_label(size_bytes: int) -> str:
+    size = float(max(0, size_bytes))
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+        size /= 1024
+    return ""
+
+
+def _timestamp(value: float) -> str:
+    try:
+        return datetime.fromtimestamp(value).astimezone().strftime("%y/%m/%d %H:%M")
+    except (OSError, OverflowError, ValueError):
+        return ""

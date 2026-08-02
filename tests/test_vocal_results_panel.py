@@ -69,6 +69,18 @@ class VocalResultsPanelTests(unittest.TestCase):
         self.assertEqual(changed.count(), 0)
         row.close()
 
+    def test_studio_track_restores_mix_state_without_emitting_change(self) -> None:
+        row = TrackRow("Original Vocal")
+        changed = QSignalSpy(row.playback_settings_changed)
+
+        row.set_mix_state(muted=True, volume_percent=175)
+
+        self.assertTrue(row.is_muted())
+        self.assertEqual(row.volume_percent(), 175)
+        self.assertEqual(row.volume(), 1.75)
+        self.assertEqual(changed.count(), 0)
+        row.close()
+
 
 def _version(
     name: str,
