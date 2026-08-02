@@ -74,6 +74,8 @@ def _output_duration_ms(output_set: OutputSoundSet) -> int:
 def _is_output_for_song(song: SongItem, output_set: OutputSoundSet) -> bool:
     if song.kind == "output":
         return True
+    if song.output_job_dir is not None:
+        return song.output_job_dir.expanduser().resolve() == output_set.job_dir.expanduser().resolve()
     return _normalize_name(song.path.stem) == _normalize_name(output_set.job_dir.name)
 
 

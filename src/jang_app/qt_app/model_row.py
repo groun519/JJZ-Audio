@@ -4,6 +4,7 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from jang_app.qt_app.model_badge import set_model_badge
+from jang_app.services.i18n import tr
 from jang_app.services.rvc_model_workspace import RvcModelRecord
 
 
@@ -62,12 +63,16 @@ class ModelListRow(QWidget):
         self.style().polish(self)
 
     def update_record(self, record: RvcModelRecord) -> None:
+        self._record = record
         self._model_id = record.model_id
         self.name_label.setText(record.title)
         self.name_label.setToolTip(record.name if record.display_name else "")
         self.detail_label.setText(_record_summary(record))
         set_model_badge(self.status_badge, record.status_label, "status", record.status_key)
         set_model_badge(self.mode_badge, record.mode_label, "managed", record.is_managed)
+
+    def apply_language(self) -> None:
+        self.update_record(self._record)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
@@ -78,9 +83,9 @@ class ModelListRow(QWidget):
 def _record_summary(record: RvcModelRecord) -> str:
     parts = [_format_size(record.total_size_bytes)]
     if record.has_index:
-        parts.append("Index")
+        parts.append(tr("Index"))
     if record.can_resume:
-        parts.append("G/D checkpoint")
+        parts.append(tr("G/D checkpoint"))
     return "  /  ".join(parts)
 
 

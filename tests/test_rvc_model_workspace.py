@@ -1,13 +1,39 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from jang_app.services.rvc_model_workspace import RvcModelWorkspace, discover_rvc_models
+from jang_app.services.rvc_model_workspace import (
+    RvcModelWorkspace,
+    RvcModelWorkspaceError,
+    discover_rvc_models,
+)
 
 
 class RvcModelWorkspaceTests(unittest.TestCase):
+    def test_create_model_builds_empty_managed_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = _build_rvc_root(base / "runtime")
+            workspace = RvcModelWorkspace(base / "workspace")
+
+            record = workspace.create_model("  My   Voice  ", runtime)
+
+            model_dir = workspace.library_dir / record.model_id
+            self.assertEqual(record.name, "My Voice")
+            self.assertEqual(record.mode, "created")
+            self.assertTrue(record.is_managed)
+            self.assertEqual(record.mode_label, "New Model")
+            self.assertEqual(record.source_folder, model_dir / "rvc" / "logs" / "My Voice")
+            self.assertTrue((model_dir / "rvc" / "weights").is_dir())
+            self.assertTrue((model_dir / "rvc" / "logs" / "My Voice").is_dir())
+            self.assertTrue((model_dir / "model.json").is_file())
+            self.assertEqual(workspace.records()[0], record)
+            with self.assertRaises(RvcModelWorkspaceError):
+                workspace.create_model("my voice", runtime)
+
     def test_discovers_one_model_per_experiment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = _build_rvc_root(Path(temporary))
@@ -33,7 +59,7 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertEqual(records[0].status_label, "Resume Ready")
             self.assertFalse(records[0].is_managed)
 
-    def test_import_creates_baseline_without_changing_source(self) -> None:
+    def test_import_preserves_webui_layout_without_changing_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             source = _build_rvc_root(base / "source")
@@ -43,12 +69,29 @@ class RvcModelWorkspaceTests(unittest.TestCase):
 
             record = workspace.import_folder(source / "logs" / "voice-a")[0]
             model_dir = base / "workspace" / "library" / record.model_id
+            package_root = model_dir / "rvc"
 
             self.assertTrue(record.is_managed)
             self.assertTrue(record.can_resume)
-            self.assertTrue((model_dir / "baseline" / "inference" / "voice-a.pth").is_file())
-            self.assertTrue((model_dir / "baseline" / "checkpoints" / "G_100.pth").is_file())
-            self.assertTrue((model_dir / "manifest.json").is_file())
+            self.assertEqual(record.inference_model, package_root / "weights" / "voice-a.pth")
+            self.assertEqual(record.index_file, package_root / "logs" / "voice-a" / "added_voice-a.index")
+            self.assertTrue((package_root / "weights" / "voice-a_e50_s500.pth").is_file())
+            self.assertTrue((package_root / "logs" / "voice-a" / "0_gt_wavs" / "sample.wav").is_file())
+            self.assertTrue((package_root / "logs" / "voice-a" / "2a_f0").is_dir())
+            self.assertTrue((package_root / "logs" / "voice-a" / "3_feature768" / "sample.npy").is_file())
+            self.assertTrue((package_root / "logs" / "voice-a" / "train.log").is_file())
+            self.assertTrue((model_dir / "model.json").is_file())
+            self.assertEqual(workspace.portable_rvc_root(record.model_id), package_root)
+            self.assertEqual(record.primary_location, package_root)
+            manifest = json.loads((model_dir / "model.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["rvc_name"], "voice-a")
+            self.assertEqual(manifest["rvc"]["root"], "rvc")
+            self.assertEqual(manifest["rvc"]["artifacts"]["inference_model"], "rvc/weights/voice-a.pth")
+            self.assertEqual(
+                manifest["rvc"]["artifacts"]["generator_checkpoint"],
+                "rvc/logs/voice-a/G_100.pth",
+            )
+            self.assertEqual([model.name for model in discover_rvc_models(model_dir)], ["voice-a"])
             self.assertEqual(original_bytes, {path: path.read_bytes() for path in source_files})
 
     def test_profile_survives_source_rescan(self) -> None:
@@ -75,7 +118,7 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertEqual(record.default_pitch, -12)
             self.assertEqual(record.default_device, "cpu")
 
-    def test_managed_artifact_repair_copies_replacement_into_baseline(self) -> None:
+    def test_managed_artifact_repair_keeps_webui_relative_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             source = _build_rvc_root(base / "source")
@@ -90,7 +133,61 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertNotEqual(updated.index_file, replacement)
             self.assertEqual(updated.index_file.read_bytes(), b"other")
             self.assertEqual(replacement.read_bytes(), b"other")
-            self.assertIn("baseline", updated.index_file.parts)
+            self.assertEqual(
+                updated.index_file.relative_to(base / "workspace" / "library" / record.model_id).as_posix(),
+                "rvc/logs/voice-a/added_voice-a.index",
+            )
+
+    def test_legacy_baseline_is_copied_to_rvc_package_without_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = _build_rvc_root(base / "runtime")
+            workspace_root = base / "workspace"
+            model_id = "managed-legacy"
+            model_dir = workspace_root / "library" / model_id
+            legacy_inference = model_dir / "baseline" / "inference" / "voice-a.pth"
+            legacy_index = model_dir / "baseline" / "inference" / "added_voice-a.index"
+            legacy_generator = model_dir / "baseline" / "checkpoints" / "G_100.pth"
+            legacy_discriminator = model_dir / "baseline" / "checkpoints" / "D_100.pth"
+            for path, content in (
+                (legacy_inference, b"inference"),
+                (legacy_index, b"index"),
+                (legacy_generator, b"generator"),
+                (legacy_discriminator, b"discriminator"),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            (workspace_root / "catalog.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "models": [
+                            {
+                                "id": model_id,
+                                "name": "voice-a",
+                                "mode": "managed",
+                                "runtime_root": str(runtime),
+                                "source_folder": str(model_dir),
+                                "inference_model": str(legacy_inference),
+                                "index_file": str(legacy_index),
+                                "generator_checkpoint": str(legacy_generator),
+                                "discriminator_checkpoint": str(legacy_discriminator),
+                                "created_at": "2026-01-01T00:00:00+00:00",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            record = RvcModelWorkspace(workspace_root).records()[0]
+
+            self.assertEqual(record.inference_model, model_dir / "rvc" / "weights" / "voice-a.pth")
+            self.assertEqual(record.generator_checkpoint, model_dir / "rvc" / "logs" / "voice-a" / "G_100.pth")
+            self.assertTrue(legacy_inference.is_file())
+            self.assertTrue(legacy_generator.is_file())
+            self.assertTrue((model_dir / "model.json").is_file())
 
     def test_linked_index_repair_recovers_missing_file_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -122,6 +219,14 @@ def _build_rvc_root(root: Path) -> Path:
     (weights / "voice-a_e50_s500.pth").write_bytes(b"old inference")
     (weights / "standalone.pth").write_bytes(b"standalone")
     (experiment / "added_voice-a.index").write_bytes(b"index")
+    (experiment / "0_gt_wavs").mkdir()
+    (experiment / "0_gt_wavs" / "sample.wav").write_bytes(b"wave")
+    (experiment / "2a_f0").mkdir()
+    (experiment / "3_feature768").mkdir()
+    (experiment / "3_feature768" / "sample.npy").write_bytes(b"features")
+    (experiment / "config.json").write_text("{}", encoding="utf-8")
+    (experiment / "filelist.txt").write_text("sample", encoding="utf-8")
+    (experiment / "train.log").write_text("trained", encoding="utf-8")
     (experiment / "G_50.pth").write_bytes(b"old generator")
     (experiment / "D_50.pth").write_bytes(b"old discriminator")
     (experiment / "G_100.pth").write_bytes(b"generator")

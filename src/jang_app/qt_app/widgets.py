@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QWheelEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QApplication,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -16,12 +18,130 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QLineEdit,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from jang_app.services.audio_metadata import format_duration, read_audio_metadata
+from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
 from jang_app.services.waveform import build_waveform_peaks
+
+
+class _ScrollSafeControl:
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        scroll_area = _nearest_scroll_area(self)
+        if scroll_area is None:
+            event.ignore()
+            return
+
+        viewport = scroll_area.viewport()
+        local_position = viewport.mapFromGlobal(event.globalPosition().toPoint())
+        forwarded_event = QWheelEvent(
+            QPointF(local_position),
+            event.globalPosition(),
+            event.pixelDelta(),
+            event.angleDelta(),
+            event.buttons(),
+            event.modifiers(),
+            event.phase(),
+            event.inverted(),
+        )
+        QApplication.sendEvent(viewport, forwarded_event)
+        event.accept()
+
+
+class ScrollSafeComboBox(_ScrollSafeControl, QComboBox):
+    pass
+
+
+class ScrollSafeSlider(_ScrollSafeControl, QSlider):
+    pass
+
+
+class ScrollSafeSpinBox(_ScrollSafeControl, QSpinBox):
+    pass
+
+
+class FeedbackButton(QPushButton):
+    """Button with pointer feedback that reserves focus chrome for keyboard use."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setProperty("keyboardFocus", False)
+        self.setProperty("pointerState", "normal")
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        self._set_keyboard_focus(event.reason() != Qt.FocusReason.MouseFocusReason)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        self._set_keyboard_focus(False)
+        super().focusOutEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._set_keyboard_focus(False)
+            focused = QApplication.focusWidget()
+            if isinstance(focused, FeedbackButton):
+                focused.clearFocus()
+            self._set_pointer_state("pressed")
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        super().mouseReleaseEvent(event)
+        is_inside = self.rect().contains(event.position().toPoint())
+        self._set_pointer_state("hover" if is_inside and self.isEnabled() else "normal")
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._set_pointer_state("pressed" if self.isDown() else "hover")
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._set_pointer_state("normal")
+        super().leaveEvent(event)
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.EnabledChange and not self.isEnabled():
+            self._set_pointer_state("normal")
+
+    def _set_keyboard_focus(self, is_visible: bool) -> None:
+        self._set_visual_property("keyboardFocus", is_visible)
+
+    def _set_pointer_state(self, state: str) -> None:
+        self._set_visual_property("pointerState", state)
+
+    def _set_visual_property(self, name: str, value: object) -> None:
+        if self.property(name) == value:
+            return
+        self.setProperty(name, value)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def _is_pointer_hovered(self) -> bool:
+        return self.property("pointerState") == "hover"
+
+    def _is_pointer_pressed(self) -> bool:
+        return self.property("pointerState") == "pressed"
+
+    def _draw_keyboard_focus(self, painter: QPainter, rect: QRectF, radius: float) -> None:
+        if not bool(self.property("keyboardFocus")):
+            return
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(_keyboard_focus_color(getattr(self, "_theme_mode", "white")), 1))
+        painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), max(2.0, radius - 2), max(2.0, radius - 2))
+
+
+def _nearest_scroll_area(widget: QWidget) -> QAbstractScrollArea | None:
+    parent = widget.parentWidget()
+    while parent is not None:
+        if isinstance(parent, QAbstractScrollArea):
+            return parent
+        parent = parent.parentWidget()
+    return None
 
 
 class WindowTitleBar(QFrame):
@@ -102,10 +222,13 @@ class WindowTitleBar(QFrame):
 
     def set_maximized(self, is_maximized: bool) -> None:
         self.maximize_button.set_icon_name("restore" if is_maximized else "maximize")
-        self.maximize_button.setToolTip("Restore" if is_maximized else "Maximize")
+        set_translated_tooltip(self.maximize_button, "Restore" if is_maximized else "Maximize")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and not self._is_interactive_position(event.position().toPoint()):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and not self._is_interactive_position(event.position().toPoint())
+        ):
             handle = self.window().windowHandle()
             if handle is not None and handle.startSystemMove():
                 event.accept()
@@ -127,7 +250,10 @@ class WindowTitleBar(QFrame):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and not self._is_interactive_position(event.position().toPoint()):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and not self._is_interactive_position(event.position().toPoint())
+        ):
             self.maximize_requested.emit()
             event.accept()
             return
@@ -145,7 +271,7 @@ class WindowTitleBar(QFrame):
 def _window_control_button(icon_name: str, tooltip: str) -> QPushButton:
     button = SvgIconButton(icon_name, size=26)
     button.setObjectName("WindowControlButton")
-    button.setToolTip(tooltip)
+    set_translated_tooltip(button, tooltip)
     button.setFixedSize(30, 26)
     return button
 
@@ -170,7 +296,7 @@ class FileDropCard(QFrame):
 
         self.file_button = SvgIconButton("file_plus", size=58)
         self.file_button.setObjectName("DropFileButton")
-        self.file_button.setToolTip("Add audio file")
+        set_translated_tooltip(self.file_button, "Add audio file")
         self.file_button.clicked.connect(self.browse_requested.emit)
 
         self.selected_label = QLabel("")
@@ -249,7 +375,7 @@ class UrlDownloadCard(QFrame):
         self.url_edit.setPlaceholderText("YouTube URL")
         self.url_edit.returnPressed.connect(self._emit_download_requested)
 
-        self.download_button = QPushButton("Download")
+        self.download_button = FeedbackButton("Download")
         self.download_button.setObjectName("PrimaryButton")
         self.download_button.clicked.connect(self._emit_download_requested)
 
@@ -290,7 +416,7 @@ class UrlDownloadCard(QFrame):
 
     def set_status(self, text: str) -> None:
         value = text.strip()
-        self.status_label.setText(value)
+        set_translated_text(self.status_label, value)
         self.status_label.setToolTip("")
         self.status_label.setVisible(bool(value))
 
@@ -310,7 +436,7 @@ class TaskActionWidget(QFrame):
 
         self.title_label = QLabel(title)
         self.title_label.setObjectName("CardTitle")
-        self.button = QPushButton(button_text)
+        self.button = FeedbackButton(button_text)
         self.button.setObjectName("PrimaryButton")
         self.button.setMinimumWidth(112)
         self.button.clicked.connect(self.triggered.emit)
@@ -344,7 +470,7 @@ class TaskActionWidget(QFrame):
         layout.addWidget(self.status_label)
 
     def set_button_text(self, text: str) -> None:
-        self.button.setText(text)
+        set_translated_text(self.button, text)
 
     def set_running(self, is_running: bool) -> None:
         self.button.setDisabled(is_running)
@@ -356,7 +482,7 @@ class TaskActionWidget(QFrame):
 
     def set_status(self, text: str) -> None:
         value = text.strip()
-        self.status_label.setText(value)
+        set_translated_text(self.status_label, value)
         self.status_label.setToolTip("")
         self.status_label.setVisible(bool(value))
 
@@ -375,7 +501,7 @@ class WaveformView(QWidget):
         self._muted = False
         self._theme_mode = "white"
         self._error = ""
-        self.setMinimumHeight(128)
+        self.setMinimumHeight(66)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -456,7 +582,7 @@ class WaveformView(QWidget):
         self.seek_requested.emit(ratio)
 
 
-class SvgIconButton(QPushButton):
+class SvgIconButton(FeedbackButton):
     def __init__(self, icon_name: str, size: int = 26) -> None:
         super().__init__()
         self._icon_name = icon_name
@@ -482,7 +608,8 @@ class SvgIconButton(QPushButton):
             self._theme_mode,
             self.isChecked(),
             self.isEnabled(),
-            self.underMouse(),
+            self._is_pointer_hovered(),
+            self._is_pointer_pressed() or self.isDown(),
             self.objectName(),
         )
 
@@ -492,7 +619,13 @@ class SvgIconButton(QPushButton):
         painter.setBrush(QBrush(palette["background"]))
         painter.drawRoundedRect(rect, 9, 9)
         padding = max(6, int(self._icon_size * 0.25))
-        _render_track_icon(painter, rect.adjusted(padding, padding, -padding, -padding), self._icon_key(), palette["icon"])
+        _render_track_icon(
+            painter,
+            rect.adjusted(padding, padding, -padding, -padding),
+            self._icon_key(),
+            palette["icon"],
+        )
+        self._draw_keyboard_focus(painter, rect, 9)
 
     def _icon_key(self) -> str:
         if self._icon_name == "speaker":
@@ -504,7 +637,7 @@ class SvgIconButton(QPushButton):
         return self._icon_name
 
 
-class ThemeToggleButton(QPushButton):
+class ThemeToggleButton(FeedbackButton):
     def __init__(self) -> None:
         super().__init__()
         self._theme_mode = "white"
@@ -513,7 +646,7 @@ class ThemeToggleButton(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setCheckable(True)
         self.setFixedSize(66, 26)
-        self.setToolTip("Switch theme")
+        set_translated_tooltip(self, "Switch theme")
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
@@ -523,7 +656,11 @@ class ThemeToggleButton(QPushButton):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        colors = _theme_toggle_palette(self._theme_mode, self.underMouse())
+        colors = _theme_toggle_palette(
+            self._theme_mode,
+            self._is_pointer_hovered(),
+            self._is_pointer_pressed() or self.isDown(),
+        )
 
         outer = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -546,6 +683,7 @@ class ThemeToggleButton(QPushButton):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(colors["knob"]))
         painter.drawEllipse(QRectF(knob_x, track.top() + 2, 8, 8))
+        self._draw_keyboard_focus(painter, outer, 10)
 
 
 class TrackRow(QFrame):
@@ -566,29 +704,27 @@ class TrackRow(QFrame):
         self.title_label = QLabel(title)
         self.title_label.setObjectName("CardTitle")
 
-        self.path_combo = QComboBox()
+        self.path_combo = ScrollSafeComboBox()
+        self.path_combo.setObjectName("TrackVersionCombo")
+        self.path_combo.setMinimumWidth(220)
+        self.path_combo.setMaximumWidth(440)
         self.path_combo.setVisible(allow_selection)
         self.path_combo.currentIndexChanged.connect(self._on_combo_changed)
 
-        self.time_label = QLabel("--:--")
-        self.time_label.setObjectName("TrackTime")
-        self.time_label.setFixedWidth(46)
-        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self.open_location_button = SvgIconButton("folder", size=28)
-        self.open_location_button.setObjectName("TrackIconButton")
-        self.open_location_button.setToolTip("Open file location")
+        self.open_location_button = SvgIconButton("folder", size=26)
+        self.open_location_button.setObjectName("TrackActionButton")
+        set_translated_tooltip(self.open_location_button, "Open file location")
         self.open_location_button.clicked.connect(self._emit_open_location_requested)
 
-        self.export_button = SvgIconButton("download", size=28)
-        self.export_button.setObjectName("TrackIconButton")
-        self.export_button.setToolTip("Export this track")
+        self.export_button = SvgIconButton("download", size=26)
+        self.export_button.setObjectName("TrackActionButton")
+        set_translated_tooltip(self.export_button, "Save a copy of this track")
         self.export_button.clicked.connect(self._emit_export_requested)
 
-        self.mute_button = SvgIconButton("speaker", size=28)
-        self.mute_button.setObjectName("TrackIconButton")
+        self.mute_button = SvgIconButton("speaker", size=26)
+        self.mute_button.setObjectName("TrackMuteButton")
         self.mute_button.setCheckable(True)
-        self.mute_button.setToolTip("Mute this track")
+        set_translated_tooltip(self.mute_button, "Mute this track")
         self.mute_button.clicked.connect(self._on_mute_changed)
 
         self.volume_slider = VolumeSlider()
@@ -603,32 +739,46 @@ class TrackRow(QFrame):
         self.waveform = WaveformView()
         self.waveform.seek_requested.connect(self.seek_requested.emit)
 
-        control_strip = QFrame()
-        control_strip.setObjectName("TrackControlStrip")
-        control_strip.setFixedHeight(36)
-        control_layout = QHBoxLayout(control_strip)
-        control_layout.setContentsMargins(10, 3, 10, 3)
-        control_layout.setSpacing(6)
-        control_layout.addWidget(self.time_label, 0)
-        control_layout.addWidget(_track_control_divider(), 0)
-        control_layout.addWidget(self.open_location_button, 0)
-        control_layout.addWidget(self.export_button, 0)
-        control_layout.addWidget(self.mute_button, 0)
-        control_layout.addWidget(self.volume_slider, 0)
-        control_layout.addWidget(self.volume_label, 0)
+        action_group = QFrame()
+        action_group.setObjectName("TrackActionGroup")
+        action_group.setFixedHeight(32)
+        action_layout = QHBoxLayout(action_group)
+        action_layout.setContentsMargins(3, 3, 3, 3)
+        action_layout.setSpacing(3)
+        action_layout.addWidget(self.open_location_button)
+        action_layout.addWidget(_track_action_divider())
+        action_layout.addWidget(self.export_button)
 
         header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(10)
         header.addWidget(self.title_label, 0)
         header.addWidget(self.path_combo, 1)
         header.addStretch(1)
-        header.addWidget(control_strip, 0)
+        header.addWidget(action_group, 0)
+
+        mixer_strip = QFrame()
+        mixer_strip.setObjectName("TrackMixerStrip")
+        mixer_strip.setFixedHeight(34)
+        mixer_layout = QHBoxLayout(mixer_strip)
+        mixer_layout.setContentsMargins(10, 4, 10, 4)
+        mixer_layout.setSpacing(8)
+
+        mixer_label = QLabel("LEVEL")
+        mixer_label.setObjectName("TrackMixerLabel")
+        mixer_label.setFixedWidth(42)
+        mixer_layout.addStretch(1)
+        mixer_layout.addWidget(mixer_label, 0)
+        mixer_layout.addWidget(self.mute_button, 0)
+        mixer_layout.addWidget(self.volume_slider, 0)
+        mixer_layout.addWidget(self.volume_label, 0)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
         layout.addLayout(header)
         layout.addWidget(self.waveform, 1)
+        layout.addWidget(mixer_strip, 0)
 
         self.set_loaded(False)
 
@@ -687,13 +837,15 @@ class TrackRow(QFrame):
         if path is None:
             self._paths_by_label = {}
             self.waveform.set_path(None)
-            self.time_label.setText("--:--")
+            self.path_combo.setToolTip("")
+            self.waveform.setToolTip("")
             self.set_loaded(False)
             return
 
         self._paths_by_label.setdefault(_display_name(path), path)
         self.waveform.set_path(path)
-        self.time_label.setText(_safe_duration_label(path))
+        self.path_combo.setToolTip(str(path))
+        self.waveform.setToolTip(str(path))
         self.set_loaded(True)
 
     def _on_combo_changed(self) -> None:
@@ -703,7 +855,10 @@ class TrackRow(QFrame):
 
     def _on_mute_changed(self) -> None:
         self.waveform.set_muted(self.is_muted())
-        self.mute_button.setToolTip("Unmute this track" if self.is_muted() else "Mute this track")
+        set_translated_tooltip(
+            self.mute_button,
+            "Unmute this track" if self.is_muted() else "Mute this track",
+        )
         self._emit_playback_settings_changed()
 
     def _on_volume_changed(self, value: int) -> None:
@@ -731,12 +886,13 @@ def make_list_item(row: QWidget) -> QListWidgetItem:
     return item
 
 
-class VolumeSlider(QSlider):
+class VolumeSlider(ScrollSafeSlider):
     def __init__(self) -> None:
         super().__init__(Qt.Orientation.Horizontal)
         self._theme_mode = "white"
         self.setObjectName("TrackVolumeSlider")
-        self.setFixedSize(112, 24)
+        self.setFixedWidth(180)
+        self.setFixedHeight(24)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_theme_mode(self, theme_mode: str) -> None:
@@ -761,7 +917,13 @@ class VolumeSlider(QSlider):
         painter.setBrush(QBrush(palette["track"]))
         painter.drawRoundedRect(track, 2, 2)
 
+        unity_ratio = (100 - self.minimum()) / max(1, self.maximum() - self.minimum())
+        unity_x = left + width * max(0.0, min(1.0, unity_ratio))
+        painter.setPen(QPen(palette["unity"], 1))
+        painter.drawLine(QPointF(unity_x, center_y - 5), QPointF(unity_x, center_y + 5))
+
         fill = QRectF(left, center_y - 2, max(0.0, knob_x - left), 4)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(palette["fill"]))
         painter.drawRoundedRect(fill, 2, 2)
 
@@ -792,9 +954,9 @@ class VolumeSlider(QSlider):
         self.setValue(round(self.minimum() + ratio * (self.maximum() - self.minimum())))
 
 
-def _track_control_divider() -> QFrame:
+def _track_action_divider() -> QFrame:
     divider = QFrame()
-    divider.setObjectName("TrackControlDivider")
+    divider.setObjectName("TrackActionDivider")
     divider.setFixedSize(1, 16)
     return divider
 
@@ -804,31 +966,38 @@ def _track_button_palette(
     is_checked: bool,
     is_enabled: bool,
     is_hovered: bool,
+    is_pressed: bool,
     object_name: str = "",
 ) -> dict[str, QColor]:
     if object_name in {"WindowControlButton", "WindowCloseButton"}:
-        return _window_control_palette(theme_mode, object_name, is_enabled, is_hovered)
+        return _window_control_palette(theme_mode, object_name, is_enabled, is_hovered, is_pressed)
     if object_name == "DropFileButton":
-        return _drop_file_button_palette(theme_mode, is_enabled, is_hovered)
-    if object_name == "TrackIconButton":
-        return _track_icon_button_palette(theme_mode, is_checked, is_enabled, is_hovered)
+        return _drop_file_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
+    if object_name in {"TrackActionButton", "TrackMuteButton"}:
+        return _track_icon_button_palette(theme_mode, is_checked, is_enabled, is_hovered, is_pressed)
 
     if theme_mode == "dark":
         colors = {
             "background": QColor(0, 0, 0, 0),
-            "hover": QColor("#23211f"),
-            "active": QColor("#f7f4ec"),
-            "border": QColor("#34312d"),
-            "icon": QColor("#f7f4ec"),
-            "active_icon": QColor("#090909"),
-            "disabled": QColor("#5f5b54"),
+            "hover": QColor("#30302e"),
+            "pressed": QColor("#3a3a37"),
+            "active": QColor("#30302e"),
+            "active_pressed": QColor("#444440"),
+            "border": QColor("#484843"),
+            "hover_border": QColor("#5a5a55"),
+            "icon": QColor("#ecebe7"),
+            "active_icon": QColor("#ecebe7"),
+            "disabled": QColor("#6c6b66"),
         }
     else:
         colors = {
             "background": QColor(0, 0, 0, 0),
             "hover": QColor("#e7e1d5"),
+            "pressed": QColor("#d1c8b8"),
             "active": QColor("#10100e"),
+            "active_pressed": QColor("#46443e"),
             "border": QColor("#d8d0c2"),
+            "hover_border": QColor("#10100e"),
             "icon": QColor("#10100e"),
             "active_icon": QColor("#fffdf7"),
             "disabled": QColor("#aaa397"),
@@ -836,26 +1005,38 @@ def _track_button_palette(
 
     if not is_enabled:
         return {"background": colors["background"], "border": colors["border"], "icon": colors["disabled"]}
+    if is_pressed:
+        background = colors["active_pressed"] if is_checked else colors["pressed"]
+        icon = colors["active_icon"] if is_checked else colors["icon"]
+        return {"background": background, "border": background, "icon": icon}
     if is_checked:
         return {"background": colors["active"], "border": colors["active"], "icon": colors["active_icon"]}
     if is_hovered:
-        return {"background": colors["hover"], "border": colors["icon"], "icon": colors["icon"]}
+        return {"background": colors["hover"], "border": colors["hover_border"], "icon": colors["icon"]}
     return {"background": colors["background"], "border": colors["border"], "icon": colors["icon"]}
 
 
-def _window_control_palette(theme_mode: str, object_name: str, is_enabled: bool, is_hovered: bool) -> dict[str, QColor]:
+def _window_control_palette(
+    theme_mode: str,
+    object_name: str,
+    is_enabled: bool,
+    is_hovered: bool,
+    is_pressed: bool,
+) -> dict[str, QColor]:
     if theme_mode == "dark":
         colors = {
             "background": QColor(0, 0, 0, 0),
-            "hover": QColor("#242321"),
-            "icon": QColor("#b8b1a6"),
-            "hover_icon": QColor("#f7f4ec"),
-            "disabled": QColor("#5f5b54"),
+            "hover": QColor("#30302e"),
+            "pressed": QColor("#3a3a37"),
+            "icon": QColor("#aaa8a1"),
+            "hover_icon": QColor("#ecebe7"),
+            "disabled": QColor("#6c6b66"),
         }
     else:
         colors = {
             "background": QColor(0, 0, 0, 0),
             "hover": QColor("#e7e1d5"),
+            "pressed": QColor("#d1c8b8"),
             "icon": QColor("#6e6a61"),
             "hover_icon": QColor("#10100e"),
             "disabled": QColor("#aaa397"),
@@ -863,8 +1044,12 @@ def _window_control_palette(theme_mode: str, object_name: str, is_enabled: bool,
 
     if not is_enabled:
         return {"background": colors["background"], "border": colors["background"], "icon": colors["disabled"]}
+    if object_name == "WindowCloseButton" and is_pressed:
+        return {"background": QColor("#9f2929"), "border": QColor("#9f2929"), "icon": QColor("#fffdf7")}
     if object_name == "WindowCloseButton" and is_hovered:
         return {"background": QColor("#c93d3d"), "border": QColor("#c93d3d"), "icon": QColor("#fffdf7")}
+    if is_pressed:
+        return {"background": colors["pressed"], "border": colors["pressed"], "icon": colors["hover_icon"]}
     if is_hovered:
         return {"background": colors["hover"], "border": colors["hover"], "icon": colors["hover_icon"]}
     return {"background": colors["background"], "border": colors["background"], "icon": colors["icon"]}
@@ -875,21 +1060,26 @@ def _track_icon_button_palette(
     is_checked: bool,
     is_enabled: bool,
     is_hovered: bool,
+    is_pressed: bool,
 ) -> dict[str, QColor]:
     if theme_mode == "dark":
         colors = {
             "background": QColor(0, 0, 0, 0),
-            "hover": QColor("#242321"),
-            "active": QColor("#f7f4ec"),
-            "icon": QColor("#f7f4ec"),
-            "muted_icon": QColor("#090909"),
-            "disabled": QColor("#5f5b54"),
+            "hover": QColor("#30302e"),
+            "pressed": QColor("#3a3a37"),
+            "active": QColor("#30302e"),
+            "active_pressed": QColor("#444440"),
+            "icon": QColor("#ecebe7"),
+            "muted_icon": QColor("#ecebe7"),
+            "disabled": QColor("#6c6b66"),
         }
     else:
         colors = {
             "background": QColor(0, 0, 0, 0),
             "hover": QColor("#e7e1d5"),
+            "pressed": QColor("#d1c8b8"),
             "active": QColor("#10100e"),
+            "active_pressed": QColor("#46443e"),
             "icon": QColor("#10100e"),
             "muted_icon": QColor("#fffdf7"),
             "disabled": QColor("#aaa397"),
@@ -897,6 +1087,10 @@ def _track_icon_button_palette(
 
     if not is_enabled:
         return {"background": colors["background"], "border": colors["background"], "icon": colors["disabled"]}
+    if is_pressed:
+        background = colors["active_pressed"] if is_checked else colors["pressed"]
+        icon = colors["muted_icon"] if is_checked else colors["icon"]
+        return {"background": background, "border": background, "icon": icon}
     if is_checked:
         return {"background": colors["active"], "border": colors["active"], "icon": colors["muted_icon"]}
     if is_hovered:
@@ -907,11 +1101,12 @@ def _track_icon_button_palette(
 def _volume_slider_palette(theme_mode: str, is_enabled: bool) -> dict[str, QColor]:
     if theme_mode == "dark":
         colors = {
-            "track": QColor("#34312d"),
-            "fill": QColor("#f7f4ec"),
-            "knob": QColor("#f7f4ec"),
-            "knob_border": QColor("#111111"),
-            "disabled": QColor("#5f5b54"),
+            "track": QColor("#484843"),
+            "fill": QColor("#ecebe7"),
+            "knob": QColor("#ecebe7"),
+            "knob_border": QColor("#212120"),
+            "unity": QColor("#898780"),
+            "disabled": QColor("#6c6b66"),
         }
     else:
         colors = {
@@ -919,6 +1114,7 @@ def _volume_slider_palette(theme_mode: str, is_enabled: bool) -> dict[str, QColo
             "fill": QColor("#10100e"),
             "knob": QColor("#10100e"),
             "knob_border": QColor("#fffdf7"),
+            "unity": QColor("#8e887e"),
             "disabled": QColor("#aaa397"),
         }
 
@@ -928,25 +1124,33 @@ def _volume_slider_palette(theme_mode: str, is_enabled: bool) -> dict[str, QColo
             "fill": colors["disabled"],
             "knob": colors["disabled"],
             "knob_border": colors["track"],
+            "unity": colors["disabled"],
         }
     return colors
 
 
-def _drop_file_button_palette(theme_mode: str, is_enabled: bool, is_hovered: bool) -> dict[str, QColor]:
+def _drop_file_button_palette(
+    theme_mode: str,
+    is_enabled: bool,
+    is_hovered: bool,
+    is_pressed: bool,
+) -> dict[str, QColor]:
     if theme_mode == "dark":
         colors = {
-            "background": QColor("#191919"),
-            "hover": QColor("#f7f4ec"),
-            "border": QColor("#34312d"),
-            "hover_border": QColor("#f7f4ec"),
-            "icon": QColor("#f7f4ec"),
-            "hover_icon": QColor("#090909"),
-            "disabled": QColor("#5f5b54"),
+            "background": QColor("#272725"),
+            "hover": QColor("#30302e"),
+            "pressed": QColor("#3a3a37"),
+            "border": QColor("#484843"),
+            "hover_border": QColor("#5a5a55"),
+            "icon": QColor("#ecebe7"),
+            "hover_icon": QColor("#ecebe7"),
+            "disabled": QColor("#6c6b66"),
         }
     else:
         colors = {
             "background": QColor("#fffdf7"),
             "hover": QColor("#10100e"),
+            "pressed": QColor("#46443e"),
             "border": QColor("#d8d0c2"),
             "hover_border": QColor("#10100e"),
             "icon": QColor("#10100e"),
@@ -956,26 +1160,30 @@ def _drop_file_button_palette(theme_mode: str, is_enabled: bool, is_hovered: boo
 
     if not is_enabled:
         return {"background": colors["background"], "border": colors["border"], "icon": colors["disabled"]}
+    if is_pressed:
+        return {"background": colors["pressed"], "border": colors["hover_border"], "icon": colors["hover_icon"]}
     if is_hovered:
         return {"background": colors["hover"], "border": colors["hover_border"], "icon": colors["hover_icon"]}
     return {"background": colors["background"], "border": colors["border"], "icon": colors["icon"]}
 
 
-def _theme_toggle_palette(theme_mode: str, is_hovered: bool) -> dict[str, QColor]:
+def _theme_toggle_palette(theme_mode: str, is_hovered: bool, is_pressed: bool) -> dict[str, QColor]:
     if theme_mode == "dark":
         colors = {
             "surface": QColor(0, 0, 0, 0),
-            "hover_surface": QColor("#23211f"),
-            "track": QColor("#080808"),
-            "hover_track": QColor("#2c2a27"),
-            "border": QColor("#5f5b54"),
-            "knob": QColor("#f7f4ec"),
-            "icon": QColor("#f7f4ec"),
+            "hover_surface": QColor("#30302e"),
+            "pressed_surface": QColor("#3a3a37"),
+            "track": QColor("#151515"),
+            "hover_track": QColor("#272725"),
+            "border": QColor("#6c6b66"),
+            "knob": QColor("#ecebe7"),
+            "icon": QColor("#ecebe7"),
         }
     else:
         colors = {
             "surface": QColor(0, 0, 0, 0),
             "hover_surface": QColor("#e7e1d5"),
+            "pressed_surface": QColor("#d1c8b8"),
             "track": QColor("#fffdf7"),
             "hover_track": QColor("#fffdf7"),
             "border": QColor("#d8d0c2"),
@@ -983,12 +1191,20 @@ def _theme_toggle_palette(theme_mode: str, is_hovered: bool) -> dict[str, QColor
             "icon": QColor("#10100e"),
         }
     return {
-        "surface": colors["hover_surface"] if is_hovered else colors["surface"],
+        "surface": (
+            colors["pressed_surface"]
+            if is_pressed
+            else colors["hover_surface"] if is_hovered else colors["surface"]
+        ),
         "track": colors["hover_track"] if is_hovered else colors["track"],
         "border": colors["border"],
         "knob": colors["knob"],
         "icon": colors["icon"],
     }
+
+
+def _keyboard_focus_color(theme_mode: str) -> QColor:
+    return QColor("#898780" if theme_mode == "dark" else "#6e6a61")
 
 
 def _render_track_icon(painter: QPainter, rect: QRectF, icon_key: str, color: QColor) -> None:
@@ -1087,6 +1303,53 @@ _TRACK_ICON_SVGS = {
         '<path d="M19 6l-1 14H6L5 6"/>'
         '<path d="M10 11v5"/>'
         '<path d="M14 11v5"/>'
+        "</svg>"
+    ),
+    "undo": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M9 7 4 12l5 5"/>'
+        '<path d="M5 12h8a6 6 0 0 1 6 6"/>'
+        "</svg>"
+    ),
+    "redo": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="m15 7 5 5-5 5"/>'
+        '<path d="M19 12h-8a6 6 0 0 0-6 6"/>'
+        "</svg>"
+    ),
+    "repeat": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="m17 2 4 4-4 4"/>'
+        '<path d="M3 11V9a3 3 0 0 1 3-3h15"/>'
+        '<path d="m7 22-4-4 4-4"/>'
+        '<path d="M21 13v2a3 3 0 0 1-3 3H3"/>'
+        "</svg>"
+    ),
+    "globe": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<circle cx="12" cy="12" r="9"/>'
+        '<path d="M3 12h18"/>'
+        '<path d="M12 3a14 14 0 0 1 0 18"/>'
+        '<path d="M12 3a14 14 0 0 0 0 18"/>'
+        "</svg>"
+    ),
+    "split": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.1" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<circle cx="6" cy="7" r="3"/>'
+        '<circle cx="6" cy="17" r="3"/>'
+        '<path d="m8.6 8.5 11.4 7"/>'
+        '<path d="m8.6 15.5 4-2.5"/>'
+        '<path d="m15.2 9.4 4.8-3"/>'
         "</svg>"
     ),
     "play": (
@@ -1209,13 +1472,6 @@ def _paths_from_drop(event) -> list[Path]:
     return paths
 
 
-def _safe_duration_label(path: Path) -> str:
-    try:
-        return format_duration(read_audio_metadata(path).duration_ms)
-    except Exception:
-        return "--:--"
-
-
 def _display_name(path: Path) -> str:
     return path.stem
 
@@ -1227,12 +1483,12 @@ def _clamp(value: float) -> float:
 def _waveform_palette(theme_mode: str, is_muted: bool) -> dict[str, QColor]:
     if theme_mode == "dark":
         palette = {
-            "background": QColor("#151515"),
-            "border": QColor("#34312d"),
-            "midline": QColor("#504d48"),
-            "wave": QColor("#f7f4ec"),
-            "playhead": QColor("#f7f4ec"),
-            "muted": QColor("#8e887e"),
+            "background": QColor("#191919"),
+            "border": QColor("#383835"),
+            "midline": QColor("#55544f"),
+            "wave": QColor("#deddd8"),
+            "playhead": QColor("#efeee9"),
+            "muted": QColor("#898780"),
         }
     else:
         palette = {

@@ -8,9 +8,10 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QVBoxLayout, QWidget
 
+from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
 from jang_app.qt_app.widgets import SvgIconButton
 from jang_app.services.song_metadata import SongDisplayMetadata
-from jang_app.services.waveform import build_waveform_peaks
+from jang_app.services.waveform import build_waveform_peaks, waveform_cache_key
 
 
 _WAVEFORM_POINT_COUNT = 160
@@ -33,7 +34,8 @@ class SongListRow(QWidget):
         self._is_editing = False
         self.setMouseTracking(True)
 
-        self.source_badge = QLabel(metadata.source_label)
+        self.source_badge = QLabel()
+        set_translated_text(self.source_badge, metadata.source_label)
         self.source_badge.setObjectName("SourceBadge")
         self.source_badge.setProperty("sourceType", metadata.source_type)
         self.source_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -56,13 +58,13 @@ class SongListRow(QWidget):
         self.waveform.set_path(metadata.waveform_path)
 
         self.use_button = SvgIconButton("arrow_right", size=30)
-        self.use_button.setToolTip("Load in Studio")
+        set_translated_tooltip(self.use_button, "Load in Studio")
         self.use_button.clicked.connect(lambda: self.use_requested.emit(self._item_id))
         self.rename_button = SvgIconButton("edit", size=30)
-        self.rename_button.setToolTip("Rename")
+        set_translated_tooltip(self.rename_button, "Rename")
         self.rename_button.clicked.connect(self._begin_rename)
         self.remove_button = SvgIconButton("trash", size=30)
-        self.remove_button.setToolTip("Remove")
+        set_translated_tooltip(self.remove_button, "Remove")
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self._item_id))
 
         action_container = QWidget()
@@ -182,7 +184,7 @@ class MiniWaveformView(QFrame):
             return
 
         try:
-            cache_key = _waveform_cache_key(path, _WAVEFORM_POINT_COUNT)
+            cache_key = waveform_cache_key(path, _WAVEFORM_POINT_COUNT)
         except Exception:
             self.update()
             return
@@ -254,10 +256,10 @@ class MiniWaveformView(QFrame):
 def _mini_waveform_palette(theme_mode: str) -> dict[str, QColor]:
     if theme_mode == "dark":
         return {
-            "background": QColor("#181818"),
-            "midline": QColor("#4b4842"),
-            "wave": QColor("#f7f4ec"),
-            "muted": QColor("#8e887e"),
+            "background": QColor("#202020"),
+            "midline": QColor("#55544f"),
+            "wave": QColor("#deddd8"),
+            "muted": QColor("#898780"),
         }
     return {
         "background": QColor("#ebe7dd"),
@@ -265,12 +267,6 @@ def _mini_waveform_palette(theme_mode: str) -> dict[str, QColor]:
         "wave": QColor("#10100e"),
         "muted": QColor("#8b857a"),
     }
-
-
-def _waveform_cache_key(path: Path, point_count: int) -> tuple[str, int, int, int]:
-    resolved = path.expanduser().resolve()
-    stat = resolved.stat()
-    return (str(resolved), stat.st_mtime_ns, stat.st_size, point_count)
 
 
 def _draw_waveform_placeholder(painter: QPainter, content: QRectF, color: QColor) -> None:

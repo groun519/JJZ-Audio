@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QScrollArea, QVBoxLayout, QWidget
 
-from jang_app.qt_app.widgets import SvgIconButton
+from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
+from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
 from jang_app.services.processing_queue import ProcessingQueue, ProcessingTask, TASK_COMPLETED, TASK_FAILED
 
 
@@ -87,7 +88,7 @@ class ProcessingQueuePanel(QFrame):
         self.empty_label.setObjectName("ProcessingQueueEmpty")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.clear_button = QPushButton("Clear finished")
+        self.clear_button = FeedbackButton("Clear finished")
         self.clear_button.setObjectName("ProcessingQueueClear")
         self.clear_button.clicked.connect(self._queue.clear_finished)
 
@@ -107,6 +108,14 @@ class ProcessingQueuePanel(QFrame):
         self._theme_mode = theme_mode
         self.log_button.set_theme_mode(theme_mode)
         self.toggle_button.set_theme_mode(theme_mode)
+
+    def apply_language(self) -> None:
+        apply_widget_language(self)
+        self._on_tasks_changed(self._queue.tasks())
+        self._apply_expanded_state()
+
+    def has_tasks(self) -> bool:
+        return bool(self._queue.tasks())
 
     def toggle_expanded(self) -> None:
         self._idle_collapse_timer.stop()
@@ -132,13 +141,13 @@ class ProcessingQueuePanel(QFrame):
         self._active_count = active_count
 
         if active_count:
-            self.activity_label.setText(f"{active_count} active")
+            set_translated_text(self.activity_label, "{count} active", count=active_count)
             self.activity_label.setProperty("active", True)
         elif tasks:
-            self.activity_label.setText(f"{len(tasks)} recent")
+            set_translated_text(self.activity_label, "{count} recent", count=len(tasks))
             self.activity_label.setProperty("active", False)
         else:
-            self.activity_label.setText("Idle")
+            set_translated_text(self.activity_label, "Idle")
             self.activity_label.setProperty("active", False)
         self.activity_label.style().unpolish(self.activity_label)
         self.activity_label.style().polish(self.activity_label)
@@ -174,7 +183,10 @@ class ProcessingQueuePanel(QFrame):
     def _apply_expanded_state(self) -> None:
         self.body.setVisible(self._is_expanded)
         self.toggle_button.set_icon_name("chevron_down" if self._is_expanded else "chevron_up")
-        self.toggle_button.setToolTip("Hide processing queue" if self._is_expanded else "Show processing queue")
+        set_translated_tooltip(
+            self.toggle_button,
+            "Hide processing queue" if self._is_expanded else "Show processing queue",
+        )
         if self._is_expanded:
             self.setFixedWidth(_EXPANDED_WIDTH)
             self._resize_expanded_panel()
@@ -226,16 +238,21 @@ class ProcessingTaskRow(QFrame):
         self.update_task(task)
 
     def update_task(self, task: ProcessingTask) -> None:
-        self.title_label.setText(task.title)
+        set_translated_text(self.title_label, task.title)
         detail = _last_error_line(task.error) if task.status == TASK_FAILED else task.detail
-        self.detail_label.setText(detail)
+        set_translated_text(self.detail_label, detail)
         self.detail_label.setToolTip(task.error or task.detail)
         self.detail_label.setVisible(bool(detail))
         self.progress_bar.setValue(task.progress)
         self.progress_bar.setVisible(task.is_active)
 
-        status_text = "Complete" if task.status == TASK_COMPLETED else "Failed" if task.status == TASK_FAILED else f"{task.progress}%"
-        self.status_label.setText(status_text)
+        if task.status == TASK_COMPLETED:
+            status_text = "Complete"
+        elif task.status == TASK_FAILED:
+            status_text = "Failed"
+        else:
+            status_text = f"{task.progress}%"
+        set_translated_text(self.status_label, status_text)
         self.status_label.setProperty("status", task.status)
         self.setProperty("status", task.status)
         for widget in (self, self.status_label):

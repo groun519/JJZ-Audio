@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QActionGroup, QIcon
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -17,11 +17,10 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
-    QPushButton,
+    QMenu,
     QScrollArea,
     QSizeGrip,
     QSizePolicy,
-    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -31,6 +30,7 @@ from jang_app.config import APP_ICON_PATH, APP_NAME, LOG_FILE, SUPPORTED_AUDIO_E
 from jang_app.pipeline.rvc_convert import convert_vocal_with_rvc, list_index_files, list_voice_models
 from jang_app.pipeline.separate import SeparationResult, separate_audio
 from jang_app.qt_app.library_row import SongListRow
+from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
 from jang_app.qt_app.log_drawer import LogDrawer
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.player_bar import GlobalPlayerBar
@@ -39,7 +39,10 @@ from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
 from jang_app.qt_app.toast_stack import ToastStack
 from jang_app.qt_app.work_context_bar import WorkContextBar
 from jang_app.qt_app.widgets import (
+    FeedbackButton,
     FileDropCard,
+    ScrollSafeComboBox,
+    ScrollSafeSpinBox,
     SvgIconButton,
     TaskActionWidget,
     ThemeToggleButton,
@@ -54,6 +57,7 @@ from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.audio_player import AudioPlaybackError, AudioPlayer
 from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.file_browser import open_in_file_browser
+from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language, tr
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set, scan_output_sound_sets
 from jang_app.services.playback_queue import PlaybackQueue
 from jang_app.services.processing_queue import ProcessingQueue
@@ -69,6 +73,7 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
         self.settings = settings
+        set_language(settings.language)
         self.library = SongLibrary()
         self.player = AudioPlayer()
         self.processing_queue = ProcessingQueue()
@@ -95,11 +100,13 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._apply_theme()
+        self._apply_language()
         self._refresh_song_list()
         self._refresh_rvc_choices()
         self._refresh_output_sets()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.model_workspace_page.stop_preview()
         self.player.stop()
         super().closeEvent(event)
 
@@ -191,17 +198,17 @@ class MainWindow(QMainWindow):
         nav_layout.setContentsMargins(16, 8, 16, 8)
         nav_layout.setSpacing(8)
 
-        self.library_nav_button = QPushButton("Library")
+        self.library_nav_button = FeedbackButton("Library")
         self.library_nav_button.setObjectName("NavButton")
         self.library_nav_button.setCheckable(True)
         self.library_nav_button.setChecked(True)
-        self.studio_nav_button = QPushButton("Studio")
+        self.studio_nav_button = FeedbackButton("Studio")
         self.studio_nav_button.setObjectName("NavButton")
         self.studio_nav_button.setCheckable(True)
-        self.video_nav_button = QPushButton("Video")
+        self.video_nav_button = FeedbackButton("Video")
         self.video_nav_button.setObjectName("NavButton")
         self.video_nav_button.setCheckable(True)
-        self.models_nav_button = QPushButton("Models")
+        self.models_nav_button = FeedbackButton("Models")
         self.models_nav_button.setObjectName("NavButton")
         self.models_nav_button.setCheckable(True)
 
@@ -215,6 +222,21 @@ class MainWindow(QMainWindow):
 
         self.theme_button = ThemeToggleButton()
         self.theme_button.clicked.connect(self._toggle_theme)
+        self.language_button = SvgIconButton("globe", size=30)
+        self.language_button.setObjectName("TitleBarLanguageButton")
+        self.language_menu = QMenu(self.language_button)
+        self.language_action_group = QActionGroup(self.language_menu)
+        self.language_action_group.setExclusive(True)
+        self.language_actions = {}
+        for language, label in ((LANGUAGE_KOREAN, "한국어"), (LANGUAGE_ENGLISH, "English")):
+            action = self.language_menu.addAction(label)
+            action.setCheckable(True)
+            action.setData(language)
+            action.triggered.connect(lambda checked, value=language: self._change_language(value) if checked else None)
+            self.language_action_group.addAction(action)
+            self.language_actions[language] = action
+        self.language_button.setMenu(self.language_menu)
+        self.title_bar.add_action_widget(self.language_button)
         self.title_bar.add_action_widget(self.theme_button)
 
         nav_layout.addStretch(1)
@@ -271,7 +293,7 @@ class MainWindow(QMainWindow):
         list_header = QHBoxLayout()
         list_title = QLabel("Library")
         list_title.setObjectName("SectionTitle")
-        add_button = QPushButton("Add")
+        add_button = FeedbackButton("Add")
         add_button.clicked.connect(self._choose_audio_files)
         list_header.addWidget(list_title, 1)
         list_header.addWidget(add_button, 0)
@@ -329,7 +351,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("Video")
         title.setObjectName("SectionTitle")
-        select_button = QPushButton("Select Video")
+        select_button = FeedbackButton("Select Video")
         select_button.setObjectName("PrimaryButton")
         select_button.clicked.connect(self._choose_video_file)
         self.selected_video_label = QLabel("")
@@ -365,6 +387,7 @@ class MainWindow(QMainWindow):
         self.model_workspace_page = ModelWorkspacePage(self.settings.rvc.root)
         self.model_workspace_page.use_in_convert_requested.connect(self._use_model_in_convert)
         self.model_workspace_page.open_location_requested.connect(self._open_model_location)
+        self.model_workspace_page.preview_started.connect(self._on_model_preview_started)
         return self.model_workspace_page
 
     def _build_selected_song_panel(self) -> QWidget:
@@ -373,7 +396,7 @@ class MainWindow(QMainWindow):
         source_layout = QVBoxLayout(source_card)
         source_layout.setContentsMargins(14, 14, 14, 14)
         source_layout.setSpacing(0)
-        self.studio_song_combo = QComboBox()
+        self.studio_song_combo = ScrollSafeComboBox()
         self.studio_song_combo.currentIndexChanged.connect(self._on_studio_song_changed)
         source_layout.addWidget(self.studio_song_combo)
         return source_card
@@ -391,7 +414,7 @@ class MainWindow(QMainWindow):
         self.studio_step_group = QButtonGroup(self)
         self.studio_step_group.setExclusive(True)
         for index, label in enumerate(("Separate", "Convert", "Export")):
-            button = QPushButton(label)
+            button = FeedbackButton(label)
             button.setObjectName("SegmentButton")
             button.setCheckable(True)
             button.setChecked(index == 0)
@@ -443,23 +466,24 @@ class MainWindow(QMainWindow):
         self.browse_rvc_button.setToolTip("Select RVC root")
         self.browse_rvc_button.clicked.connect(self._choose_rvc_root)
 
-        self.model_combo = QComboBox()
+        self.model_combo = ScrollSafeComboBox()
         self.model_combo.currentIndexChanged.connect(self._save_rvc_settings_from_controls)
-        self.index_combo = QComboBox()
+        self.index_combo = ScrollSafeComboBox()
         self.index_combo.currentIndexChanged.connect(self._save_rvc_settings_from_controls)
         self.refresh_rvc_button = SvgIconButton("refresh", size=34)
         self.refresh_rvc_button.setObjectName("ControlIconButton")
         self.refresh_rvc_button.setToolTip("Refresh RVC models")
         self.refresh_rvc_button.clicked.connect(self._refresh_rvc_choices)
 
-        self.pitch_spin = QSpinBox()
+        self.pitch_spin = ScrollSafeSpinBox()
         self.pitch_spin.setRange(-999, 999)
         self.pitch_spin.setValue(self.settings.rvc.pitch)
         self.pitch_spin.valueChanged.connect(self._save_rvc_settings_from_controls)
 
-        self.device_combo = QComboBox()
+        self.device_combo = ScrollSafeComboBox()
         self.device_combo.addItems(["cuda:0", "cpu"])
-        self.device_combo.setCurrentText(self.settings.rvc.device if self.settings.rvc.device in {"cuda:0", "cpu"} else "cuda:0")
+        selected_device = self.settings.rvc.device if self.settings.rvc.device in {"cuda:0", "cpu"} else "cuda:0"
+        self.device_combo.setCurrentText(selected_device)
         self.device_combo.currentIndexChanged.connect(self._save_rvc_settings_from_controls)
 
         form.addWidget(_field_label("Root"), 0, 0)
@@ -496,7 +520,7 @@ class MainWindow(QMainWindow):
         mix_layout.setSpacing(14)
         mix_title = QLabel("Mix Export")
         mix_title.setObjectName("SectionTitle")
-        self.export_mix_button = QPushButton("Export Mix")
+        self.export_mix_button = FeedbackButton("Export Mix")
         self.export_mix_button.setObjectName("PrimaryButton")
         self.export_mix_button.clicked.connect(self._export_mix)
         self.mix_status_label = QLabel("")
@@ -519,7 +543,7 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         title = QLabel("Output Sounds")
         title.setObjectName("SectionTitle")
-        self.output_set_combo = QComboBox()
+        self.output_set_combo = ScrollSafeComboBox()
         self.output_set_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.output_set_combo.currentIndexChanged.connect(self._on_output_set_changed)
         self.output_refresh_button = SvgIconButton("refresh", size=34)
@@ -540,7 +564,7 @@ class MainWindow(QMainWindow):
         track_content = QWidget()
         track_layout = QVBoxLayout(track_content)
         track_layout.setContentsMargins(0, 0, 0, 0)
-        track_layout.setSpacing(14)
+        track_layout.setSpacing(10)
 
         self.vocal_track = TrackRow("Original Vocal")
         self.instrumental_track = TrackRow("Instrumental")
@@ -565,6 +589,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(build_stylesheet(self.settings.theme_mode))
         self.title_bar.set_theme_mode(self.settings.theme_mode)
         self.theme_button.set_theme_mode(self.settings.theme_mode)
+        self.language_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "player_bar"):
             self.player_bar.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "processing_queue_panel"):
@@ -589,6 +614,21 @@ class MainWindow(QMainWindow):
         for track in getattr(self, "output_tracks", []):
             track.set_theme_mode(self.settings.theme_mode)
 
+    def _apply_language(self) -> None:
+        set_language(self.settings.language)
+        apply_widget_language(self)
+        set_translated_tooltip(self.language_button, "Language")
+        for language, action in self.language_actions.items():
+            action.setChecked(language == self.settings.language)
+        if hasattr(self, "studio_song_combo") and self.studio_song_combo.count() > 0:
+            self.studio_song_combo.setItemText(0, tr("Select"))
+        self.player_bar.apply_language()
+        self.processing_queue_panel.apply_language()
+        self.toast_stack.apply_language()
+        self.work_context_bar.apply_language()
+        self.log_drawer.apply_language()
+        self.model_workspace_page.apply_language()
+
     def _position_processing_queue(self) -> None:
         if not hasattr(self, "processing_queue_panel") or not hasattr(self, "player_bar"):
             return
@@ -604,12 +644,14 @@ class MainWindow(QMainWindow):
             drawer.move(max(16, parent.width() - drawer.width() - 16), top_position)
             drawer.raise_()
             panel.hide()
-        else:
+        elif panel.has_tasks():
             panel.show()
             x_position = max(16, parent.width() - panel.width() - 16)
             y_position = max(16, player_top - panel.height() - 10)
             panel.move(x_position, y_position)
             panel.raise_()
+        else:
+            panel.hide()
 
         if hasattr(self, "toast_stack") and self.toast_stack.isVisible():
             toast = self.toast_stack
@@ -618,7 +660,8 @@ class MainWindow(QMainWindow):
                 toast_y = max(16, player_top - toast.height() - 10)
             else:
                 toast_x = max(16, parent.width() - toast.width() - 16)
-                toast_y = max(16, panel.y() - toast.height() - 10)
+                toast_anchor = panel.y() if panel.isVisible() else player_top
+                toast_y = max(16, toast_anchor - toast.height() - 10)
             toast.move(toast_x, toast_y)
             toast.raise_()
 
@@ -647,7 +690,16 @@ class MainWindow(QMainWindow):
         save_app_settings(self.settings)
         self._apply_theme()
 
+    def _change_language(self, language: str) -> None:
+        if language == self.settings.language:
+            return
+        self.settings = replace(self.settings, language=language)
+        save_app_settings(self.settings)
+        self._apply_language()
+
     def _navigate_to_page(self, index: int) -> None:
+        if index != 3:
+            self.model_workspace_page.stop_preview()
         self.page_stack.setCurrentIndex(index)
         self.library_nav_button.setChecked(index == 0)
         self.studio_nav_button.setChecked(index == 1)
@@ -663,13 +715,23 @@ class MainWindow(QMainWindow):
 
     def _choose_audio_files(self, *_args) -> None:
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_AUDIO_EXTENSIONS))
-        filenames, _ = QFileDialog.getOpenFileNames(self, "Select Audio Files", str(Path.home()), f"Audio Files ({suffixes})")
+        filenames, _ = QFileDialog.getOpenFileNames(
+            self,
+            tr("Select Audio Files"),
+            str(Path.home()),
+            f"{tr('Audio Files')} ({suffixes})",
+        )
         if filenames:
             self._add_songs([Path(filename) for filename in filenames])
 
     def _choose_video_file(self, *_args) -> None:
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_VIDEO_EXTENSIONS))
-        filename, _ = QFileDialog.getOpenFileName(self, "Select Video", str(Path.home()), f"Video Files ({suffixes})")
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Select Video"),
+            str(Path.home()),
+            f"{tr('Video Files')} ({suffixes})",
+        )
         if not filename:
             return
         self.selected_video_path = Path(filename).expanduser().resolve()
@@ -710,9 +772,14 @@ class MainWindow(QMainWindow):
             self.youtube_card.set_status("Failed")
             return
 
-        self.library.add_paths([download_result.audio_path])
+        song = self.library.add_youtube_audio(
+            download_result.audio_path,
+            download_result.title,
+            download_result.url,
+        )
         self._refresh_song_list()
-        self._select_song_by_path(download_result.audio_path)
+        if song is not None:
+            self._select_song(song.id)
         self.youtube_card.url_edit.clear()
         self.youtube_card.set_progress(100)
         self.youtube_card.set_status("Done")
@@ -731,6 +798,7 @@ class MainWindow(QMainWindow):
             metadata = build_song_display_metadata(item, self.settings.output_root)
             row = SongListRow(item.id, item.title, metadata)
             row.set_theme_mode(self.settings.theme_mode)
+            apply_widget_language(row)
             row.use_requested.connect(self._use_library_item)
             row.rename_requested.connect(self._rename_library_item)
             row.remove_requested.connect(self._remove_library_item)
@@ -755,13 +823,6 @@ class MainWindow(QMainWindow):
                 self.song_list.setCurrentItem(item)
                 return True
         return False
-
-    def _select_song_by_path(self, path: Path) -> None:
-        resolved = path.expanduser().resolve()
-        for item in self._song_items_by_id.values():
-            if item.path.expanduser().resolve() == resolved:
-                self._select_song(item.id)
-                return
 
     def _on_song_selection_changed(self, *_args) -> None:
         song = self._selected_song()
@@ -838,7 +899,7 @@ class MainWindow(QMainWindow):
         self._is_loading_studio_song_combo = True
         self.studio_song_combo.blockSignals(True)
         self.studio_song_combo.clear()
-        self.studio_song_combo.addItem("Select", "")
+        self.studio_song_combo.addItem(tr("Select"), "")
         for song in source_songs:
             self.studio_song_combo.addItem(song.title, song.id)
         index = self.studio_song_combo.findData(selected_id)
@@ -1081,13 +1142,13 @@ class MainWindow(QMainWindow):
     def _output_item_for_sound_set(self, sound_set: OutputSoundSet) -> SongItem | None:
         output_job_dir = sound_set.job_dir.expanduser().resolve()
         for item in self._song_items_by_id.values():
-            if item.kind == "output" and item.output_job_dir is not None:
+            if item.output_job_dir is not None:
                 if item.output_job_dir.expanduser().resolve() == output_job_dir:
                     return item
         return None
 
     def _choose_rvc_root(self, *_args) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Select RVC Root", self.rvc_root_edit.text())
+        selected = QFileDialog.getExistingDirectory(self, tr("Select RVC Root"), self.rvc_root_edit.text())
         if not selected:
             return
         self.rvc_root_edit.setText(selected)
@@ -1105,7 +1166,7 @@ class MainWindow(QMainWindow):
     def _populate_combo(self, combo: QComboBox, values: list[str], current_value: str, placeholder: str) -> None:
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem(placeholder, "")
+        combo.addItem(tr(placeholder), "")
         for value in values:
             combo.addItem(value, value)
         if current_value and current_value not in values:
@@ -1169,6 +1230,7 @@ class MainWindow(QMainWindow):
         self.rvc_action.status_label.setToolTip(f"{LOG_FILE}\n{_last_error_line(error)}")
 
     def _toggle_global_playback(self, *_args) -> None:
+        self.model_workspace_page.stop_preview()
         if self.player.is_playing():
             self._pause_playback()
             return
@@ -1178,8 +1240,16 @@ class MainWindow(QMainWindow):
         if self.current_playback_queue is None:
             return
 
-        start_ms = 0 if self._playback_position_ms >= self.current_playback_queue.duration_ms else self._playback_position_ms
+        start_ms = (
+            0
+            if self._playback_position_ms >= self.current_playback_queue.duration_ms
+            else self._playback_position_ms
+        )
         self._play_current_queue(start_ms)
+
+    def _on_model_preview_started(self) -> None:
+        if self.player.is_playing():
+            self._pause_playback()
 
     def _play_current_queue(self, start_ms: int = 0) -> None:
         queue = self.current_playback_queue
@@ -1260,7 +1330,13 @@ class MainWindow(QMainWindow):
         self._refresh_player_bar(is_playing=True)
         self._update_output_playheads(self._playback_position_ms, queue.duration_ms)
 
-    def _set_playback_queue(self, queue: PlaybackQueue | None, *, position_ms: int = 0, auto_play: bool = False) -> None:
+    def _set_playback_queue(
+        self,
+        queue: PlaybackQueue | None,
+        *,
+        position_ms: int = 0,
+        auto_play: bool = False,
+    ) -> None:
         self.player.stop()
         self.playback_timer.stop()
         self.current_playback_queue = queue
@@ -1545,7 +1621,7 @@ def _field_label(text: str) -> QLabel:
 
 def _set_optional_label(label: QLabel, text: str) -> None:
     value = text.strip()
-    label.setText(value)
+    set_translated_text(label, value)
     label.setToolTip("")
     label.setVisible(bool(value))
 

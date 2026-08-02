@@ -11,14 +11,15 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPlainTextEdit,
-    QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from jang_app.config import LOG_FILE
-from jang_app.qt_app.widgets import SvgIconButton
+from jang_app.qt_app.localization import apply_widget_language
+from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
+from jang_app.services.i18n import tr
 from jang_app.services.log_reader import read_log_tail
 from jang_app.services.processing_queue import ProcessingQueue, ProcessingTask, TASK_COMPLETED, TASK_FAILED
 
@@ -79,7 +80,7 @@ class LogDrawer(QFrame):
         self.tab_group = QButtonGroup(self)
         self.tab_group.setExclusive(True)
         for index, label in enumerate(("Activity", "Application Log")):
-            button = QPushButton(label)
+            button = FeedbackButton(label)
             button.setObjectName("SegmentButton")
             button.setCheckable(True)
             button.setChecked(index == 0)
@@ -143,10 +144,17 @@ class LogDrawer(QFrame):
         for button in (self.open_button, self.refresh_button, self.close_button):
             button.set_theme_mode(theme_mode)
 
+    def apply_language(self) -> None:
+        selected_task_id = self._selected_task_id()
+        apply_widget_language(self)
+        self._refresh_activity_list(selected_task_id)
+        if not self._tasks:
+            self.activity_detail.setPlainText(tr("No processing activity yet."))
+
     def refresh_content(self) -> None:
         self._refresh_activity_list(self._selected_task_id() or self._pending_task_id)
         log_text = read_log_tail()
-        self.application_log.setPlainText(log_text or "No application log entries yet.")
+        self.application_log.setPlainText(log_text or tr("No application log entries yet."))
         scroll_bar = self.application_log.verticalScrollBar()
         scroll_bar.setValue(scroll_bar.maximum())
 
@@ -190,7 +198,7 @@ class LogDrawer(QFrame):
         if self.activity_list.count():
             self.activity_list.setCurrentRow(0)
         else:
-            self.activity_detail.setPlainText("No processing activity yet.")
+            self.activity_detail.setPlainText(tr("No processing activity yet."))
 
     def _select_task_item(self, task_id: str) -> bool:
         for index in range(self.activity_list.count()):
@@ -213,7 +221,7 @@ class LogDrawer(QFrame):
         self._show_task_detail(self._tasks_by_id.get(task_id) if isinstance(task_id, str) else None)
 
     def _show_task_detail(self, task: ProcessingTask | None) -> None:
-        self.activity_detail.setPlainText(_format_task_detail(task) if task is not None else "No task selected.")
+        self.activity_detail.setPlainText(_format_task_detail(task) if task is not None else tr("No task selected."))
 
     def _show_tab(self, index: int) -> None:
         self.page_stack.setCurrentIndex(index)
@@ -232,9 +240,9 @@ class ActivityTaskRow(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._task_id = task.task_id
 
-        title = QLabel(task.title)
+        title = QLabel(tr(task.title))
         title.setObjectName("ActivityTaskTitle")
-        detail = QLabel(task.detail or _task_time(task))
+        detail = QLabel(tr(task.detail) if task.detail else _task_time(task))
         detail.setObjectName("ActivityTaskMeta")
         status = QLabel(_task_status_label(task))
         status.setObjectName("ActivityTaskStatus")
@@ -266,9 +274,9 @@ class ActivityTaskRow(QWidget):
 
 def _task_status_label(task: ProcessingTask) -> str:
     if task.status == TASK_COMPLETED:
-        return "Complete"
+        return tr("Complete")
     if task.status == TASK_FAILED:
-        return "Failed"
+        return tr("Failed")
     return f"{task.progress}%"
 
 
@@ -278,14 +286,14 @@ def _task_time(task: ProcessingTask) -> str:
 
 def _format_task_detail(task: ProcessingTask) -> str:
     lines = [
-        task.title,
-        f"Status: {_task_status_label(task)}",
-        f"Started: {task.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}",
+        tr(task.title),
+        f"{tr('Status')}: {_task_status_label(task)}",
+        f"{tr('Started')}: {task.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}",
     ]
     if task.finished_at is not None:
-        lines.append(f"Finished: {task.finished_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"{tr('Finished')}: {task.finished_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}")
     if task.detail:
-        lines.extend(("", task.detail))
+        lines.extend(("", tr(task.detail)))
     if task.error:
-        lines.extend(("", "Error", task.error))
+        lines.extend(("", tr("Error"), task.error))
     return "\n".join(lines)

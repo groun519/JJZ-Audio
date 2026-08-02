@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -11,25 +12,30 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QInputDialog,
     QMessageBox,
     QProgressBar,
-    QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from jang_app.qt_app.model_badge import set_model_badge
+from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
 from jang_app.qt_app.model_detail_panel import ModelDetailPanel, ModelProfileValues
 from jang_app.qt_app.model_row import ModelListRow
-from jang_app.qt_app.widgets import SvgIconButton
+from jang_app.qt_app.localization import apply_widget_language, set_translated_text
+from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
 from jang_app.qt_app.workers import TaskWorker
+from jang_app.services.model_dataset import ModelDatasetStore
+from jang_app.services.i18n import tr
 from jang_app.services.rvc_model_workspace import RvcModelRecord, RvcModelWorkspace
 
 
 class ModelWorkspacePage(QWidget):
     use_in_convert_requested = Signal(object)
     open_location_requested = Signal(object)
+    preview_started = Signal()
 
     def __init__(self, initial_folder: Path, workspace: RvcModelWorkspace | None = None) -> None:
         super().__init__()
@@ -95,13 +101,15 @@ class ModelWorkspacePage(QWidget):
         add_layout.setContentsMargins(16, 16, 16, 16)
         add_layout.setSpacing(12)
 
-        add_title = QLabel("Add Existing Models")
+        add_title = QLabel("Model Setup")
         add_title.setObjectName("CardTitle")
 
-        self.link_button = QPushButton("Link Folder")
+        self.new_model_button = FeedbackButton("New Model")
+        self.new_model_button.setObjectName("PrimaryButton")
+        self.new_model_button.clicked.connect(self._create_model)
+        self.link_button = FeedbackButton("Link Folder")
         self.link_button.clicked.connect(self._choose_link_folder)
-        self.import_button = QPushButton("Import Copy")
-        self.import_button.setObjectName("PrimaryButton")
+        self.import_button = FeedbackButton("Import Copy")
         self.import_button.clicked.connect(self._choose_import_folder)
 
         add_actions = QHBoxLayout()
@@ -110,6 +118,7 @@ class ModelWorkspacePage(QWidget):
         add_actions.addWidget(self.link_button, 1)
         add_actions.addWidget(self.import_button, 1)
         add_layout.addWidget(add_title)
+        add_layout.addWidget(self.new_model_button)
         add_layout.addLayout(add_actions)
 
         summary = QFrame()
@@ -206,7 +215,7 @@ class ModelWorkspacePage(QWidget):
         self.workspace_open_button.setObjectName("ModelIconButton")
         self.workspace_open_button.setToolTip("Open model location")
         self.workspace_open_button.clicked.connect(self._emit_open_selected)
-        self.workspace_use_button = QPushButton("Use in Convert")
+        self.workspace_use_button = FeedbackButton("Use in Convert")
         self.workspace_use_button.setObjectName("PrimaryButton")
         self.workspace_use_button.clicked.connect(self._emit_use_selected)
 
@@ -217,6 +226,32 @@ class ModelWorkspacePage(QWidget):
         header_layout.addStretch(1)
         header_layout.addWidget(self.workspace_open_button)
         header_layout.addWidget(self.workspace_use_button)
+
+        section_control = QFrame()
+        section_control.setObjectName("SegmentedControl")
+        section_control.setMaximumWidth(300)
+        section_layout = QHBoxLayout(section_control)
+        section_layout.setContentsMargins(3, 3, 3, 3)
+        section_layout.setSpacing(0)
+        self.overview_section_button = FeedbackButton("Overview")
+        self.overview_section_button.setObjectName("SegmentButton")
+        self.overview_section_button.setCheckable(True)
+        self.overview_section_button.setChecked(True)
+        self.dataset_section_button = FeedbackButton("Dataset")
+        self.dataset_section_button.setObjectName("SegmentButton")
+        self.dataset_section_button.setCheckable(True)
+        self.section_button_group = QButtonGroup(self)
+        self.section_button_group.setExclusive(True)
+        self.section_button_group.addButton(self.overview_section_button, 0)
+        self.section_button_group.addButton(self.dataset_section_button, 1)
+        self.section_button_group.idClicked.connect(self._navigate_model_section)
+        section_layout.addWidget(self.overview_section_button, 1)
+        section_layout.addWidget(self.dataset_section_button, 1)
+
+        section_row = QHBoxLayout()
+        section_row.setContentsMargins(0, 0, 0, 0)
+        section_row.addWidget(section_control)
+        section_row.addStretch(1)
 
         overview = QFrame()
         overview.setObjectName("Panel")
@@ -236,8 +271,26 @@ class ModelWorkspacePage(QWidget):
 
         overview_layout.addWidget(overview_title)
         overview_layout.addWidget(self.detail_panel, 1)
+
+        dataset = QFrame()
+        dataset.setObjectName("Panel")
+        dataset_layout = QVBoxLayout(dataset)
+        dataset_layout.setContentsMargins(20, 20, 20, 20)
+        dataset_layout.setSpacing(14)
+        dataset_title = QLabel("Training Materials")
+        dataset_title.setObjectName("SectionTitle")
+        self.dataset_panel = ModelDatasetPanel(ModelDatasetStore(self._workspace.root))
+        self.dataset_panel.preview_started.connect(self.preview_started.emit)
+        dataset_layout.addWidget(dataset_title)
+        dataset_layout.addWidget(self.dataset_panel, 1)
+
+        self.workspace_content_stack = QStackedWidget()
+        self.workspace_content_stack.addWidget(overview)
+        self.workspace_content_stack.addWidget(dataset)
+
         layout.addWidget(header)
-        layout.addWidget(overview, 1)
+        layout.addLayout(section_row)
+        layout.addWidget(self.workspace_content_stack, 1)
         return view
 
     def refresh_models(self) -> None:
@@ -248,7 +301,7 @@ class ModelWorkspacePage(QWidget):
         self._rows_by_id.clear()
 
         if not records:
-            empty_item = QListWidgetItem("No models added")
+            empty_item = QListWidgetItem(tr("No models added"))
             empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.model_list.addItem(empty_item)
         else:
@@ -272,6 +325,7 @@ class ModelWorkspacePage(QWidget):
         if not records:
             self._selected_model_id = None
             self.detail_panel.set_record(None)
+            self.dataset_panel.set_model(None)
             self._update_workspace_header(None)
             self.view_stack.setCurrentIndex(0)
 
@@ -281,13 +335,41 @@ class ModelWorkspacePage(QWidget):
         self.workspace_back_button.set_theme_mode(theme_mode)
         self.workspace_open_button.set_theme_mode(theme_mode)
         self.detail_panel.set_theme_mode(theme_mode)
+        self.dataset_panel.set_theme_mode(theme_mode)
+
+    def apply_language(self) -> None:
+        apply_widget_language(self)
+        self.detail_panel.apply_language()
+        self.dataset_panel.apply_language()
+        self._navigate_model_section(self.workspace_content_stack.currentIndex())
+        self._update_workspace_header(self._selected_record())
+        for row in self._rows_by_id.values():
+            row.apply_language()
+            apply_widget_language(row)
+        if self.model_list.count() == 1 and self.model_list.item(0).data(Qt.ItemDataRole.UserRole) is None:
+            self.model_list.item(0).setText(tr("No models added"))
 
     def show_status(self, message: str) -> None:
-        self.status_label.setText(message)
+        set_translated_text(self.status_label, message)
         self.status_label.setVisible(bool(message))
 
+    def _create_model(self) -> None:
+        name, accepted = QInputDialog.getText(self, tr("New Model"), tr("Model Name"))
+        if not accepted:
+            return
+        try:
+            record = self._workspace.create_model(name, self._initial_folder)
+        except Exception as exc:
+            self.show_status(f"Create failed: {_last_error_line(exc)}")
+            return
+        self._selected_model_id = record.model_id
+        self.refresh_models()
+        self._open_model(record.model_id)
+        self._navigate_model_section(1)
+        self.show_status("Model created.")
+
     def _choose_link_folder(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Select RVC Model Folder", str(self._initial_folder))
+        selected = QFileDialog.getExistingDirectory(self, tr("Select RVC Model Folder"), str(self._initial_folder))
         if not selected:
             return
         try:
@@ -300,7 +382,7 @@ class ModelWorkspacePage(QWidget):
         self.show_status(f"Linked {len(linked)} model{'s' if len(linked) != 1 else ''} as read-only.")
 
     def _choose_import_folder(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Select RVC Model Folder", str(self._initial_folder))
+        selected = QFileDialog.getExistingDirectory(self, tr("Select RVC Model Folder"), str(self._initial_folder))
         if not selected:
             return
         folder = Path(selected)
@@ -314,8 +396,12 @@ class ModelWorkspacePage(QWidget):
         if import_size >= 1024**3:
             answer = QMessageBox.question(
                 self,
-                "Import Models",
-                f"Copy {len(discovered)} models ({_format_size(import_size)}) into JJZero Audio?",
+                tr("Import Models"),
+                tr(
+                    "Copy {count} models ({size}) into JJZero Audio?",
+                    count=len(discovered),
+                    size=_format_size(import_size),
+                ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -354,6 +440,7 @@ class ModelWorkspacePage(QWidget):
             worker.deleteLater()
 
     def _set_busy(self, is_busy: bool) -> None:
+        self.new_model_button.setDisabled(is_busy)
         self.link_button.setDisabled(is_busy)
         self.import_button.setDisabled(is_busy)
         self.refresh_button.setDisabled(is_busy)
@@ -371,6 +458,7 @@ class ModelWorkspacePage(QWidget):
             row.set_selected(row_id == self._selected_model_id)
         selected = self._selected_record()
         self.detail_panel.set_record(selected)
+        self.dataset_panel.set_model(selected.model_id if selected is not None else None)
         self._update_workspace_header(selected)
 
     def _open_model_from_item(self, item: QListWidgetItem) -> None:
@@ -384,11 +472,26 @@ class ModelWorkspacePage(QWidget):
             return
         self._select_model_item(model_id)
         self.detail_panel.set_record(record)
+        self.dataset_panel.set_model(record.model_id)
         self._update_workspace_header(record)
+        self._navigate_model_section(0)
         self.view_stack.setCurrentIndex(1)
 
     def _show_model_library(self) -> None:
+        self.stop_preview()
         self.view_stack.setCurrentIndex(0)
+
+    def _navigate_model_section(self, index: int) -> None:
+        selected_index = max(0, min(1, index))
+        self.workspace_content_stack.setCurrentIndex(selected_index)
+        self.overview_section_button.setChecked(selected_index == 0)
+        self.dataset_section_button.setChecked(selected_index == 1)
+        set_translated_text(self.workspace_section_label, "Overview" if selected_index == 0 else "Dataset")
+        if selected_index != 1:
+            self.stop_preview()
+
+    def stop_preview(self) -> None:
+        self.dataset_panel.stop_preview()
 
     def _select_model_item(self, model_id: str) -> None:
         for index in range(self.model_list.count()):
@@ -398,7 +501,10 @@ class ModelWorkspacePage(QWidget):
                 return
 
     def _update_workspace_header(self, record: RvcModelRecord | None) -> None:
-        self.workspace_title_label.setText(record.title if record is not None else "Model")
+        if record is not None:
+            self.workspace_title_label.setText(record.title)
+        else:
+            set_translated_text(self.workspace_title_label, "Model")
         set_model_badge(
             self.workspace_status_badge,
             record.status_label if record is not None else "",
@@ -485,7 +591,7 @@ class ModelWorkspacePage(QWidget):
         record = self._selected_record()
         if record is None:
             return
-        selected = QFileDialog.getExistingDirectory(self, "Select RVC Runtime", str(record.runtime_root))
+        selected = QFileDialog.getExistingDirectory(self, tr("Select RVC Runtime"), str(record.runtime_root))
         if not selected:
             return
         try:
@@ -523,7 +629,7 @@ def _summary_value(text: str) -> QLabel:
 
 
 def _summary_label(text: str) -> QLabel:
-    label = QLabel(text)
+    label = QLabel(tr(text))
     label.setObjectName("ModelSummaryLabel")
     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     return label
@@ -541,12 +647,12 @@ def _format_size(size_bytes: int) -> str:
 
 def _artifact_dialog_settings(artifact_name: str) -> tuple[str, str]:
     settings = {
-        "inference_model": ("Select RVC Model", "RVC Model (*.pth)"),
-        "index_file": ("Select RVC Index", "RVC Index (*.index)"),
-        "generator_checkpoint": ("Select Generator Checkpoint", "RVC Checkpoint (G_*.pth)"),
-        "discriminator_checkpoint": ("Select Discriminator Checkpoint", "RVC Checkpoint (D_*.pth)"),
+        "inference_model": (tr("Select RVC Model"), "RVC Model (*.pth)"),
+        "index_file": (tr("Select RVC Index"), "RVC Index (*.index)"),
+        "generator_checkpoint": (tr("Select Generator Checkpoint"), "RVC Checkpoint (G_*.pth)"),
+        "discriminator_checkpoint": (tr("Select Discriminator Checkpoint"), "RVC Checkpoint (D_*.pth)"),
     }
-    return settings.get(artifact_name, ("Select Model File", "All Files (*)"))
+    return settings.get(artifact_name, (tr("Select Model File"), tr("All Files (*)")))
 
 
 def _artifact_label(artifact_name: str) -> str:

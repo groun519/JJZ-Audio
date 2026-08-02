@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QSlider, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
 
-from jang_app.qt_app.widgets import SvgIconButton
+from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
+from jang_app.qt_app.widgets import ScrollSafeSlider, SvgIconButton
 from jang_app.services.audio_metadata import format_duration
 
 
@@ -17,9 +18,11 @@ class GlobalPlayerBar(QFrame):
         self.setFixedHeight(82)
         self._duration_ms = 0
         self._is_syncing = False
+        self._context_source = ""
+        self._title = ""
 
         self.play_button = SvgIconButton("play", size=38)
-        self.play_button.setToolTip("Play")
+        set_translated_tooltip(self.play_button, "Play")
         self.play_button.clicked.connect(self.play_toggled.emit)
 
         self.context_label = QLabel("")
@@ -36,7 +39,7 @@ class GlobalPlayerBar(QFrame):
         self.time_label.setMinimumWidth(96)
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider = ScrollSafeSlider(Qt.Orientation.Horizontal)
         self.slider.setObjectName("PlayerSlider")
         self.slider.setRange(0, 1000)
         self.slider.setValue(0)
@@ -69,25 +72,39 @@ class GlobalPlayerBar(QFrame):
 
     def set_queue(self, context: str, title: str, duration_ms: int) -> None:
         self._duration_ms = max(0, duration_ms)
-        self.context_label.setText(context)
+        self._context_source = context
+        self._title = title.strip()
+        set_translated_text(self.context_label, context)
         self.context_label.setVisible(bool(context))
-        self.title_label.setText(title.strip() or "Untitled")
+        if self._title:
+            self.title_label.setText(self._title)
+        else:
+            set_translated_text(self.title_label, "Untitled")
         self.slider.setEnabled(self._duration_ms > 0)
         self.play_button.setEnabled(self._duration_ms > 0)
 
     def clear(self) -> None:
         self._duration_ms = 0
+        self._context_source = ""
+        self._title = ""
         self.context_label.setText("")
         self.context_label.hide()
-        self.title_label.setText("No sound selected")
+        set_translated_text(self.title_label, "No sound selected")
         self.slider.setEnabled(False)
         self.play_button.setEnabled(False)
         self.set_playing(False)
         self.set_position(0)
 
     def set_playing(self, is_playing: bool) -> None:
-        self.play_button.set_icon_name("pause" if is_playing else "play")
-        self.play_button.setToolTip("Pause" if is_playing else "Play")
+        self.play_button.set_icon_name("stop" if is_playing else "play")
+        set_translated_tooltip(self.play_button, "Stop" if is_playing else "Play")
+
+    def apply_language(self) -> None:
+        apply_widget_language(self)
+        if self._context_source:
+            set_translated_text(self.context_label, self._context_source)
+        if not self._title:
+            set_translated_text(self.title_label, "No sound selected" if self._duration_ms == 0 else "Untitled")
 
     def set_position(self, position_ms: int, duration_ms: int | None = None) -> None:
         if duration_ms is not None:

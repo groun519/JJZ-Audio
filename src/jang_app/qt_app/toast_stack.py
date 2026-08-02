@@ -3,8 +3,15 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
 from jang_app.qt_app.widgets import SvgIconButton
-from jang_app.services.processing_queue import ProcessingQueue, ProcessingTask, TASK_COMPLETED, TASK_FAILED, TASK_RUNNING
+from jang_app.services.processing_queue import (
+    ProcessingQueue,
+    ProcessingTask,
+    TASK_COMPLETED,
+    TASK_FAILED,
+    TASK_RUNNING,
+)
 
 
 _MAX_VISIBLE_TOASTS = 3
@@ -36,6 +43,11 @@ class ToastStack(QWidget):
         for card in self._cards:
             card.set_theme_mode(theme_mode)
 
+    def apply_language(self) -> None:
+        apply_widget_language(self)
+        for card in self._cards:
+            card.apply_language()
+
     def dismiss_all(self) -> None:
         for card in tuple(self._cards):
             self._remove_card(card)
@@ -55,6 +67,7 @@ class ToastStack(QWidget):
     def _show_task_toast(self, task: ProcessingTask) -> None:
         card = ToastCard(task)
         card.set_theme_mode(self._theme_mode)
+        card.apply_language()
         card.dismiss_requested.connect(lambda: self._remove_card(card))
         card.details_requested.connect(self.details_requested.emit)
         self._cards.insert(0, card)
@@ -76,7 +89,8 @@ class ToastStack(QWidget):
             self.hide()
             self.setFixedHeight(0)
         else:
-            height = sum(card.sizeHint().height() for card in self._cards) + self._layout.spacing() * (len(self._cards) - 1)
+            card_heights = sum(card.sizeHint().height() for card in self._cards)
+            height = card_heights + self._layout.spacing() * (len(self._cards) - 1)
             self.setFixedHeight(height)
             self.show()
             self.raise_()
@@ -93,6 +107,7 @@ class ToastCard(QFrame):
         self.setProperty("status", task.status)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._task_id = task.task_id
+        self._task = task
 
         self.title_label = QLabel(task.title)
         self.title_label.setObjectName("ToastTitle")
@@ -105,7 +120,7 @@ class ToastCard(QFrame):
         self.message_label.setWordWrap(True)
         self.close_button = SvgIconButton("close", size=24)
         self.close_button.setObjectName("ToastCloseButton")
-        self.close_button.setToolTip("Dismiss")
+        set_translated_tooltip(self.close_button, "Dismiss")
         self.close_button.clicked.connect(self.dismiss_requested.emit)
 
         header = QHBoxLayout()
@@ -129,6 +144,15 @@ class ToastCard(QFrame):
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self.close_button.set_theme_mode(theme_mode)
+
+    def apply_language(self) -> None:
+        set_translated_text(self.title_label, self._task.title)
+        set_translated_text(
+            self.status_label,
+            "Complete" if self._task.status == TASK_COMPLETED else "Failed",
+        )
+        set_translated_text(self.message_label, _toast_message(self._task))
+        apply_widget_language(self)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):

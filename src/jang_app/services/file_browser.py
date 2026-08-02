@@ -10,7 +10,8 @@ def open_in_file_browser(path: Path) -> Path:
     if not target.exists():
         raise FileNotFoundError(f"File does not exist: {target}")
     if sys.platform == "win32":
-        subprocess.Popen(["explorer.exe", f"/select,{target}"])
+        command = ["explorer.exe", str(target)] if target.is_dir() else ["explorer.exe", f"/select,{target}"]
+        subprocess.Popen(command)
     else:
-        subprocess.Popen(["open", str(target.parent)])
+        subprocess.Popen(["open", str(target if target.is_dir() else target.parent)])
     return target

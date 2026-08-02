@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from jang_app.config import DEFAULT_RVC_ROOT, SEPARATION_OUTPUT_DIR, SETTINGS_FILE
+from jang_app.services.i18n import LANGUAGE_KOREAN, normalize_language
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class AppSettings:
     output_root: Path = SEPARATION_OUTPUT_DIR
     rvc: RvcSettings = field(default_factory=RvcSettings)
     theme_mode: str = "white"
+    language: str = LANGUAGE_KOREAN
 
 
 def load_app_settings() -> AppSettings:
@@ -36,6 +38,7 @@ def load_app_settings() -> AppSettings:
     default_settings = AppSettings()
     output_root = _path_from_data(data.get("output_root"), default_settings.output_root)
     theme_mode = _theme_mode_from_data(data.get("theme_mode"), default_settings.theme_mode)
+    language = normalize_language(data.get("language"))
     rvc_data = data.get("rvc") if isinstance(data.get("rvc"), dict) else {}
     rvc = RvcSettings(
         root=_path_from_data(rvc_data.get("root"), default_settings.rvc.root),
@@ -45,7 +48,7 @@ def load_app_settings() -> AppSettings:
         device=_string_from_data(rvc_data.get("device"), default_settings.rvc.device),
         f0_method="rmvpe",
     )
-    return AppSettings(output_root=output_root, rvc=rvc, theme_mode=theme_mode)
+    return AppSettings(output_root=output_root, rvc=rvc, theme_mode=theme_mode, language=language)
 
 
 def save_app_settings(settings: AppSettings) -> None:
@@ -53,6 +56,7 @@ def save_app_settings(settings: AppSettings) -> None:
     data = {
         "output_root": str(settings.output_root.expanduser()),
         "theme_mode": settings.theme_mode,
+        "language": normalize_language(settings.language),
         "rvc": {
             "root": str(settings.rvc.root.expanduser()),
             "voice_model": settings.rvc.voice_model,

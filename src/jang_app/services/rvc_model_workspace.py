@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import shutil
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.config import MODEL_WORKSPACE_DIR
+from jang_app.services.managed_files import write_json_atomic
+from jang_app.services.rvc_model_package import (
+    RvcModelPackageLayout,
+    build_rvc_package_plan,
+    copy_rvc_package_files,
+    create_rvc_package_directories,
+    packaged_target,
+    relative_package_path,
+)
 
 
 CATALOG_VERSION = 1
@@ -81,10 +89,12 @@ class RvcModelRecord:
 
     @property
     def is_managed(self) -> bool:
-        return self.mode == "managed"
+        return self.mode in {"managed", "created"}
 
     @property
     def mode_label(self) -> str:
+        if self.mode == "created":
+            return "New Model"
         return "Managed Copy" if self.is_managed else "Linked"
 
     @property
@@ -161,12 +171,9 @@ class RvcModelRecord:
     @property
     def primary_location(self) -> Path:
         if self.is_managed:
-            for path in self.artifacts:
-                try:
-                    path.relative_to(MODEL_WORKSPACE_DIR)
-                    return path
-                except ValueError:
-                    continue
+            package_root = _managed_rvc_root(self.source_folder)
+            if package_root is not None:
+                return package_root
         return self.inference_model or self.generator_checkpoint or self.source_folder
 
 
@@ -187,15 +194,51 @@ class RvcModelWorkspace:
             return []
 
         records: list[RvcModelRecord] = []
+        did_migrate = False
         for item in data["models"]:
             try:
-                records.append(self._record_from_data(item))
+                record = self._record_from_data(item)
+                if record.is_managed:
+                    record, migrated = self._ensure_managed_package(record)
+                    did_migrate = did_migrate or migrated
+                records.append(record)
             except (KeyError, TypeError, ValueError):
                 continue
+        if did_migrate:
+            self._write_catalog(records)
         return sorted(records, key=lambda record: record.title.casefold())
 
     def inspect_folder(self, folder: Path) -> list[DiscoveredRvcModel]:
         return discover_rvc_models(folder)
+
+    def create_model(self, name: str, runtime_root: Path) -> RvcModelRecord:
+        model_name = " ".join(name.split())[:80]
+        if not model_name:
+            raise RvcModelWorkspaceError("Model name is required.")
+        existing = {record.model_id: record for record in self.records()}
+        if any(record.title.casefold() == model_name.casefold() for record in existing.values()):
+            raise RvcModelWorkspaceError(f'A model named "{model_name}" already exists.')
+
+        model_id = _new_model_id(model_name)
+        model_dir = self.library_dir / model_id
+        model_dir.mkdir(parents=True, exist_ok=False)
+        package = RvcModelPackageLayout(model_dir, model_name)
+        package.create()
+        record = RvcModelRecord(
+            model_id=model_id,
+            name=model_name,
+            mode="created",
+            runtime_root=runtime_root.expanduser().resolve(),
+            source_folder=package.experiment_dir,
+            inference_model=None,
+            index_file=None,
+            generator_checkpoint=None,
+            discriminator_checkpoint=None,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        existing[model_id] = record
+        self._save_records(existing.values())
+        return record
 
     def link_folder(self, folder: Path) -> list[RvcModelRecord]:
         discovered = self.inspect_folder(folder)
@@ -216,51 +259,45 @@ class RvcModelWorkspace:
     ) -> list[RvcModelRecord]:
         discovered = self.inspect_folder(folder)
         existing = {record.model_id: record for record in self.records()}
-        total_bytes = sum(model.import_size_bytes for model in discovered)
-        copied_bytes = 0
         imported: list[RvcModelRecord] = []
+        package_plans: list[tuple[DiscoveredRvcModel, str, RvcModelPackageLayout, tuple]] = []
 
         for model in discovered:
             model_id = _model_id("managed", model)
             model_dir = self.library_dir / model_id
-            baseline_dir = model_dir / "baseline"
-            targets = {
-                "inference_model": _artifact_target(model.inference_model, baseline_dir / "inference"),
-                "index_file": _artifact_target(model.index_file, baseline_dir / "inference"),
-                "generator_checkpoint": _artifact_target(model.generator_checkpoint, baseline_dir / "checkpoints"),
-                "discriminator_checkpoint": _artifact_target(model.discriminator_checkpoint, baseline_dir / "checkpoints"),
-            }
+            package = RvcModelPackageLayout(model_dir, model.name)
+            experiment_source = model.runtime_root / "logs" / model.name
+            if not experiment_source.is_dir():
+                experiment_source = None
+            create_rvc_package_directories(package, experiment_source)
+            weight_sources = _group_inference_weights(model.runtime_root / "weights").get(model.name, [])
+            plan = build_rvc_package_plan(
+                package,
+                experiment_source=experiment_source,
+                weight_sources=weight_sources,
+                artifacts=dict(_discovery_artifact_items(model)),
+            )
+            package_plans.append((model, model_id, package, plan))
 
-            for field_name, source in _discovery_artifact_items(model):
-                target = targets[field_name]
-                if source is None or target is None:
-                    continue
-
-                def report(file_bytes: int, base: int = copied_bytes) -> None:
-                    if progress is not None:
-                        progress(_percentage(base + file_bytes, total_bytes))
-
-                _copy_file(source, target, report)
-                copied_bytes += source.stat().st_size
-                if progress is not None:
-                    progress(_percentage(copied_bytes, total_bytes))
-
+        copy_rvc_package_files(
+            (item for _model, _model_id_value, _package, plan in package_plans for item in plan),
+            progress,
+        )
+        for model, model_id, package, plan in package_plans:
             managed = DiscoveredRvcModel(
                 name=model.name,
                 runtime_root=model.runtime_root,
-                source_folder=model.source_folder,
-                inference_model=targets["inference_model"],
-                index_file=targets["index_file"],
-                generator_checkpoint=targets["generator_checkpoint"],
-                discriminator_checkpoint=targets["discriminator_checkpoint"],
+                source_folder=package.experiment_dir,
+                inference_model=packaged_target(plan, model.inference_model),
+                index_file=packaged_target(plan, model.index_file),
+                generator_checkpoint=packaged_target(plan, model.generator_checkpoint),
+                discriminator_checkpoint=packaged_target(plan, model.discriminator_checkpoint),
             )
             record = _record_from_discovery(model_id, "managed", managed, existing.get(model_id))
             existing[model_id] = record
             imported.append(record)
 
         self._save_records(existing.values())
-        if progress is not None:
-            progress(100)
         return imported
 
     def update_profile(
@@ -299,20 +336,28 @@ class RvcModelWorkspace:
         _validate_replacement_artifact(artifact_name, source_path)
         replacement = source_path
         if record.is_managed:
-            model_dir = self.library_dir / record.model_id / "baseline"
-            directory = model_dir / ("inference" if artifact_name in {"inference_model", "index_file"} else "checkpoints")
-            replacement = directory / source_path.name
-            source_size = source_path.stat().st_size
-            _copy_file(
-                source_path,
-                replacement,
-                lambda copied: progress(_percentage(copied, source_size)) if progress is not None else None,
+            package = RvcModelPackageLayout(self.library_dir / record.model_id, record.name)
+            plan = build_rvc_package_plan(
+                package,
+                experiment_source=None,
+                weight_sources=(),
+                artifacts={artifact_name: source_path},
             )
+            copy_rvc_package_files(plan, progress)
+            replacement = packaged_target(plan, source_path) or source_path
         updated = replace(record, **{artifact_name: replacement})
         self._replace_record(updated)
-        if progress is not None:
+        if progress is not None and not record.is_managed:
             progress(100)
         return updated
+
+    def portable_rvc_root(self, model_id: str) -> Path:
+        record = self._require_record(model_id)
+        if not record.is_managed:
+            raise RvcModelWorkspaceError("Linked models do not have a managed RVC package.")
+        package = RvcModelPackageLayout(self.library_dir / record.model_id, record.name)
+        package.create()
+        return package.root
 
     def replace_runtime_root(self, model_id: str, runtime_root: Path) -> RvcModelRecord:
         record = self._require_record(model_id)
@@ -335,16 +380,52 @@ class RvcModelWorkspace:
         self._save_records(records.values())
 
     def _save_records(self, records) -> None:
+        prepared: list[RvcModelRecord] = []
+        for record in records:
+            if record.is_managed:
+                record, _migrated = self._ensure_managed_package(record)
+            prepared.append(record)
+        self._write_catalog(prepared)
+        for record in prepared:
+            if record.is_managed:
+                _write_model_manifest(self.library_dir / record.model_id, record)
+
+    def _write_catalog(self, records) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         sorted_records = sorted(records, key=lambda item: item.title.casefold())
         data = {
             "version": CATALOG_VERSION,
             "models": [self._record_to_data(record) for record in sorted_records],
         }
-        _write_json_atomic(self.catalog_path, data)
-        for record in sorted_records:
-            if record.is_managed:
-                _write_model_manifest(self.library_dir / record.model_id, record)
+        write_json_atomic(self.catalog_path, data)
+
+    def _ensure_managed_package(self, record: RvcModelRecord) -> tuple[RvcModelRecord, bool]:
+        model_dir = self.library_dir / record.model_id
+        package = RvcModelPackageLayout(model_dir, record.name)
+        package.create()
+        artifacts = dict(_record_artifact_items(record))
+        external_artifacts = {
+            name: path if path is not None and path.is_file() and not package.contains(path) else None
+            for name, path in artifacts.items()
+        }
+        plan = build_rvc_package_plan(
+            package,
+            experiment_source=None,
+            weight_sources=(),
+            artifacts=external_artifacts,
+        )
+        if plan:
+            copy_rvc_package_files(plan)
+
+        updates = {
+            name: packaged_target(plan, path) or path
+            for name, path in artifacts.items()
+        }
+        updated = replace(record, source_folder=package.experiment_dir, **updates)
+        did_migrate = updated != record
+        if did_migrate or not package.manifest_path.is_file():
+            _write_model_manifest(model_dir, updated)
+        return updated, did_migrate
 
     def _record_to_data(self, record: RvcModelRecord) -> dict[str, object]:
         return {
@@ -367,7 +448,7 @@ class RvcModelWorkspace:
 
     def _record_from_data(self, data: dict[str, object]) -> RvcModelRecord:
         mode = str(data["mode"])
-        if mode not in {"linked", "managed"}:
+        if mode not in {"linked", "managed", "created"}:
             raise ValueError("Unsupported model mode")
         return RvcModelRecord(
             model_id=str(data["id"]),
@@ -450,6 +531,8 @@ def discover_rvc_models(folder: Path) -> list[DiscoveredRvcModel]:
 def _resolve_rvc_layout(selected: Path) -> tuple[Path, str | None]:
     if (selected / "weights").is_dir() and (selected / "logs").is_dir():
         return selected, None
+    if (selected / "rvc" / "weights").is_dir() and (selected / "rvc" / "logs").is_dir():
+        return selected / "rvc", None
     if selected.parent.name.casefold() == "logs" and (selected.parent.parent / "weights").is_dir():
         return selected.parent.parent, selected.name
 
@@ -559,6 +642,11 @@ def _model_id(mode: str, model: DiscoveredRvcModel) -> str:
     return f"{mode}-{digest}"
 
 
+def _new_model_id(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")[:32] or "model"
+    return f"created-{slug}-{uuid.uuid4().hex[:8]}"
+
+
 def _record_from_discovery(
     model_id: str,
     mode: str,
@@ -585,10 +673,6 @@ def _record_from_discovery(
     )
 
 
-def _artifact_target(source: Path | None, directory: Path) -> Path | None:
-    return directory / source.name if source is not None else None
-
-
 def _discovery_artifact_items(model: DiscoveredRvcModel):
     return (
         ("inference_model", model.inference_model),
@@ -598,53 +682,40 @@ def _discovery_artifact_items(model: DiscoveredRvcModel):
     )
 
 
-def _copy_file(source: Path, target: Path, progress: Callable[[int], None]) -> None:
-    source_size = source.stat().st_size
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if source.resolve() == target.resolve():
-        progress(source_size)
-        return
-    if (
-        target.is_file()
-        and target.stat().st_size == source_size
-        and target.stat().st_mtime_ns == source.stat().st_mtime_ns
-    ):
-        progress(source_size)
-        return
-
-    temporary = target.with_suffix(f"{target.suffix}.copying")
-    copied = 0
-    try:
-        with source.open("rb") as source_file, temporary.open("wb") as target_file:
-            while chunk := source_file.read(8 * 1024 * 1024):
-                target_file.write(chunk)
-                copied += len(chunk)
-                progress(copied)
-        os.replace(temporary, target)
-        shutil.copystat(source, target)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+def _record_artifact_items(record: RvcModelRecord):
+    return (
+        ("inference_model", record.inference_model),
+        ("index_file", record.index_file),
+        ("generator_checkpoint", record.generator_checkpoint),
+        ("discriminator_checkpoint", record.discriminator_checkpoint),
+    )
 
 
 def _write_model_manifest(model_dir: Path, record: RvcModelRecord) -> None:
+    package = RvcModelPackageLayout(model_dir, record.name)
+
     def relative(path: Path | None) -> str:
-        if path is None:
+        if path is None or not package.contains(path):
             return ""
-        return path.relative_to(model_dir).as_posix()
+        return relative_package_path(package, path)
 
     data = {
-        "version": CATALOG_VERSION,
+        "version": 1,
         "id": record.model_id,
         "name": record.name,
+        "rvc_name": record.name,
         "mode": record.mode,
         "runtime_root": str(record.runtime_root),
-        "source_folder": str(record.source_folder),
-        "artifacts": {
-            "inference_model": relative(record.inference_model),
-            "index_file": relative(record.index_file),
-            "generator_checkpoint": relative(record.generator_checkpoint),
-            "discriminator_checkpoint": relative(record.discriminator_checkpoint),
+        "rvc": {
+            "root": "rvc",
+            "weights": "rvc/weights",
+            "experiment": relative(package.experiment_dir),
+            "artifacts": {
+                "inference_model": relative(record.inference_model),
+                "index_file": relative(record.index_file),
+                "generator_checkpoint": relative(record.generator_checkpoint),
+                "discriminator_checkpoint": relative(record.discriminator_checkpoint),
+            },
         },
         "created_at": record.created_at,
         "profile": {
@@ -655,14 +726,7 @@ def _write_model_manifest(model_dir: Path, record: RvcModelRecord) -> None:
             "default_device": record.default_device,
         },
     }
-    _write_json_atomic(model_dir / "manifest.json", data)
-
-
-def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(f"{path.suffix}.tmp")
-    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(temporary, path)
+    write_json_atomic(package.manifest_path, data)
 
 
 def _existing_unique_paths(*paths: Path | None) -> tuple[Path, ...]:
@@ -677,6 +741,16 @@ def _existing_unique_paths(*paths: Path | None) -> tuple[Path, ...]:
         seen.add(resolved)
         existing.append(path)
     return tuple(existing)
+
+
+def _managed_rvc_root(source_folder: Path) -> Path | None:
+    experiment_dir = source_folder.expanduser().resolve()
+    if experiment_dir.parent.name.casefold() != "logs":
+        return None
+    root = experiment_dir.parent.parent
+    if (root / "weights").is_dir() and (root / "logs").is_dir():
+        return root
+    return None
 
 
 def _normalize_name(value: str) -> str:
@@ -735,9 +809,3 @@ def _int_value(value: object, default: int) -> int:
 
 def _device_value(value: object) -> str:
     return value if value in {"cuda:0", "cpu"} else "cuda:0"
-
-
-def _percentage(current: int, total: int) -> int:
-    if total <= 0:
-        return 100
-    return max(0, min(100, round(current * 100 / total)))

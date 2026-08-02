@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from jang_app.config import DOWNLOAD_OUTPUT_DIR
 from jang_app.services.audio_metadata import format_duration, read_audio_metadata
 from jang_app.services.output_catalog import load_output_sound_set
 from jang_app.services.song_library import SongItem
@@ -38,14 +37,9 @@ def build_song_display_metadata(song: SongItem, output_root: Path) -> SongDispla
 
 
 def _source_type(song: SongItem) -> str:
-    if song.kind == "output":
-        return "output"
-    try:
-        if DOWNLOAD_OUTPUT_DIR.expanduser().resolve() in song.path.expanduser().resolve().parents:
-            return "youtube"
-    except OSError:
-        pass
-    return "local"
+    if song.source_type in {"local", "youtube", "output"}:
+        return song.source_type
+    return "output" if song.kind == "output" else "local"
 
 
 def _source_label(source_type: str) -> str:

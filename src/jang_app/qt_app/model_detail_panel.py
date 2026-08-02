@@ -5,22 +5,21 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
-    QPushButton,
     QScrollArea,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from jang_app.qt_app.model_badge import set_model_badge
-from jang_app.qt_app.widgets import SvgIconButton
+from jang_app.qt_app.localization import apply_widget_language, set_translated_text
+from jang_app.qt_app.widgets import FeedbackButton, ScrollSafeComboBox, ScrollSafeSpinBox, SvgIconButton
+from jang_app.services.i18n import tr
 from jang_app.services.rvc_model_workspace import RvcModelRecord
 
 
@@ -114,10 +113,10 @@ class ModelDetailPanel(QFrame):
         self.tags_edit = QLineEdit()
         self.tags_edit.setObjectName("ModelProfileInput")
         self.tags_edit.setMaxLength(220)
-        self.pitch_spin = QSpinBox()
+        self.pitch_spin = ScrollSafeSpinBox()
         self.pitch_spin.setObjectName("ModelProfileInput")
         self.pitch_spin.setRange(-9999, 9999)
-        self.device_combo = QComboBox()
+        self.device_combo = ScrollSafeComboBox()
         self.device_combo.setObjectName("ModelProfileInput")
         self.device_combo.addItems(["cuda:0", "cpu"])
         self.notes_edit = QPlainTextEdit()
@@ -178,7 +177,7 @@ class ModelDetailPanel(QFrame):
         actions = QHBoxLayout(self.actions_widget)
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(8)
-        self.use_button = QPushButton("Use in Convert")
+        self.use_button = FeedbackButton("Use in Convert")
         self.use_button.setObjectName("PrimaryButton")
         self.use_button.clicked.connect(self._emit_use_requested)
         self.open_button = SvgIconButton("folder", size=36)
@@ -218,6 +217,17 @@ class ModelDetailPanel(QFrame):
         for row in self.artifact_rows.values():
             row.set_theme_mode(theme_mode)
 
+    def apply_language(self) -> None:
+        apply_widget_language(self)
+        if self._record is None:
+            set_translated_text(self.title_label, "Select a model")
+        else:
+            set_model_badge(self.status_badge, self._record.status_label, "status", self._record.status_key)
+            set_model_badge(self.mode_badge, self._record.mode_label, "managed", self._record.is_managed)
+            self.source_label.setText(f"{tr('Source location')}\n{_source_display_path(self._record)}")
+        for row in self.artifact_rows.values():
+            row.apply_language()
+
     def set_busy(self, is_busy: bool) -> None:
         for row in self.artifact_rows.values():
             row.setDisabled(is_busy)
@@ -231,9 +241,22 @@ class ModelDetailPanel(QFrame):
 
     def _populate_record(self, record: RvcModelRecord | None) -> None:
         is_available = record is not None
-        self.title_label.setText(record.title if record is not None else "Select a model")
-        set_model_badge(self.status_badge, record.status_label if record else "", "status", record.status_key if record else "")
-        set_model_badge(self.mode_badge, record.mode_label if record else "", "managed", record.is_managed if record else False)
+        if record is not None:
+            self.title_label.setText(record.title)
+        else:
+            set_translated_text(self.title_label, "Select a model")
+        set_model_badge(
+            self.status_badge,
+            record.status_label if record else "",
+            "status",
+            record.status_key if record else "",
+        )
+        set_model_badge(
+            self.mode_badge,
+            record.mode_label if record else "",
+            "managed",
+            record.is_managed if record else False,
+        )
 
         self.display_name_edit.setEnabled(is_available)
         self.tags_edit.setEnabled(is_available)
@@ -276,7 +299,7 @@ class ModelDetailPanel(QFrame):
         )
         for row in self.artifact_rows.values():
             row.setEnabled(True)
-        self.source_label.setText(f"Source\n{_source_display_path(record)}")
+        self.source_label.setText(f"{tr('Source location')}\n{_source_display_path(record)}")
         self.source_label.setToolTip(str(record.source_folder))
         self.use_button.setEnabled(record.can_convert)
         self.open_button.setEnabled(record.primary_location.exists())
@@ -318,6 +341,9 @@ class ArtifactRepairRow(QFrame):
         super().__init__()
         self.setObjectName("ArtifactRepairRow")
         self._artifact_name = artifact_name
+        self._label_source = label
+        self._state_source = "Not linked"
+        self._path: Path | None = None
 
         self.name_label = QLabel(label)
         self.name_label.setObjectName("ArtifactName")
@@ -329,7 +355,7 @@ class ArtifactRepairRow(QFrame):
         self.state_label.setMinimumWidth(62)
         self.relink_button = SvgIconButton("folder", size=28)
         self.relink_button.setObjectName("ModelArtifactButton")
-        self.relink_button.setToolTip(f"Relink {label.lower()}")
+        self.relink_button.setToolTip(tr("Relink {artifact}", artifact=tr(label)))
         self.relink_button.clicked.connect(lambda: self.relink_requested.emit(self._artifact_name))
 
         text_layout = QVBoxLayout()
@@ -346,21 +372,29 @@ class ArtifactRepairRow(QFrame):
         layout.addWidget(self.relink_button)
 
     def set_value(self, path: Path | None, state: str) -> None:
+        self._path = path
+        self._state_source = state
         if path is None:
-            value = "Not linked"
+            value = tr("Not linked")
         elif path.is_dir():
             value = path.name
         else:
             value = path.name
         self.value_label.setText(value)
         self.value_label.setToolTip(str(path) if path is not None else "")
-        self.state_label.setText(state)
+        set_translated_text(self.state_label, state)
         self.state_label.setProperty("state", state.casefold().replace(" ", "_"))
         self.state_label.style().unpolish(self.state_label)
         self.state_label.style().polish(self.state_label)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self.relink_button.set_theme_mode(theme_mode)
+
+    def apply_language(self) -> None:
+        apply_widget_language(self)
+        self.name_label.setText(tr(self._label_source))
+        self.relink_button.setToolTip(tr("Relink {artifact}", artifact=tr(self._label_source)))
+        self.set_value(self._path, self._state_source)
 
 
 def _field_label(text: str) -> QLabel:

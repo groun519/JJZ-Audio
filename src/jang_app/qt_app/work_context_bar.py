@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
 
+from jang_app.qt_app.localization import apply_widget_language, set_translated_text
 from jang_app.services.work_context import WorkContextDisplay
 
 
@@ -11,6 +12,7 @@ class WorkContextBar(QFrame):
         super().__init__()
         self.setObjectName("WorkContextBar")
         self.setFixedHeight(46)
+        self._display = WorkContextDisplay(is_active=False)
 
         self.work_badge = QLabel("WORK")
         self.work_badge.setObjectName("WorkBadge")
@@ -57,18 +59,23 @@ class WorkContextBar(QFrame):
         self.set_display(WorkContextDisplay(is_active=False))
 
     def set_display(self, display: WorkContextDisplay) -> None:
+        self._display = display
         self.setVisible(display.is_active)
         if not display.is_active:
             return
 
-        self.source_badge.setText(display.source_label)
+        set_translated_text(self.source_badge, display.source_label)
         self.source_badge.setProperty("sourceType", display.source_type)
         self.source_badge.style().unpolish(self.source_badge)
         self.source_badge.style().polish(self.source_badge)
         self.title_label.setText(display.title)
         self.detail_label.setText(display.detail_label)
-        self.state_label.setText(display.state_label)
+        set_translated_text(self.state_label, display.state_label)
 
         output_text = display.output_label.strip()
         self.output_label.setText(output_text)
         self.output_label.setVisible(bool(output_text))
+
+    def apply_language(self) -> None:
+        apply_widget_language(self)
+        self.set_display(self._display)
