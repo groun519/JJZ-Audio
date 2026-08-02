@@ -800,7 +800,7 @@ class TrackRow(QFrame):
         self._set_current_path(path)
         self._is_loading = False
 
-    def set_options(self, paths: list[Path]) -> None:
+    def set_options(self, paths: list[Path], selected_path: Path | None = None) -> None:
         self._is_loading = True
         self._paths_by_label = {_display_name(path): path for path in paths}
         self.path_combo.blockSignals(True)
@@ -808,9 +808,27 @@ class TrackRow(QFrame):
         for label, path in self._paths_by_label.items():
             self.path_combo.addItem(label, str(path))
         self.path_combo.setVisible(len(paths) > 1)
+        selected_index = self._path_index(selected_path)
+        self.path_combo.setCurrentIndex(selected_index if selected_index >= 0 else (0 if paths else -1))
         self.path_combo.blockSignals(False)
-        self._set_current_path(paths[0] if paths else None)
+        self._set_current_path(self.current_path())
         self._is_loading = False
+
+    def select_path(self, path: Path | None, *, emit: bool = False) -> bool:
+        index = self._path_index(path)
+        if index < 0:
+            return False
+        was_loading = self._is_loading
+        self._is_loading = not emit
+        was_blocked = self.path_combo.signalsBlocked()
+        if not emit:
+            self.path_combo.blockSignals(True)
+        self.path_combo.setCurrentIndex(index)
+        if not emit:
+            self.path_combo.blockSignals(was_blocked)
+        self._set_current_path(self.current_path())
+        self._is_loading = was_loading
+        return True
 
     def current_path(self) -> Path | None:
         if self.path_combo.count() > 0:
@@ -852,6 +870,16 @@ class TrackRow(QFrame):
         self._set_current_path(self.current_path())
         if not self._is_loading:
             self.source_changed.emit()
+
+    def _path_index(self, path: Path | None) -> int:
+        if path is None:
+            return -1
+        resolved = path.expanduser().resolve()
+        for index in range(self.path_combo.count()):
+            data = self.path_combo.itemData(index)
+            if data and Path(data).expanduser().resolve() == resolved:
+                return index
+        return -1
 
     def _on_mute_changed(self) -> None:
         self.waveform.set_muted(self.is_muted())

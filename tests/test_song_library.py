@@ -81,6 +81,11 @@ class SongLibraryTests(unittest.TestCase):
             self.assertEqual(sound_sets[0].job_dir, job_dir.resolve())
             self.assertEqual(len(sound_sets[0].converted_vocal_paths), 1)
 
+            versions = library.vocal_versions(song.id)
+            self.assertEqual(len(versions), 1)
+            self.assertEqual(versions[0].job_dir, job_dir.resolve())
+            self.assertEqual(versions[0].active_converted_path, versions[0].converted_vocal_paths[0])
+
     def test_selecting_output_version_updates_song_active_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)
@@ -101,6 +106,44 @@ class SongLibraryTests(unittest.TestCase):
             self.assertIsNotNone(activated)
             self.assertEqual(activated.output_job_dir, first.resolve())
             self.assertEqual(library.items()[0].output_job_dir, first.resolve())
+
+    def test_converted_selection_and_output_detach_are_non_destructive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"source")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            song = library.add_paths([source])[0]
+            job_dir = project / "output"
+            job_dir.mkdir()
+            (job_dir / "vocals.wav").write_bytes(b"vocals")
+            (job_dir / "no_vocals.wav").write_bytes(b"instrumental")
+            first = job_dir / "vocals_rvc_first.wav"
+            second = job_dir / "vocals_rvc_second.wav"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            library.register_output(song.id, job_dir, "Version")
+
+            updated = library.activate_converted_output(job_dir, second)
+            selected_path = store.require(song.id).outputs[0].active_converted_path
+            detached = library.detach_output(job_dir)
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(selected_path, second.resolve())
+            self.assertIsNotNone(detached)
+            self.assertIsNone(detached.output_job_dir)
+            self.assertTrue(first.is_file())
+            self.assertTrue(second.is_file())
+
+            reloaded = SongLibrary(
+                project / "missing.json",
+                SongPackageStore(project / "workspace" / "library" / "songs", project),
+            )
+            reloaded.add_output_sets(
+                [OutputSoundSet("Version", job_dir, job_dir / "vocals.wav", job_dir / "no_vocals.wav", (first, second))]
+            )
+            self.assertEqual(reloaded.vocal_versions(song.id), ())
 
 
 def _sound_set(project: Path, name: str) -> OutputSoundSet:

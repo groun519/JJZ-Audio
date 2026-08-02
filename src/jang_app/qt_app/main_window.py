@@ -39,6 +39,7 @@ from jang_app.qt_app.segmented_stack import SegmentedStack
 from jang_app.qt_app.selected_song_card import SelectedSongCard
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
 from jang_app.qt_app.toast_stack import ToastStack
+from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
 from jang_app.qt_app.work_context_bar import WorkContextBar
 from jang_app.qt_app.widgets import (
     FeedbackButton,
@@ -67,7 +68,7 @@ from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.settings import AppSettings, RvcSettings, save_app_settings
 from jang_app.services.song_metadata import build_song_display_metadata
 from jang_app.services.work_context import build_work_context_display
-from jang_app.services.song_library import SongItem, SongLibrary
+from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion
 from jang_app.services.youtube_download import YouTubeDownloadResult, download_youtube_audio
 
 
@@ -347,8 +348,16 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.vocal_song_card, 0)
         left_layout.addWidget(self.vocal_steps, 1)
 
+        self.vocal_results_panel = VocalResultsPanel()
+        self.vocal_results_panel.output_selected.connect(self._activate_vocal_output_version)
+        self.vocal_results_panel.converted_selected.connect(self._activate_vocal_converted_version)
+        self.vocal_results_panel.open_location_requested.connect(self._open_vocal_output_location)
+        self.vocal_results_panel.remove_output_requested.connect(self._remove_vocal_output_version)
+        self.vocal_results_panel.open_studio_requested.connect(self._open_current_song_in_studio)
+        self.vocal_results_panel.seek_requested.connect(self._seek_output_playback)
+
         layout.addWidget(left_panel, 0)
-        layout.addWidget(self._build_vocal_results_panel(), 1)
+        layout.addWidget(self.vocal_results_panel, 1)
         return page
 
     def _build_studio_page(self) -> QWidget:
@@ -502,38 +511,6 @@ class MainWindow(QMainWindow):
         rvc_layout.addStretch(1)
         return rvc_panel
 
-    def _build_vocal_results_panel(self) -> QWidget:
-        panel = QFrame()
-        panel.setObjectName("Panel")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(14)
-
-        title = QLabel("Vocal Results")
-        title.setObjectName("SectionTitle")
-        self.vocal_result_name_label = QLabel("No output.")
-        self.vocal_result_name_label.setObjectName("MutedText")
-        self.vocal_result_name_label.setWordWrap(True)
-
-        vocal_row, self.vocal_result_vocal_status = _build_vocal_result_row("Original Vocal")
-        instrumental_row, self.vocal_result_instrumental_status = _build_vocal_result_row("Instrumental")
-        converted_row, self.vocal_result_converted_status = _build_vocal_result_row("Converted Vocal")
-
-        self.open_studio_button = FeedbackButton("Open Studio")
-        self.open_studio_button.setObjectName("PrimaryButton")
-        self.open_studio_button.setEnabled(False)
-        self.open_studio_button.clicked.connect(self._open_current_song_in_studio)
-
-        layout.addWidget(title)
-        layout.addWidget(self.vocal_result_name_label)
-        layout.addSpacing(4)
-        layout.addWidget(vocal_row)
-        layout.addWidget(instrumental_row)
-        layout.addWidget(converted_row)
-        layout.addStretch(1)
-        layout.addWidget(self.open_studio_button)
-        return panel
-
     def _build_mix_export_panel(self) -> QWidget:
         mix_panel = QFrame()
         mix_panel.setObjectName("Card")
@@ -571,7 +548,7 @@ class MainWindow(QMainWindow):
         self.output_refresh_button = SvgIconButton("refresh", size=34)
         self.output_refresh_button.setObjectName("ControlIconButton")
         self.output_refresh_button.setToolTip("Refresh output sounds")
-        self.output_refresh_button.clicked.connect(self._refresh_output_sets)
+        self.output_refresh_button.clicked.connect(lambda: self._refresh_output_sets())
         header.addWidget(title, 0)
         header.addWidget(self.output_set_combo, 1)
         header.addWidget(self.output_refresh_button, 0)
@@ -628,6 +605,8 @@ class MainWindow(QMainWindow):
             self.drop_card.file_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "model_workspace_page"):
             self.model_workspace_page.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "vocal_results_panel"):
+            self.vocal_results_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "song_list"):
             for index in range(self.song_list.count()):
                 row = self.song_list.itemWidget(self.song_list.item(index))
@@ -650,6 +629,7 @@ class MainWindow(QMainWindow):
         self.work_context_bar.apply_language()
         self.log_drawer.apply_language()
         self.model_workspace_page.apply_language()
+        self.vocal_results_panel.apply_language()
 
     def _position_processing_queue(self) -> None:
         if not hasattr(self, "processing_queue_panel") or not hasattr(self, "player_bar"):
@@ -1041,7 +1021,7 @@ class MainWindow(QMainWindow):
         self.separation_action.set_progress(3)
         self.separation_action.set_status("Separating")
         song = self.current_song
-        output_root = self.library.vocal_separation_root(song.id)
+        output_root = self.library.create_vocal_separation_run(song.id)
         worker = TaskWorker(
             lambda progress: separate_audio(
                 song.path,
@@ -1077,7 +1057,12 @@ class MainWindow(QMainWindow):
         self.separation_action.set_status("Failed")
         self.separation_action.status_label.setToolTip(f"{LOG_FILE}\n{_last_error_line(error)}")
 
-    def _refresh_output_sets(self, preferred_job_dir: Path | None = None) -> None:
+    def _refresh_output_sets(
+        self,
+        preferred_job_dir: Path | None = None,
+        *,
+        select_fallback: bool = True,
+    ) -> None:
         legacy_sound_sets = scan_output_sound_sets(self.settings.output_root)
         self.library.add_output_sets(legacy_sound_sets)
         sound_sets = self.library.output_sound_sets()
@@ -1090,6 +1075,12 @@ class MainWindow(QMainWindow):
             self.output_set_combo.addItem(sound_set.label, str(sound_set.job_dir))
 
         if not sound_sets:
+            self.output_set_combo.blockSignals(False)
+            self._apply_output_set(None)
+            return
+
+        if preferred_job_dir is None and not select_fallback:
+            self.output_set_combo.setCurrentIndex(-1)
             self.output_set_combo.blockSignals(False)
             self._apply_output_set(None)
             return
@@ -1143,7 +1134,13 @@ class MainWindow(QMainWindow):
         if not data:
             self._apply_output_set(None)
             return
-        job_dir = Path(data)
+        self._activate_output_job(Path(data))
+
+    def _activate_vocal_output_version(self, job_dir: Path) -> None:
+        self._select_output_set(job_dir)
+        self._activate_output_job(job_dir)
+
+    def _activate_output_job(self, job_dir: Path) -> None:
         song = self.library.activate_output(job_dir)
         if song is not None:
             self._song_items_by_id[song.id] = song
@@ -1153,14 +1150,49 @@ class MainWindow(QMainWindow):
                 card.select_song(song.id if song.kind == "source" else "")
         self._apply_output_set(load_output_sound_set(job_dir, self.settings.output_root))
 
+    def _activate_vocal_converted_version(self, path: Path | None) -> None:
+        if self.current_output_set is None:
+            return
+        song = self.library.activate_converted_output(self.current_output_set.job_dir, path)
+        if song is not None:
+            self._song_items_by_id[song.id] = song
+            if self.current_song is not None and self.current_song.id == song.id:
+                self.current_song = song
+            if self.current_work_item is not None and self.current_work_item.id == song.id:
+                self.current_work_item = song
+        self.converted_track.select_path(path)
+        self._refresh_output_playback_queue()
+        self._sync_work_context_bar()
+
+    def _open_vocal_output_location(self, job_dir: Path) -> None:
+        try:
+            open_in_file_browser(job_dir)
+        except Exception as exc:
+            _set_optional_label(self.output_status_label, f"Open failed: {_last_error_line(str(exc))}")
+
+    def _remove_vocal_output_version(self, job_dir: Path) -> None:
+        updated = self.library.detach_output(job_dir)
+        if updated is None:
+            return
+        self._song_items_by_id[updated.id] = updated
+        self.current_song = updated if updated.kind == "source" else None
+        self.current_work_item = updated
+        preferred = updated.output_job_dir
+        self._refresh_output_sets(preferred_job_dir=preferred, select_fallback=preferred is not None)
+        if preferred is None:
+            self._apply_output_set(None)
+        for card in self.song_selector_cards:
+            card.select_song(updated.id if updated.kind == "source" else "")
+        self._sync_work_context_bar()
+
     def _apply_output_set(self, sound_set: OutputSoundSet | None) -> None:
         self.current_output_set = sound_set
         self._sync_current_work_output_item(sound_set)
-        self._update_vocal_results(sound_set)
         if sound_set is None:
             self.vocal_track.set_single_path(None)
             self.instrumental_track.set_single_path(None)
             self.converted_track.set_options([])
+            self.vocal_results_panel.set_versions((), None)
             self.rvc_action.set_action_enabled(False)
             self.rvc_action.set_status("")
             _set_optional_label(self.mix_status_label, "")
@@ -1171,7 +1203,14 @@ class MainWindow(QMainWindow):
 
         self.vocal_track.set_single_path(sound_set.vocals_path)
         self.instrumental_track.set_single_path(sound_set.instrumental_path)
-        self.converted_track.set_options(list(sound_set.converted_vocal_paths))
+        versions = self._current_vocal_versions()
+        selected_version = next(
+            (version for version in versions if version.job_dir == sound_set.job_dir),
+            None,
+        )
+        selected_converted = selected_version.active_converted_path if selected_version is not None else None
+        self.converted_track.set_options(list(sound_set.converted_vocal_paths), selected_converted)
+        self.vocal_results_panel.set_versions(versions, sound_set.job_dir)
         self.rvc_action.set_action_enabled(True)
         self.rvc_action.set_progress(0)
         self.rvc_action.set_status("")
@@ -1180,26 +1219,14 @@ class MainWindow(QMainWindow):
         self._refresh_output_playback_queue()
         self._sync_work_context_bar()
 
-    def _update_vocal_results(self, sound_set: OutputSoundSet | None) -> None:
-        if sound_set is None:
-            set_translated_text(self.vocal_result_name_label, "No output.")
-            set_translated_text(self.vocal_result_vocal_status, "Missing")
-            set_translated_text(self.vocal_result_instrumental_status, "Missing")
-            self.vocal_result_converted_status.setText("0")
-            self.open_studio_button.setEnabled(False)
-            return
-
-        self.vocal_result_name_label.setText(sound_set.label)
-        set_translated_text(
-            self.vocal_result_vocal_status,
-            "Ready" if sound_set.vocals_path.is_file() else "Missing",
-        )
-        set_translated_text(
-            self.vocal_result_instrumental_status,
-            "Ready" if sound_set.instrumental_path.is_file() else "Missing",
-        )
-        self.vocal_result_converted_status.setText(str(len(sound_set.converted_vocal_paths)))
-        self.open_studio_button.setEnabled(True)
+    def _current_vocal_versions(self) -> tuple[SongVocalVersion, ...]:
+        item = self.current_song or self.current_work_item
+        if item is None:
+            return ()
+        try:
+            return self.library.vocal_versions(item.id)
+        except KeyError:
+            return ()
 
     def _sync_current_work_output_item(self, sound_set: OutputSoundSet | None) -> None:
         if self.current_song is not None:
@@ -1283,18 +1310,23 @@ class MainWindow(QMainWindow):
         )
         self._run_worker(
             worker,
-            self._on_rvc_succeeded,
+            lambda result: self._on_rvc_succeeded(sound_set.job_dir, result),
             self._on_rvc_failed,
             self.rvc_action,
             task_title="Convert Vocal",
             task_detail=sound_set.label,
         )
 
-    def _on_rvc_succeeded(self, _result: object) -> None:
+    def _on_rvc_succeeded(self, job_dir: Path, result: object) -> None:
         self.rvc_action.set_progress(100)
         self.rvc_action.set_status("Done")
-        if self.current_output_set is not None:
-            self._refresh_output_sets(preferred_job_dir=self.current_output_set.job_dir)
+        output_path = getattr(result, "output_path", None)
+        if isinstance(output_path, Path):
+            updated = self.library.activate_converted_output(job_dir, output_path)
+            if updated is not None:
+                self._song_items_by_id[updated.id] = updated
+        preferred = self.current_output_set.job_dir if self.current_output_set is not None else job_dir
+        self._refresh_output_sets(preferred_job_dir=preferred)
 
     def _on_rvc_failed(self, error: str) -> None:
         self.rvc_action.set_status("Failed")
@@ -1383,6 +1415,16 @@ class MainWindow(QMainWindow):
         self._refresh_output_playback_queue()
 
     def _on_output_track_source_changed(self) -> None:
+        if self.current_output_set is not None:
+            path = self.converted_track.current_path()
+            song = self.library.activate_converted_output(self.current_output_set.job_dir, path)
+            if song is not None:
+                self._song_items_by_id[song.id] = song
+                if self.current_song is not None and self.current_song.id == song.id:
+                    self.current_song = song
+                if self.current_work_item is not None and self.current_work_item.id == song.id:
+                    self.current_work_item = song
+            self.vocal_results_panel.select_converted(path)
         self._refresh_output_playback_queue()
 
     def _sync_global_playback_state(self) -> None:
@@ -1529,6 +1571,7 @@ class MainWindow(QMainWindow):
         position = max(0, min(position_ms, duration)) if duration > 0 else 0
         for track in self.output_tracks:
             track.set_playhead_ratio(position / duration if duration > 0 else 0.0)
+        self.vocal_results_panel.set_playhead_ratio(position / duration if duration > 0 else 0.0)
 
     def _loaded_output_duration_ms(self) -> int:
         return self._duration_ms_for_paths(self._loaded_track_paths())
@@ -1688,21 +1731,6 @@ def _field_label(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("MutedText")
     return label
-
-
-def _build_vocal_result_row(title: str) -> tuple[QFrame, QLabel]:
-    row = QFrame()
-    row.setObjectName("InsetCard")
-    layout = QHBoxLayout(row)
-    layout.setContentsMargins(14, 12, 14, 12)
-    layout.setSpacing(12)
-    title_label = QLabel(title)
-    status_label = QLabel("Missing")
-    status_label.setObjectName("MutedText")
-    status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-    layout.addWidget(title_label, 1)
-    layout.addWidget(status_label, 0)
-    return row, status_label
 
 
 def _set_optional_label(label: QLabel, text: str) -> None:

@@ -71,6 +71,21 @@ class SongPackageStoreTests(unittest.TestCase):
             self.assertEqual(output_root, package.folder / "02_vocal" / "separations")
             self.assertTrue(output_root.is_dir())
 
+    def test_each_separation_run_receives_a_unique_output_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            package, _created = store.import_audio(source, title="Song")
+
+            first = store.create_vocal_separation_run(package.song_id)
+            second = store.create_vocal_separation_run(package.song_id)
+
+            self.assertNotEqual(first, second)
+            self.assertEqual(first.parent, package.folder / "02_vocal" / "separations")
+            self.assertEqual(second.parent, first.parent)
+
     def test_output_version_can_be_activated_without_reordering_history(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)
@@ -93,6 +108,26 @@ class SongPackageStoreTests(unittest.TestCase):
                 [item.job_dir for item in activated.outputs],
                 [item.job_dir for item in latest.outputs],
             )
+
+    def test_converted_selection_persists_and_detach_keeps_output_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            job_dir = project / "output"
+            job_dir.mkdir()
+            converted = job_dir / "vocals_rvc_test.wav"
+            converted.write_bytes(b"converted")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            package, _created = store.import_audio(source, title="Song")
+            store.attach_output(package.song_id, job_dir, "Version")
+
+            selected = store.activate_converted_output(package.song_id, job_dir, converted)
+            detached = store.detach_output(package.song_id, job_dir)
+
+            self.assertEqual(selected.active_output.active_converted_path, converted.resolve())
+            self.assertEqual(detached.outputs, ())
+            self.assertTrue(converted.is_file())
 
 
 if __name__ == "__main__":

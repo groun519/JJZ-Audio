@@ -25,6 +25,7 @@ class SongOutputReference:
     label: str
     job_dir: Path
     added_at: str
+    active_converted_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class SongPackage:
     outputs: tuple[SongOutputReference, ...]
     active_output_id: str
     created_at: str
+    detached_output_dirs: tuple[Path, ...] = ()
     removed: bool = False
 
     @property
@@ -149,9 +151,25 @@ class SongPackageStore:
         package = self.require(song_id)
         resolved_job = job_dir.expanduser().resolve()
         output_id = _output_id(resolved_job)
+        previous = next((item for item in package.outputs if item.output_id == output_id), None)
         outputs = tuple(item for item in package.outputs if item.output_id != output_id)
-        outputs = (SongOutputReference(output_id, label, resolved_job, _now()), *outputs)
-        updated = replace(package, outputs=outputs, active_output_id=output_id)
+        outputs = (
+            SongOutputReference(
+                output_id,
+                label,
+                resolved_job,
+                _now(),
+                previous.active_converted_path if previous is not None else None,
+            ),
+            *outputs,
+        )
+        detached = tuple(path for path in package.detached_output_dirs if path != resolved_job)
+        updated = replace(
+            package,
+            outputs=outputs,
+            active_output_id=output_id,
+            detached_output_dirs=detached,
+        )
         self._save(updated)
         return updated
 
@@ -167,6 +185,54 @@ class SongPackageStore:
         self._save(updated)
         return updated
 
+    def activate_converted_output(
+        self,
+        song_id: str,
+        job_dir: Path,
+        converted_path: Path | None,
+    ) -> SongPackage:
+        package = self.require(song_id)
+        resolved_job = job_dir.expanduser().resolve()
+        resolved_converted = converted_path.expanduser().resolve() if converted_path is not None else None
+        if resolved_converted is not None and (
+            not resolved_converted.is_file() or resolved_converted.parent != resolved_job
+        ):
+            raise ValueError("Converted vocal must be a file inside its output folder")
+
+        found = False
+        outputs: list[SongOutputReference] = []
+        for output in package.outputs:
+            if output.job_dir != resolved_job:
+                outputs.append(output)
+                continue
+            found = True
+            outputs.append(replace(output, active_converted_path=resolved_converted))
+        if not found:
+            raise KeyError(f"Song output does not exist: {resolved_job}")
+
+        updated = replace(package, outputs=tuple(outputs))
+        self._save(updated)
+        return updated
+
+    def detach_output(self, song_id: str, job_dir: Path) -> SongPackage:
+        package = self.require(song_id)
+        resolved_job = job_dir.expanduser().resolve()
+        outputs = tuple(item for item in package.outputs if item.job_dir != resolved_job)
+        if len(outputs) == len(package.outputs):
+            raise KeyError(f"Song output does not exist: {resolved_job}")
+        active_output_id = package.active_output_id
+        if not any(item.output_id == active_output_id for item in outputs):
+            active_output_id = outputs[0].output_id if outputs else ""
+        detached = (*package.detached_output_dirs, resolved_job)
+        updated = replace(
+            package,
+            outputs=outputs,
+            active_output_id=active_output_id,
+            detached_output_dirs=tuple(dict.fromkeys(detached)),
+        )
+        self._save(updated)
+        return updated
+
     def vocal_separation_root(self, song_id: str) -> Path:
         package = self.require(song_id)
         if package.source_path is None:
@@ -174,6 +240,17 @@ class SongPackageStore:
         output_root = package.folder / VOCAL_STAGE / "separations"
         output_root.mkdir(parents=True, exist_ok=True)
         return output_root
+
+    def create_vocal_separation_run(self, song_id: str) -> Path:
+        output_root = self.vocal_separation_root(song_id)
+        base = output_root / f"run-{datetime.now(UTC):%Y%m%d-%H%M%S}"
+        candidate = base
+        suffix = 2
+        while candidate.exists():
+            candidate = base.with_name(f"{base.name}-{suffix:03d}")
+            suffix += 1
+        candidate.mkdir(parents=True)
+        return candidate
 
     def rename(self, song_id: str, title: str) -> SongPackage:
         value = title.strip()
@@ -228,12 +305,18 @@ class SongPackageStore:
             "source": source,
             "vocal": {
                 "active_output_id": package.active_output_id,
+                "detached_outputs": [self._workspace_path(path) for path in package.detached_output_dirs],
                 "outputs": [
                     {
                         "id": item.output_id,
                         "label": item.label,
                         "job_dir": self._workspace_path(item.job_dir),
                         "added_at": item.added_at,
+                        "active_converted": (
+                            self._workspace_path(item.active_converted_path)
+                            if item.active_converted_path is not None
+                            else ""
+                        ),
                     }
                     for item in package.outputs
                 ],
@@ -260,12 +343,16 @@ class SongPackageStore:
             original_name = str(source_data.get("original_name", ""))
 
         vocal_data = data.get("vocal") if isinstance(data.get("vocal"), dict) else {}
+        detached_outputs = vocal_data.get("detached_outputs", [])
+        if not isinstance(detached_outputs, list):
+            detached_outputs = []
         outputs = tuple(
             SongOutputReference(
                 output_id=str(item["id"]),
                 label=str(item.get("label", "")),
                 job_dir=self._resolve_workspace_path(item.get("job_dir")),
                 added_at=str(item.get("added_at", "")),
+                active_converted_path=self._resolve_optional_workspace_path(item.get("active_converted")),
             )
             for item in vocal_data.get("outputs", [])
             if isinstance(item, dict)
@@ -282,6 +369,11 @@ class SongPackageStore:
             outputs=outputs,
             active_output_id=str(vocal_data.get("active_output_id", "")),
             created_at=str(data["created_at"]),
+            detached_output_dirs=tuple(
+                self._resolve_workspace_path(value)
+                for value in detached_outputs
+                if isinstance(value, str) and value
+            ),
             removed=bool(data.get("removed", False)),
         )
         return self._migrate_managed_source_name(package)
@@ -314,6 +406,11 @@ class SongPackageStore:
                 raise ValueError("Output path leaves the project workspace")
             return resolved
         return Path(value).expanduser().resolve()
+
+    def _resolve_optional_workspace_path(self, value: object) -> Path | None:
+        if not isinstance(value, str) or not value:
+            return None
+        return self._resolve_workspace_path(value)
 
     @staticmethod
     def _create_stage_directories(folder: Path) -> None:
