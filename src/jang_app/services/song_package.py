@@ -155,6 +155,26 @@ class SongPackageStore:
         self._save(updated)
         return updated
 
+    def activate_output(self, song_id: str, job_dir: Path) -> SongPackage:
+        package = self.require(song_id)
+        resolved_job = job_dir.expanduser().resolve()
+        output = next((item for item in package.outputs if item.job_dir == resolved_job), None)
+        if output is None:
+            raise KeyError(f"Song output does not exist: {resolved_job}")
+        if package.active_output_id == output.output_id:
+            return package
+        updated = replace(package, active_output_id=output.output_id)
+        self._save(updated)
+        return updated
+
+    def vocal_separation_root(self, song_id: str) -> Path:
+        package = self.require(song_id)
+        if package.source_path is None:
+            raise ValueError("A source song is required for separation")
+        output_root = package.folder / VOCAL_STAGE / "separations"
+        output_root.mkdir(parents=True, exist_ok=True)
+        return output_root
+
     def rename(self, song_id: str, title: str) -> SongPackage:
         value = title.strip()
         if not value:

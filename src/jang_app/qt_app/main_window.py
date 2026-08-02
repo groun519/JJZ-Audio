@@ -35,6 +35,8 @@ from jang_app.qt_app.log_drawer import LogDrawer
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.player_bar import GlobalPlayerBar
 from jang_app.qt_app.processing_queue_panel import ProcessingQueuePanel
+from jang_app.qt_app.segmented_stack import SegmentedStack
+from jang_app.qt_app.selected_song_card import SelectedSongCard
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
 from jang_app.qt_app.toast_stack import ToastStack
 from jang_app.qt_app.work_context_bar import WorkContextBar
@@ -69,6 +71,12 @@ from jang_app.services.song_library import SongItem, SongLibrary
 from jang_app.services.youtube_download import YouTubeDownloadResult, download_youtube_audio
 
 
+PAGE_LIBRARY = 0
+PAGE_VOCAL = 1
+PAGE_MODELS = 2
+PAGE_STUDIO = 3
+
+
 class MainWindow(QMainWindow):
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
@@ -85,7 +93,6 @@ class MainWindow(QMainWindow):
         self.current_playback_queue: PlaybackQueue | None = None
         self._playback_position_ms = 0
         self.selected_video_path: Path | None = None
-        self._is_loading_studio_song_combo = False
         self._is_loading_rvc_settings = False
 
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
@@ -142,9 +149,9 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._build_navigation_bar(), 0)
 
         self.page_stack.addWidget(self._build_library_page())
-        self.page_stack.addWidget(self._build_studio_page())
-        self.page_stack.addWidget(self._build_video_page())
+        self.page_stack.addWidget(self._build_vocal_page())
         self.page_stack.addWidget(self._build_models_page())
+        self.page_stack.addWidget(self._build_studio_page())
 
         content_widget = QWidget()
         content_widget.setObjectName("AppContent")
@@ -202,22 +209,22 @@ class MainWindow(QMainWindow):
         self.library_nav_button.setObjectName("NavButton")
         self.library_nav_button.setCheckable(True)
         self.library_nav_button.setChecked(True)
-        self.studio_nav_button = FeedbackButton("Studio")
-        self.studio_nav_button.setObjectName("NavButton")
-        self.studio_nav_button.setCheckable(True)
-        self.video_nav_button = FeedbackButton("Video")
-        self.video_nav_button.setObjectName("NavButton")
-        self.video_nav_button.setCheckable(True)
+        self.vocal_nav_button = FeedbackButton("Vocal")
+        self.vocal_nav_button.setObjectName("NavButton")
+        self.vocal_nav_button.setCheckable(True)
         self.models_nav_button = FeedbackButton("Models")
         self.models_nav_button.setObjectName("NavButton")
         self.models_nav_button.setCheckable(True)
+        self.studio_nav_button = FeedbackButton("Studio")
+        self.studio_nav_button.setObjectName("NavButton")
+        self.studio_nav_button.setCheckable(True)
 
         self.page_nav_group = QButtonGroup(self)
         self.page_nav_group.setExclusive(True)
-        self.page_nav_group.addButton(self.library_nav_button, 0)
-        self.page_nav_group.addButton(self.studio_nav_button, 1)
-        self.page_nav_group.addButton(self.video_nav_button, 2)
-        self.page_nav_group.addButton(self.models_nav_button, 3)
+        self.page_nav_group.addButton(self.library_nav_button, PAGE_LIBRARY)
+        self.page_nav_group.addButton(self.vocal_nav_button, PAGE_VOCAL)
+        self.page_nav_group.addButton(self.models_nav_button, PAGE_MODELS)
+        self.page_nav_group.addButton(self.studio_nav_button, PAGE_STUDIO)
         self.page_nav_group.idClicked.connect(self._navigate_to_page)
 
         self.theme_button = ThemeToggleButton()
@@ -240,7 +247,12 @@ class MainWindow(QMainWindow):
         self.title_bar.add_action_widget(self.theme_button)
 
         nav_layout.addStretch(1)
-        for button in (self.library_nav_button, self.studio_nav_button, self.video_nav_button, self.models_nav_button):
+        for button in (
+            self.library_nav_button,
+            self.vocal_nav_button,
+            self.models_nav_button,
+            self.studio_nav_button,
+        ):
             nav_layout.addWidget(button, 0)
         nav_layout.addStretch(1)
         return nav_bar
@@ -308,6 +320,37 @@ class MainWindow(QMainWindow):
         layout.addWidget(list_panel, 3)
         return page
 
+    def _build_vocal_page(self) -> QWidget:
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        left_panel = QFrame()
+        left_panel.setObjectName("Panel")
+        left_panel.setMinimumWidth(380)
+        left_panel.setMaximumWidth(460)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(20, 20, 20, 20)
+        left_layout.setSpacing(16)
+
+        self.vocal_song_card = SelectedSongCard()
+        self.vocal_song_combo = self.vocal_song_card.combo
+        self.vocal_song_card.song_changed.connect(self._on_workspace_song_changed)
+        self.vocal_steps = SegmentedStack(
+            (
+                ("Separate", self._build_separate_step_page()),
+                ("Convert", self._build_convert_step_page()),
+            )
+        )
+
+        left_layout.addWidget(self.vocal_song_card, 0)
+        left_layout.addWidget(self.vocal_steps, 1)
+
+        layout.addWidget(left_panel, 0)
+        layout.addWidget(self._build_vocal_results_panel(), 1)
+        return page
+
     def _build_studio_page(self) -> QWidget:
         page = QWidget()
         layout = QHBoxLayout(page)
@@ -322,32 +365,30 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(16)
 
-        self.studio_step_stack = QStackedWidget()
-        self.studio_step_stack.addWidget(self._build_separate_step_page())
-        self.studio_step_stack.addWidget(self._build_convert_step_page())
-        self.studio_step_stack.addWidget(self._build_export_step_page())
+        self.studio_song_card = SelectedSongCard()
+        self.studio_song_combo = self.studio_song_card.combo
+        self.studio_song_card.song_changed.connect(self._on_workspace_song_changed)
+        self.song_selector_cards = (self.vocal_song_card, self.studio_song_card)
+        self.studio_steps = SegmentedStack(
+            (
+                ("Mix", self._build_mix_export_panel()),
+                ("Video", self._build_video_step_page()),
+            )
+        )
 
-        left_layout.addWidget(self._build_selected_song_panel(), 0)
-        left_layout.addLayout(self._build_studio_step_nav())
-        left_layout.addWidget(self.studio_step_stack, 1)
+        left_layout.addWidget(self.studio_song_card, 0)
+        left_layout.addWidget(self.studio_steps, 1)
 
         layout.addWidget(left_panel, 0)
         layout.addWidget(self._build_output_panel(), 1)
         return page
 
-    def _build_video_page(self) -> QWidget:
-        page = QWidget()
-        layout = QHBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
-
-        control_panel = QFrame()
-        control_panel.setObjectName("Panel")
-        control_panel.setMinimumWidth(380)
-        control_panel.setMaximumWidth(460)
-        control_layout = QVBoxLayout(control_panel)
-        control_layout.setContentsMargins(20, 20, 20, 20)
-        control_layout.setSpacing(16)
+    def _build_video_step_page(self) -> QWidget:
+        page = QFrame()
+        page.setObjectName("Card")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(16)
 
         title = QLabel("Video")
         title.setObjectName("SectionTitle")
@@ -359,28 +400,14 @@ class MainWindow(QMainWindow):
         self.selected_video_label.setWordWrap(True)
         self.selected_video_label.hide()
 
-        control_layout.addWidget(title)
-        control_layout.addWidget(select_button)
-        control_layout.addWidget(self.selected_video_label)
-        control_layout.addStretch(1)
-
-        editor_panel = QFrame()
-        editor_panel.setObjectName("Panel")
-        editor_layout = QVBoxLayout(editor_panel)
-        editor_layout.setContentsMargins(20, 20, 20, 20)
-        editor_layout.setSpacing(16)
-
-        editor_title = QLabel("Editor")
-        editor_title.setObjectName("SectionTitle")
         preview_surface = QFrame()
         preview_surface.setObjectName("VideoPreviewSurface")
-        preview_surface.setMinimumHeight(360)
+        preview_surface.setMinimumHeight(240)
 
-        editor_layout.addWidget(editor_title)
-        editor_layout.addWidget(preview_surface, 1)
-
-        layout.addWidget(control_panel, 0)
-        layout.addWidget(editor_panel, 1)
+        layout.addWidget(title)
+        layout.addWidget(select_button)
+        layout.addWidget(self.selected_video_label)
+        layout.addWidget(preview_surface, 1)
         return page
 
     def _build_models_page(self) -> QWidget:
@@ -389,40 +416,6 @@ class MainWindow(QMainWindow):
         self.model_workspace_page.open_location_requested.connect(self._open_model_location)
         self.model_workspace_page.preview_started.connect(self._on_model_preview_started)
         return self.model_workspace_page
-
-    def _build_selected_song_panel(self) -> QWidget:
-        source_card = QFrame()
-        source_card.setObjectName("Card")
-        source_layout = QVBoxLayout(source_card)
-        source_layout.setContentsMargins(14, 14, 14, 14)
-        source_layout.setSpacing(0)
-        self.studio_song_combo = ScrollSafeComboBox()
-        self.studio_song_combo.currentIndexChanged.connect(self._on_studio_song_changed)
-        source_layout.addWidget(self.studio_song_combo)
-        return source_card
-
-    def _build_studio_step_nav(self) -> QHBoxLayout:
-        nav_layout = QHBoxLayout()
-        nav_layout.setSpacing(0)
-
-        segment = QFrame()
-        segment.setObjectName("SegmentedControl")
-        segment_layout = QHBoxLayout(segment)
-        segment_layout.setContentsMargins(4, 4, 4, 4)
-        segment_layout.setSpacing(4)
-
-        self.studio_step_group = QButtonGroup(self)
-        self.studio_step_group.setExclusive(True)
-        for index, label in enumerate(("Separate", "Convert", "Export")):
-            button = FeedbackButton(label)
-            button.setObjectName("SegmentButton")
-            button.setCheckable(True)
-            button.setChecked(index == 0)
-            self.studio_step_group.addButton(button, index)
-            segment_layout.addWidget(button, 1)
-        self.studio_step_group.idClicked.connect(self._navigate_to_studio_step)
-        nav_layout.addWidget(segment, 1)
-        return nav_layout
 
     def _build_separate_step_page(self) -> QWidget:
         page = QFrame()
@@ -509,8 +502,37 @@ class MainWindow(QMainWindow):
         rvc_layout.addStretch(1)
         return rvc_panel
 
-    def _build_export_step_page(self) -> QWidget:
-        return self._build_mix_export_panel()
+    def _build_vocal_results_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+
+        title = QLabel("Vocal Results")
+        title.setObjectName("SectionTitle")
+        self.vocal_result_name_label = QLabel("No output.")
+        self.vocal_result_name_label.setObjectName("MutedText")
+        self.vocal_result_name_label.setWordWrap(True)
+
+        vocal_row, self.vocal_result_vocal_status = _build_vocal_result_row("Original Vocal")
+        instrumental_row, self.vocal_result_instrumental_status = _build_vocal_result_row("Instrumental")
+        converted_row, self.vocal_result_converted_status = _build_vocal_result_row("Converted Vocal")
+
+        self.open_studio_button = FeedbackButton("Open Studio")
+        self.open_studio_button.setObjectName("PrimaryButton")
+        self.open_studio_button.setEnabled(False)
+        self.open_studio_button.clicked.connect(self._open_current_song_in_studio)
+
+        layout.addWidget(title)
+        layout.addWidget(self.vocal_result_name_label)
+        layout.addSpacing(4)
+        layout.addWidget(vocal_row)
+        layout.addWidget(instrumental_row)
+        layout.addWidget(converted_row)
+        layout.addStretch(1)
+        layout.addWidget(self.open_studio_button)
+        return panel
 
     def _build_mix_export_panel(self) -> QWidget:
         mix_panel = QFrame()
@@ -620,8 +642,8 @@ class MainWindow(QMainWindow):
         set_translated_tooltip(self.language_button, "Language")
         for language, action in self.language_actions.items():
             action.setChecked(language == self.settings.language)
-        if hasattr(self, "studio_song_combo") and self.studio_song_combo.count() > 0:
-            self.studio_song_combo.setItemText(0, tr("Select"))
+        for card in getattr(self, "song_selector_cards", ()):
+            card.apply_language()
         self.player_bar.apply_language()
         self.processing_queue_panel.apply_language()
         self.toast_stack.apply_language()
@@ -698,20 +720,26 @@ class MainWindow(QMainWindow):
         self._apply_language()
 
     def _navigate_to_page(self, index: int) -> None:
-        if index != 3:
+        if index != PAGE_MODELS:
             self.model_workspace_page.stop_preview()
         self.page_stack.setCurrentIndex(index)
-        self.library_nav_button.setChecked(index == 0)
-        self.studio_nav_button.setChecked(index == 1)
-        self.video_nav_button.setChecked(index == 2)
-        self.models_nav_button.setChecked(index == 3)
+        self.library_nav_button.setChecked(index == PAGE_LIBRARY)
+        self.vocal_nav_button.setChecked(index == PAGE_VOCAL)
+        self.models_nav_button.setChecked(index == PAGE_MODELS)
+        self.studio_nav_button.setChecked(index == PAGE_STUDIO)
         self._sync_playback_queue_for_page(index)
 
+    def _navigate_to_vocal_step(self, index: int) -> None:
+        self.vocal_steps.set_current_index(index)
+
     def _navigate_to_studio_step(self, index: int) -> None:
-        self.studio_step_stack.setCurrentIndex(index)
-        button = self.studio_step_group.button(index)
-        if button is not None:
-            button.setChecked(True)
+        self.studio_steps.set_current_index(index)
+
+    def _open_current_song_in_studio(self, *_args) -> None:
+        if self.current_output_set is None:
+            return
+        self._navigate_to_page(PAGE_STUDIO)
+        self._navigate_to_studio_step(0)
 
     def _choose_audio_files(self, *_args) -> None:
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_AUDIO_EXTENSIONS))
@@ -791,9 +819,13 @@ class MainWindow(QMainWindow):
 
     def _refresh_song_list(self) -> None:
         selected_id = self._current_song_id()
+        studio_song_id = self.current_song.id if self.current_song is not None else ""
+        work_item_id = self.current_work_item.id if self.current_work_item is not None else ""
         self.song_list.blockSignals(True)
         self.song_list.clear()
         self._song_items_by_id = {item.id: item for item in self.library.items()}
+        self.current_song = self._song_items_by_id.get(studio_song_id)
+        self.current_work_item = self._song_items_by_id.get(work_item_id)
         for item in self._song_items_by_id.values():
             metadata = build_song_display_metadata(item, self.settings.output_root)
             row = SongListRow(item.id, item.title, metadata)
@@ -814,7 +846,7 @@ class MainWindow(QMainWindow):
         else:
             self._on_song_selection_changed()
         self._sync_song_row_selection()
-        self._refresh_studio_song_combo()
+        self._refresh_song_selectors()
 
     def _select_song(self, song_id: str) -> bool:
         for index in range(self.song_list.count()):
@@ -829,7 +861,7 @@ class MainWindow(QMainWindow):
         self._sync_song_row_selection()
         if self.player.is_playing() and self._current_playback_context() != "library":
             return
-        if self.page_stack.currentIndex() == 0 or self._current_playback_context() == "library":
+        if self.page_stack.currentIndex() == PAGE_LIBRARY or self._current_playback_context() == "library":
             self._load_library_playback_queue(song, auto_play=self._is_playing_context("library"))
 
     def _sync_song_row_selection(self) -> None:
@@ -864,7 +896,7 @@ class MainWindow(QMainWindow):
         self._select_song(song_id)
         if self.current_song is not None and self.current_song.id == song_id:
             self.current_song = self._song_items_by_id.get(song_id)
-            self._refresh_studio_song_combo(preferred_song_id=song_id)
+            self._refresh_song_selectors(preferred_song_id=song_id)
         if self.current_work_item is not None and self.current_work_item.id == song_id:
             self.current_work_item = self._song_items_by_id.get(song_id)
         self._sync_work_context_bar()
@@ -883,30 +915,24 @@ class MainWindow(QMainWindow):
             return
 
         if was_current_song:
-            self._set_current_studio_song(None)
+            self._set_current_song(None)
         elif was_work_item:
             self.current_work_item = None
             self._sync_work_context_bar()
         _set_optional_label(self.library_status_label, "Removed")
         self._refresh_song_list()
 
-    def _refresh_studio_song_combo(self, preferred_song_id: str | None = None) -> None:
-        if not hasattr(self, "studio_song_combo"):
+    def _refresh_song_selectors(self, preferred_song_id: str | None = None) -> None:
+        if not hasattr(self, "vocal_song_card") or not hasattr(self, "studio_song_card"):
             return
 
         selected_id = preferred_song_id or (self.current_song.id if self.current_song is not None else "")
         source_songs = self._source_song_items()
-        self._is_loading_studio_song_combo = True
-        self.studio_song_combo.blockSignals(True)
-        self.studio_song_combo.clear()
-        self.studio_song_combo.addItem(tr("Select"), "")
-        for song in source_songs:
-            self.studio_song_combo.addItem(song.title, song.id)
-        index = self.studio_song_combo.findData(selected_id)
-        self.studio_song_combo.setCurrentIndex(index if index >= 0 else 0)
-        self.studio_song_combo.blockSignals(False)
-        self._is_loading_studio_song_combo = False
-        if index < 0:
+        song_options = tuple((song.id, song.title) for song in source_songs)
+        self.song_selector_cards = (self.vocal_song_card, self.studio_song_card)
+        for card in self.song_selector_cards:
+            card.set_songs(song_options, selected_id)
+        if selected_id and selected_id not in self._song_items_by_id:
             self.current_song = None
             if self.current_work_item is not None and self.current_work_item.kind == "source":
                 self.current_work_item = None
@@ -918,29 +944,33 @@ class MainWindow(QMainWindow):
             key=lambda item: item.title.casefold(),
         )
 
-    def _on_studio_song_changed(self, *_args) -> None:
-        if self._is_loading_studio_song_combo:
-            return
-        song_id = self.studio_song_combo.currentData()
+    def _on_workspace_song_changed(self, song_id: str) -> None:
         song = self._song_items_by_id.get(song_id) if song_id else None
-        self._set_current_studio_song(song)
+        self._set_current_song(song)
+        for card in self.song_selector_cards:
+            card.select_song(song_id)
 
-    def _set_current_studio_song(self, song: SongItem | None) -> None:
+    def _set_current_song(self, song: SongItem | None) -> None:
         self.current_song = song
         self.current_work_item = song
-        self._sync_work_context_bar()
         self.separation_action.set_action_enabled(song is not None)
         self.separation_action.set_progress(0)
         self.separation_action.set_status("")
+        if song is None or song.output_job_dir is None:
+            self._apply_output_set(None)
+            return
+        sound_set = load_output_sound_set(song.output_job_dir, self.settings.output_root)
+        self._select_output_set(song.output_job_dir)
+        self._apply_output_set(sound_set)
 
     def _sync_work_context_bar(self) -> None:
         self.work_context_bar.set_display(
             build_work_context_display(self.current_work_item, self.current_output_set, self.settings.output_root)
         )
 
-    def _select_studio_song(self, song: SongItem) -> None:
-        self._refresh_studio_song_combo(preferred_song_id=song.id)
-        self._set_current_studio_song(song)
+    def _select_work_song(self, song: SongItem) -> None:
+        self._refresh_song_selectors(preferred_song_id=song.id)
+        self._set_current_song(song)
 
     def _use_selected_song(self, *_args) -> None:
         self._use_library_item(self._current_song_id())
@@ -956,10 +986,10 @@ class MainWindow(QMainWindow):
             self._use_output_song(song)
             return
 
-        self._select_studio_song(song)
+        self._select_work_song(song)
         _set_optional_label(self.library_status_label, "Loaded")
-        self._navigate_to_page(1)
-        self._navigate_to_studio_step(0)
+        self._navigate_to_page(PAGE_VOCAL)
+        self._navigate_to_vocal_step(0)
 
     def _library_playback_queue(self, song: SongItem) -> PlaybackQueue | None:
         try:
@@ -1011,23 +1041,24 @@ class MainWindow(QMainWindow):
         self.separation_action.set_progress(3)
         self.separation_action.set_status("Separating")
         song = self.current_song
+        output_root = self.library.vocal_separation_root(song.id)
         worker = TaskWorker(
             lambda progress: separate_audio(
                 song.path,
-                output_root=self.settings.output_root,
+                output_root=output_root,
                 progress_callback=progress,
             )
         )
         self._run_worker(
             worker,
-            self._on_separation_succeeded,
+            lambda result: self._on_separation_succeeded(song.id, result),
             self._on_separation_failed,
             self.separation_action,
             task_title="Separate Audio",
             task_detail=song.title,
         )
 
-    def _on_separation_succeeded(self, result: object) -> None:
+    def _on_separation_succeeded(self, song_id: str, result: object) -> None:
         separation_result = result if isinstance(result, SeparationResult) else None
         if separation_result is None:
             self.separation_action.set_status("Failed")
@@ -1035,6 +1066,11 @@ class MainWindow(QMainWindow):
 
         self.separation_action.set_progress(100)
         self.separation_action.set_status("Done")
+        self.library.register_output(
+            song_id,
+            separation_result.job_dir,
+            separation_result.job_dir.parent.name,
+        )
         self._refresh_output_sets(preferred_job_dir=separation_result.job_dir)
 
     def _on_separation_failed(self, error: str) -> None:
@@ -1042,8 +1078,9 @@ class MainWindow(QMainWindow):
         self.separation_action.status_label.setToolTip(f"{LOG_FILE}\n{_last_error_line(error)}")
 
     def _refresh_output_sets(self, preferred_job_dir: Path | None = None) -> None:
-        sound_sets = scan_output_sound_sets(self.settings.output_root)
-        self.library.add_output_sets(sound_sets)
+        legacy_sound_sets = scan_output_sound_sets(self.settings.output_root)
+        self.library.add_output_sets(legacy_sound_sets)
+        sound_sets = self.library.output_sound_sets()
         if hasattr(self, "song_list"):
             self._refresh_song_list()
 
@@ -1051,9 +1088,9 @@ class MainWindow(QMainWindow):
         self.output_set_combo.clear()
         for sound_set in sound_sets:
             self.output_set_combo.addItem(sound_set.label, str(sound_set.job_dir))
-        self.output_set_combo.blockSignals(False)
 
         if not sound_sets:
+            self.output_set_combo.blockSignals(False)
             self._apply_output_set(None)
             return
 
@@ -1065,6 +1102,7 @@ class MainWindow(QMainWindow):
                     preferred_index = index
                     break
         self.output_set_combo.setCurrentIndex(preferred_index)
+        self.output_set_combo.blockSignals(False)
         self._apply_output_set(sound_sets[preferred_index])
 
     def _use_output_song(self, song: SongItem) -> None:
@@ -1079,22 +1117,25 @@ class MainWindow(QMainWindow):
 
         self.current_song = None
         self.current_work_item = song
-        self.studio_song_combo.setCurrentIndex(0)
+        for card in self.song_selector_cards:
+            card.select_song("")
         self.separation_action.set_action_enabled(False)
         self.separation_action.set_progress(0)
         self.separation_action.set_status("")
         self._select_output_set(sound_set.job_dir)
         self._apply_output_set(sound_set)
         _set_optional_label(self.library_status_label, "Loaded")
-        self._navigate_to_page(1)
-        self._navigate_to_studio_step(2)
+        self._navigate_to_page(PAGE_STUDIO)
+        self._navigate_to_studio_step(0)
 
     def _select_output_set(self, job_dir: Path) -> None:
         resolved = job_dir.expanduser().resolve()
         for index in range(self.output_set_combo.count()):
             data = self.output_set_combo.itemData(index)
             if data and Path(data).expanduser().resolve() == resolved:
+                was_blocked = self.output_set_combo.blockSignals(True)
                 self.output_set_combo.setCurrentIndex(index)
+                self.output_set_combo.blockSignals(was_blocked)
                 return
 
     def _on_output_set_changed(self, *_args) -> None:
@@ -1102,11 +1143,20 @@ class MainWindow(QMainWindow):
         if not data:
             self._apply_output_set(None)
             return
-        self._apply_output_set(load_output_sound_set(Path(data), self.settings.output_root))
+        job_dir = Path(data)
+        song = self.library.activate_output(job_dir)
+        if song is not None:
+            self._song_items_by_id[song.id] = song
+            self.current_song = song if song.kind == "source" else None
+            self.current_work_item = song
+            for card in self.song_selector_cards:
+                card.select_song(song.id if song.kind == "source" else "")
+        self._apply_output_set(load_output_sound_set(job_dir, self.settings.output_root))
 
     def _apply_output_set(self, sound_set: OutputSoundSet | None) -> None:
         self.current_output_set = sound_set
         self._sync_current_work_output_item(sound_set)
+        self._update_vocal_results(sound_set)
         if sound_set is None:
             self.vocal_track.set_single_path(None)
             self.instrumental_track.set_single_path(None)
@@ -1129,6 +1179,27 @@ class MainWindow(QMainWindow):
         _set_optional_label(self.output_status_label, "")
         self._refresh_output_playback_queue()
         self._sync_work_context_bar()
+
+    def _update_vocal_results(self, sound_set: OutputSoundSet | None) -> None:
+        if sound_set is None:
+            set_translated_text(self.vocal_result_name_label, "No output.")
+            set_translated_text(self.vocal_result_vocal_status, "Missing")
+            set_translated_text(self.vocal_result_instrumental_status, "Missing")
+            self.vocal_result_converted_status.setText("0")
+            self.open_studio_button.setEnabled(False)
+            return
+
+        self.vocal_result_name_label.setText(sound_set.label)
+        set_translated_text(
+            self.vocal_result_vocal_status,
+            "Ready" if sound_set.vocals_path.is_file() else "Missing",
+        )
+        set_translated_text(
+            self.vocal_result_instrumental_status,
+            "Ready" if sound_set.instrumental_path.is_file() else "Missing",
+        )
+        self.vocal_result_converted_status.setText(str(len(sound_set.converted_vocal_paths)))
+        self.open_studio_button.setEnabled(True)
 
     def _sync_current_work_output_item(self, sound_set: OutputSoundSet | None) -> None:
         if self.current_song is not None:
@@ -1393,7 +1464,7 @@ class MainWindow(QMainWindow):
                     self._play_current_queue(self._playback_position_ms)
             return
 
-        if self.page_stack.currentIndex() == 1 and not self.player.is_playing():
+        if self.page_stack.currentIndex() in {PAGE_VOCAL, PAGE_STUDIO} and not self.player.is_playing():
             self._set_playback_queue(queue)
             return
 
@@ -1402,9 +1473,9 @@ class MainWindow(QMainWindow):
     def _sync_playback_queue_for_page(self, index: int, *, force: bool = False) -> None:
         if self.player.is_playing() and not force:
             return
-        if index == 0:
+        if index == PAGE_LIBRARY:
             self._load_library_playback_queue(self._selected_song())
-        elif index == 1:
+        elif index in {PAGE_VOCAL, PAGE_STUDIO}:
             self._refresh_output_playback_queue()
 
     def _refresh_player_bar(self, *, is_playing: bool) -> None:
@@ -1619,6 +1690,21 @@ def _field_label(text: str) -> QLabel:
     return label
 
 
+def _build_vocal_result_row(title: str) -> tuple[QFrame, QLabel]:
+    row = QFrame()
+    row.setObjectName("InsetCard")
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(14, 12, 14, 12)
+    layout.setSpacing(12)
+    title_label = QLabel(title)
+    status_label = QLabel("Missing")
+    status_label.setObjectName("MutedText")
+    status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    layout.addWidget(title_label, 1)
+    layout.addWidget(status_label, 0)
+    return row, status_label
+
+
 def _set_optional_label(label: QLabel, text: str) -> None:
     value = text.strip()
     set_translated_text(label, value)
@@ -1651,7 +1737,7 @@ def _track_export_label(track: TrackRow) -> str:
 
 def _playback_context_label(context: str) -> str:
     if context == "output":
-        return "Studio"
+        return "Output"
     if context == "library":
         return "Library"
     return ""

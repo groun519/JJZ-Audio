@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jang_app.config import DOWNLOAD_OUTPUT_DIR, SONG_LIBRARY_FILE, SUPPORTED_AUDIO_EXTENSIONS
-from jang_app.services.output_catalog import OutputSoundSet
+from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set
 from jang_app.services.song_package import SongPackage, SongPackageStore
 
 
@@ -116,6 +116,46 @@ class SongLibrary:
 
     def items(self) -> list[SongItem]:
         return [_item_from_package(package) for package in self._store.packages()]
+
+    def vocal_separation_root(self, item_id: str) -> Path:
+        return self._store.vocal_separation_root(item_id)
+
+    def register_output(self, item_id: str, job_dir: Path, label: str) -> SongItem:
+        return _item_from_package(self._store.attach_output(item_id, job_dir, label))
+
+    def activate_output(self, job_dir: Path) -> SongItem | None:
+        package = self._store.find_by_output_job_dir(job_dir)
+        if package is None:
+            return None
+        return _item_from_package(self._store.activate_output(package.song_id, job_dir))
+
+    def output_sound_sets(self) -> list[OutputSoundSet]:
+        sound_sets: list[tuple[str, OutputSoundSet]] = []
+        seen_job_dirs: set[Path] = set()
+        for package in self._store.packages():
+            for output in package.outputs:
+                job_dir = output.job_dir.expanduser().resolve()
+                if job_dir in seen_job_dirs:
+                    continue
+                sound_set = load_output_sound_set(job_dir, package.folder / "02_vocal")
+                if sound_set is None:
+                    continue
+                seen_job_dirs.add(job_dir)
+                display_label = f"{package.title} / {output.label or sound_set.label}"
+                sound_sets.append(
+                    (
+                        output.added_at,
+                        OutputSoundSet(
+                            label=display_label,
+                            job_dir=sound_set.job_dir,
+                            vocals_path=sound_set.vocals_path,
+                            instrumental_path=sound_set.instrumental_path,
+                            converted_vocal_paths=sound_set.converted_vocal_paths,
+                        ),
+                    )
+                )
+        sound_sets.sort(key=lambda item: item[0], reverse=True)
+        return [sound_set for _added_at, sound_set in sound_sets]
 
     def rename_item(self, item_id: str, title: str) -> bool:
         try:

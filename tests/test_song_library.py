@@ -57,6 +57,51 @@ class SongLibraryTests(unittest.TestCase):
             self.assertEqual(library.items(), [])
             self.assertTrue(store.require(added.id, include_removed=True).removed)
 
+    def test_managed_vocal_output_is_registered_and_loaded_from_song_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"source")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            song = library.add_paths([source])[0]
+            output_root = library.vocal_separation_root(song.id)
+            job_dir = output_root / "htdemucs" / source.stem
+            job_dir.mkdir(parents=True)
+            (job_dir / "vocals.wav").write_bytes(b"vocals")
+            (job_dir / "no_vocals.wav").write_bytes(b"instrumental")
+            (job_dir / "vocals_rvc_voice_pitch_p0_noindex_rmvpe.wav").write_bytes(b"converted")
+
+            updated = library.register_output(song.id, job_dir, "htdemucs")
+            sound_sets = library.output_sound_sets()
+
+            self.assertEqual(updated.output_job_dir, job_dir.resolve())
+            self.assertEqual(len(sound_sets), 1)
+            self.assertEqual(sound_sets[0].label, "source / htdemucs")
+            self.assertEqual(sound_sets[0].job_dir, job_dir.resolve())
+            self.assertEqual(len(sound_sets[0].converted_vocal_paths), 1)
+
+    def test_selecting_output_version_updates_song_active_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"source")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            song = library.add_paths([source])[0]
+            first = project / "first"
+            second = project / "second"
+            first.mkdir()
+            second.mkdir()
+            library.register_output(song.id, first, "First")
+            library.register_output(song.id, second, "Second")
+
+            activated = library.activate_output(first)
+
+            self.assertIsNotNone(activated)
+            self.assertEqual(activated.output_job_dir, first.resolve())
+            self.assertEqual(library.items()[0].output_job_dir, first.resolve())
+
 
 def _sound_set(project: Path, name: str) -> OutputSoundSet:
     job_dir = project / "output" / "separations" / "htdemucs" / name

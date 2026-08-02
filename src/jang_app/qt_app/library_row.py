@@ -58,7 +58,7 @@ class SongListRow(QWidget):
         self.waveform.set_path(metadata.waveform_path)
 
         self.use_button = SvgIconButton("arrow_right", size=30)
-        set_translated_tooltip(self.use_button, "Load in Studio")
+        set_translated_tooltip(self.use_button, "Open in Vocal")
         self.use_button.clicked.connect(lambda: self.use_requested.emit(self._item_id))
         self.rename_button = SvgIconButton("edit", size=30)
         set_translated_tooltip(self.rename_button, "Rename")

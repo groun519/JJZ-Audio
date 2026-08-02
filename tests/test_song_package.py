@@ -58,6 +58,42 @@ class SongPackageStoreTests(unittest.TestCase):
                 "@project/output/separations/song",
             )
 
+    def test_vocal_separation_root_is_owned_by_source_song(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            package, _created = store.import_audio(source, title="Song")
+
+            output_root = store.vocal_separation_root(package.song_id)
+
+            self.assertEqual(output_root, package.folder / "02_vocal" / "separations")
+            self.assertTrue(output_root.is_dir())
+
+    def test_output_version_can_be_activated_without_reordering_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            package, _created = store.import_audio(source, title="Song")
+            first = project / "first"
+            second = project / "second"
+            first.mkdir()
+            second.mkdir()
+            store.attach_output(package.song_id, first, "First")
+            latest = store.attach_output(package.song_id, second, "Second")
+
+            activated = store.activate_output(package.song_id, first)
+
+            self.assertEqual(latest.active_output.job_dir, second.resolve())
+            self.assertEqual(activated.active_output.job_dir, first.resolve())
+            self.assertEqual(
+                [item.job_dir for item in activated.outputs],
+                [item.job_dir for item in latest.outputs],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

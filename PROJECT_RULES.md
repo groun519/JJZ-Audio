@@ -12,6 +12,15 @@ This document records the working rules for this project.
 - All edits for this product must happen inside this repository.
 - Do not commit unless the user explicitly asks for a commit.
 
+## Commit Format
+
+- Use `YY/MM/DD Workstream Sequence - Summary` for commit titles.
+- Use the Asia/Seoul date. Use `YY/MM/DD~DD` only when one commit intentionally covers work across multiple dates.
+- Keep a stable workstream name and increment its sequence for related work, starting at `01`.
+- Write the commit body with a `DONE` section followed by verified completed items.
+- Write a `TODO` section with only the agreed next work that remains relevant to this project.
+- Keep the title concise and use Korean for detailed `DONE` and `TODO` items.
+
 ## Scope Control
 
 - Do not add future features before they are implemented end-to-end.
