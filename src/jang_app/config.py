@@ -23,6 +23,7 @@ LOG_FILE = LOG_DIR / "jang.log"
 SETTINGS_DIR = PROJECT_ROOT / "settings"
 SETTINGS_FILE = SETTINGS_DIR / "app_settings.json"
 SONG_LIBRARY_FILE = SETTINGS_DIR / "song_library.json"
+WORK_SONG_FILE = SETTINGS_DIR / "work_song.json"
 SEPARATION_OUTPUT_DIR = OUTPUT_DIR / "separations"
 
 SUPPORTED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg"}

@@ -79,6 +79,7 @@ from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.settings import AppSettings, RvcSettings, save_app_settings
 from jang_app.services.song_metadata import build_song_display_metadata
 from jang_app.services.work_context import build_work_context_display
+from jang_app.services.work_song import WorkSongStore
 from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion
 from jang_app.services.studio_session import (
     StudioMasterState,
@@ -97,11 +98,13 @@ PAGE_EXPORT = 4
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: AppSettings) -> None:
+    def __init__(self, settings: AppSettings, work_song_store: WorkSongStore | None = None) -> None:
         super().__init__()
         self.settings = settings
         set_language(settings.language)
         self.library = SongLibrary()
+        self.work_song_store = work_song_store or WorkSongStore()
+        self._work_song_ready = False
         self.player = AudioPlayer()
         self.processing_queue = ProcessingQueue()
         self._workers: list[TaskWorker] = []
@@ -133,6 +136,7 @@ class MainWindow(QMainWindow):
         self._refresh_song_list()
         self._refresh_rvc_choices()
         self._refresh_output_sets()
+        self._restore_work_song()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.studio_session_autosave.flush()
@@ -889,13 +893,16 @@ class MainWindow(QMainWindow):
         selected_id = self._current_song_id()
         detail_song_id = self.library_details_panel.song_id
         detail_is_open = self.library_content_stack.currentIndex() == 1
-        studio_song_id = self.current_song.id if self.current_song is not None else ""
         work_item_id = self.current_work_item.id if self.current_work_item is not None else ""
         self.song_list.blockSignals(True)
         self.song_list.clear()
         self._song_items_by_id = {item.id: item for item in self.library.items()}
-        self.current_song = self._song_items_by_id.get(studio_song_id)
         self.current_work_item = self._song_items_by_id.get(work_item_id)
+        self.current_song = (
+            self.current_work_item
+            if self.current_work_item is not None and self.current_work_item.kind == "source"
+            else None
+        )
         for item in self._song_items_by_id.values():
             metadata = build_song_display_metadata(item, self.settings.output_root)
             row = SongListRow(item.id, item.title, metadata)
@@ -1029,11 +1036,10 @@ class MainWindow(QMainWindow):
         _set_optional_label(self.library_status_label, "Renamed")
         self._refresh_song_list()
         self._select_song(song_id)
-        if self.current_song is not None and self.current_song.id == song_id:
-            self.current_song = self._song_items_by_id.get(song_id)
-            self._refresh_song_selectors(preferred_song_id=song_id)
         if self.current_work_item is not None and self.current_work_item.id == song_id:
-            self.current_work_item = self._song_items_by_id.get(song_id)
+            self._assign_work_item(self._song_items_by_id.get(song_id), persist=False)
+        if self.current_song is not None and self.current_song.id == song_id:
+            self._refresh_song_selectors(preferred_song_id=song_id)
         self._sync_work_context_bar()
 
     def _remove_library_item(self, song_id: str) -> None:
@@ -1049,11 +1055,8 @@ class MainWindow(QMainWindow):
         if not self.library.remove_item(song_id):
             return
 
-        if was_current_song:
+        if was_current_song or was_work_item:
             self._set_current_song(None)
-        elif was_work_item:
-            self.current_work_item = None
-            self._sync_work_context_bar()
         _set_optional_label(self.library_status_label, "Removed")
         self._refresh_song_list()
 
@@ -1075,9 +1078,7 @@ class MainWindow(QMainWindow):
         for card in self.song_selector_cards:
             card.set_songs(song_options, selected_id)
         if selected_id and selected_id not in self._song_items_by_id:
-            self.current_song = None
-            if self.current_work_item is not None and self.current_work_item.kind == "source":
-                self.current_work_item = None
+            self._set_current_song(None)
         self._sync_work_context_bar()
 
     def _source_song_items(self) -> list[SongItem]:
@@ -1093,18 +1094,57 @@ class MainWindow(QMainWindow):
             card.select_song(song_id)
         self._refresh_export_page()
 
-    def _set_current_song(self, song: SongItem | None) -> None:
-        self.current_song = song
-        self.current_work_item = song
-        self.separation_action.set_action_enabled(song is not None)
-        self.separation_action.set_progress(0)
-        self.separation_action.set_status("")
+    def _set_current_song(self, song: SongItem | None, *, persist: bool = True) -> None:
+        self._assign_work_item(song, persist=persist)
         if song is None or song.output_job_dir is None:
             self._apply_output_set(None)
             return
         sound_set = load_output_sound_set(song.output_job_dir, self.settings.output_root)
         self._select_output_set(song.output_job_dir)
         self._apply_output_set(sound_set)
+
+    def _set_output_work_song(self, song: SongItem, *, persist: bool = True) -> bool:
+        self._assign_work_item(song, persist=persist)
+        if song.output_job_dir is None:
+            self._apply_output_set(None)
+            return False
+        sound_set = load_output_sound_set(song.output_job_dir, self.settings.output_root)
+        if sound_set is None:
+            self._apply_output_set(None)
+            return False
+        self._select_output_set(sound_set.job_dir)
+        self._apply_output_set(sound_set)
+        return True
+
+    def _assign_work_item(self, item: SongItem | None, *, persist: bool = True) -> None:
+        self.current_work_item = item
+        self.current_song = item if item is not None and item.kind == "source" else None
+        self.separation_action.set_action_enabled(self.current_song is not None)
+        self.separation_action.set_progress(0)
+        self.separation_action.set_status("")
+        selected_source_id = self.current_song.id if self.current_song is not None else ""
+        for card in getattr(self, "song_selector_cards", ()):
+            card.select_song(selected_source_id)
+        if persist and self._work_song_ready:
+            try:
+                self.work_song_store.save(item.id if item is not None else "")
+            except OSError as exc:
+                _set_optional_label(self.output_status_label, f"Work song failed: {_last_error_line(str(exc))}")
+        self._sync_work_context_bar()
+
+    def _restore_work_song(self) -> None:
+        state = self.work_song_store.load()
+        item = self._song_items_by_id.get(state.song_id) if state.song_id else None
+        if item is not None and item.kind == "output":
+            self._set_output_work_song(item, persist=False)
+        else:
+            self._set_current_song(item, persist=False)
+        self._work_song_ready = True
+        if state.song_id and item is None:
+            try:
+                self.work_song_store.save("")
+            except OSError:
+                pass
 
     def _sync_work_context_bar(self) -> None:
         self.work_context_bar.set_display(
@@ -1263,21 +1303,9 @@ class MainWindow(QMainWindow):
         if song.output_job_dir is None:
             _set_optional_label(self.library_status_label, "Missing output.")
             return
-
-        sound_set = load_output_sound_set(song.output_job_dir, self.settings.output_root)
-        if sound_set is None:
+        if not self._set_output_work_song(song):
             _set_optional_label(self.library_status_label, "Load failed.")
             return
-
-        self.current_song = None
-        self.current_work_item = song
-        for card in self.song_selector_cards:
-            card.select_song("")
-        self.separation_action.set_action_enabled(False)
-        self.separation_action.set_progress(0)
-        self.separation_action.set_status("")
-        self._select_output_set(sound_set.job_dir)
-        self._apply_output_set(sound_set)
         _set_optional_label(self.library_status_label, "Loaded")
         self._navigate_to_page(PAGE_STUDIO)
         self._navigate_to_studio_step(0)
@@ -1307,10 +1335,7 @@ class MainWindow(QMainWindow):
         song = self.library.activate_output(job_dir)
         if song is not None:
             self._song_items_by_id[song.id] = song
-            self.current_song = song if song.kind == "source" else None
-            self.current_work_item = song
-            for card in self.song_selector_cards:
-                card.select_song(song.id if song.kind == "source" else "")
+            self._assign_work_item(song)
         self._apply_output_set(load_output_sound_set(job_dir, self.settings.output_root))
 
     def _activate_vocal_converted_version(self, path: Path | None) -> None:
@@ -1319,10 +1344,8 @@ class MainWindow(QMainWindow):
         song = self.library.activate_converted_output(self.current_output_set.job_dir, path)
         if song is not None:
             self._song_items_by_id[song.id] = song
-            if self.current_song is not None and self.current_song.id == song.id:
-                self.current_song = song
             if self.current_work_item is not None and self.current_work_item.id == song.id:
-                self.current_work_item = song
+                self._assign_work_item(song, persist=False)
         self.converted_track.select_path(path)
         self._refresh_output_playback_queue()
         self._sync_work_context_bar()
@@ -1338,14 +1361,11 @@ class MainWindow(QMainWindow):
         if updated is None:
             return
         self._song_items_by_id[updated.id] = updated
-        self.current_song = updated if updated.kind == "source" else None
-        self.current_work_item = updated
+        self._assign_work_item(updated)
         preferred = updated.output_job_dir
         self._refresh_output_sets(preferred_job_dir=preferred, select_fallback=preferred is not None)
         if preferred is None:
             self._apply_output_set(None)
-        for card in self.song_selector_cards:
-            card.select_song(updated.id if updated.kind == "source" else "")
         self._sync_work_context_bar()
 
     def _apply_output_set(self, sound_set: OutputSoundSet | None) -> None:
@@ -1400,10 +1420,10 @@ class MainWindow(QMainWindow):
         if self.current_song is not None:
             return
         if sound_set is None:
-            if self.current_work_item is not None and self.current_work_item.kind == "output":
-                self.current_work_item = None
             return
-        self.current_work_item = self._output_item_for_sound_set(sound_set)
+        item = self._output_item_for_sound_set(sound_set)
+        if item is not None:
+            self._assign_work_item(item)
 
     def _output_item_for_sound_set(self, sound_set: OutputSoundSet) -> SongItem | None:
         output_job_dir = sound_set.job_dir.expanduser().resolve()
@@ -1598,10 +1618,8 @@ class MainWindow(QMainWindow):
             song = self.library.activate_converted_output(self.current_output_set.job_dir, path)
             if song is not None:
                 self._song_items_by_id[song.id] = song
-                if self.current_song is not None and self.current_song.id == song.id:
-                    self.current_song = song
                 if self.current_work_item is not None and self.current_work_item.id == song.id:
-                    self.current_work_item = song
+                    self._assign_work_item(song, persist=False)
             self.vocal_results_panel.select_converted(path)
         self._refresh_output_playback_queue()
 

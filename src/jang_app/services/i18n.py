@@ -326,6 +326,7 @@ _KOREAN_PREFIXES = {
     "Track failed: ": "트랙 저장 실패: ",
     "Volume failed: ": "음량 변경 실패: ",
     "Session failed: ": "세션 저장 실패: ",
+    "Work song failed: ": "작업곡 저장 실패: ",
     "Operation failed: ": "작업 실패: ",
     "Reorder failed: ": "순서 변경 실패: ",
     "Edit failed: ": "편집 실패: ",
