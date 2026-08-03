@@ -36,6 +36,15 @@ def build_stylesheet(theme_mode: str) -> str:
             tab_active_hover="#393936",
             tab_active_pressed="#444440",
             tab_active_border="#4b4b46",
+            source_local_text="#c7d6e8",
+            source_local_background="#202a34",
+            source_local_border="#40566c",
+            source_youtube_text="#ffd4d4",
+            source_youtube_background="#3a2022",
+            source_youtube_border="#7a3a3f",
+            source_output_text="#c9f0dc",
+            source_output_background="#1f3128",
+            source_output_border="#3f6b53",
             chevron_down=chevron_down,
             chevron_up=chevron_up,
         )
@@ -64,6 +73,15 @@ def build_stylesheet(theme_mode: str) -> str:
         tab_active_hover="#2b2a26",
         tab_active_pressed="#46443e",
         tab_active_border="#10100e",
+        source_local_text="#244664",
+        source_local_background="#e5eef5",
+        source_local_border="#9bb3c6",
+        source_youtube_text="#8a2930",
+        source_youtube_background="#f6e4e4",
+        source_youtube_border="#d7a2a5",
+        source_output_text="#24543c",
+        source_output_background="#e2f0e8",
+        source_output_border="#9abda8",
         chevron_down=chevron_down,
         chevron_up=chevron_up,
     )
@@ -94,6 +112,15 @@ def _stylesheet(
     tab_active_hover: str,
     tab_active_pressed: str,
     tab_active_border: str,
+    source_local_text: str,
+    source_local_background: str,
+    source_local_border: str,
+    source_youtube_text: str,
+    source_youtube_background: str,
+    source_youtube_border: str,
+    source_output_text: str,
+    source_output_background: str,
+    source_output_border: str,
     chevron_down: str,
     chevron_up: str,
 ) -> str:
@@ -142,10 +169,23 @@ def _stylesheet(
             letter-spacing: 0;
         }}
 
-        QFrame#NavigationBar {{
+        QFrame#NavigationDock {{
             background: {chrome};
             border: 0;
+            border-top: 1px solid {border};
             border-radius: 0;
+        }}
+
+        QPushButton#NavigationItemButton {{
+            padding: 0;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+        }}
+
+        QFrame#NavigationGroupDivider {{
+            background: {border};
+            border: 0;
         }}
 
         QWidget#AppContent {{
@@ -174,9 +214,9 @@ def _stylesheet(
         }}
 
         QLabel#WorkSourceBadge {{
-            color: {text};
-            background: {raised};
-            border: 1px solid {border};
+            color: {source_local_text};
+            background: {source_local_background};
+            border: 1px solid {source_local_border};
             border-radius: 9px;
             font-size: 10px;
             font-weight: 900;
@@ -184,15 +224,15 @@ def _stylesheet(
         }}
 
         QLabel#WorkSourceBadge[sourceType="youtube"] {{
-            color: {tab_active_text};
-            background: {tab_active};
-            border-color: {tab_active_border};
+            color: {source_youtube_text};
+            background: {source_youtube_background};
+            border-color: {source_youtube_border};
         }}
 
         QLabel#WorkSourceBadge[sourceType="output"] {{
-            color: {text};
-            background: {selection};
-            border-color: {faint};
+            color: {source_output_text};
+            background: {source_output_background};
+            border-color: {source_output_border};
         }}
 
         QLabel#WorkStateBadge {{
@@ -582,9 +622,9 @@ def _stylesheet(
         }}
 
         QLabel#SourceBadge {{
-            color: {text};
-            background: {background};
-            border: 1px solid {border};
+            color: {source_local_text};
+            background: {source_local_background};
+            border: 1px solid {source_local_border};
             border-radius: 10px;
             font-size: 10px;
             font-weight: 900;
@@ -592,15 +632,15 @@ def _stylesheet(
         }}
 
         QLabel#SourceBadge[sourceType="youtube"] {{
-            color: {tab_active_text};
-            background: {tab_active};
-            border-color: {tab_active_border};
+            color: {source_youtube_text};
+            background: {source_youtube_background};
+            border-color: {source_youtube_border};
         }}
 
         QLabel#SourceBadge[sourceType="output"] {{
-            color: {text};
-            background: {selection};
-            border-color: {faint};
+            color: {source_output_text};
+            background: {source_output_background};
+            border-color: {source_output_border};
         }}
 
         QFrame#MiniWaveform {{
@@ -1525,90 +1565,6 @@ def _stylesheet(
             background: {surface};
         }}
 
-        QFrame#WorkflowNavigationRail {{
-            background: {raised};
-            border: 1px solid {border};
-            border-radius: 19px;
-        }}
-
-        QPushButton#StandaloneNavButton,
-        QPushButton#ExportNavButton {{
-            min-width: 112px;
-            min-height: 34px;
-            border-radius: 18px;
-            border-color: {border};
-            background: transparent;
-        }}
-
-        QPushButton#WorkflowNavButton {{
-            min-width: 106px;
-            min-height: 30px;
-            border: 1px solid transparent;
-            border-radius: 15px;
-            background: transparent;
-        }}
-
-        QPushButton#StandaloneNavButton:hover,
-        QPushButton#StandaloneNavButton[pointerState="hover"],
-        QPushButton#ExportNavButton:hover,
-        QPushButton#ExportNavButton[pointerState="hover"],
-        QPushButton#WorkflowNavButton:hover,
-        QPushButton#WorkflowNavButton[pointerState="hover"] {{
-            background: {hover};
-            color: {text};
-        }}
-
-        QPushButton#StandaloneNavButton:pressed,
-        QPushButton#StandaloneNavButton[pointerState="pressed"],
-        QPushButton#ExportNavButton:pressed,
-        QPushButton#ExportNavButton[pointerState="pressed"],
-        QPushButton#WorkflowNavButton:pressed,
-        QPushButton#WorkflowNavButton[pointerState="pressed"] {{
-            background: {pressed};
-            color: {text};
-        }}
-
-        QPushButton#StandaloneNavButton:checked,
-        QPushButton#ExportNavButton:checked,
-        QPushButton#WorkflowNavButton:checked {{
-            background: {tab_active};
-            color: {tab_active_text};
-            border-color: {tab_active_border};
-        }}
-
-        QPushButton#StandaloneNavButton:checked:hover,
-        QPushButton#StandaloneNavButton[pointerState="hover"]:checked,
-        QPushButton#ExportNavButton:checked:hover,
-        QPushButton#ExportNavButton[pointerState="hover"]:checked,
-        QPushButton#WorkflowNavButton:checked:hover,
-        QPushButton#WorkflowNavButton[pointerState="hover"]:checked {{
-            background: {tab_active_hover};
-            color: {tab_active_text};
-        }}
-
-        QPushButton#StandaloneNavButton:checked:pressed,
-        QPushButton#StandaloneNavButton[pointerState="pressed"]:checked,
-        QPushButton#ExportNavButton:checked:pressed,
-        QPushButton#ExportNavButton[pointerState="pressed"]:checked,
-        QPushButton#WorkflowNavButton:checked:pressed,
-        QPushButton#WorkflowNavButton[pointerState="pressed"]:checked {{
-            background: {tab_active_pressed};
-            color: {tab_active_text};
-        }}
-
-        QPushButton#StandaloneNavButton[keyboardFocus="true"],
-        QPushButton#ExportNavButton[keyboardFocus="true"],
-        QPushButton#WorkflowNavButton[keyboardFocus="true"] {{
-            border-color: {focus};
-        }}
-
-        QPushButton#StandaloneNavButton:disabled,
-        QPushButton#ExportNavButton:disabled,
-        QPushButton#WorkflowNavButton:disabled {{
-            color: {faint};
-            background: {raised};
-        }}
-
         QFrame#SegmentedControl {{
             background: {raised};
             border: 1px solid {border};
@@ -1692,13 +1648,39 @@ def _stylesheet(
         }}
 
         QPushButton#TitleBarLanguageButton {{
-            min-width: 30px;
-            max-width: 30px;
+            min-width: 42px;
+            max-width: 42px;
             min-height: 26px;
             max-height: 26px;
             padding: 0;
-            border: 0;
-            background: transparent;
+            border: 1px solid {border};
+            border-radius: 9px;
+            background: {raised};
+            color: {text};
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
+        QPushButton#TitleBarLanguageButton:hover,
+        QPushButton#TitleBarLanguageButton[pointerState="hover"] {{
+            background: {hover};
+            border-color: {faint};
+        }}
+
+        QPushButton#TitleBarLanguageButton:pressed,
+        QPushButton#TitleBarLanguageButton[pointerState="pressed"] {{
+            background: {pressed};
+            border-color: {text};
+        }}
+
+        QPushButton#TitleBarLanguageButton[keyboardFocus="true"] {{
+            border-color: {focus};
+        }}
+
+        QPushButton#TitleBarLanguageButton::menu-indicator {{
+            image: none;
+            width: 0;
+            height: 0;
         }}
 
         QMenu {{

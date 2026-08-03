@@ -51,6 +51,7 @@ from jang_app.qt_app.video_preview_panel import VideoPreviewPanel
 from jang_app.qt_app.workspace_transport_dock import WorkspaceTransportDock
 from jang_app.qt_app.widgets import (
     FileDropCard,
+    FeedbackButton,
     ScrollSafeComboBox,
     ScrollSafeSpinBox,
     SvgIconButton,
@@ -149,6 +150,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._position_processing_queue()
+        self._position_size_grip()
 
     def _toggle_window_maximized(self) -> None:
         if self.isMaximized():
@@ -162,6 +164,7 @@ class MainWindow(QMainWindow):
             self.title_bar.set_maximized(self.isMaximized())
         if hasattr(self, "size_grip"):
             self.size_grip.setVisible(not self.isMaximized())
+            self._position_size_grip()
 
     def _build_ui(self) -> None:
         root_widget = QWidget()
@@ -170,7 +173,7 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
         self.page_stack = QStackedWidget()
         root_layout.addWidget(self._build_top_bar(), 0)
-        root_layout.addWidget(self._build_navigation_bar(), 0)
+        navigation_dock = self._build_navigation_bar()
 
         self.page_stack.addWidget(self._build_library_page())
         self.page_stack.addWidget(self._build_models_page())
@@ -206,15 +209,13 @@ class MainWindow(QMainWindow):
         self.log_drawer.open_location_requested.connect(self._open_log_location)
         QTimer.singleShot(0, self._position_processing_queue)
 
-        self.size_grip = QSizeGrip(content_widget)
-        grip_layout = QHBoxLayout()
-        grip_layout.setContentsMargins(0, 0, 0, 0)
-        grip_layout.addStretch(1)
-        grip_layout.addWidget(self.size_grip, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
-        content_layout.addLayout(grip_layout, 0)
         root_layout.addWidget(content_widget, 1)
+        root_layout.addWidget(navigation_dock, 0)
 
         self.setCentralWidget(root_widget)
+        self.size_grip = QSizeGrip(root_widget)
+        self.size_grip.raise_()
+        QTimer.singleShot(0, self._position_size_grip)
 
     def _build_top_bar(self) -> QWidget:
         self.title_bar = WindowTitleBar(APP_NAME, APP_ICON_PATH)
@@ -239,7 +240,7 @@ class MainWindow(QMainWindow):
 
         self.theme_button = ThemeToggleButton()
         self.theme_button.clicked.connect(self._toggle_theme)
-        self.language_button = SvgIconButton("globe", size=30)
+        self.language_button = FeedbackButton("KR")
         self.language_button.setObjectName("TitleBarLanguageButton")
         self.language_menu = QMenu(self.language_button)
         self.language_action_group = QActionGroup(self.language_menu)
@@ -568,8 +569,8 @@ class MainWindow(QMainWindow):
     def _apply_theme(self) -> None:
         self.setStyleSheet(build_stylesheet(self.settings.theme_mode))
         self.title_bar.set_theme_mode(self.settings.theme_mode)
+        self.primary_navigation.set_theme_mode(self.settings.theme_mode)
         self.theme_button.set_theme_mode(self.settings.theme_mode)
-        self.language_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "workspace_dock"):
             self.workspace_dock.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "processing_queue_panel"):
@@ -605,6 +606,7 @@ class MainWindow(QMainWindow):
     def _apply_language(self) -> None:
         set_language(self.settings.language)
         apply_widget_language(self)
+        self.language_button.setText("KR" if self.settings.language == LANGUAGE_KOREAN else "EN")
         set_translated_tooltip(self.language_button, "Language")
         for language, action in self.language_actions.items():
             action.setChecked(language == self.settings.language)
@@ -656,6 +658,19 @@ class MainWindow(QMainWindow):
                 toast_y = max(16, toast_anchor - toast.height() - 10)
             toast.move(toast_x, toast_y)
             toast.raise_()
+
+    def _position_size_grip(self) -> None:
+        if not hasattr(self, "size_grip"):
+            return
+        parent = self.size_grip.parentWidget()
+        if parent is None:
+            return
+        self.size_grip.resize(self.size_grip.sizeHint())
+        self.size_grip.move(
+            max(0, parent.width() - self.size_grip.width()),
+            max(0, parent.height() - self.size_grip.height()),
+        )
+        self.size_grip.raise_()
 
     def _open_log_drawer(self, task_id: str = "") -> None:
         self.toast_stack.dismiss_all()

@@ -5,7 +5,7 @@ import unittest
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
-from jang_app.qt_app.primary_navigation import PrimaryNavigationBar
+from jang_app.qt_app.primary_navigation import NavigationItemButton, PrimaryNavigationBar
 
 
 class PrimaryNavigationBarTests(unittest.TestCase):
@@ -25,13 +25,11 @@ class PrimaryNavigationBarTests(unittest.TestCase):
 
         self.assertEqual(requested.at(0)[0], 3)
         self.assertEqual(navigation.button_group.checkedId(), 3)
-        self.assertTrue(
-            all(button.objectName() == "WorkflowNavButton" for button in navigation.workflow_buttons)
-        )
-        self.assertTrue(
-            all(button.objectName() == "StandaloneNavButton" for button in navigation.leading_buttons)
-        )
-        self.assertEqual(navigation.export_button.objectName(), "ExportNavButton")
+        self.assertTrue(all(isinstance(button, NavigationItemButton) for button in navigation.buttons))
+        self.assertTrue(all(button.objectName() == "NavigationItemButton" for button in navigation.buttons))
+        self.assertEqual(navigation.height(), 62)
+        self.assertEqual(navigation.data_divider.width(), 1)
+        self.assertEqual(navigation.export_divider.width(), 1)
         navigation.set_current_page(0)
         self.assertTrue(navigation.leading_buttons[0].isChecked())
         navigation.close()

@@ -629,7 +629,7 @@ class SvgIconButton(FeedbackButton):
         painter.setBrush(QBrush(palette["background"]))
         painter.drawRoundedRect(rect, 9, 9)
         padding = max(6, int(self._icon_size * 0.25))
-        _render_track_icon(
+        render_app_icon(
             painter,
             rect.adjusted(padding, padding, -padding, -padding),
             self._icon_key(),
@@ -677,7 +677,7 @@ class ThemeToggleButton(FeedbackButton):
         painter.setBrush(QBrush(colors["surface"]))
         painter.drawRoundedRect(outer, 10, 10)
 
-        _render_track_icon(
+        render_app_icon(
             painter,
             QRectF(7, 5, 16, 16),
             "moon" if self.isChecked() else "sun",
@@ -1273,7 +1273,7 @@ def _keyboard_focus_color(theme_mode: str) -> QColor:
     return QColor("#898780" if theme_mode == "dark" else "#6e6a61")
 
 
-def _render_track_icon(painter: QPainter, rect: QRectF, icon_key: str, color: QColor) -> None:
+def render_app_icon(painter: QPainter, rect: QRectF, icon_key: str, color: QColor) -> None:
     svg_template = _TRACK_ICON_SVGS.get(icon_key, _TRACK_ICON_SVGS["missing"])
     svg = svg_template.replace("{color}", color.name())
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
@@ -1486,6 +1486,37 @@ _TRACK_ICON_SVGS = {
         '<ellipse cx="12" cy="5" rx="8" ry="3"/>'
         '<path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/>'
         '<path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>'
+        "</svg>"
+    ),
+    "model": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<rect x="8" y="8" width="8" height="8" rx="2"/>'
+        '<path d="M12 3v5M12 16v5M3 12h5M16 12h5"/>'
+        '<circle cx="12" cy="3" r="1" fill="{color}" stroke="none"/>'
+        '<circle cx="12" cy="21" r="1" fill="{color}" stroke="none"/>'
+        '<circle cx="3" cy="12" r="1" fill="{color}" stroke="none"/>'
+        '<circle cx="21" cy="12" r="1" fill="{color}" stroke="none"/>'
+        "</svg>"
+    ),
+    "vocal": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M4 12h2l2-5 3 10 3-12 3 7h3"/>'
+        '<path d="M4 20h16" opacity=".45"/>'
+        "</svg>"
+    ),
+    "studio": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M6 4v16M12 4v16M18 4v16"/>'
+        '<path d="M3 9h6M9 15h6M15 8h6"/>'
+        '<circle cx="6" cy="9" r="2" fill="{color}" stroke="none"/>'
+        '<circle cx="12" cy="15" r="2" fill="{color}" stroke="none"/>'
+        '<circle cx="18" cy="8" r="2" fill="{color}" stroke="none"/>'
         "</svg>"
     ),
     "refresh": (
