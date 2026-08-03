@@ -604,6 +604,9 @@ class SvgIconButton(FeedbackButton):
         self._icon_name = icon_name
         self.update()
 
+    def icon_name(self) -> str:
+        return self._icon_name
+
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
         self.update()

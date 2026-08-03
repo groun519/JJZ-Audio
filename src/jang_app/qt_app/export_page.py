@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
@@ -7,12 +8,14 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
+from jang_app.qt_app.work_song_selector import WorkSongSelector
 from jang_app.qt_app.widgets import SvgIconButton, TaskActionWidget
 from jang_app.services.song_export import SongAudioExport
 from jang_app.services.song_video_export import SongVideoExport
 
 
 class ExportPage(QWidget):
+    song_changed = Signal(str)
     audio_export_requested = Signal(str)
     video_export_requested = Signal(str)
     open_location_requested = Signal(object)
@@ -20,7 +23,7 @@ class ExportPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._export_dir: Path | None = None
-        self._work_song_id = ""
+        self._target_song_id = ""
         self._theme_mode = "white"
         self.export_rows: list[_ExportRow] = []
 
@@ -31,6 +34,18 @@ class ExportPage(QWidget):
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(14)
+
+        target_label = QLabel("Export Song")
+        target_label.setObjectName("SectionLabel")
+        self.song_selector = WorkSongSelector(
+            empty_text="Select export song",
+            search_text="Search export songs",
+            object_name="ExportSongCombo",
+        )
+        self.song_selector.setMinimumWidth(0)
+        self.song_selector.song_changed.connect(self._on_song_changed)
+        left_layout.addWidget(target_label, 0)
+        left_layout.addWidget(self.song_selector, 0)
 
         self.audio_action = TaskActionWidget("Audio Mix", "Export")
         self.audio_action.triggered.connect(self._request_audio_export)
@@ -110,15 +125,22 @@ class ExportPage(QWidget):
             self.export_layout.addWidget(row, 0)
         self.export_layout.addStretch(1)
 
-    def set_work_song(
+    def set_songs(self, songs: Iterable[tuple[str, str]], selected_id: str = "") -> None:
+        self.song_selector.set_songs(songs, selected_id)
+
+    def selected_song_id(self) -> str:
+        return self._target_song_id
+
+    def set_target_song(
         self,
         song_id: str,
         *,
         audio_enabled: bool,
         video_enabled: bool,
     ) -> None:
-        changed = song_id != self._work_song_id
-        self._work_song_id = song_id
+        changed = song_id != self._target_song_id
+        self._target_song_id = song_id
+        self.song_selector.select_song(song_id)
         if changed:
             for action in (self.audio_action, self.video_action):
                 action.set_progress(0)
@@ -154,13 +176,18 @@ class ExportPage(QWidget):
 
     def apply_language(self) -> None:
         apply_widget_language(self)
+        self.song_selector.apply_language()
         set_translated_tooltip(self.open_folder_button, "Open export location")
 
     def _request_audio_export(self) -> None:
-        self.audio_export_requested.emit(self._work_song_id)
+        self.audio_export_requested.emit(self._target_song_id)
 
     def _request_video_export(self) -> None:
-        self.video_export_requested.emit(self._work_song_id)
+        self.video_export_requested.emit(self._target_song_id)
+
+    def _on_song_changed(self, song_id: str) -> None:
+        self.set_target_song(song_id, audio_enabled=False, video_enabled=False)
+        self.song_changed.emit(song_id)
 
     def _open_export_location(self) -> None:
         if self._export_dir is not None:

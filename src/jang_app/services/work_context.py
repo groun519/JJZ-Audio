@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
-from jang_app.services.audio_metadata import format_duration, read_audio_metadata
 from jang_app.services.output_catalog import OutputSoundSet
 from jang_app.services.song_library import SongItem
-from jang_app.services.song_metadata import build_song_display_metadata
 
 
 @dataclass(frozen=True)
@@ -15,24 +12,21 @@ class WorkContextDisplay:
     is_active: bool
     source_type: str = ""
     source_label: str = ""
-    detail_label: str = ""
     state_label: str = ""
 
 
 def build_work_context_display(
     song: SongItem | None,
     output_set: OutputSoundSet | None,
-    output_root: Path,
 ) -> WorkContextDisplay:
     if song is not None:
-        metadata = build_song_display_metadata(song, output_root)
+        source_type = _source_type(song)
         is_output_item = song.kind == "output"
         has_matching_output = output_set is not None and _is_output_for_song(song, output_set)
         return WorkContextDisplay(
             is_active=True,
-            source_type=metadata.source_type,
-            source_label=metadata.source_label,
-            detail_label=metadata.detail_label,
+            source_type=source_type,
+            source_label={"local": "LOCAL", "youtube": "YT", "output": "OUT"}[source_type],
             state_label="Output" if is_output_item else "Separated" if has_matching_output else "Source",
         )
 
@@ -41,28 +35,16 @@ def build_work_context_display(
             is_active=True,
             source_type="output",
             source_label="OUT",
-            detail_label=_output_detail_label(output_set),
             state_label="Output",
         )
 
     return WorkContextDisplay(is_active=False)
 
 
-def _output_detail_label(output_set: OutputSoundSet) -> str:
-    duration_ms = _output_duration_ms(output_set)
-    converted_count = len(output_set.converted_vocal_paths)
-    converted_label = f"{converted_count} CV" if converted_count else "No CV"
-    return f"OUTPUT | {format_duration(duration_ms) if duration_ms > 0 else '--:--'} | {converted_label}"
-
-
-def _output_duration_ms(output_set: OutputSoundSet) -> int:
-    durations: list[int] = []
-    for path in (output_set.vocals_path, output_set.instrumental_path):
-        try:
-            durations.append(read_audio_metadata(path).duration_ms)
-        except Exception:
-            continue
-    return max(durations, default=0)
+def _source_type(song: SongItem) -> str:
+    if song.source_type in {"local", "youtube", "output"}:
+        return song.source_type
+    return "output" if song.kind == "output" else "local"
 
 
 def _is_output_for_song(song: SongItem, output_set: OutputSoundSet) -> bool:

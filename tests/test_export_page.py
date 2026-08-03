@@ -16,9 +16,10 @@ class ExportPageTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_work_song_is_emitted_by_independent_export_actions(self) -> None:
+    def test_target_song_is_emitted_by_independent_export_actions(self) -> None:
         page = ExportPage()
-        page.set_work_song("song-1", audio_enabled=True, video_enabled=True)
+        page.set_songs((("song-1", "Song One"),), "song-1")
+        page.set_target_song("song-1", audio_enabled=True, video_enabled=True)
         audio_requested = QSignalSpy(page.audio_export_requested)
         video_requested = QSignalSpy(page.video_export_requested)
 
@@ -45,14 +46,15 @@ class ExportPageTests(unittest.TestCase):
         self.assertEqual(opened.at(1)[0], export_dir)
         page.close()
 
-    def test_changing_work_song_resets_both_actions_without_unlocking_running_task(self) -> None:
+    def test_changing_target_song_resets_both_actions_without_unlocking_running_task(self) -> None:
         page = ExportPage()
-        page.set_work_song("song-1", audio_enabled=True, video_enabled=True)
+        page.set_songs((("song-1", "Song One"), ("song-2", "Song Two")), "song-1")
+        page.set_target_song("song-1", audio_enabled=True, video_enabled=True)
         page.set_audio_progress(64)
         page.set_audio_status("Exporting audio mix")
         page.set_audio_running(True)
 
-        page.set_work_song("song-2", audio_enabled=True, video_enabled=False)
+        page.set_target_song("song-2", audio_enabled=True, video_enabled=False)
 
         self.assertEqual(page.audio_action.progress_bar.value(), 0)
         self.assertTrue(page.audio_action.status_label.isHidden())
@@ -60,6 +62,17 @@ class ExportPageTests(unittest.TestCase):
         self.assertFalse(page.video_action.button.isEnabled())
         page.set_audio_running(False)
         self.assertTrue(page.audio_action.button.isEnabled())
+        page.close()
+
+    def test_selector_changes_only_the_export_target(self) -> None:
+        page = ExportPage()
+        page.set_songs((("song-1", "Song One"), ("song-2", "Song Two")), "song-1")
+        changed = QSignalSpy(page.song_changed)
+
+        page.song_selector.activated.emit(2)
+
+        self.assertEqual(changed.at(0)[0], "song-2")
+        self.assertEqual(page.selected_song_id(), "song-2")
         page.close()
 
 

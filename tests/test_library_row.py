@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from PySide6.QtTest import QSignalSpy
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.library_row import SongListRow
@@ -29,6 +30,27 @@ class SongListRowTests(unittest.TestCase):
         row.details_button.click()
 
         self.assertEqual(requested.at(0)[0], "song-1")
+        row.close()
+
+    def test_row_expands_one_shared_transport_without_resizing_the_title_column(self) -> None:
+        row = SongListRow(
+            "song-1",
+            "A title long enough to require the overflow treatment",
+            SongDisplayMetadata("local", "LOCAL", "WAV", "01:00", "1.0 MB", None),
+        )
+        requested = QSignalSpy(row.preview_requested)
+        normal_height = row.sizeHint().height()
+        row.resize(720, normal_height)
+        row.show()
+        self.app.processEvents()
+
+        QTest.mouseClick(row.title_label, Qt.MouseButton.LeftButton)
+        row.set_preview_expanded(True)
+
+        self.assertEqual(requested.at(0)[0], "song-1")
+        self.assertGreater(row.sizeHint().height(), normal_height)
+        self.assertFalse(row.preview_transport.isHidden())
+        self.assertGreaterEqual(row.waveform.minimumWidth(), 190)
         row.close()
 
 

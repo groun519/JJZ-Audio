@@ -36,7 +36,6 @@ class ModelWorkspacePage(QWidget):
     use_in_convert_requested = Signal(object)
     open_location_requested = Signal(object)
     preview_started = Signal()
-    model_count_changed = Signal(int)
 
     def __init__(self, initial_folder: Path, workspace: RvcModelWorkspace | None = None) -> None:
         super().__init__()
@@ -297,7 +296,6 @@ class ModelWorkspacePage(QWidget):
     def refresh_models(self) -> None:
         records = self._workspace.records()
         self._records_by_id = {record.model_id: record for record in records}
-        self.model_count_changed.emit(len(records))
         previous_selection = self._selected_model_id
         self.model_list.clear()
         self._rows_by_id.clear()
@@ -338,9 +336,6 @@ class ModelWorkspacePage(QWidget):
         self.workspace_open_button.set_theme_mode(theme_mode)
         self.detail_panel.set_theme_mode(theme_mode)
         self.dataset_panel.set_theme_mode(theme_mode)
-
-    def model_count(self) -> int:
-        return len(self._records_by_id)
 
     def apply_language(self) -> None:
         apply_widget_language(self)

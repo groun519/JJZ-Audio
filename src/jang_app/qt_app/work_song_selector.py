@@ -13,9 +13,17 @@ from jang_app.services.i18n import tr
 class WorkSongSelector(ScrollSafeComboBox):
     song_changed = Signal(str)
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        empty_text: str = "Select work song",
+        search_text: str = "Search work songs",
+        object_name: str = "WorkSongCombo",
+    ) -> None:
         super().__init__()
-        self.setObjectName("WorkSongCombo")
+        self.setObjectName(object_name)
+        self._empty_text = empty_text
+        self._search_text = search_text
         self.setEditable(True)
         self.setLineEdit(_ElidingLineEdit())
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -38,8 +46,8 @@ class WorkSongSelector(ScrollSafeComboBox):
         self._loading = True
         self.blockSignals(True)
         self.clear()
-        self.addItem(tr("Select work song"), "")
-        self.setItemData(0, tr("Select work song"), Qt.ItemDataRole.ToolTipRole)
+        self.addItem(tr(self._empty_text), "")
+        self.setItemData(0, tr(self._empty_text), Qt.ItemDataRole.ToolTipRole)
         for song_id, title in songs:
             self.addItem(title, song_id)
             self.setItemData(self.count() - 1, title, Qt.ItemDataRole.ToolTipRole)
@@ -66,9 +74,9 @@ class WorkSongSelector(ScrollSafeComboBox):
 
     def apply_language(self) -> None:
         if self.count() > 0:
-            self.setItemText(0, tr("Select work song"))
-            self.setItemData(0, tr("Select work song"), Qt.ItemDataRole.ToolTipRole)
-        self.lineEdit().setPlaceholderText(tr("Search work songs"))
+            self.setItemText(0, tr(self._empty_text))
+            self.setItemData(0, tr(self._empty_text), Qt.ItemDataRole.ToolTipRole)
+        self.lineEdit().setPlaceholderText(tr(self._search_text))
         self._update_current_tooltip()
 
     def showPopup(self) -> None:  # noqa: N802
