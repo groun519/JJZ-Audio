@@ -7,7 +7,6 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QIcon
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -32,6 +31,7 @@ from jang_app.pipeline.separate import SeparationResult, separate_audio
 from jang_app.qt_app.export_page import ExportPage
 from jang_app.qt_app.library_details_panel import LibraryDetailsPanel
 from jang_app.qt_app.library_row import SongListRow
+from jang_app.qt_app.library_workspace import LibraryWorkspace
 from jang_app.qt_app.localization import (
     apply_widget_language,
     set_translated_placeholder,
@@ -42,6 +42,7 @@ from jang_app.qt_app.log_drawer import LogDrawer
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.player_bar import GlobalPlayerBar
 from jang_app.qt_app.processing_queue_panel import ProcessingQueuePanel
+from jang_app.qt_app.primary_navigation import PrimaryNavigationBar
 from jang_app.qt_app.segmented_stack import SegmentedStack
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
@@ -50,7 +51,6 @@ from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
 from jang_app.qt_app.video_preview_panel import VideoPreviewPanel
 from jang_app.qt_app.work_context_bar import WorkContextBar
 from jang_app.qt_app.widgets import (
-    FeedbackButton,
     FileDropCard,
     ScrollSafeComboBox,
     ScrollSafeSpinBox,
@@ -79,16 +79,15 @@ from jang_app.services.work_context import build_work_context_display
 from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
 from jang_app.services.work_song import WorkSongStore
 from jang_app.services.video_source import VideoSource
-from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion
+from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion, sort_song_items
 from jang_app.services.studio_session import StudioSession, StudioTrackState
 from jang_app.services.youtube_download import YouTubeDownloadResult, download_youtube_audio
 
 
 PAGE_LIBRARY = 0
 PAGE_VOCAL = 1
-PAGE_MODELS = 2
-PAGE_STUDIO = 3
-PAGE_EXPORT = 4
+PAGE_STUDIO = 2
+PAGE_EXPORT = 3
 
 
 class MainWindow(QMainWindow):
@@ -170,9 +169,8 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._build_top_bar(), 0)
         root_layout.addWidget(self._build_navigation_bar(), 0)
 
-        self.page_stack.addWidget(self._build_library_page())
+        self.page_stack.addWidget(self._build_library_workspace_page())
         self.page_stack.addWidget(self._build_vocal_page())
-        self.page_stack.addWidget(self._build_models_page())
         self.page_stack.addWidget(self._build_studio_page())
         self.page_stack.addWidget(self._build_export_page())
 
@@ -223,37 +221,15 @@ class MainWindow(QMainWindow):
         return self.title_bar
 
     def _build_navigation_bar(self) -> QWidget:
-        nav_bar = QFrame()
-        nav_bar.setObjectName("NavigationBar")
-        nav_layout = QHBoxLayout(nav_bar)
-        nav_layout.setContentsMargins(16, 8, 16, 8)
-        nav_layout.setSpacing(8)
-
-        self.library_nav_button = FeedbackButton("Library")
-        self.library_nav_button.setObjectName("NavButton")
-        self.library_nav_button.setCheckable(True)
-        self.library_nav_button.setChecked(True)
-        self.vocal_nav_button = FeedbackButton("Vocal")
-        self.vocal_nav_button.setObjectName("NavButton")
-        self.vocal_nav_button.setCheckable(True)
-        self.models_nav_button = FeedbackButton("Models")
-        self.models_nav_button.setObjectName("NavButton")
-        self.models_nav_button.setCheckable(True)
-        self.studio_nav_button = FeedbackButton("Studio")
-        self.studio_nav_button.setObjectName("NavButton")
-        self.studio_nav_button.setCheckable(True)
-        self.export_nav_button = FeedbackButton("Export")
-        self.export_nav_button.setObjectName("NavButton")
-        self.export_nav_button.setCheckable(True)
-
-        self.page_nav_group = QButtonGroup(self)
-        self.page_nav_group.setExclusive(True)
-        self.page_nav_group.addButton(self.library_nav_button, PAGE_LIBRARY)
-        self.page_nav_group.addButton(self.vocal_nav_button, PAGE_VOCAL)
-        self.page_nav_group.addButton(self.models_nav_button, PAGE_MODELS)
-        self.page_nav_group.addButton(self.studio_nav_button, PAGE_STUDIO)
-        self.page_nav_group.addButton(self.export_nav_button, PAGE_EXPORT)
-        self.page_nav_group.idClicked.connect(self._navigate_to_page)
+        self.primary_navigation = PrimaryNavigationBar(
+            ("Library", PAGE_LIBRARY),
+            (
+                ("Vocal", PAGE_VOCAL),
+                ("Studio", PAGE_STUDIO),
+                ("Export", PAGE_EXPORT),
+            ),
+        )
+        self.primary_navigation.page_requested.connect(self._navigate_to_page)
 
         self.theme_button = ThemeToggleButton()
         self.theme_button.clicked.connect(self._toggle_theme)
@@ -274,17 +250,21 @@ class MainWindow(QMainWindow):
         self.title_bar.add_action_widget(self.language_button)
         self.title_bar.add_action_widget(self.theme_button)
 
-        nav_layout.addStretch(1)
-        for button in (
-            self.library_nav_button,
-            self.vocal_nav_button,
-            self.models_nav_button,
-            self.studio_nav_button,
-            self.export_nav_button,
-        ):
-            nav_layout.addWidget(button, 0)
-        nav_layout.addStretch(1)
-        return nav_bar
+        return self.primary_navigation
+
+    def _build_library_workspace_page(self) -> QWidget:
+        self.library_sections = LibraryWorkspace(
+            (
+                ("Songs", self._build_library_page()),
+                ("Models", self._build_models_page()),
+            ),
+        )
+        self.library_sections.current_changed.connect(self._on_library_section_changed)
+        self.library_sections.set_section_count(1, self.model_workspace_page.model_count())
+        self.model_workspace_page.model_count_changed.connect(
+            lambda count: self.library_sections.set_section_count(1, count)
+        )
+        return self.library_sections
 
     def _build_library_page(self) -> QWidget:
         page = QWidget()
@@ -336,17 +316,8 @@ class MainWindow(QMainWindow):
         list_title.setObjectName("SectionTitle")
         self.library_count_label = QLabel("")
         self.library_count_label.setObjectName("MutedText")
-        self.library_details_button = SvgIconButton("database", size=34)
-        self.library_details_button.setObjectName("ControlIconButton")
-        set_translated_tooltip(self.library_details_button, "Open song details")
-        self.library_details_button.setEnabled(False)
-        self.library_details_button.clicked.connect(self._open_selected_library_details)
-        add_button = FeedbackButton("Add")
-        add_button.clicked.connect(self._choose_audio_files)
         list_header.addWidget(list_title, 0)
         list_header.addWidget(self.library_count_label, 1)
-        list_header.addWidget(self.library_details_button, 0)
-        list_header.addWidget(add_button, 0)
 
         filter_layout = QHBoxLayout()
         filter_layout.setContentsMargins(0, 0, 0, 0)
@@ -357,8 +328,13 @@ class MainWindow(QMainWindow):
         self.library_source_filter = ScrollSafeComboBox()
         self.library_source_filter.setFixedWidth(150)
         self.library_source_filter.currentIndexChanged.connect(self._apply_library_filters)
+        self.library_sort_combo = ScrollSafeComboBox()
+        self.library_sort_combo.setFixedWidth(150)
+        set_translated_tooltip(self.library_sort_combo, "Sort songs")
+        self.library_sort_combo.currentIndexChanged.connect(lambda _index: self._refresh_song_list())
         filter_layout.addWidget(self.library_search_edit, 1)
         filter_layout.addWidget(self.library_source_filter, 0)
+        filter_layout.addWidget(self.library_sort_combo, 0)
 
         self.song_list = QListWidget()
         self.song_list.currentItemChanged.connect(self._on_library_selection_changed)
@@ -377,6 +353,7 @@ class MainWindow(QMainWindow):
         self.library_content_stack.addWidget(list_panel)
         self.library_content_stack.addWidget(self.library_details_panel)
         self._populate_library_source_filter()
+        self._populate_library_sort_combo()
 
         layout.addWidget(import_panel, 1)
         layout.addWidget(self.library_content_stack, 3)
@@ -410,7 +387,6 @@ class MainWindow(QMainWindow):
         self.vocal_results_panel.converted_selected.connect(self._activate_vocal_converted_version)
         self.vocal_results_panel.open_location_requested.connect(self._open_vocal_output_location)
         self.vocal_results_panel.remove_output_requested.connect(self._remove_vocal_output_version)
-        self.vocal_results_panel.open_studio_requested.connect(self._open_current_song_in_studio)
         self.vocal_results_panel.seek_requested.connect(self._seek_output_playback)
 
         layout.addWidget(left_panel, 0)
@@ -624,8 +600,6 @@ class MainWindow(QMainWindow):
             self.export_page.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "video_preview_panel"):
             self.video_preview_panel.set_theme_mode(self.settings.theme_mode)
-        if hasattr(self, "library_details_button"):
-            self.library_details_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "song_list"):
             for index in range(self.song_list.count()):
                 row = self.song_list.itemWidget(self.song_list.item(index))
@@ -651,7 +625,8 @@ class MainWindow(QMainWindow):
         self.export_page.apply_language()
         self.video_preview_panel.apply_language()
         self._populate_library_source_filter()
-        set_translated_tooltip(self.library_details_button, "Open song details")
+        self._populate_library_sort_combo()
+        set_translated_tooltip(self.library_sort_combo, "Sort songs")
 
     def _position_processing_queue(self) -> None:
         if not hasattr(self, "processing_queue_panel") or not hasattr(self, "player_bar"):
@@ -724,26 +699,21 @@ class MainWindow(QMainWindow):
     def _navigate_to_page(self, index: int) -> None:
         if self.page_stack.currentIndex() == PAGE_STUDIO and index != PAGE_STUDIO:
             self.studio_session_autosave.flush()
-        if index != PAGE_MODELS:
+        if index != PAGE_LIBRARY or self.library_sections.current_index() != 1:
             self.model_workspace_page.stop_preview()
         self.page_stack.setCurrentIndex(index)
-        self.library_nav_button.setChecked(index == PAGE_LIBRARY)
-        self.vocal_nav_button.setChecked(index == PAGE_VOCAL)
-        self.models_nav_button.setChecked(index == PAGE_MODELS)
-        self.studio_nav_button.setChecked(index == PAGE_STUDIO)
-        self.export_nav_button.setChecked(index == PAGE_EXPORT)
+        self.primary_navigation.set_current_page(index)
         if index == PAGE_EXPORT:
             self._refresh_export_page()
         self._sync_playback_queue_for_page(index)
         self._sync_video_workspace()
 
+    def _on_library_section_changed(self, index: int) -> None:
+        if index != 1:
+            self.model_workspace_page.stop_preview()
+
     def _navigate_to_vocal_step(self, index: int) -> None:
         self.vocal_steps.set_current_index(index)
-
-    def _open_current_song_in_studio(self, *_args) -> None:
-        if self.current_output_set is None:
-            return
-        self._navigate_to_page(PAGE_STUDIO)
 
     def _choose_audio_files(self, *_args) -> None:
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_AUDIO_EXTENSIONS))
@@ -970,19 +940,23 @@ class MainWindow(QMainWindow):
         work_item_id = self.current_work_item.id if self.current_work_item is not None else ""
         self.song_list.blockSignals(True)
         self.song_list.clear()
-        self._song_items_by_id = {item.id: item for item in self.library.items()}
+        items = self.library.items()
+        self._song_items_by_id = {item.id: item for item in items}
+        self.library_sections.set_section_count(0, len(items))
         self.current_work_item = self._song_items_by_id.get(work_item_id)
         self.current_song = (
             self.current_work_item
             if self.current_work_item is not None and self.current_work_item.kind == "source"
             else None
         )
-        for item in self._song_items_by_id.values():
+        sort_mode = str(self.library_sort_combo.currentData() or "newest")
+        for item in sort_song_items(items, sort_mode):
             metadata = build_song_display_metadata(item, self.settings.output_root)
             row = SongListRow(item.id, item.title, metadata)
             row.set_theme_mode(self.settings.theme_mode)
             apply_widget_language(row)
             row.use_requested.connect(self._use_library_item)
+            row.details_requested.connect(self._open_library_details)
             row.rename_requested.connect(self._rename_library_item)
             row.remove_requested.connect(self._remove_library_item)
             list_item = make_list_item(row)
@@ -1014,7 +988,6 @@ class MainWindow(QMainWindow):
 
     def _on_library_selection_changed(self, *_args) -> None:
         song = self._browsed_song()
-        self.library_details_button.setEnabled(song is not None)
         self._sync_song_row_selection()
         if self.player.is_playing() and self._current_playback_context() != "library":
             return
@@ -1036,6 +1009,21 @@ class MainWindow(QMainWindow):
         self.library_source_filter.setCurrentIndex(index if index >= 0 else 0)
         self.library_source_filter.blockSignals(False)
 
+    def _populate_library_sort_combo(self) -> None:
+        current = self.library_sort_combo.currentData() if self.library_sort_combo.count() else "newest"
+        self.library_sort_combo.blockSignals(True)
+        self.library_sort_combo.clear()
+        for label, value in (
+            ("Newest", "newest"),
+            ("Oldest", "oldest"),
+            ("Name A-Z", "name_asc"),
+            ("Name Z-A", "name_desc"),
+        ):
+            self.library_sort_combo.addItem(tr(label), value)
+        index = self.library_sort_combo.findData(current)
+        self.library_sort_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.library_sort_combo.blockSignals(False)
+
     def _apply_library_filters(self, *_args) -> None:
         query = self.library_search_edit.text().strip().casefold()
         source_filter = str(self.library_source_filter.currentData() or "all")
@@ -1056,8 +1044,6 @@ class MainWindow(QMainWindow):
         current = self.song_list.currentItem()
         if current is not None and current.isHidden():
             self.song_list.setCurrentItem(visible_items[0] if visible_items else None)
-        self.library_details_button.setEnabled(self._browsed_song() is not None)
-
     def _open_selected_library_details(self, *_args) -> None:
         song = self._browsed_song()
         if song is not None:

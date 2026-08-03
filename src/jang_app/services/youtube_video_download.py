@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from collections.abc import Callable
@@ -7,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jang_app.config import FFMPEG_BIN_DIR, SUPPORTED_VIDEO_EXTENSIONS
+from jang_app.services.app_logging import get_logger
+from jang_app.services.command import run_command
 from jang_app.services.environment import MissingExecutableError, require_executable
 from jang_app.services.file_names import safe_filename_stem
 
@@ -23,6 +26,10 @@ class YouTubeVideoDownloadResult:
 
 
 ProgressCallback = Callable[[int], None]
+_VIDEO_FORMAT = (
+    "bv*[vcodec^=avc1][ext=mp4][height<=1080]/"
+    "bv*[ext=mp4][height<=1080]/bv*/b"
+)
 
 
 def download_youtube_video(
@@ -34,9 +41,14 @@ def download_youtube_video(
     if not source_url.lower().startswith(("http://", "https://")):
         raise YouTubeVideoDownloadError("Enter a valid YouTube URL.")
     try:
-        require_executable(
+        ffmpeg = require_executable(
             "ffmpeg",
             "Place FFmpeg under third_party/ffmpeg/bin or add it to PATH.",
+            [FFMPEG_BIN_DIR],
+        )
+        ffprobe = require_executable(
+            "ffprobe",
+            "Place FFprobe under third_party/ffmpeg/bin or add it to PATH.",
             [FFMPEG_BIN_DIR],
         )
     except MissingExecutableError as exc:
@@ -49,14 +61,15 @@ def download_youtube_video(
 
     target_dir = output_dir.expanduser().resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
+    logger = get_logger()
+    logger.info("Starting YouTube video download: url=%s output_dir=%s", source_url, target_dir)
     report = _progress_reporter(progress_callback)
     report(1)
     try:
         with tempfile.TemporaryDirectory(prefix="video-download-", dir=target_dir) as temporary:
             download_dir = Path(temporary)
             options = {
-                "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-                "merge_output_format": "mp4",
+                "format": _VIDEO_FORMAT,
                 "outtmpl": str(download_dir / "%(id)s.%(ext)s"),
                 "noplaylist": True,
                 "quiet": True,
@@ -71,10 +84,12 @@ def download_youtube_video(
             with yt_dlp.YoutubeDL(options) as downloader:
                 info = downloader.extract_info(source_url, download=True)
             downloaded = _find_downloaded_video(download_dir)
+            downloaded = _ensure_preview_compatible(downloaded, download_dir, ffmpeg, ffprobe)
+            report(99)
             title = _info_text(info, "title") or downloaded.stem
             video_id = safe_filename_stem(_info_text(info, "id"), fallback="youtube", max_length=24)
             title_stem = safe_filename_stem(title, fallback="youtube_video", max_length=64)
-            target = target_dir / f"{title_stem}_{video_id}{downloaded.suffix.lower()}"
+            target = target_dir / f"{title_stem}_{video_id}.mp4"
             os.replace(downloaded, target)
     except YouTubeVideoDownloadError:
         raise
@@ -82,7 +97,73 @@ def download_youtube_video(
         raise YouTubeVideoDownloadError(str(exc)) from exc
 
     report(100)
+    logger.info("YouTube video download complete: video=%s", target)
     return YouTubeVideoDownloadResult(source_url, title, target.resolve())
+
+
+def _ensure_preview_compatible(
+    source: Path,
+    output_dir: Path,
+    ffmpeg: str,
+    ffprobe: str,
+) -> Path:
+    if source.suffix.casefold() == ".mp4" and _video_codec(ffprobe, source) == ("h264", "yuv420p"):
+        return source
+
+    target = output_dir / f"{source.stem}.compatible.mp4"
+    completed = run_command(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(target),
+        ]
+    )
+    if completed.returncode != 0 or not target.is_file():
+        raise YouTubeVideoDownloadError(f"FFmpeg video conversion failed. {completed.output}")
+    return target
+
+
+def _video_codec(ffprobe: str, source: Path) -> tuple[str, str]:
+    completed = run_command(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt",
+            "-of",
+            "json",
+            str(source),
+        ]
+    )
+    if completed.returncode != 0:
+        return "", ""
+    try:
+        data = json.loads(completed.stdout)
+        stream = data["streams"][0]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return "", ""
+    return str(stream.get("codec_name", "")), str(stream.get("pix_fmt", ""))
 
 
 def _progress_reporter(callback: ProgressCallback | None) -> Callable[[int], None]:

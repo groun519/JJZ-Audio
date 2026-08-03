@@ -25,6 +25,5 @@ class SegmentedStackTests(unittest.TestCase):
         self.assertEqual(changed.count(), 1)
         control.close()
 
-
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
-from jang_app.qt_app.widgets import FeedbackButton, ScrollSafeComboBox, SvgIconButton, WaveformView
+from jang_app.qt_app.widgets import ScrollSafeComboBox, SvgIconButton, WaveformView
 from jang_app.services.song_library import SongVocalVersion
 
 
@@ -16,7 +16,6 @@ class VocalResultsPanel(QFrame):
     converted_selected = Signal(object)
     open_location_requested = Signal(object)
     remove_output_requested = Signal(object)
-    open_studio_requested = Signal()
     seek_requested = Signal(float)
 
     def __init__(self) -> None:
@@ -64,23 +63,12 @@ class VocalResultsPanel(QFrame):
             waveform.seek_requested.connect(self.seek_requested.emit)
         self.converted_waveform.selection_changed.connect(self._on_converted_changed)
 
-        self.open_studio_button = FeedbackButton("Open Studio")
-        self.open_studio_button.setObjectName("PrimaryButton")
-        self.open_studio_button.setFixedWidth(148)
-        self.open_studio_button.clicked.connect(self.open_studio_requested.emit)
-
-        studio_actions = QHBoxLayout()
-        studio_actions.setContentsMargins(0, 0, 0, 0)
-        studio_actions.addStretch(1)
-        studio_actions.addWidget(self.open_studio_button, 0)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
         layout.addLayout(header)
         for waveform in self.result_waveforms:
             layout.addWidget(waveform, 1)
-        layout.addLayout(studio_actions)
         self._set_controls_enabled(False)
 
     def set_versions(
@@ -146,7 +134,6 @@ class VocalResultsPanel(QFrame):
     def _set_controls_enabled(self, enabled: bool) -> None:
         self.open_location_button.setEnabled(enabled)
         self.remove_output_button.setEnabled(enabled)
-        self.open_studio_button.setEnabled(enabled)
 
     def _request_open_location(self) -> None:
         version = self.current_version()

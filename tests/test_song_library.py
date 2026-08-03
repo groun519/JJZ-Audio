@@ -6,11 +6,38 @@ import unittest
 from pathlib import Path
 
 from jang_app.services.output_catalog import OutputSoundSet
-from jang_app.services.song_library import SongLibrary
+from jang_app.services.song_library import SongItem, SongLibrary, sort_song_items
 from jang_app.services.song_package import SongPackageStore
 
 
 class SongLibraryTests(unittest.TestCase):
+    def test_song_items_can_be_sorted_by_creation_time_and_name(self) -> None:
+        items = [
+            SongItem(
+                "b",
+                Path("beta.wav"),
+                title_override="Beta",
+                created_at="2026-01-02T00:00:00+00:00",
+            ),
+            SongItem(
+                "a",
+                Path("alpha.wav"),
+                title_override="alpha",
+                created_at="2026-01-03T00:00:00+00:00",
+            ),
+            SongItem(
+                "c",
+                Path("charlie.wav"),
+                title_override="Charlie",
+                created_at="2026-01-01T00:00:00+00:00",
+            ),
+        ]
+
+        self.assertEqual([item.id for item in sort_song_items(items, "newest")], ["a", "b", "c"])
+        self.assertEqual([item.id for item in sort_song_items(items, "oldest")], ["c", "b", "a"])
+        self.assertEqual([item.id for item in sort_song_items(items, "name_asc")], ["a", "b", "c"])
+        self.assertEqual([item.id for item in sort_song_items(items, "name_desc")], ["c", "b", "a"])
+
     def test_legacy_sources_and_outputs_merge_into_one_song_without_modifying_legacy_data(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)
@@ -51,6 +78,7 @@ class SongLibraryTests(unittest.TestCase):
             self.assertIsNotNone(added)
             self.assertEqual(added.title, "Video Title")
             self.assertEqual(added.source_type, "youtube")
+            self.assertEqual(added.source_url, "https://example.test/watch?v=1")
             self.assertTrue(library.rename_item(added.id, "Renamed"))
             self.assertEqual(library.items()[0].title, "Renamed")
             self.assertTrue(library.remove_item(added.id))

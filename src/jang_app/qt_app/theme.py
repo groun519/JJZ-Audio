@@ -190,13 +190,7 @@ def _stylesheet(
             border-color: {faint};
         }}
 
-        QLabel#WorkTitle {{
-            color: {text};
-            font-size: 13px;
-            font-weight: 900;
-        }}
-
-        QLabel#WorkDetail, QLabel#WorkOutput {{
+        QLabel#WorkDetail {{
             color: {muted};
             font-size: 11px;
             font-weight: 700;
@@ -1528,52 +1522,123 @@ def _stylesheet(
             background: {surface};
         }}
 
-        QPushButton#NavButton {{
-            min-width: 108px;
-            min-height: 32px;
-            border-radius: 17px;
+        QFrame#WorkflowNavigationRail {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 19px;
+        }}
+
+        QPushButton#LibraryNavButton {{
+            min-width: 118px;
+            min-height: 34px;
+            border-radius: 18px;
             border-color: {border};
             background: transparent;
         }}
 
-        QPushButton#NavButton:hover,
-        QPushButton#NavButton[pointerState="hover"] {{
+        QPushButton#WorkflowNavButton {{
+            min-width: 106px;
+            min-height: 30px;
+            border: 1px solid transparent;
+            border-radius: 15px;
+            background: transparent;
+        }}
+
+        QPushButton#LibraryNavButton:hover,
+        QPushButton#LibraryNavButton[pointerState="hover"],
+        QPushButton#WorkflowNavButton:hover,
+        QPushButton#WorkflowNavButton[pointerState="hover"] {{
             background: {hover};
             color: {text};
         }}
 
-        QPushButton#NavButton:pressed,
-        QPushButton#NavButton[pointerState="pressed"] {{
+        QPushButton#LibraryNavButton:pressed,
+        QPushButton#LibraryNavButton[pointerState="pressed"],
+        QPushButton#WorkflowNavButton:pressed,
+        QPushButton#WorkflowNavButton[pointerState="pressed"] {{
             background: {pressed};
             color: {text};
         }}
 
-        QPushButton#NavButton:checked {{
+        QPushButton#LibraryNavButton:checked,
+        QPushButton#WorkflowNavButton:checked {{
             background: {tab_active};
             color: {tab_active_text};
             border-color: {tab_active_border};
         }}
 
-        QPushButton#NavButton:checked:hover,
-        QPushButton#NavButton[pointerState="hover"]:checked {{
+        QPushButton#LibraryNavButton:checked:hover,
+        QPushButton#LibraryNavButton[pointerState="hover"]:checked,
+        QPushButton#WorkflowNavButton:checked:hover,
+        QPushButton#WorkflowNavButton[pointerState="hover"]:checked {{
             background: {tab_active_hover};
             color: {tab_active_text};
         }}
 
-        QPushButton#NavButton:checked:pressed,
-        QPushButton#NavButton[pointerState="pressed"]:checked {{
+        QPushButton#LibraryNavButton:checked:pressed,
+        QPushButton#LibraryNavButton[pointerState="pressed"]:checked,
+        QPushButton#WorkflowNavButton:checked:pressed,
+        QPushButton#WorkflowNavButton[pointerState="pressed"]:checked {{
             background: {tab_active_pressed};
             color: {tab_active_text};
         }}
 
-        QPushButton#NavButton[keyboardFocus="true"] {{
+        QPushButton#LibraryNavButton[keyboardFocus="true"],
+        QPushButton#WorkflowNavButton[keyboardFocus="true"] {{
             border-color: {focus};
         }}
 
-        QPushButton#NavButton:disabled {{
+        QPushButton#LibraryNavButton:disabled,
+        QPushButton#WorkflowNavButton:disabled {{
             color: {faint};
             background: {raised};
-            border-color: {border};
+        }}
+
+        QFrame#LibraryWorkspaceHeader {{
+            background: transparent;
+            border: 0;
+            border-bottom: 1px solid {border};
+        }}
+
+        QLabel#LibraryWorkspaceTitle {{
+            font-size: 20px;
+            font-weight: 850;
+        }}
+
+        QPushButton#LibrarySectionTab {{
+            min-width: 88px;
+            min-height: 44px;
+            padding: 0 12px;
+            border: 0;
+            border-bottom: 2px solid transparent;
+            border-radius: 0;
+            background: transparent;
+            color: {muted};
+            font-weight: 700;
+        }}
+
+        QPushButton#LibrarySectionTab:hover,
+        QPushButton#LibrarySectionTab[pointerState="hover"] {{
+            color: {text};
+            background: transparent;
+        }}
+
+        QPushButton#LibrarySectionTab:pressed,
+        QPushButton#LibrarySectionTab[pointerState="pressed"] {{
+            color: {text};
+            background: transparent;
+            border-bottom-color: {focus};
+        }}
+
+        QPushButton#LibrarySectionTab:checked {{
+            color: {text};
+            background: transparent;
+            border-bottom-color: {accent};
+        }}
+
+        QPushButton#LibrarySectionTab[keyboardFocus="true"] {{
+            color: {text};
+            border-bottom-color: {focus};
         }}
 
         QFrame#SegmentedControl {{

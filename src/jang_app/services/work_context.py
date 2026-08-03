@@ -13,12 +13,10 @@ from jang_app.services.song_metadata import build_song_display_metadata
 @dataclass(frozen=True)
 class WorkContextDisplay:
     is_active: bool
-    title: str = ""
     source_type: str = ""
     source_label: str = ""
     detail_label: str = ""
     state_label: str = ""
-    output_label: str = ""
 
 
 def build_work_context_display(
@@ -32,23 +30,19 @@ def build_work_context_display(
         has_matching_output = output_set is not None and _is_output_for_song(song, output_set)
         return WorkContextDisplay(
             is_active=True,
-            title=song.title,
             source_type=metadata.source_type,
             source_label=metadata.source_label,
             detail_label=metadata.detail_label,
             state_label="Output" if is_output_item else "Separated" if has_matching_output else "Source",
-            output_label=output_set.label if has_matching_output and not is_output_item else "",
         )
 
     if output_set is not None:
         return WorkContextDisplay(
             is_active=True,
-            title=output_set.label,
             source_type="output",
             source_label="OUT",
             detail_label=_output_detail_label(output_set),
             state_label="Output",
-            output_label="",
         )
 
     return WorkContextDisplay(is_active=False)

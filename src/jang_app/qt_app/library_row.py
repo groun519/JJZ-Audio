@@ -24,6 +24,7 @@ class SongListRow(QWidget):
     rename_requested = Signal(str, str)
     remove_requested = Signal(str)
     use_requested = Signal(str)
+    details_requested = Signal(str)
 
     def __init__(self, item_id: str, title: str, metadata: SongDisplayMetadata) -> None:
         super().__init__()
@@ -60,22 +61,30 @@ class SongListRow(QWidget):
         self.use_button = SvgIconButton("arrow_right", size=30)
         set_translated_tooltip(self.use_button, "Open in Vocal")
         self.use_button.clicked.connect(lambda: self.use_requested.emit(self._item_id))
+        self.details_button = SvgIconButton("database", size=30)
+        set_translated_tooltip(self.details_button, "Open song details")
+        self.details_button.clicked.connect(lambda: self.details_requested.emit(self._item_id))
         self.rename_button = SvgIconButton("edit", size=30)
         set_translated_tooltip(self.rename_button, "Rename")
         self.rename_button.clicked.connect(self._begin_rename)
         self.remove_button = SvgIconButton("trash", size=30)
         set_translated_tooltip(self.remove_button, "Remove")
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self._item_id))
+        self.action_buttons = (
+            self.use_button,
+            self.details_button,
+            self.rename_button,
+            self.remove_button,
+        )
 
         action_container = QWidget()
         action_container.setObjectName("SongActionSlot")
-        action_container.setFixedWidth(104)
+        action_container.setFixedWidth(141)
         action_layout = QHBoxLayout(action_container)
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.setSpacing(7)
-        action_layout.addWidget(self.use_button)
-        action_layout.addWidget(self.rename_button)
-        action_layout.addWidget(self.remove_button)
+        for button in self.action_buttons:
+            action_layout.addWidget(button)
 
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 0, 0, 0)
@@ -104,9 +113,8 @@ class SongListRow(QWidget):
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self.waveform.set_theme_mode(theme_mode)
-        self.use_button.set_theme_mode(theme_mode)
-        self.rename_button.set_theme_mode(theme_mode)
-        self.remove_button.set_theme_mode(theme_mode)
+        for button in self.action_buttons:
+            button.set_theme_mode(theme_mode)
 
     def set_selected(self, is_selected: bool) -> None:
         self.setProperty("selected", is_selected)
@@ -123,9 +131,8 @@ class SongListRow(QWidget):
         super().leaveEvent(event)
 
     def _set_actions_visible(self, is_visible: bool) -> None:
-        self.use_button.setVisible(is_visible)
-        self.rename_button.setVisible(is_visible)
-        self.remove_button.setVisible(is_visible)
+        for button in self.action_buttons:
+            button.setVisible(is_visible)
 
     def _begin_rename(self) -> None:
         self._is_editing = True

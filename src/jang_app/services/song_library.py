@@ -5,6 +5,7 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from jang_app.config import DOWNLOAD_OUTPUT_DIR, SONG_LIBRARY_FILE, SUPPORTED_AUDIO_EXTENSIONS
@@ -39,7 +40,9 @@ class SongItem:
     output_job_dir: Path | None = None
     title_override: str = ""
     source_type: str = "local"
+    source_url: str = ""
     package_dir: Path | None = None
+    created_at: str = ""
 
     @property
     def title(self) -> str:
@@ -62,6 +65,20 @@ class SongItem:
         except OSError:
             return "Unknown size"
         return f"{size_mb:.1f} MB"
+
+
+def sort_song_items(items: list[SongItem], sort_mode: str) -> list[SongItem]:
+    if sort_mode == "oldest":
+        return sorted(items, key=lambda item: (_created_timestamp(item), item.title.casefold(), item.id))
+    if sort_mode == "name_asc":
+        return sorted(items, key=lambda item: (item.title.casefold(), -_created_timestamp(item), item.id))
+    if sort_mode == "name_desc":
+        return sorted(
+            items,
+            key=lambda item: (item.title.casefold(), _created_timestamp(item), item.id),
+            reverse=True,
+        )
+    return sorted(items, key=lambda item: (-_created_timestamp(item), item.title.casefold(), item.id))
 
 
 @dataclass(frozen=True)
@@ -360,7 +377,9 @@ def _item_from_package(package: SongPackage) -> SongItem:
             output_job_dir=active_output.job_dir if active_output is not None else None,
             title_override=package.title,
             source_type=package.source_type,
+            source_url=package.source_url,
             package_dir=package.folder,
+            created_at=package.created_at,
         )
     if active_output is None:
         raise ValueError(f"Song package has neither source nor output: {package.song_id}")
@@ -371,8 +390,22 @@ def _item_from_package(package: SongPackage) -> SongItem:
         output_job_dir=active_output.job_dir,
         title_override=package.title,
         source_type="output",
+        source_url="",
         package_dir=package.folder,
+        created_at=package.created_at,
     )
+
+
+def _created_timestamp(item: SongItem) -> float:
+    if item.created_at:
+        try:
+            return datetime.fromisoformat(item.created_at.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    try:
+        return item.path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _vocal_version_from_output(
