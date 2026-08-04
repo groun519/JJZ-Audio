@@ -84,8 +84,11 @@ Verify clean install, in-place update, and uninstall data preservation:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 `
-  -InstallerPath release\JJZero-Audio-0.1.0-Setup.exe
+  -InstallerPath release\JJZero-Audio-0.2.0-Setup.exe
 ```
+
+The release version is defined once in `src\jang_app\version.py`. Windows
+executable metadata, installer names, and manifests are generated from it.
 
 Outputs are written under `output\separations` by default.
 

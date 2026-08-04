@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #error AppVersion must be provided by scripts\build_installer.ps1
 #endif
 
 #define AppName "JJZero Audio"

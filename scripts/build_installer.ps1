@@ -10,9 +10,12 @@ $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $appBuild = Join-Path $projectRoot "scripts\build_windows.ps1"
 $distribution = Join-Path $projectRoot "dist\JJZero Audio"
 $installerScript = Join-Path $projectRoot "packaging\JJZeroAudio.iss"
-$versionFile = Join-Path $projectRoot "packaging\version.txt"
+$versionScript = Join-Path $projectRoot "scripts\release_version.py"
 $releaseDir = Join-Path $projectRoot "release"
-$version = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+$version = (& $python $versionScript "print").Trim()
+if ($LASTEXITCODE -ne 0 -or -not $version) {
+    throw "Release version lookup failed with exit code $LASTEXITCODE"
+}
 
 if (-not $SkipAppBuild) {
     & $appBuild -SkipTests:$SkipTests

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jang-audio-app"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local desktop audio workflow app."
 requires-python = ">=3.11"
 dependencies = [
@@ -22,6 +22,9 @@ jang-audio = "jang_app.qt_app.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "jang_app.version.__version__"}
 
 [tool.setuptools.package-data]
 jang_app = ["assets/*.svg"]

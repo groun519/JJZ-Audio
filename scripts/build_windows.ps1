@@ -11,6 +11,7 @@ $spec = Join-Path $projectRoot "packaging\JJZeroAudio.spec"
 $distribution = Join-Path $projectRoot "dist\JJZero Audio"
 $runtimeSource = Join-Path $projectRoot "third_party"
 $runtimeRoot = Join-Path $distribution "runtime"
+$versionScript = Join-Path $projectRoot "scripts\release_version.py"
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Project Python was not found: $python"
@@ -24,6 +25,11 @@ foreach ($component in @("ffmpeg", "demucs", "rvc")) {
 
 Push-Location $projectRoot
 try {
+    & $python $versionScript "write-windows-info"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows version metadata generation failed with exit code $LASTEXITCODE"
+    }
+
     if (-not $SkipTests) {
         & $python -m unittest discover -s tests -p "test_*.py"
         if ($LASTEXITCODE -ne 0) {
