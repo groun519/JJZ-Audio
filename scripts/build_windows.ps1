@@ -1,6 +1,7 @@
 param(
     [switch]$SkipTests,
-    [switch]$SkipVerification
+    [switch]$SkipVerification,
+    [switch]$IncludeRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,10 +17,12 @@ $versionScript = Join-Path $projectRoot "scripts\release_version.py"
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Project Python was not found: $python"
 }
-foreach ($component in @("ffmpeg", "demucs", "rvc")) {
-    $componentSource = Join-Path $runtimeSource $component
-    if (-not (Test-Path -LiteralPath $componentSource -PathType Container)) {
-        throw "Required runtime component was not found: $componentSource"
+if ($IncludeRuntime) {
+    foreach ($component in @("ffmpeg", "demucs", "rvc")) {
+        $componentSource = Join-Path $runtimeSource $component
+        if (-not (Test-Path -LiteralPath $componentSource -PathType Container)) {
+            throw "Required runtime component was not found: $componentSource"
+        }
     }
 }
 
@@ -42,13 +45,19 @@ try {
         throw "PyInstaller failed with exit code $LASTEXITCODE"
     }
 
-    New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
-    foreach ($component in @("ffmpeg", "demucs", "rvc")) {
-        $componentSource = Join-Path $runtimeSource $component
-        Copy-Item -LiteralPath $componentSource -Destination $runtimeRoot -Recurse -Force
+    if ($IncludeRuntime) {
+        New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+        foreach ($component in @("ffmpeg", "demucs", "rvc")) {
+            $componentSource = Join-Path $runtimeSource $component
+            Copy-Item -LiteralPath $componentSource -Destination $runtimeRoot -Recurse -Force
+        }
     }
     if (-not $SkipVerification) {
-        & $python scripts\verify_distribution.py $distribution
+        $verificationArguments = @("scripts\verify_distribution.py", $distribution)
+        if (-not $IncludeRuntime) {
+            $verificationArguments += "--app-only"
+        }
+        & $python @verificationArguments
         if ($LASTEXITCODE -ne 0) {
             throw "Distribution verification failed with exit code $LASTEXITCODE"
         }

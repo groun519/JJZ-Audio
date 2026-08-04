@@ -5,21 +5,35 @@ import hashlib
 import json
 from pathlib import Path
 
+from jang_app.runtime_version import AI_RUNTIME_VERSION
+
 
 MANIFEST_NAME = "latest.json"
+RUNTIME_INDEX_NAME = "runtime-packages.json"
+GITHUB_ASSET_LIMIT = 2 * 1024 * 1024 * 1024
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Create the JJZero Audio release manifest.")
     parser.add_argument("release_dir", type=Path)
     parser.add_argument("version")
+    parser.add_argument("--signing-publisher", default="")
     arguments = parser.parse_args()
-    manifest = create_release_manifest(arguments.release_dir, arguments.version)
+    manifest = create_release_manifest(
+        arguments.release_dir,
+        arguments.version,
+        signing_publisher=arguments.signing_publisher,
+    )
     print(f"Created release manifest: {manifest}")
     return 0
 
 
-def create_release_manifest(release_dir: Path, version: str) -> Path:
+def create_release_manifest(
+    release_dir: Path,
+    version: str,
+    runtime_version: str = AI_RUNTIME_VERSION,
+    signing_publisher: str = "",
+) -> Path:
     resolved_release = release_dir.expanduser().resolve()
     artifacts = sorted(
         path
@@ -30,25 +44,93 @@ def create_release_manifest(release_dir: Path, version: str) -> Path:
         raise FileNotFoundError(
             f"No installer artifacts were found for version {version}: {resolved_release}"
         )
+    for artifact in artifacts:
+        _validate_asset_size(artifact)
+
+    components = [
+        {
+            "id": "application",
+            "version": version,
+            "install_mode": "installer",
+            "artifacts": [
+                _artifact_data(path, signing_publisher=signing_publisher)
+                for path in artifacts
+            ],
+        }
+    ]
+    runtime_index = resolved_release / RUNTIME_INDEX_NAME
+    if runtime_index.is_file():
+        runtime_data = json.loads(runtime_index.read_text(encoding="utf-8"))
+        if runtime_data.get("version") != runtime_version:
+            raise ValueError(
+                "Runtime package version does not match the release runtime version."
+            )
+        runtime_artifacts = runtime_data.get("artifacts")
+        if not isinstance(runtime_artifacts, list) or not runtime_artifacts:
+            raise ValueError("Runtime package index has no artifacts.")
+        runtime_artifacts = [
+            _validated_index_artifact(resolved_release, artifact)
+            for artifact in runtime_artifacts
+        ]
+        components.append(
+            {
+                "id": "ai-runtime",
+                "version": runtime_version,
+                "install_mode": "extract",
+                "artifacts": runtime_artifacts,
+            }
+        )
 
     data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "product": "JJZero Audio",
         "version": version,
         "architecture": "x64",
         "minimum_windows": "10.0.17763",
-        "artifacts": [
-            {
-                "name": path.name,
-                "size": path.stat().st_size,
-                "sha256": _sha256(path),
-            }
-            for path in artifacts
-        ],
+        "components": components,
     }
     manifest = resolved_release / MANIFEST_NAME
     manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return manifest
+
+
+def _artifact_data(path: Path, *, signing_publisher: str = "") -> dict[str, object]:
+    data: dict[str, object] = {
+        "name": path.name,
+        "size": path.stat().st_size,
+        "sha256": _sha256(path),
+    }
+    if signing_publisher:
+        data["authenticode"] = {
+            "required": True,
+            "publisher": signing_publisher,
+        }
+    return data
+
+
+def _validated_index_artifact(
+    release_dir: Path,
+    data: object,
+) -> dict[str, object]:
+    if not isinstance(data, dict):
+        raise ValueError("Runtime package artifact must be an object.")
+    name = data.get("name")
+    if not isinstance(name, str) or Path(name).name != name:
+        raise ValueError(f"Unsafe runtime package name: {name!r}")
+    package = release_dir / name
+    if not package.is_file():
+        raise FileNotFoundError(f"Runtime package was not found: {package}")
+    _validate_asset_size(package)
+    expected_size = data.get("size")
+    expected_hash = data.get("sha256")
+    if expected_size != package.stat().st_size or expected_hash != _sha256(package):
+        raise ValueError(f"Runtime package index verification failed: {name}")
+    return dict(data)
+
+
+def _validate_asset_size(path: Path) -> None:
+    if path.stat().st_size >= GITHUB_ASSET_LIMIT:
+        raise ValueError(f"Release asset exceeds GitHub's 2 GiB limit: {path.name}")
 
 
 def _sha256(path: Path) -> str:

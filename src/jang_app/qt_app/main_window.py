@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import replace
@@ -56,6 +57,7 @@ from jang_app.qt_app.segmented_stack import SegmentedStack
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
 from jang_app.qt_app.toast_stack import ToastStack
+from jang_app.qt_app.update_dialog import UpdateDialog
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
 from jang_app.qt_app.video_preview_panel import VideoPreviewPanel
 from jang_app.qt_app.window_chrome import apply_window_corner_style
@@ -74,6 +76,14 @@ from jang_app.qt_app.widgets import (
     make_list_item,
 )
 from jang_app.qt_app.workers import TaskProgressTarget, TaskWorker
+from jang_app.services.app_logging import get_logger
+from jang_app.services.app_update import (
+    DEFAULT_MANIFEST_URL,
+    UpdatePlan,
+    create_update_plan,
+    download_artifact,
+    fetch_release_manifest,
+)
 from jang_app.services.audio_export import export_audio_file
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.audio_player import AudioPlaybackError, AudioPlayer
@@ -84,6 +94,10 @@ from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_s
 from jang_app.services.playback_queue import PlaybackQueue
 from jang_app.services.processing_queue import ProcessingQueue
 from jang_app.services.rvc_model_workspace import RvcModelRecord
+from jang_app.services.runtime_installation import (
+    install_runtime_packages,
+    installed_runtime_version,
+)
 from jang_app.services.settings import AppSettings, RvcSettings, save_app_settings
 from jang_app.services.song_metadata import build_song_display_metadata
 from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
@@ -92,6 +106,7 @@ from jang_app.services.video_source import VideoSource
 from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion, sort_song_items
 from jang_app.services.studio_session import StudioSession, StudioTrackState
 from jang_app.services.youtube_download import YouTubeDownloadResult, download_youtube_audio
+from jang_app.version import __version__
 
 
 PAGE_LIBRARY = 0
@@ -112,6 +127,11 @@ class MainWindow(QMainWindow):
         self.player = AudioPlayer()
         self.processing_queue = ProcessingQueue()
         self._workers: list[TaskWorker] = []
+        self._logger = get_logger()
+        self._update_check_worker: TaskWorker | None = None
+        self._update_dialog: UpdateDialog | None = None
+        self._downloaded_update: tuple[Path, ...] = ()
+        self._downloaded_update_plan: UpdatePlan | None = None
         self._action_task_ids: dict[int, str] = {}
         self._song_items_by_id: dict[str, SongItem] = {}
         self.current_song: SongItem | None = None
@@ -144,6 +164,8 @@ class MainWindow(QMainWindow):
         self._refresh_rvc_choices()
         self._refresh_output_sets()
         self._restore_work_song()
+        if getattr(sys, "frozen", False) or os.environ.get("JJZERO_UPDATE_MANIFEST_URL"):
+            QTimer.singleShot(2500, self._start_update_check)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.studio_session_autosave.flush()
@@ -780,6 +802,164 @@ class MainWindow(QMainWindow):
             arguments = [str(Path(sys.argv[0]).resolve()), *sys.argv[1:]]
         if QProcess.startDetached(sys.executable, arguments, str(Path.cwd())):
             QApplication.quit()
+
+    def _start_update_check(self) -> None:
+        if self._update_check_worker is not None:
+            return
+        manifest_url = os.environ.get("JJZERO_UPDATE_MANIFEST_URL", DEFAULT_MANIFEST_URL)
+        worker = TaskWorker(lambda progress: _check_for_updates(manifest_url, progress))
+        self._update_check_worker = worker
+        self._workers.append(worker)
+
+        def complete(result: object) -> None:
+            if isinstance(result, UpdatePlan) and result.required:
+                self._show_update_dialog(result)
+
+        def failed(error: str) -> None:
+            self._logger.info("Automatic update check failed: %s", _last_error_line(error))
+
+        def cleanup() -> None:
+            self._update_check_worker = None
+            if worker in self._workers:
+                self._workers.remove(worker)
+            worker.deleteLater()
+
+        worker.succeeded.connect(complete)
+        worker.failed.connect(failed)
+        worker.finished.connect(cleanup)
+        worker.start()
+
+    def _show_update_dialog(self, plan: UpdatePlan) -> None:
+        if self._update_dialog is not None:
+            self._update_dialog.raise_()
+            self._update_dialog.activateWindow()
+            return
+        dialog = UpdateDialog(
+            plan,
+            APP_ICON_PATH,
+            current_version=__version__,
+            theme_mode=self.settings.theme_mode,
+            parent=self,
+        )
+        self._update_dialog = dialog
+        dialog.download_requested.connect(lambda: self._start_update_download(plan))
+        dialog.install_requested.connect(self._install_downloaded_update)
+        dialog.finished.connect(lambda _result: self._clear_update_dialog(dialog))
+        dialog.show()
+
+    def _clear_update_dialog(self, dialog: UpdateDialog) -> None:
+        if self._update_dialog is dialog:
+            self._update_dialog = None
+        dialog.deleteLater()
+
+    def _start_update_download(self, plan: UpdatePlan) -> None:
+        dialog = self._update_dialog
+        if dialog is None:
+            return
+        dialog.set_downloading()
+        worker = TaskWorker(
+            lambda progress: _download_update_artifacts(plan, APP_PATHS.cache_dir, progress)
+        )
+
+        def succeeded(result: object) -> None:
+            paths = (
+                tuple(path for path in result if isinstance(path, Path))
+                if isinstance(result, tuple)
+                else ()
+            )
+            self._downloaded_update = paths
+            self._downloaded_update_plan = plan
+            if not paths:
+                dialog.set_download_failed(tr("No update installer was downloaded."))
+                return
+            dialog.set_ready_to_install()
+
+        def failed(error: str) -> None:
+            dialog.set_download_failed(_last_error_line(error))
+
+        self._run_worker(
+            worker,
+            succeeded,
+            failed,
+            dialog,
+            task_title="Download Update",
+            task_detail=f"JJZero Audio {plan.release.version}",
+        )
+
+    def _install_downloaded_update(self) -> None:
+        plan = self._downloaded_update_plan
+        if plan is None:
+            return
+        runtime = plan.release.ai_runtime
+        runtime_packages = tuple(
+            path for path in self._downloaded_update if path.suffix.lower() == ".zip"
+        )
+        if plan.runtime_required and runtime is not None:
+            if not runtime_packages:
+                if self._update_dialog is not None:
+                    self._update_dialog.set_download_failed(
+                        tr("AI runtime packages are unavailable.")
+                    )
+                return
+            self.player.stop()
+            self.video_preview_panel.stop()
+            dialog = self._update_dialog
+            if dialog is None:
+                return
+            dialog.set_installing_runtime()
+            worker = TaskWorker(
+                lambda progress: install_runtime_packages(
+                    runtime_packages,
+                    APP_PATHS.runtime_root,
+                    runtime.version,
+                    progress=progress,
+                )
+            )
+            self._run_worker(
+                worker,
+                lambda _result: self._launch_downloaded_installer_or_restart(),
+                lambda error: dialog.set_download_failed(_last_error_line(error)),
+                dialog,
+                task_title="Install AI Runtime",
+                task_detail=f"Runtime {runtime.version}",
+            )
+            return
+        self._launch_downloaded_installer_or_restart()
+
+    def _launch_downloaded_installer_or_restart(self) -> None:
+        installer = next(
+            (path for path in self._downloaded_update if path.suffix.lower() == ".exe"),
+            None,
+        )
+        plan = self._downloaded_update_plan
+        if installer is None:
+            if plan is not None and not plan.application_required:
+                if getattr(sys, "frozen", False):
+                    arguments = sys.argv[1:]
+                else:
+                    arguments = [str(Path(sys.argv[0]).resolve()), *sys.argv[1:]]
+                if QProcess.startDetached(sys.executable, arguments, str(Path.cwd())):
+                    QApplication.quit()
+                    return
+            if self._update_dialog is not None:
+                self._update_dialog.set_download_failed(
+                    tr("The update installer is unavailable.")
+                )
+            return
+        arguments = (
+            "/SILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/CLOSEAPPLICATIONS",
+            "/RUN",
+        )
+        if not QProcess.startDetached(str(installer), list(arguments), str(installer.parent)):
+            if self._update_dialog is not None:
+                self._update_dialog.set_download_failed(
+                    tr("Could not start the update installer.")
+                )
+            return
+        QApplication.quit()
 
     def _change_language(self, language: str) -> None:
         if language == self.settings.language:
@@ -2343,6 +2523,45 @@ class MainWindow(QMainWindow):
         worker.failed.connect(handle_failure)
         worker.finished.connect(cleanup)
         worker.start()
+
+
+def _check_for_updates(manifest_url: str, progress: Callable[[int], None]) -> UpdatePlan:
+    progress(10)
+    release = fetch_release_manifest(manifest_url)
+    progress(100)
+    runtime_version = installed_runtime_version(APP_PATHS.runtime_root)
+    return create_update_plan(
+        release,
+        runtime_version=runtime_version,
+        runtime_ready=runtime_version is not None,
+    )
+
+
+def _download_update_artifacts(
+    plan: UpdatePlan,
+    cache_dir: Path,
+    progress: Callable[[int], None],
+) -> tuple[Path, ...]:
+    artifacts = plan.artifacts
+    if not artifacts:
+        return ()
+    destination = cache_dir / "updates" / plan.release.version
+    total_size = sum(artifact.size for artifact in artifacts)
+    completed_size = 0
+    paths: list[Path] = []
+    for artifact in artifacts:
+        base_size = completed_size
+        path = download_artifact(
+            artifact,
+            destination,
+            progress=lambda value, item=artifact, base=base_size: progress(
+                int((base + item.size * value / 100) * 100 / total_size)
+            ),
+        )
+        paths.append(path)
+        completed_size += artifact.size
+    progress(100)
+    return tuple(paths)
 
 
 def _field_label(text: str) -> QLabel:

@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$InstallerPath,
-    [string]$PreviousInstallerPath = ""
+    [string]$PreviousInstallerPath = "",
+    [string]$RuntimePackageIndex = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +20,7 @@ $testRoot = Join-Path $env:TEMP ("jz-" + $testId)
 $installDir = Join-Path $testRoot "app"
 $dataRoot = Join-Path $testRoot "data"
 $sentinel = Join-Path $dataRoot "settings\preserve.txt"
+$runtimeSentinel = Join-Path $installDir "runtime\rvc\weights\preserve-runtime-model.pth"
 
 function Get-InstallerVersion([string]$SetupPath) {
     $name = [System.IO.Path]::GetFileName($SetupPath)
@@ -69,9 +71,25 @@ $targetVersion = Get-InstallerVersion $installer
 
 Invoke-Setup $baselineInstaller "install-$baselineVersion.log"
 Assert-InstalledVersion $baselineVersion
+New-Item -ItemType Directory -Path (Split-Path -Parent $runtimeSentinel) -Force | Out-Null
+Set-Content -LiteralPath $runtimeSentinel -Value "preserve-runtime-model" -Encoding UTF8
 Invoke-Setup $installer "update-$targetVersion.log"
 Assert-InstalledVersion $targetVersion
+if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtime-model") {
+    throw "Existing runtime data changed during the app update: $runtimeSentinel"
+}
+if ($RuntimePackageIndex) {
+    $packageIndex = (Resolve-Path -LiteralPath $RuntimePackageIndex).Path
+    & $python scripts\install_runtime_packages.py $packageIndex (Join-Path $installDir "runtime")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runtime package installation failed with exit code $LASTEXITCODE"
+    }
+}
 Invoke-DistributionVerification
+
+if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtime-model") {
+    throw "Runtime model data changed during the runtime update: $runtimeSentinel"
+}
 
 if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne "preserve-user-data") {
     throw "User data changed during the update test: $sentinel"

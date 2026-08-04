@@ -62,15 +62,14 @@ copy personal `weights` or `logs` model data.
 .\.venv\Scripts\python.exe scripts\prepare_rvc_runtime.py "C:\path\to\RVC"
 ```
 
-Build and verify the `onedir` distribution:
+Build and verify the app-only `onedir` distribution:
 
 ```powershell
 .\build_windows.bat
 ```
 
-The verified application is created under `dist\JJZero Audio`. FFmpeg, the
-Demucs model, and the shared CUDA RVC/Demucs runtime are bundled under its
-`runtime` folder without duplicating PyTorch.
+The verified application is created under `dist\JJZero Audio`. AI tools are
+versioned separately so normal application updates do not download Torch again.
 
 Build the versioned Windows installer after installing Inno Setup:
 
@@ -78,7 +77,32 @@ Build the versioned Windows installer after installing Inno Setup:
 .\build_installer.bat -SkipAppBuild
 ```
 
-Installer files and their SHA-256 update manifest are created under `release`.
+Build a complete GitHub Release payload with the app installer, bounded AI
+runtime ZIP parts, and the SHA-256 component manifest:
+
+```powershell
+.\build_release.bat
+```
+
+Every release asset is kept below GitHub Releases' 2 GiB per-file limit. The
+small app installer preserves an existing runtime. On a new PC, first-run setup
+downloads and verifies the runtime parts before installing them atomically.
+For app-only releases, reuse existing runtime parts with
+`.\build_release.bat -SkipRuntimeBuild`.
+
+Public releases require an Authenticode certificate. Configure
+`JJZERO_SIGN_CERT_THUMBPRINT` or `JJZERO_SIGN_CERT_PATH`, set
+`JJZERO_SIGNING_PUBLISHER` to the expected certificate subject, then build with:
+
+```powershell
+.\build_release.bat -RequireCodeSigning
+powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1
+powershell -ExecutionPolicy Bypass -File scripts\publish_github_release.ps1
+```
+
+Publishing uses GitHub CLI and uploads `latest.json`, the offline runtime index,
+the app installer, and all runtime parts to one GitHub Release. Unsigned output
+is accepted only when `-AllowUnsigned` is explicitly supplied for local testing.
 
 Verify clean install, in-place update, and uninstall data preservation:
 

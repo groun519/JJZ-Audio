@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import math
 import os
 import struct
@@ -16,41 +17,43 @@ EXECUTABLE_NAME = "JJZero Audio.exe"
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("Usage: verify_distribution.py <distribution-directory>", file=sys.stderr)
-        return 2
-
-    distribution = Path(sys.argv[1]).expanduser().resolve()
+    parser = argparse.ArgumentParser(description="Verify a JJZero Audio distribution.")
+    parser.add_argument("distribution", type=Path)
+    parser.add_argument("--app-only", action="store_true")
+    arguments = parser.parse_args()
+    distribution = arguments.distribution.expanduser().resolve()
     executable = distribution / EXECUTABLE_NAME
     rvc_root = distribution / "runtime" / "rvc"
     rvc_python = rvc_root / "runtime" / "python.exe"
-    required_files = required_distribution_files(distribution)
+    required_files = required_application_files(distribution)
+    if not arguments.app_only:
+        required_files += required_runtime_files(distribution)
     missing = tuple(path for path in required_files if not path.is_file())
     if missing:
         for path in missing:
             print(f"Missing distribution file: {path}", file=sys.stderr)
         return 1
 
-    demucs_check = subprocess.run(
-        [str(rvc_python), "-m", "demucs", "--help"],
-        cwd=distribution,
-        check=False,
-        timeout=90,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if demucs_check.returncode != 0:
-        print(
-            f"Packaged Demucs runtime failed with exit code {demucs_check.returncode}",
-            file=sys.stderr,
+    if not arguments.app_only:
+        demucs_check = subprocess.run(
+            [str(rvc_python), "-m", "demucs", "--help"],
+            cwd=distribution,
+            check=False,
+            timeout=90,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        return 1
-
-    if not _verify_demucs_runtime(distribution, rvc_python):
-        return 1
-    if not _verify_rvc_runtime(distribution):
-        return 1
+        if demucs_check.returncode != 0:
+            print(
+                f"Packaged Demucs runtime failed with exit code {demucs_check.returncode}",
+                file=sys.stderr,
+            )
+            return 1
+        if not _verify_demucs_runtime(distribution, rvc_python):
+            return 1
+        if not _verify_rvc_runtime(distribution):
+            return 1
 
     with tempfile.TemporaryDirectory(prefix="jjzero-dist-smoke-") as temporary:
         temporary_root = Path(temporary)
@@ -95,11 +98,19 @@ def main() -> int:
     return 0
 
 
-def required_distribution_files(distribution: Path) -> tuple[Path, ...]:
+def required_application_files(distribution: Path) -> tuple[Path, ...]:
+    root = distribution.expanduser().resolve()
+    return (
+        root / EXECUTABLE_NAME,
+        root / "_internal" / "jang_app" / "assets" / "jjzero_logo.svg",
+        root / "_internal" / "jang_app" / "rvc_tools" / "rvc_artifact_worker.py",
+    )
+
+
+def required_runtime_files(distribution: Path) -> tuple[Path, ...]:
     root = distribution.expanduser().resolve()
     rvc_root = root / "runtime" / "rvc"
     return (
-        root / EXECUTABLE_NAME,
         rvc_root / "runtime" / "python.exe",
         root / "runtime" / "ffmpeg" / "bin" / "ffmpeg.exe",
         root / "runtime" / "ffmpeg" / "bin" / "ffprobe.exe",
@@ -112,10 +123,12 @@ def required_distribution_files(distribution: Path) -> tuple[Path, ...]:
         / "955717e8-8726e21a.th",
         rvc_root / "infer_cli.py",
         rvc_root / "vc_infer_pipeline.py",
-        root / "_internal" / "jang_app" / "assets" / "jjzero_logo.svg",
-        root / "_internal" / "jang_app" / "rvc_tools" / "rvc_artifact_worker.py",
         *(rvc_root / path for path in required_rvc_training_paths()),
     )
+
+
+def required_distribution_files(distribution: Path) -> tuple[Path, ...]:
+    return required_application_files(distribution) + required_runtime_files(distribution)
 
 
 def _verify_demucs_runtime(distribution: Path, runtime_python: Path) -> bool:

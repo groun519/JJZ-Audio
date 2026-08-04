@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, Signal
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 from jang_app.qt_app.app_dialog import AppDialog
 from jang_app.qt_app.theme import theme_tokens
 from jang_app.services.app_paths import AppPaths
+from jang_app.services.app_update import DEFAULT_MANIFEST_URL
 from jang_app.services.i18n import tr
 from jang_app.services.initial_setup import (
     InitialSetupError,
@@ -32,6 +34,7 @@ from jang_app.services.system_diagnostics import (
     SystemDiagnostics,
     run_system_diagnostics,
 )
+from jang_app.services.runtime_bootstrap import provision_ai_runtime, provision_ai_runtime_offline
 
 
 class DiagnosticsWorker(QThread):
@@ -51,6 +54,41 @@ class DiagnosticsWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class RuntimeProvisionWorker(QThread):
+    progress_changed = Signal(int)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        paths: AppPaths,
+        manifest_url: str,
+        package_index: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self._paths = paths
+        self._manifest_url = manifest_url
+        self._package_index = package_index
+
+    def run(self) -> None:
+        try:
+            if self._package_index is None:
+                result = provision_ai_runtime(
+                    self._paths,
+                    manifest_url=self._manifest_url,
+                    progress=self.progress_changed.emit,
+                )
+            else:
+                result = provision_ai_runtime_offline(
+                    self._paths,
+                    self._package_index,
+                    progress=self.progress_changed.emit,
+                )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class InitialSetupDialog(AppDialog):
     def __init__(
         self,
@@ -60,6 +98,7 @@ class InitialSetupDialog(AppDialog):
         first_run: bool = True,
         theme_mode: str = "dark",
         diagnostics_worker_type: type[DiagnosticsWorker] = DiagnosticsWorker,
+        runtime_worker_type: type[RuntimeProvisionWorker] = RuntimeProvisionWorker,
     ) -> None:
         dialog_title = tr("First Run Setup" if first_run else "System Setup")
         super().__init__(
@@ -74,7 +113,8 @@ class InitialSetupDialog(AppDialog):
         self._first_run = first_run
         self._theme_mode = theme_mode
         self._diagnostics_worker_type = diagnostics_worker_type
-        self._worker: DiagnosticsWorker | None = None
+        self._runtime_worker_type = runtime_worker_type
+        self._worker: QThread | None = None
         self._diagnostics: SystemDiagnostics | None = None
         self.restart_required = False
 
@@ -232,7 +272,17 @@ class InitialSetupDialog(AppDialog):
         self.rerun_button.setObjectName("SetupSecondaryButton")
         self.rerun_button.clicked.connect(self._start_diagnostics)
         self.rerun_button.hide()
+        self.install_runtime_button = QPushButton(tr("Install AI Runtime"))
+        self.install_runtime_button.setObjectName("SetupPrimaryButton")
+        self.install_runtime_button.clicked.connect(lambda: self._start_runtime_install())
+        self.install_runtime_button.hide()
+        self.offline_runtime_button = QPushButton(tr("Install from Files"))
+        self.offline_runtime_button.setObjectName("SetupSecondaryButton")
+        self.offline_runtime_button.clicked.connect(self._choose_runtime_packages)
+        self.offline_runtime_button.hide()
         rerun_row = QHBoxLayout()
+        rerun_row.addWidget(self.install_runtime_button)
+        rerun_row.addWidget(self.offline_runtime_button)
         rerun_row.addStretch(1)
         rerun_row.addWidget(self.rerun_button)
 
@@ -308,7 +358,10 @@ class InitialSetupDialog(AppDialog):
             row.set_waiting()
         self.diagnostic_summary.setText(tr("Checking bundled tools and NVIDIA GPU..."))
         self.diagnostic_progress.show()
+        self.diagnostic_progress.setRange(0, 0)
         self.rerun_button.hide()
+        self.install_runtime_button.hide()
+        self.offline_runtime_button.hide()
         self.primary_button.setEnabled(False)
         self.back_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
@@ -341,6 +394,9 @@ class InitialSetupDialog(AppDialog):
         self.diagnostic_summary.setText(tr(summary))
         self.diagnostic_progress.hide()
         self.rerun_button.show()
+        needs_runtime = _needs_runtime_install(diagnostics)
+        self.install_runtime_button.setVisible(needs_runtime)
+        self.offline_runtime_button.setVisible(needs_runtime)
         self.primary_button.setText(tr("Start JJZero Audio" if self._first_run else "Apply and Restart"))
         self.primary_button.setEnabled(True)
         self.back_button.setEnabled(True)
@@ -356,6 +412,8 @@ class InitialSetupDialog(AppDialog):
         self.diagnostic_summary.setText(tr("System diagnostics failed."))
         self.diagnostic_progress.hide()
         self.rerun_button.show()
+        self.install_runtime_button.show()
+        self.offline_runtime_button.show()
         if self._first_run:
             action = "Start JJZero Audio"
         elif self._configured_paths.workspace_anchor != self._paths.workspace_anchor:
@@ -366,6 +424,64 @@ class InitialSetupDialog(AppDialog):
         self.primary_button.setEnabled(True)
         self.back_button.setEnabled(True)
         self.cancel_button.setEnabled(True)
+
+    def _choose_runtime_packages(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Select AI Runtime Package Index"),
+            str(Path.home()),
+            f"{tr('JSON Files')} (*.json)",
+        )
+        if selected:
+            self._start_runtime_install(Path(selected))
+
+    def _start_runtime_install(self, package_index: Path | None = None) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.setProperty("runtimeInstallFailed", False)
+        self.diagnostic_summary.setText(tr("Downloading and installing the AI runtime..."))
+        self.diagnostic_progress.setRange(0, 100)
+        self.diagnostic_progress.setValue(0)
+        self.diagnostic_progress.show()
+        self.install_runtime_button.hide()
+        self.offline_runtime_button.hide()
+        self.rerun_button.hide()
+        self.primary_button.setEnabled(False)
+        self.back_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        manifest_url = os.environ.get("JJZERO_UPDATE_MANIFEST_URL", DEFAULT_MANIFEST_URL)
+        worker = self._runtime_worker_type(
+            self._configured_paths,
+            manifest_url,
+            package_index,
+        )
+        worker.setParent(self)
+        worker.progress_changed.connect(self.diagnostic_progress.setValue)
+        worker.completed.connect(
+            lambda _result: self.diagnostic_summary.setText(tr("AI runtime installed. Verifying..."))
+        )
+        worker.failed.connect(self._on_runtime_install_failed)
+        worker.finished.connect(self._on_worker_finished)
+        worker.finished.connect(self._restart_diagnostics_after_runtime_install)
+        self._worker = worker
+        worker.start()
+
+    def _on_runtime_install_failed(self, error: str) -> None:
+        self.diagnostic_summary.setText(f"{tr('Runtime failed')}: {error}")
+        self.diagnostic_progress.hide()
+        self.install_runtime_button.show()
+        self.offline_runtime_button.show()
+        self.rerun_button.show()
+        self.primary_button.setEnabled(True)
+        self.back_button.setEnabled(True)
+        self.cancel_button.setEnabled(True)
+        self.setProperty("runtimeInstallFailed", True)
+
+    def _restart_diagnostics_after_runtime_install(self) -> None:
+        failed = bool(self.property("runtimeInstallFailed"))
+        self.setProperty("runtimeInstallFailed", False)
+        if not failed:
+            self._start_diagnostics()
 
     def _on_worker_finished(self) -> None:
         worker = self._worker
@@ -432,6 +548,14 @@ class DiagnosticRow(QFrame):
         for widget in (self, self.status_label):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+
+
+def _needs_runtime_install(diagnostics: SystemDiagnostics) -> bool:
+    runtime_keys = {"ffmpeg", "demucs", "rvc_assets", "ai_runtime"}
+    return any(
+        check.key in runtime_keys and check.status == DiagnosticStatus.FAIL
+        for check in diagnostics.checks
+    )
 
 
 def _path_preview(label: str) -> QLabel:
