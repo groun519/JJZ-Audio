@@ -8,17 +8,20 @@ from jang_app.qt_app.widgets import ScrollSafeSlider, SvgIconButton
 from jang_app.services.audio_metadata import format_duration
 
 
+TRANSPORT_BUTTON_SIZE = 34
+
+
 class TransportControls(QWidget):
     play_toggled = Signal()
     seek_requested = Signal(int)
 
-    def __init__(self, *, button_size: int = 34) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.setObjectName("TransportControls")
         self._duration_ms = 0
         self._is_syncing = False
 
-        self.play_button = SvgIconButton("play", size=button_size)
+        self.play_button = SvgIconButton("play", size=TRANSPORT_BUTTON_SIZE)
         self.play_button.setObjectName("TransportPlayButton")
         set_translated_tooltip(self.play_button, "Play")
         self.play_button.clicked.connect(self.play_toggled.emit)

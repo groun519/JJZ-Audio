@@ -172,14 +172,13 @@ def _stylesheet(
         QFrame#NavigationDock {{
             background: {chrome};
             border: 0;
-            border-top: 1px solid {border};
             border-radius: 0;
         }}
 
         QPushButton#NavigationItemButton {{
             padding: 0;
             border: 0;
-            border-radius: 0;
+            border-radius: 12px;
             background: transparent;
         }}
 
@@ -1637,6 +1636,16 @@ def _stylesheet(
             background: transparent;
         }}
 
+        QPushButton#TransportPlayButton {{
+            min-width: 34px;
+            max-width: 34px;
+            min-height: 34px;
+            max-height: 34px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+        }}
+
         QPushButton#ThemeToggleButton {{
             min-width: 66px;
             max-width: 66px;
@@ -1648,10 +1657,10 @@ def _stylesheet(
         }}
 
         QPushButton#TitleBarLanguageButton {{
-            min-width: 42px;
-            max-width: 42px;
-            min-height: 26px;
-            max-height: 26px;
+            min-width: 40px;
+            max-width: 40px;
+            min-height: 24px;
+            max-height: 24px;
             padding: 0;
             border: 1px solid {border};
             border-radius: 9px;

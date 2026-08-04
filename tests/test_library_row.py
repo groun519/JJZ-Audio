@@ -7,6 +7,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.library_row import SongListRow
+from jang_app.qt_app.transport_controls import TRANSPORT_BUTTON_SIZE
 from jang_app.services.song_metadata import SongDisplayMetadata
 
 
@@ -51,6 +52,8 @@ class SongListRowTests(unittest.TestCase):
         self.assertGreater(row.sizeHint().height(), normal_height)
         self.assertFalse(row.preview_transport.isHidden())
         self.assertGreaterEqual(row.waveform.minimumWidth(), 190)
+        self.assertEqual(row.preview_transport.play_button.width(), TRANSPORT_BUTTON_SIZE)
+        self.assertEqual(row.preview_transport.play_button.height(), TRANSPORT_BUTTON_SIZE)
         row.close()
 
 

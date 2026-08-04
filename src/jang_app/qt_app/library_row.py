@@ -111,7 +111,7 @@ class SongListRow(QWidget):
         self.preview_divider.setFixedHeight(1)
         self.preview_divider.hide()
 
-        self.preview_transport = TransportControls(button_size=30)
+        self.preview_transport = TransportControls()
         self.preview_transport.setObjectName("LibraryPreviewTransport")
         self.preview_transport.play_toggled.connect(
             lambda: self.preview_play_toggled.emit(self._item_id)

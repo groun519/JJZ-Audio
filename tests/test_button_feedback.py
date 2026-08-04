@@ -7,6 +7,7 @@ from PySide6.QtGui import QFocusEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
+from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.widgets import FeedbackButton, _track_button_palette
 
 
@@ -63,6 +64,18 @@ class ButtonFeedbackTests(unittest.TestCase):
                 self.assertNotEqual(normal["background"], hovered["background"])
                 self.assertNotEqual(hovered["background"], pressed["background"])
                 self.assertNotEqual(checked["background"], checked_pressed["background"])
+
+    def test_title_bar_language_button_keeps_compact_outer_size(self) -> None:
+        for theme_mode in ("dark", "white"):
+            button = FeedbackButton("KR" if theme_mode == "dark" else "EN")
+            button.setObjectName("TitleBarLanguageButton")
+            button.setStyleSheet(build_stylesheet(theme_mode))
+            button.ensurePolished()
+
+            with self.subTest(theme_mode=theme_mode):
+                self.assertEqual((button.sizeHint().width(), button.sizeHint().height()), (42, 26))
+
+            button.close()
 
 
 if __name__ == "__main__":

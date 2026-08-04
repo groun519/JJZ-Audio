@@ -23,7 +23,7 @@ class NavigationItemButton(FeedbackButton):
         super().__init__(label)
         self.setObjectName("NavigationItemButton")
         self.setCheckable(True)
-        self.setFixedSize(104, 58)
+        self.setFixedSize(112, 38)
         self.setAccessibleName(label)
         self._icon_name = icon_name
         self._theme_mode = "white"
@@ -44,37 +44,33 @@ class NavigationItemButton(FeedbackButton):
             is_enabled=self.isEnabled(),
         )
 
-        rect = QRectF(self.rect())
-        painter.fillRect(rect, palette["background"])
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        border = palette["border"]
+        painter.setPen(QPen(border, 1) if border.alpha() else Qt.PenStyle.NoPen)
+        painter.setBrush(palette["background"])
+        painter.drawRoundedRect(rect, 12, 12)
         render_app_icon(
             painter,
-            QRectF((rect.width() - 20) / 2, 7, 20, 20),
+            QRectF(15, (rect.height() - 16) / 2, 16, 16),
             self._icon_name,
             palette["foreground"],
         )
 
         font = QFont(self.font())
-        font.setPixelSize(11)
-        font.setWeight(QFont.Weight.DemiBold)
+        font.setPixelSize(12)
+        font.setWeight(QFont.Weight.Bold if self.isChecked() else QFont.Weight.DemiBold)
         painter.setFont(font)
         painter.setPen(palette["foreground"])
         painter.drawText(
-            QRectF(4, 30, rect.width() - 8, 20),
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+            QRectF(40, 0, rect.width() - 48, rect.height()),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             self.text(),
         )
 
-        if self.isChecked():
-            indicator = QRectF(0, rect.height() - 2, rect.width(), 2)
-            painter.fillRect(indicator, palette["indicator"])
-        elif self._is_pointer_hovered():
-            indicator = QRectF(14, rect.height() - 2, rect.width() - 28, 2)
-            painter.fillRect(indicator, palette["indicator"])
-
         if bool(self.property("keyboardFocus")):
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(palette["focus"], 1, Qt.PenStyle.DotLine))
-            painter.drawRect(rect.adjusted(3, 3, -3, -3))
+            painter.setPen(QPen(palette["focus"], 1))
+            painter.drawRoundedRect(rect.adjusted(3, 3, -3, -3), 9, 9)
 
 
 class PrimaryNavigationBar(QFrame):
@@ -88,7 +84,7 @@ class PrimaryNavigationBar(QFrame):
     ) -> None:
         super().__init__()
         self.setObjectName("NavigationDock")
-        self.setFixedHeight(62)
+        self.setFixedHeight(54)
         leading_items = tuple(leading_pages)
         workflow_items = tuple(workflow_pages)
         if not leading_items or not workflow_items:
@@ -107,8 +103,8 @@ class PrimaryNavigationBar(QFrame):
         self.export_divider = _navigation_divider()
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 2, 16, 2)
-        layout.setSpacing(2)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setSpacing(4)
         layout.addStretch(1)
         for button in self.leading_buttons:
             layout.addWidget(button)
@@ -144,7 +140,7 @@ class PrimaryNavigationBar(QFrame):
 def _navigation_divider() -> QFrame:
     divider = QFrame()
     divider.setObjectName("NavigationGroupDivider")
-    divider.setFixedSize(1, 28)
+    divider.setFixedSize(1, 20)
     return divider
 
 
@@ -158,35 +154,33 @@ def _navigation_palette(
 ) -> dict[str, QColor]:
     if theme_mode == "dark":
         colors = {
-            "idle_text": "#85837d",
+            "idle_text": "#8f8d87",
             "hover_text": "#d6d4ce",
-            "selected_text": "#f0efea",
-            "hover_surface": "#222221",
-            "pressed_surface": "#292927",
-            "selected_surface": "#0b0b0b",
-            "hover_indicator": "#77756f",
-            "selected_indicator": "#d97757",
+            "selected_text": "#ecebe7",
+            "hover_surface": "#20201f",
+            "pressed_surface": "#353532",
+            "selected_surface": "#2b2b29",
+            "selected_border": "#484843",
         }
-        focus = QColor("#aaa8a1")
+        focus = QColor("#898780")
     else:
         colors = {
             "idle_text": "#777168",
             "hover_text": "#292824",
-            "selected_text": "#fffdf7",
+            "selected_text": "#10100e",
             "hover_surface": "#eee9df",
             "pressed_surface": "#d9d2c5",
-            "selected_surface": "#10100e",
-            "hover_indicator": "#aaa397",
-            "selected_indicator": "#c96345",
+            "selected_surface": "#e7e1d5",
+            "selected_border": "#c8c0b2",
         }
         focus = QColor("#6e6a61")
     background = QColor(0, 0, 0, 0)
     foreground = QColor(colors["idle_text"])
-    indicator = QColor(colors["hover_indicator"])
+    border = QColor(0, 0, 0, 0)
     if is_selected:
         background = QColor(colors["selected_surface"])
         foreground = QColor(colors["selected_text"])
-        indicator = QColor(colors["selected_indicator"])
+        border = QColor(colors["selected_border"])
     elif is_pressed:
         background = QColor(colors["pressed_surface"])
         foreground = QColor(colors["hover_text"])
@@ -195,10 +189,10 @@ def _navigation_palette(
         foreground = QColor(colors["hover_text"])
     if not is_enabled:
         foreground.setAlpha(90)
-        indicator.setAlpha(90)
+        border.setAlpha(90)
     return {
         "background": background,
         "foreground": foreground,
-        "indicator": indicator,
+        "border": border,
         "focus": focus,
     }

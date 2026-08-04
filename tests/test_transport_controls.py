@@ -5,7 +5,8 @@ import unittest
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
-from jang_app.qt_app.transport_controls import TransportControls
+from jang_app.qt_app.theme import build_stylesheet
+from jang_app.qt_app.transport_controls import TRANSPORT_BUTTON_SIZE, TransportControls
 
 
 class TransportControlsTests(unittest.TestCase):
@@ -24,15 +25,19 @@ class TransportControlsTests(unittest.TestCase):
         controls.close()
 
     def test_play_state_uses_square_icon_button(self) -> None:
-        controls = TransportControls(button_size=30)
+        for theme_mode in ("dark", "white"):
+            controls = TransportControls()
+            controls.setStyleSheet(build_stylesheet(theme_mode))
+            controls.set_duration(1_000)
+            controls.set_playing(True)
+            controls.ensurePolished()
 
-        controls.set_duration(1_000)
-        controls.set_playing(True)
+            with self.subTest(theme_mode=theme_mode):
+                self.assertEqual(controls.play_button.width(), TRANSPORT_BUTTON_SIZE)
+                self.assertEqual(controls.play_button.height(), TRANSPORT_BUTTON_SIZE)
+                self.assertEqual(controls.play_button.icon_name(), "stop")
 
-        self.assertEqual(controls.play_button.width(), 30)
-        self.assertEqual(controls.play_button.height(), 30)
-        self.assertEqual(controls.play_button.icon_name(), "stop")
-        controls.close()
+            controls.close()
 
 
 if __name__ == "__main__":

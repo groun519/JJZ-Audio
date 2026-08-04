@@ -19,7 +19,7 @@ class WorkspaceTransportDock(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("WorkspaceTransportDock")
-        self.setFixedHeight(94)
+        self.setFixedHeight(96)
         self._display = WorkContextDisplay(is_active=False)
         self._queue_context = ""
         self._queue_title = ""
@@ -66,7 +66,7 @@ class WorkspaceTransportDock(QFrame):
         info_layout.addWidget(self.context_label, 0)
         info_layout.addWidget(self.title_label, 2)
 
-        self.transport = TransportControls(button_size=34)
+        self.transport = TransportControls()
         self.transport.play_toggled.connect(self.play_toggled.emit)
         self.transport.seek_requested.connect(self.seek_requested.emit)
 

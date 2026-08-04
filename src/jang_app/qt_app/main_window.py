@@ -174,6 +174,7 @@ class MainWindow(QMainWindow):
         self.page_stack = QStackedWidget()
         root_layout.addWidget(self._build_top_bar(), 0)
         navigation_dock = self._build_navigation_bar()
+        root_layout.addWidget(navigation_dock, 0)
 
         self.page_stack.addWidget(self._build_library_page())
         self.page_stack.addWidget(self._build_models_page())
@@ -210,7 +211,6 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._position_processing_queue)
 
         root_layout.addWidget(content_widget, 1)
-        root_layout.addWidget(navigation_dock, 0)
 
         self.setCentralWidget(root_widget)
         self.size_grip = QSizeGrip(root_widget)
@@ -242,6 +242,7 @@ class MainWindow(QMainWindow):
         self.theme_button.clicked.connect(self._toggle_theme)
         self.language_button = FeedbackButton("KR")
         self.language_button.setObjectName("TitleBarLanguageButton")
+        self.language_button.setFixedSize(42, 26)
         self.language_menu = QMenu(self.language_button)
         self.language_action_group = QActionGroup(self.language_menu)
         self.language_action_group.setExclusive(True)
