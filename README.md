@@ -84,6 +84,7 @@ Verify clean install, in-place update, and uninstall data preservation:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 `
+  -PreviousInstallerPath release\JJZero-Audio-0.1.0-Setup.exe `
   -InstallerPath release\JJZero-Audio-0.2.0-Setup.exe
 ```
 
