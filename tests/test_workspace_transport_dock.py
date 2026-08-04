@@ -8,7 +8,6 @@ from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.workspace_transport_dock import WorkspaceTransportDock
-from jang_app.services.work_context import WorkContextDisplay
 
 
 class WorkspaceTransportDockTests(unittest.TestCase):
@@ -22,24 +21,34 @@ class WorkspaceTransportDockTests(unittest.TestCase):
         play_toggled = QSignalSpy(dock.play_toggled)
 
         dock.set_songs((("one", "Song One"), ("two", "Song Two")), "one")
-        dock.set_queue("OUTPUT", "Song One Mix", 60_000)
+        dock.set_queue(60_000)
         dock.song_combo.activated.emit(dock.song_combo.findData("two"))
         dock.transport.play_button.click()
 
         self.assertEqual(dock.selected_song_id(), "two")
         self.assertEqual(changed.at(0)[0], "two")
         self.assertEqual(play_toggled.count(), 1)
-        self.assertEqual(dock.title_label.text(), "Song One Mix")
+        self.assertEqual(dock.transport.time_label.text(), "00:00 / 01:00")
         dock.close()
 
-    def test_inactive_context_hides_only_context_badges(self) -> None:
+    def test_controls_are_ordered_in_one_compact_row(self) -> None:
         dock = WorkspaceTransportDock()
+        dock.set_songs((("one", "Song One"),), "one")
+        dock.set_queue(60_000)
+        dock.resize(1180, dock.height())
+        dock.show()
+        self.app.processEvents()
 
-        dock.set_display(WorkContextDisplay(is_active=False))
+        controls = (
+            dock.transport.play_button,
+            dock.song_combo,
+            dock.transport.slider,
+            dock.transport.time_label,
+        )
+        positions = tuple(control.mapTo(dock, control.rect().topLeft()).x() for control in controls)
 
-        self.assertTrue(dock.source_badge.isHidden())
-        self.assertTrue(dock.state_label.isHidden())
-        self.assertFalse(dock.song_combo.isHidden())
+        self.assertEqual(dock.height(), 58)
+        self.assertEqual(positions, tuple(sorted(positions)))
         dock.close()
 
     def test_selector_retains_width_and_full_title_tooltip(self) -> None:

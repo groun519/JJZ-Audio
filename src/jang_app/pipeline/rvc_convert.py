@@ -6,7 +6,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from jang_app.config import RVC_WORKSPACE_DIR
+from jang_app.config import FFMPEG_BIN_DIR, RVC_WORKSPACE_DIR
 from jang_app.services.app_logging import get_logger
 from jang_app.services.command import run_command
 from jang_app.services.settings import RvcSettings
@@ -118,7 +118,12 @@ def _prepare_rvc_workspace(rvc_root: Path) -> Path:
 
 def _build_rvc_environment(rvc_root: Path) -> dict[str, str]:
     env = os.environ.copy()
-    path_parts = [str(rvc_root), str(rvc_root / "runtime"), env.get("PATH", "")]
+    path_parts = [
+        str(FFMPEG_BIN_DIR),
+        str(rvc_root),
+        str(rvc_root / "runtime"),
+        env.get("PATH", ""),
+    ]
     env["PATH"] = os.pathsep.join(part for part in path_parts if part)
     return env
 

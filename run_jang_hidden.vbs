@@ -4,6 +4,7 @@ Dim shell
 Dim fso
 Dim appDir
 Dim batPath
+Dim dataDir
 Dim logDir
 Dim logPath
 Dim command
@@ -14,7 +15,16 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 
 appDir = fso.GetParentFolderName(WScript.ScriptFullName)
 batPath = fso.BuildPath(appDir, "run_jang.bat")
-logDir = fso.BuildPath(appDir, "logs")
+dataDir = shell.ExpandEnvironmentStrings("%LOCALAPPDATA%")
+If dataDir = "%LOCALAPPDATA%" Or Len(dataDir) = 0 Then
+    dataDir = appDir
+Else
+    dataDir = fso.BuildPath(dataDir, "JJZero Audio")
+End If
+If Not fso.FolderExists(dataDir) Then
+    fso.CreateFolder(dataDir)
+End If
+logDir = fso.BuildPath(dataDir, "logs")
 logPath = fso.BuildPath(logDir, "launcher.log")
 
 If Not fso.FolderExists(logDir) Then

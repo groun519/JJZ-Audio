@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from jang_app.config import FFMPEG_BIN_DIR, SEPARATION_OUTPUT_DIR, SUPPORTED_AUDIO_EXTENSIONS, VENV_SCRIPTS_DIR
+from jang_app.config import (
+    APP_PATHS,
+    DEMUCS_RUNTIME_DIR,
+    FFMPEG_BIN_DIR,
+    RVC_PYTHON_EXE,
+    SEPARATION_OUTPUT_DIR,
+    SUPPORTED_AUDIO_EXTENSIONS,
+    VENV_SCRIPTS_DIR,
+)
 from jang_app.services.app_logging import get_logger
 from jang_app.services.command import run_command
 from jang_app.services.environment import MissingExecutableError, require_executable
@@ -44,6 +53,7 @@ def separate_audio(
 
     completed = run_command(
         _build_demucs_command(source, output_root, model_name),
+        env=_build_demucs_environment(),
         output_callback=_build_demucs_progress_callback(progress_callback),
     )
     if completed.returncode != 0:
@@ -82,7 +92,12 @@ def _validate_input_audio(source: Path) -> None:
 
 def _require_separation_tools() -> None:
     try:
-        require_executable("demucs", "Install project requirements first.", [VENV_SCRIPTS_DIR])
+        if not APP_PATHS.is_frozen:
+            require_executable("demucs", "Install project requirements first.", [VENV_SCRIPTS_DIR])
+        elif not RVC_PYTHON_EXE.is_file():
+            raise MissingExecutableError(
+                f"Packaged AI runtime was not found: {RVC_PYTHON_EXE}"
+            )
         require_executable("ffmpeg", "Place FFmpeg under third_party/ffmpeg/bin or add it to PATH.", [FFMPEG_BIN_DIR])
         require_executable("ffprobe", "Place FFprobe under third_party/ffmpeg/bin or add it to PATH.", [FFMPEG_BIN_DIR])
     except MissingExecutableError as exc:
@@ -90,8 +105,13 @@ def _require_separation_tools() -> None:
 
 
 def _build_demucs_command(source: Path, output_root: Path, model_name: str) -> list[str]:
+    command = (
+        [str(RVC_PYTHON_EXE), "-m", "demucs"]
+        if APP_PATHS.is_frozen
+        else ["demucs"]
+    )
     return [
-        "demucs",
+        *command,
         "--two-stems=vocals",
         "-n",
         model_name,
@@ -99,6 +119,14 @@ def _build_demucs_command(source: Path, output_root: Path, model_name: str) -> l
         str(output_root),
         str(source),
     ]
+
+
+def _build_demucs_environment() -> dict[str, str] | None:
+    if not APP_PATHS.is_frozen:
+        return None
+    environment = os.environ.copy()
+    environment["TORCH_HOME"] = str(DEMUCS_RUNTIME_DIR / "torch")
+    return environment
 
 
 def _build_demucs_progress_callback(progress_callback: ProgressCallback | None) -> Callable[[str], None] | None:

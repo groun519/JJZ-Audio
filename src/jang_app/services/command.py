@@ -41,6 +41,7 @@ def run_command(
         text=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     logger.info("Command exited with code %s", completed.returncode)
     return CommandResult(
@@ -68,6 +69,7 @@ def _run_streaming_command(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
     output_parts: list[str] = []

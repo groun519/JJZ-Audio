@@ -5,11 +5,18 @@ import sys
 from jang_app.services.startup_timing import StartupTimeline
 
 
+STARTUP_SMOKE_TEST_ARGUMENT = "--startup-smoke-test"
+
+
 def main(started_at: float | None = None) -> None:
     startup = StartupTimeline(started_at)
     startup.mark("entry_ready")
 
-    from PySide6.QtCore import QTimer
+    smoke_test = STARTUP_SMOKE_TEST_ARGUMENT in sys.argv
+    application_arguments = [
+        argument for argument in sys.argv if argument != STARTUP_SMOKE_TEST_ARGUMENT
+    ]
+
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
@@ -17,32 +24,23 @@ def main(started_at: float | None = None) -> None:
 
     from jang_app.config import APP_ICON_PATH, APP_NAME
     from jang_app.services.app_logging import get_logger
-    from jang_app.services.settings import load_app_settings
 
-    app = QApplication(sys.argv)
+    app = QApplication(application_arguments)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("JJZero")
     app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
     startup.mark("application_created")
 
-    settings = load_app_settings()
-    startup.mark("settings_loaded")
+    from jang_app.qt_app.startup_coordinator import StartupCoordinator
 
-    from jang_app.qt_app.main_window import MainWindow
-
-    startup.mark("main_window_imported")
     logger = get_logger()
+    coordinator = StartupCoordinator(app, startup, logger)
+    if smoke_test:
+        from PySide6.QtCore import QTimer
 
-    window = MainWindow(settings)
-    startup.mark("main_window_created")
-    window.show()
-    startup.mark("window_shown")
-
-    def report_event_loop_ready() -> None:
-        startup.mark("event_loop_ready")
-        logger.info(startup.summary())
-
-    QTimer.singleShot(0, report_event_loop_ready)
+        coordinator.finished.connect(lambda _window: QTimer.singleShot(250, app.quit))
+        coordinator.failed.connect(lambda _message: app.exit(1))
+    coordinator.start()
     sys.exit(app.exec())
 
 

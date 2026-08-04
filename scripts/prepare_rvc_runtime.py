@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+
+RUNTIME_DIRECTORIES = ("runtime", "configs", "lib")
+RUNTIME_FILES = (
+    "infer_cli.py",
+    "vc_infer_pipeline.py",
+    "trainset_preprocess_pipeline_print.py",
+    "hubert_base.pt",
+    "rmvpe.pt",
+    "LICENSE",
+    "requirements.txt",
+)
+MANIFEST_FILE = "jjzero_runtime.json"
+DEMUCS_REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements-rvc-runtime.txt"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Copy the RVC inference runtime without modifying its source folder."
+    )
+    parser.add_argument("source", type=Path, help="Existing RVC WebUI root")
+    parser.add_argument(
+        "--destination",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "third_party" / "rvc",
+        help="Prepared runtime destination",
+    )
+    parser.add_argument(
+        "--skip-demucs",
+        action="store_true",
+        help="Skip installing the shared Demucs packages into the copied runtime",
+    )
+    arguments = parser.parse_args()
+    prepare_rvc_runtime(
+        arguments.source,
+        arguments.destination,
+        install_demucs=not arguments.skip_demucs,
+    )
+    print(f"Prepared RVC runtime: {arguments.destination.expanduser().resolve()}")
+    return 0
+
+
+def prepare_rvc_runtime(
+    source: Path,
+    destination: Path,
+    *,
+    install_demucs: bool = True,
+) -> Path:
+    resolved_source = source.expanduser().resolve()
+    resolved_destination = destination.expanduser().resolve()
+    _validate_locations(resolved_source, resolved_destination)
+    _validate_source(resolved_source)
+
+    resolved_destination.mkdir(parents=True, exist_ok=True)
+    for directory_name in RUNTIME_DIRECTORIES:
+        shutil.copytree(
+            resolved_source / directory_name,
+            resolved_destination / directory_name,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
+    for file_name in RUNTIME_FILES:
+        shutil.copy2(resolved_source / file_name, resolved_destination / file_name)
+
+    for model_directory in ("weights", "logs"):
+        (resolved_destination / model_directory).mkdir(exist_ok=True)
+    if install_demucs:
+        _install_demucs_runtime(resolved_destination)
+    _write_manifest(resolved_destination, resolved_source.name)
+    return resolved_destination
+
+
+def _validate_locations(source: Path, destination: Path) -> None:
+    if not source.is_dir():
+        raise FileNotFoundError(f"RVC source folder was not found: {source}")
+    if destination == source or source in destination.parents:
+        raise ValueError("RVC runtime destination must be outside the source folder.")
+
+
+def _validate_source(source: Path) -> None:
+    missing = [
+        path
+        for path in (
+            *(source / name for name in RUNTIME_DIRECTORIES),
+            *(source / name for name in RUNTIME_FILES),
+            source / "runtime" / "python.exe",
+        )
+        if not path.exists()
+    ]
+    if missing:
+        formatted = "\n".join(f"- {path}" for path in missing)
+        raise FileNotFoundError(f"RVC source is incomplete:\n{formatted}")
+
+
+def _write_manifest(destination: Path, source_name: str) -> None:
+    data = {
+        "layout_version": 1,
+        "source_name": source_name,
+        "purpose": "JJZero Audio shared AI runtime",
+        "demucs_requirements": DEMUCS_REQUIREMENTS.name,
+        "model_storage": ["weights", "logs"],
+    }
+    (destination / MANIFEST_FILE).write_text(
+        json.dumps(data, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _install_demucs_runtime(destination: Path) -> None:
+    runtime_python = destination / "runtime" / "python.exe"
+    completed = subprocess.run(
+        [
+            str(runtime_python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-deps",
+            "-r",
+            str(DEMUCS_REQUIREMENTS),
+        ],
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Demucs runtime preparation failed with exit code {completed.returncode}."
+        )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -198,52 +198,6 @@ def _stylesheet(
             border-radius: 16px;
         }}
 
-        QFrame#WorkspaceTransportDivider {{
-            background: {border};
-            border: 0;
-        }}
-
-        QLabel#WorkBadge {{
-            color: {tab_active_text};
-            background: {tab_active};
-            border-radius: 9px;
-            font-size: 10px;
-            font-weight: 900;
-            min-height: 22px;
-        }}
-
-        QLabel#WorkSourceBadge {{
-            color: {source_local_text};
-            background: {source_local_background};
-            border: 1px solid {source_local_border};
-            border-radius: 9px;
-            font-size: 10px;
-            font-weight: 900;
-            min-height: 22px;
-        }}
-
-        QLabel#WorkSourceBadge[sourceType="youtube"] {{
-            color: {source_youtube_text};
-            background: {source_youtube_background};
-            border-color: {source_youtube_border};
-        }}
-
-        QLabel#WorkSourceBadge[sourceType="output"] {{
-            color: {source_output_text};
-            background: {source_output_background};
-            border-color: {source_output_border};
-        }}
-
-        QLabel#WorkStateBadge {{
-            color: {text};
-            background: {raised};
-            border: 1px solid {border};
-            border-radius: 9px;
-            font-size: 10px;
-            font-weight: 900;
-            min-height: 22px;
-        }}
-
         QComboBox#WorkSongCombo, QComboBox#ExportSongCombo {{
             min-height: 32px;
             max-height: 32px;
@@ -1293,22 +1247,7 @@ def _stylesheet(
             font-size: 10px;
         }}
 
-        QLabel#PlayerContext {{
-            color: {tab_active_text};
-            background: {tab_active};
-            border-radius: 10px;
-            font-size: 11px;
-            font-weight: 900;
-            min-height: 24px;
-        }}
-
-        QLabel#PlayerTitle {{
-            color: {text};
-            font-size: 13px;
-            font-weight: 800;
-        }}
-
-        QLabel#PlayerTime, QLabel#TransportTime {{
+        QLabel#TransportTime {{
             color: {muted};
             font-size: 12px;
             font-weight: 800;

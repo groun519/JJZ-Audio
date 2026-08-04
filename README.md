@@ -17,6 +17,9 @@ Mixing, video replacement, packaging, and link downloading are intentionally out
 
 Python 3.11 is recommended.
 
+The current Windows build targets NVIDIA GPUs and installs the CUDA 12.6
+PyTorch runtime pinned in `requirements-nvidia.txt`.
+
 Double-click `setup_jang.bat` to create or update the development environment. Setup is separate from normal app startup, so dependencies are not checked and installed on every launch.
 
 ```powershell
@@ -43,13 +46,56 @@ Or:
 jang-audio
 ```
 
+## Windows Build
+
+Install the pinned build tools once:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+```
+
+Prepare a private runtime copy from an existing RVC WebUI installation. This
+copies the inference engine only; it never edits the source folder and does not
+copy personal `weights` or `logs` model data.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\prepare_rvc_runtime.py "C:\path\to\RVC"
+```
+
+Build and verify the `onedir` distribution:
+
+```powershell
+.\build_windows.bat
+```
+
+The verified application is created under `dist\JJZero Audio`. FFmpeg, the
+Demucs model, and the shared CUDA RVC/Demucs runtime are bundled under its
+`runtime` folder without duplicating PyTorch.
+
+Build the versioned Windows installer after installing Inno Setup:
+
+```powershell
+.\build_installer.bat -SkipAppBuild
+```
+
+Installer files and their SHA-256 update manifest are created under `release`.
+
+Verify clean install, in-place update, and uninstall data preservation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 `
+  -InstallerPath release\JJZero-Audio-0.1.0-Setup.exe
+```
+
 Outputs are written under `output\separations` by default.
 
-Runtime logs are written to `logs\jang.log`.
+Runtime logs are written to `%LOCALAPPDATA%\JJZero Audio\logs\jang.log`.
 Each launch writes cumulative startup timing marks to the runtime log.
-Local settings are written to `settings\app_settings.json`.
+Local settings are written under `%LOCALAPPDATA%\JJZero Audio\settings`.
+Existing development workspaces are linked in place during the first migration and are not moved or deleted.
 
-RVC settings are configured from the app settings dialog:
+Installed builds use the bundled RVC runtime by default. An existing WebUI root
+can still be selected or imported when its own runtime and models should be used:
 
 - `RVC root`: local RVC folder that contains `runtime\python.exe` and `infer_cli.py`.
 - `Voice model`: `.pth` file under the RVC `weights` folder.

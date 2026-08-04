@@ -16,6 +16,20 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo Installing or updating JJZero Audio dependencies...
+".venv\Scripts\python.exe" -m pip install --upgrade pip
+if errorlevel 1 (
+    echo Failed to update pip.
+    if "%PAUSE_ON_ERROR%"=="1" pause
+    exit /b 1
+)
+
+".venv\Scripts\python.exe" -m pip install -r requirements-nvidia.txt
+if errorlevel 1 (
+    echo Failed to install the NVIDIA audio runtime.
+    if "%PAUSE_ON_ERROR%"=="1" pause
+    exit /b 1
+)
+
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 (
     echo Failed to install dependencies.

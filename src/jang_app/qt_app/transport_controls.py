@@ -15,7 +15,7 @@ class TransportControls(QWidget):
     play_toggled = Signal()
     seek_requested = Signal(int)
 
-    def __init__(self) -> None:
+    def __init__(self, inline_widget: QWidget | None = None) -> None:
         super().__init__()
         self.setObjectName("TransportControls")
         self._duration_ms = 0
@@ -42,6 +42,8 @@ class TransportControls(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         layout.addWidget(self.play_button, 0)
+        if inline_widget is not None:
+            layout.addWidget(inline_widget, 0)
         layout.addWidget(self.slider, 1)
         layout.addWidget(self.time_label, 0)
         self.clear()

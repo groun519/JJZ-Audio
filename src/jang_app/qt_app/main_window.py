@@ -48,6 +48,7 @@ from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
 from jang_app.qt_app.toast_stack import ToastStack
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
 from jang_app.qt_app.video_preview_panel import VideoPreviewPanel
+from jang_app.qt_app.window_chrome import apply_window_corner_style
 from jang_app.qt_app.workspace_transport_dock import WorkspaceTransportDock
 from jang_app.qt_app.widgets import (
     FileDropCard,
@@ -75,7 +76,6 @@ from jang_app.services.processing_queue import ProcessingQueue
 from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.settings import AppSettings, RvcSettings, save_app_settings
 from jang_app.services.song_metadata import build_song_display_metadata
-from jang_app.services.work_context import build_work_context_display
 from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
 from jang_app.services.work_song import WorkSongStore
 from jang_app.services.video_source import VideoSource
@@ -147,10 +147,16 @@ class MainWindow(QMainWindow):
             self._sync_window_chrome_state()
         super().changeEvent(event)
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_window_chrome_state()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._position_processing_queue()
         self._position_size_grip()
+        if self.isVisible() and not self.isMaximized():
+            apply_window_corner_style(self, rounded=True)
 
     def _toggle_window_maximized(self) -> None:
         if self.isMaximized():
@@ -165,6 +171,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "size_grip"):
             self.size_grip.setVisible(not self.isMaximized())
             self._position_size_grip()
+        if self.isVisible():
+            apply_window_corner_style(self, rounded=not self.isMaximized())
 
     def _build_ui(self) -> None:
         root_widget = QWidget()
@@ -186,7 +194,7 @@ class MainWindow(QMainWindow):
         content_widget.setObjectName("AppContent")
         self._content_widget = content_widget
         content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(16, 16, 16, 8)
+        content_layout.setContentsMargins(16, 16, 16, 16)
         content_layout.setSpacing(12)
         content_layout.addWidget(self.page_stack, 1)
 
@@ -1177,7 +1185,6 @@ class MainWindow(QMainWindow):
         self._select_library_song(song_id)
         if self.current_work_item is not None and self.current_work_item.id == song_id:
             self._assign_work_item(self._song_items_by_id.get(song_id), persist=False)
-        self._sync_workspace_dock()
 
     def _remove_library_item(self, song_id: str) -> None:
         song = self._song_items_by_id.get(song_id)
@@ -1212,7 +1219,6 @@ class MainWindow(QMainWindow):
         )
         if selected_id and self.workspace_dock.selected_song_id() != selected_id:
             self._set_current_song(None)
-        self._sync_workspace_dock()
 
     def _on_global_work_song_changed(self, song_id: str) -> None:
         song = self._song_items_by_id.get(song_id) if song_id else None
@@ -1261,7 +1267,6 @@ class MainWindow(QMainWindow):
                 _set_optional_label(self.output_status_label, f"Work song failed: {_last_error_line(str(exc))}")
         self._sync_work_song_capabilities()
         self._refresh_video_source()
-        self._sync_workspace_dock()
 
     def _sync_work_song_capabilities(self) -> None:
         capabilities = build_work_song_capabilities(
@@ -1335,9 +1340,6 @@ class MainWindow(QMainWindow):
                 self.work_song_store.save("")
             except OSError:
                 pass
-
-    def _sync_workspace_dock(self) -> None:
-        self.workspace_dock.set_display(build_work_context_display(self.current_work_item, self.current_output_set))
 
     def _select_work_song(self, song: SongItem) -> None:
         if song.kind == "output":
@@ -1556,7 +1558,6 @@ class MainWindow(QMainWindow):
                 self._assign_work_item(song, persist=False)
         self.converted_track.select_path(path)
         self._refresh_output_playback_queue()
-        self._sync_workspace_dock()
 
     def _open_vocal_output_location(self, job_dir: Path) -> None:
         try:
@@ -1574,7 +1575,6 @@ class MainWindow(QMainWindow):
         self._refresh_output_sets(preferred_job_dir=preferred, select_fallback=preferred is not None)
         if preferred is None:
             self._apply_output_set(None)
-        self._sync_workspace_dock()
 
     def _apply_output_set(self, sound_set: OutputSoundSet | None) -> None:
         self.studio_session_autosave.flush()
@@ -1590,7 +1590,6 @@ class MainWindow(QMainWindow):
             _set_optional_label(self.output_status_label, "")
             self._refresh_output_playback_queue()
             self._sync_work_song_capabilities()
-            self._sync_workspace_dock()
             self._refresh_export_page()
             return
 
@@ -1610,7 +1609,6 @@ class MainWindow(QMainWindow):
         _set_optional_label(self.output_status_label, "")
         self._refresh_output_playback_queue()
         self._sync_work_song_capabilities()
-        self._sync_workspace_dock()
         self._refresh_export_page()
 
     def _current_vocal_versions(self) -> tuple[SongVocalVersion, ...]:
@@ -2024,7 +2022,7 @@ class MainWindow(QMainWindow):
                 row.set_preview_position(self._playback_position_ms, queue.duration_ms)
                 row.set_preview_playing(is_playing)
         else:
-            self.workspace_dock.set_queue(_playback_context_label(queue.context), queue.title, queue.duration_ms)
+            self.workspace_dock.set_queue(queue.duration_ms)
             self.workspace_dock.set_position(self._playback_position_ms, queue.duration_ms)
             self.workspace_dock.set_playing(is_playing)
         self._sync_video_playback(is_playing)
@@ -2360,14 +2358,6 @@ def _studio_track_state(track: TrackRow) -> StudioTrackState:
         muted=track.is_muted(),
         volume_percent=track.volume_percent(),
     )
-
-
-def _playback_context_label(context: str) -> str:
-    if context == "output":
-        return "Output"
-    if context == "library":
-        return "Library"
-    return ""
 
 
 def _last_error_line(error: str) -> str:
