@@ -17,7 +17,7 @@ from jang_app.version import __version__
 
 
 DEFAULT_MANIFEST_URL = (
-    "https://github.com/groun519/Jang/releases/latest/download/latest.json"
+    "https://github.com/groun519/JJZ-Audio/releases/latest/download/latest.json"
 )
 MAX_MANIFEST_BYTES = 1024 * 1024
 DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024
