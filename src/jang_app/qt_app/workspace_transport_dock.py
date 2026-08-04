@@ -17,10 +17,9 @@ class WorkspaceTransportDock(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("WorkspaceTransportDock")
-        self.setFixedHeight(58)
+        self.setFixedHeight(84)
 
         self.song_combo = WorkSongSelector()
-        self.song_combo.setMaximumWidth(420)
         self.song_combo.song_changed.connect(self.song_changed.emit)
 
         self.transport = TransportControls(self.song_combo)
@@ -28,7 +27,7 @@ class WorkspaceTransportDock(QFrame):
         self.transport.seek_requested.connect(self.seek_requested.emit)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.addWidget(self.transport, 0)
         self.clear()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QFocusEvent
@@ -8,7 +9,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.theme import build_stylesheet
-from jang_app.qt_app.widgets import FeedbackButton, _track_button_palette
+from jang_app.qt_app.widgets import FeedbackButton, WindowTitleBar, _track_button_palette
 
 
 class ButtonFeedbackTests(unittest.TestCase):
@@ -76,6 +77,24 @@ class ButtonFeedbackTests(unittest.TestCase):
                 self.assertEqual((button.sizeHint().width(), button.sizeHint().height()), (42, 26))
 
             button.close()
+
+    def test_title_bar_does_not_clip_action_buttons(self) -> None:
+        for theme_mode in ("dark", "white"):
+            title_bar = WindowTitleBar("JJZero Audio", Path())
+            title_bar.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            title_bar.setStyleSheet(build_stylesheet(theme_mode))
+            language_button = FeedbackButton("KR" if theme_mode == "dark" else "EN")
+            language_button.setObjectName("TitleBarLanguageButton")
+            language_button.setFixedSize(42, 26)
+            title_bar.add_action_widget(language_button)
+            title_bar.resize(900, title_bar.height())
+            title_bar.show()
+            self.app.processEvents()
+
+            with self.subTest(theme_mode=theme_mode):
+                self.assertGreaterEqual(title_bar.action_widget.height(), language_button.height())
+
+            title_bar.close()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
+from PySide6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_tooltip
 from jang_app.qt_app.widgets import ScrollSafeSlider, SvgIconButton
@@ -15,7 +15,7 @@ class TransportControls(QWidget):
     play_toggled = Signal()
     seek_requested = Signal(int)
 
-    def __init__(self, inline_widget: QWidget | None = None) -> None:
+    def __init__(self, header_widget: QWidget | None = None) -> None:
         super().__init__()
         self.setObjectName("TransportControls")
         self._duration_ms = 0
@@ -38,14 +38,17 @@ class TransportControls(QWidget):
         self.time_label.setMinimumWidth(104)
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        layout = QHBoxLayout(self)
+        layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-        layout.addWidget(self.play_button, 0)
-        if inline_widget is not None:
-            layout.addWidget(inline_widget, 0)
-        layout.addWidget(self.slider, 1)
-        layout.addWidget(self.time_label, 0)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(6)
+        timeline_row = 1 if header_widget is not None else 0
+        if header_widget is not None:
+            layout.addWidget(header_widget, 0, 1, 1, 2)
+        layout.addWidget(self.play_button, timeline_row, 0)
+        layout.addWidget(self.slider, timeline_row, 1)
+        layout.addWidget(self.time_label, timeline_row, 2)
+        layout.setColumnStretch(1, 1)
         self.clear()
 
     def set_duration(self, duration_ms: int) -> None:

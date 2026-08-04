@@ -29,7 +29,7 @@ class WorkSongSelector(ScrollSafeComboBox):
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.setMinimumWidth(360)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.lineEdit().setClearButtonEnabled(True)
+        self.lineEdit().setClearButtonEnabled(False)
         self.activated.connect(self._activate_index)
         self.lineEdit().returnPressed.connect(self._activate_search_text)
 

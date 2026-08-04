@@ -5,14 +5,14 @@ from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 
-class OverflowTitleLabel(QWidget):
-    """Single-line title with a fade edge and hover-to-reveal marquee."""
+class OverflowTextLabel(QWidget):
+    """Single-line text with a fade edge and hover-to-reveal marquee."""
 
-    def __init__(self, text: str = "") -> None:
+    def __init__(self, text: str = "", *, object_name: str = "", fixed_height: int = 22) -> None:
         super().__init__()
-        self.setObjectName("LibraryRowTitle")
+        self.setObjectName(object_name)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(22)
+        self.setFixedHeight(fixed_height)
         self.setToolTip(text)
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self._text = text
@@ -110,3 +110,8 @@ class OverflowTitleLabel(QWidget):
         else:
             gradient.setColorAt(1.0, color)
         return gradient
+
+
+class OverflowTitleLabel(OverflowTextLabel):
+    def __init__(self, text: str = "") -> None:
+        super().__init__(text, object_name="LibraryRowTitle", fixed_height=22)

@@ -22,7 +22,7 @@ from jang_app.qt_app.localization import (
     set_translated_text,
     set_translated_tooltip,
 )
-from jang_app.qt_app.widgets import FeedbackButton, FileDropCard, SvgIconButton
+from jang_app.qt_app.widgets import FileDropCard, SvgIconButton
 from jang_app.services.video_source import VideoSource
 
 
@@ -122,13 +122,16 @@ class VideoPreviewPanel(QFrame):
         source_text.addWidget(self.source_name)
         source_text.addWidget(self.source_detail)
 
-        self.download_button = FeedbackButton("Download")
-        self.download_button.setObjectName("PrimaryButton")
+        self.download_button = SvgIconButton("download", size=30)
+        self.download_button.setObjectName("VideoSourceActionButton")
+        set_translated_tooltip(self.download_button, "Download Video")
         self.download_button.clicked.connect(self.download_requested.emit)
         self.open_button = SvgIconButton("folder", size=30)
+        self.open_button.setObjectName("VideoSourceActionButton")
         set_translated_tooltip(self.open_button, "Open video location")
         self.open_button.clicked.connect(self._open_location)
         self.clear_button = SvgIconButton("trash", size=30)
+        self.clear_button.setObjectName("VideoSourceActionButton")
         set_translated_tooltip(self.clear_button, "Clear video source")
         self.clear_button.clicked.connect(self.clear_requested.emit)
 
@@ -265,6 +268,7 @@ class VideoPreviewPanel(QFrame):
     def set_theme_mode(self, theme_mode: str) -> None:
         for button in (
             self.edit_button,
+            self.download_button,
             self.open_button,
             self.clear_button,
             self.drop_card.file_button,
@@ -278,7 +282,7 @@ class VideoPreviewPanel(QFrame):
         set_translated_tooltip(self.edit_button, "Change video source")
         set_translated_tooltip(self.open_button, "Open video location")
         set_translated_tooltip(self.clear_button, "Clear video source")
-        set_translated_text(self.download_button, "Download")
+        set_translated_tooltip(self.download_button, "Download Video")
         set_translated_text(self.drop_card.title_label, "Drop Video")
         set_translated_tooltip(self.drop_card.file_button, "Add video file")
         self.url_field.apply_language()

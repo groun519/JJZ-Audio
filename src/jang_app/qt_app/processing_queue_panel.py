@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QScrollArea, QVBoxLayout, QWidget
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
+from jang_app.qt_app.overflow_title_label import OverflowTextLabel
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
 from jang_app.services.processing_queue import ProcessingQueue, ProcessingTask, TASK_COMPLETED, TASK_FAILED
 
@@ -211,11 +212,8 @@ class ProcessingTaskRow(QFrame):
         super().__init__()
         self.setObjectName("ProcessingTaskRow")
 
-        self.title_label = QLabel()
-        self.title_label.setObjectName("ProcessingTaskTitle")
-        self.detail_label = QLabel()
-        self.detail_label.setObjectName("ProcessingTaskDetail")
-        self.detail_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.title_label = OverflowTextLabel(object_name="ProcessingTaskTitle", fixed_height=18)
+        self.detail_label = OverflowTextLabel(object_name="ProcessingTaskDetail", fixed_height=16)
         self.status_label = QLabel()
         self.status_label.setObjectName("ProcessingTaskStatus")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

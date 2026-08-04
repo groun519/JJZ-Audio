@@ -198,7 +198,15 @@ def _stylesheet(
             border-radius: 16px;
         }}
 
-        QComboBox#WorkSongCombo, QComboBox#ExportSongCombo {{
+        QComboBox#WorkSongCombo {{
+            min-height: 24px;
+            max-height: 24px;
+            font-size: 13px;
+            font-weight: 850;
+            background: {raised};
+        }}
+
+        QComboBox#ExportSongCombo {{
             min-height: 32px;
             max-height: 32px;
             font-size: 13px;
@@ -206,7 +214,18 @@ def _stylesheet(
             background: {raised};
         }}
 
-        QComboBox#WorkSongCombo QLineEdit, QComboBox#ExportSongCombo QLineEdit {{
+        QComboBox#WorkSongCombo QLineEdit {{
+            min-height: 22px;
+            max-height: 22px;
+            padding: 0 8px;
+            background: transparent;
+            border: 0;
+            border-radius: 0;
+            font-size: 13px;
+            font-weight: 850;
+        }}
+
+        QComboBox#ExportSongCombo QLineEdit {{
             min-height: 30px;
             max-height: 30px;
             padding: 0 8px;
@@ -1016,13 +1035,13 @@ def _stylesheet(
             border-color: #c93d3d;
         }}
 
-        QLabel#ProcessingTaskTitle {{
+        #ProcessingTaskTitle {{
             color: {text};
             font-size: 12px;
             font-weight: 900;
         }}
 
-        QLabel#ProcessingTaskDetail, QLabel#ProcessingQueueEmpty {{
+        #ProcessingTaskDetail, QLabel#ProcessingQueueEmpty {{
             color: {muted};
             font-size: 10px;
             font-weight: 700;
@@ -1570,6 +1589,16 @@ def _stylesheet(
             max-width: 34px;
             min-height: 34px;
             max-height: 34px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+        }}
+
+        QPushButton#VideoSourceActionButton {{
+            min-width: 30px;
+            max-width: 30px;
+            min-height: 30px;
+            max-height: 30px;
             padding: 0;
             border: 0;
             background: transparent;

@@ -31,7 +31,7 @@ class WorkspaceTransportDockTests(unittest.TestCase):
         self.assertEqual(dock.transport.time_label.text(), "00:00 / 01:00")
         dock.close()
 
-    def test_controls_are_ordered_in_one_compact_row(self) -> None:
+    def test_title_is_above_the_timeline(self) -> None:
         dock = WorkspaceTransportDock()
         dock.set_songs((("one", "Song One"),), "one")
         dock.set_queue(60_000)
@@ -39,16 +39,14 @@ class WorkspaceTransportDockTests(unittest.TestCase):
         dock.show()
         self.app.processEvents()
 
-        controls = (
-            dock.transport.play_button,
-            dock.song_combo,
-            dock.transport.slider,
-            dock.transport.time_label,
-        )
-        positions = tuple(control.mapTo(dock, control.rect().topLeft()).x() for control in controls)
+        combo_position = dock.song_combo.mapTo(dock, dock.song_combo.rect().topLeft())
+        slider_position = dock.transport.slider.mapTo(dock, dock.transport.slider.rect().topLeft())
+        play_position = dock.transport.play_button.mapTo(dock, dock.transport.play_button.rect().topLeft())
 
-        self.assertEqual(dock.height(), 58)
-        self.assertEqual(positions, tuple(sorted(positions)))
+        self.assertEqual(dock.height(), 84)
+        self.assertLess(combo_position.y() + dock.song_combo.height(), slider_position.y())
+        self.assertEqual(combo_position.x(), slider_position.x())
+        self.assertLess(play_position.x(), slider_position.x())
         dock.close()
 
     def test_selector_retains_width_and_full_title_tooltip(self) -> None:
@@ -61,6 +59,7 @@ class WorkspaceTransportDockTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertGreaterEqual(dock.song_combo.minimumWidth(), 360)
+        self.assertFalse(dock.song_combo.lineEdit().isClearButtonEnabled())
         self.assertEqual(dock.song_combo.toolTip(), long_title)
         self.assertEqual(dock.song_combo.itemData(1, Qt.ItemDataRole.ToolTipRole), long_title)
         dock.close()

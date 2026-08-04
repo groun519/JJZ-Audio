@@ -201,7 +201,7 @@ class WindowTitleBar(QFrame):
         window_controls.addWidget(self.close_button)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 7, 10, 7)
+        layout.setContentsMargins(14, 6, 10, 6)
         layout.setSpacing(12)
         layout.addLayout(brand_layout, 0)
         layout.addStretch(1)

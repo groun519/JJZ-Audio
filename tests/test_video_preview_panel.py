@@ -8,6 +8,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.video_preview_panel import VideoPlaybackSynchronizer, VideoPreviewPanel
 from jang_app.services.video_source import VIDEO_KIND_FILE, VIDEO_KIND_YOUTUBE, VideoSource
 
@@ -64,6 +65,33 @@ class VideoPreviewPanelTests(unittest.TestCase):
         self.assertEqual(panel.url_field.edit.text(), source_url)
         self.assertEqual(requested.at(0)[0], source_url)
         panel.close()
+
+    def test_youtube_download_uses_a_compact_icon_action(self) -> None:
+        for theme_mode in ("dark", "white"):
+            panel = VideoPreviewPanel()
+            panel.setStyleSheet(build_stylesheet(theme_mode))
+            requested = QSignalSpy(panel.download_requested)
+            panel.set_source(
+                VideoSource(kind=VIDEO_KIND_YOUTUBE, url="https://youtu.be/source"),
+                enabled=True,
+            )
+            panel.resize(720, 520)
+            panel.show()
+            self.app.processEvents()
+
+            with self.subTest(theme_mode=theme_mode):
+                self.assertEqual(panel.download_button.icon_name(), "download")
+                self.assertEqual(
+                    {
+                        (button.width(), button.height())
+                        for button in (panel.download_button, panel.open_button, panel.clear_button)
+                    },
+                    {(30, 30)},
+                )
+                self.assertFalse(panel.download_button.isHidden())
+                panel.download_button.click()
+                self.assertEqual(requested.count(), 1)
+            panel.close()
 
 
 class _FakePlayer:
