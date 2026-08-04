@@ -11,6 +11,21 @@ from jang_app.qt_app.widgets import SvgIconButton
 
 FLOATING_PLAYER_WIDTH = 460
 FLOATING_PLAYER_HEIGHT = 94
+FLOATING_PLAYER_EDGE_MARGIN = 16
+FLOATING_PLAYER_STACK_GAP = 10
+
+
+def floating_player_position(
+    parent_height: int,
+    panel_height: int,
+    *,
+    anchor_top: int | None = None,
+) -> tuple[int, int]:
+    if anchor_top is None:
+        y_position = parent_height - panel_height - FLOATING_PLAYER_EDGE_MARGIN
+    else:
+        y_position = anchor_top - panel_height - FLOATING_PLAYER_STACK_GAP
+    return FLOATING_PLAYER_EDGE_MARGIN, max(FLOATING_PLAYER_EDGE_MARGIN, y_position)
 
 
 class FloatingPlaybackPanel(QFrame):

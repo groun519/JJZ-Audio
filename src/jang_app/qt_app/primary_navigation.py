@@ -73,8 +73,52 @@ class NavigationItemButton(FeedbackButton):
             painter.drawRoundedRect(rect.adjusted(3, 3, -3, -3), 9, 9)
 
 
+class NavigationActionButton(FeedbackButton):
+    def __init__(self, icon_name: str, accessible_name: str) -> None:
+        super().__init__()
+        self.setObjectName("NavigationActionButton")
+        self.setFixedSize(38, 38)
+        self.setAccessibleName(accessible_name)
+        self._icon_name = icon_name
+        self._theme_mode = "white"
+
+    def set_theme_mode(self, theme_mode: str) -> None:
+        self._theme_mode = theme_mode
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        palette = _navigation_palette(
+            self._theme_mode,
+            is_selected=False,
+            is_hovered=self._is_pointer_hovered(),
+            is_pressed=self._is_pointer_pressed() or self.isDown(),
+            is_enabled=self.isEnabled(),
+        )
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        border = palette["border"]
+        painter.setPen(QPen(border, 1) if border.alpha() else Qt.PenStyle.NoPen)
+        painter.setBrush(palette["background"])
+        painter.drawRoundedRect(rect, 12, 12)
+        render_app_icon(
+            painter,
+            QRectF(rect.center().x() - 9, rect.center().y() - 9, 18, 18),
+            self._icon_name,
+            palette["foreground"],
+        )
+
+        if bool(self.property("keyboardFocus")):
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(palette["focus"], 1))
+            painter.drawRoundedRect(rect.adjusted(3, 3, -3, -3), 9, 9)
+
+
 class PrimaryNavigationBar(QFrame):
     page_requested = Signal(int)
+    settings_requested = Signal()
 
     def __init__(
         self,
@@ -98,9 +142,12 @@ class PrimaryNavigationBar(QFrame):
         export_label, export_id = export_page
         self.export_button = self._add_button(export_label, export_id)
         self.buttons = (*self.leading_buttons, *self.workflow_buttons, self.export_button)
+        self.settings_button = NavigationActionButton("settings", "Settings")
+        self.settings_button.clicked.connect(self.settings_requested.emit)
 
         self.data_divider = _navigation_divider()
         self.export_divider = _navigation_divider()
+        self.settings_divider = _navigation_divider()
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 8, 16, 8)
@@ -117,6 +164,10 @@ class PrimaryNavigationBar(QFrame):
         layout.addWidget(self.export_divider)
         layout.addSpacing(12)
         layout.addWidget(self.export_button)
+        layout.addSpacing(12)
+        layout.addWidget(self.settings_divider)
+        layout.addSpacing(12)
+        layout.addWidget(self.settings_button)
         layout.addStretch(1)
 
         self.button_group.idClicked.connect(self.page_requested.emit)
@@ -130,6 +181,7 @@ class PrimaryNavigationBar(QFrame):
     def set_theme_mode(self, theme_mode: str) -> None:
         for button in self.buttons:
             button.set_theme_mode(theme_mode)
+        self.settings_button.set_theme_mode(theme_mode)
 
     def _add_button(self, label: str, page_id: int) -> NavigationItemButton:
         button = NavigationItemButton(label, _PAGE_ICONS.get(label, "missing"))

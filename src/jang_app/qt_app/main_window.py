@@ -38,7 +38,7 @@ from jang_app.config import (
 from jang_app.pipeline.rvc_convert import convert_vocal_with_rvc, list_index_files, list_voice_models
 from jang_app.pipeline.separate import SeparationResult, separate_audio
 from jang_app.qt_app.export_page import ExportPage
-from jang_app.qt_app.floating_playback_panel import FloatingPlaybackPanel
+from jang_app.qt_app.floating_playback_panel import FloatingPlaybackPanel, floating_player_position
 from jang_app.qt_app.library_details_panel import LibraryDetailsPanel
 from jang_app.qt_app.library_row import SongListRow
 from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
@@ -264,6 +264,7 @@ class MainWindow(QMainWindow):
             ("Export", PAGE_EXPORT),
         )
         self.primary_navigation.page_requested.connect(self._navigate_to_page)
+        self.primary_navigation.settings_requested.connect(self._open_system_setup)
 
         self.theme_button = ThemeToggleButton()
         self.theme_button.clicked.connect(self._toggle_theme)
@@ -282,13 +283,10 @@ class MainWindow(QMainWindow):
             self.language_action_group.addAction(action)
             self.language_actions[language] = action
         self.language_button.setMenu(self.language_menu)
-        self.settings_button = SvgIconButton("settings", size=26)
-        self.settings_button.setObjectName("TitleBarSettingsButton")
-        self.settings_button.setToolTip("System setup")
-        self.settings_button.clicked.connect(self._open_system_setup)
+        self.settings_button = self.primary_navigation.settings_button
+        set_translated_tooltip(self.settings_button, "System setup")
         self.title_bar.add_action_widget(self.language_button)
         self.title_bar.add_action_widget(self.theme_button)
-        self.title_bar.add_action_widget(self.settings_button)
 
         return self.primary_navigation
 
@@ -668,12 +666,16 @@ class MainWindow(QMainWindow):
         if not panel.isVisible():
             return
         parent = self._content_widget
-        bottom_anchor = (
-            self.workspace_dock.geometry().top()
-            if self.workspace_dock.isVisible()
-            else parent.height() - 16
+        anchor_top = (
+            self.workspace_dock.geometry().top() if self.workspace_dock.isVisible() else None
         )
-        panel.move(16, max(16, bottom_anchor - panel.height() - 10))
+        panel.move(
+            *floating_player_position(
+                parent.height(),
+                panel.height(),
+                anchor_top=anchor_top,
+            )
+        )
         panel.raise_()
 
     def _sync_playback_surfaces(self) -> None:
@@ -764,7 +766,12 @@ class MainWindow(QMainWindow):
         self._apply_theme()
 
     def _open_system_setup(self) -> None:
-        dialog = InitialSetupDialog(APP_PATHS, APP_ICON_PATH, first_run=False)
+        dialog = InitialSetupDialog(
+            APP_PATHS,
+            APP_ICON_PATH,
+            first_run=False,
+            theme_mode=self.settings.theme_mode,
+        )
         if dialog.exec() != dialog.DialogCode.Accepted or not dialog.restart_required:
             return
         if getattr(sys, "frozen", False):

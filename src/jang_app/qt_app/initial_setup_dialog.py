@@ -3,9 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
-    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -18,6 +16,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from jang_app.qt_app.app_dialog import AppDialog
+from jang_app.qt_app.theme import theme_tokens
 from jang_app.services.app_paths import AppPaths
 from jang_app.services.i18n import tr
 from jang_app.services.initial_setup import (
@@ -51,31 +51,37 @@ class DiagnosticsWorker(QThread):
             self.failed.emit(str(exc))
 
 
-class InitialSetupDialog(QDialog):
+class InitialSetupDialog(AppDialog):
     def __init__(
         self,
         paths: AppPaths,
         logo_path: Path,
         *,
         first_run: bool = True,
+        theme_mode: str = "dark",
         diagnostics_worker_type: type[DiagnosticsWorker] = DiagnosticsWorker,
     ) -> None:
-        super().__init__()
+        dialog_title = tr("First Run Setup" if first_run else "System Setup")
+        super().__init__(
+            dialog_title,
+            logo_path,
+            theme_mode=theme_mode,
+            allow_minimize=True,
+            allow_maximize=True,
+        )
         self._paths = paths
         self._configured_paths = paths
         self._first_run = first_run
+        self._theme_mode = theme_mode
         self._diagnostics_worker_type = diagnostics_worker_type
         self._worker: DiagnosticsWorker | None = None
         self._diagnostics: SystemDiagnostics | None = None
         self.restart_required = False
 
-        self.setWindowTitle(tr("First Run Setup" if first_run else "System Setup"))
-        self.setWindowIcon(QIcon(str(logo_path)))
-        self.setModal(True)
         self.setMinimumSize(780, 560)
         self.resize(820, 590)
-        self.setStyleSheet(_SETUP_STYLESHEET)
-        self._build_ui(logo_path)
+        self.setStyleSheet(_build_setup_stylesheet(theme_mode))
+        self._build_ui()
 
     @property
     def configured_paths(self) -> AppPaths:
@@ -85,23 +91,20 @@ class InitialSetupDialog(QDialog):
     def diagnostics(self) -> SystemDiagnostics | None:
         return self._diagnostics
 
-    def _build_ui(self, logo_path: Path) -> None:
+    def _build_ui(self) -> None:
         header = QFrame()
         header.setObjectName("SetupHeader")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(22, 18, 22, 18)
         header_layout.setSpacing(13)
-        logo = QLabel()
-        logo.setPixmap(QIcon(str(logo_path)).pixmap(38, 38))
         identity = QVBoxLayout()
         identity.setSpacing(2)
-        title = QLabel("JJZero Audio")
+        title = QLabel(tr("First Run Setup" if self._first_run else "System Setup"))
         title.setObjectName("SetupBrand")
         self.step_label = QLabel(tr("STORAGE SETUP"))
         self.step_label.setObjectName("SetupStep")
         identity.addWidget(title)
         identity.addWidget(self.step_label)
-        header_layout.addWidget(logo)
         header_layout.addLayout(identity)
         header_layout.addStretch(1)
         self.step_count_label = QLabel("01 / 02")
@@ -136,9 +139,7 @@ class InitialSetupDialog(QDialog):
         footer.addWidget(self.back_button)
         footer.addWidget(self.primary_button)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout = self.content_layout
         layout.addWidget(header)
         body = QWidget()
         body_layout = QVBoxLayout(body)
@@ -440,41 +441,60 @@ def _path_preview(label: str) -> QLabel:
     return preview
 
 
-_SETUP_STYLESHEET = """
-QDialog { background: #151515; color: #ecebe7; font-family: 'Segoe UI'; }
-QFrame#SetupHeader { background: #111111; border-bottom: 1px solid #383835; }
-QLabel#SetupBrand { color: #ecebe7; font-size: 17px; font-weight: 800; }
-QLabel#SetupStep { color: #898780; font-size: 10px; font-weight: 800; letter-spacing: 1px; }
-QLabel#SetupStepCount { color: #aaa8a1; background: #212120; border: 1px solid #383835;
-  border-radius: 10px; padding: 5px 10px; font-size: 10px; font-weight: 800; }
-QLabel#SetupTitle { color: #ecebe7; font-size: 22px; font-weight: 800; }
-QLabel#SetupDescription { color: #aaa8a1; font-size: 11px; }
-QFrame#SetupCard, QFrame#SetupPreview { background: #212120; border: 1px solid #383835; border-radius: 14px; }
-QLabel#SetupFieldLabel { color: #aaa8a1; font-size: 10px; font-weight: 800; }
-QLabel#SetupPathPreview { color: #aaa8a1; font-size: 10px; }
-QLineEdit#SetupPathEdit { color: #ecebe7; background: #191918; border: 1px solid #484843;
-  border-radius: 9px; min-height: 36px; padding: 0 11px; selection-background-color: #484843; }
-QLineEdit#SetupPathEdit:focus { border-color: #898780; }
-QPushButton { cursor: pointer; min-height: 34px; padding: 0 15px; border-radius: 9px; font-weight: 800; }
-QPushButton#SetupPrimaryButton { color: #171717; background: #efeee9; border: 1px solid #efeee9; }
-QPushButton#SetupPrimaryButton:hover { background: #d8d7d1; }
-QPushButton#SetupPrimaryButton:pressed { background: #c9c8c2; }
-QPushButton#SetupSecondaryButton, QPushButton#SetupBrowseButton { color: #ecebe7; background: #212120;
-  border: 1px solid #484843; }
-QPushButton#SetupSecondaryButton:hover, QPushButton#SetupBrowseButton:hover { background: #30302e; }
-QPushButton:disabled { color: #6c6b66; background: #212120; border-color: #383835; }
-QLabel#SetupError { color: #d98b78; background: #2b1e1b; border: 1px solid #6e3d34;
-  border-radius: 9px; padding: 8px 11px; }
-QProgressBar#SetupProgress { min-height: 5px; max-height: 5px; border: 0; border-radius: 2px; background: #272725; }
-QProgressBar#SetupProgress::chunk { background: #efeee9; border-radius: 2px; }
-QFrame#DiagnosticRow { background: #212120; border: 1px solid #383835; border-radius: 11px; }
-QFrame#DiagnosticRow[status='fail'] { border-color: #8a4437; }
-QFrame#DiagnosticRow[status='warning'] { border-color: #7a6740; }
-QLabel#DiagnosticTitle { color: #ecebe7; font-size: 11px; font-weight: 800; }
-QLabel#DiagnosticDetail { color: #898780; font-size: 9px; }
-QLabel#DiagnosticStatus { color: #898780; background: #191918; border: 1px solid #383835;
-  border-radius: 8px; min-width: 68px; padding: 4px 7px; font-size: 9px; font-weight: 800; }
-QLabel#DiagnosticStatus[status='pass'] { color: #c9f0dc; border-color: #3f6b53; background: #1f3128; }
-QLabel#DiagnosticStatus[status='warning'] { color: #f0dfb8; border-color: #7a6740; background: #30291b; }
-QLabel#DiagnosticStatus[status='fail'] { color: #ffd4d4; border-color: #7a3a3f; background: #3a2022; }
+def _build_setup_stylesheet(theme_mode: str) -> str:
+    colors = theme_tokens(theme_mode)
+    input_color = "#191918" if theme_mode == "dark" else colors["background"]
+    warning_text = "#f0dfb8" if theme_mode == "dark" else "#725619"
+    warning_border = "#7a6740" if theme_mode == "dark" else "#c9ac6a"
+    warning_background = "#30291b" if theme_mode == "dark" else "#f4ead1"
+    return f"""
+QDialog {{ background: {colors['background']}; color: {colors['text']};
+  font-family: "Malgun Gothic", "Segoe UI"; font-size: 13px; }}
+QFrame#WindowTitleBar {{ background: {colors['chrome']}; border: 0; border-bottom: 1px solid {colors['border']}; }}
+QFrame#WindowTitleBar QLabel#AppTitle {{ color: {colors['text']}; font-size: 16px; font-weight: 900; }}
+QLabel#AppLogo, QWidget#TitleBarCenter, QWidget#TitleBarActions {{ background: transparent; border: 0; }}
+QFrame#WindowControlGroup {{ background: {colors['raised']}; border: 1px solid {colors['border']}; border-radius: 12px; }}
+QFrame#TitleBarControlDivider {{ background: {colors['border']}; border: 0; }}
+QFrame#SetupHeader {{ background: {colors['chrome']}; border-bottom: 1px solid {colors['border']}; }}
+QLabel#SetupBrand {{ color: {colors['text']}; font-size: 17px; font-weight: 800; }}
+QLabel#SetupStep {{ color: {colors['faint']}; font-size: 10px; font-weight: 800; letter-spacing: 1px; }}
+QLabel#SetupStepCount {{ color: {colors['muted']}; background: {colors['card']}; border: 1px solid {colors['border']};
+  border-radius: 10px; padding: 5px 10px; font-size: 10px; font-weight: 800; }}
+QLabel#SetupTitle {{ color: {colors['text']}; font-size: 22px; font-weight: 800; }}
+QLabel#SetupDescription {{ color: {colors['muted']}; font-size: 11px; }}
+QFrame#SetupCard, QFrame#SetupPreview {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 14px; }}
+QLabel#SetupFieldLabel {{ color: {colors['muted']}; font-size: 10px; font-weight: 800; }}
+QLabel#SetupPathPreview {{ color: {colors['muted']}; font-size: 10px; }}
+QLineEdit#SetupPathEdit {{ color: {colors['text']}; background: {input_color}; border: 1px solid {colors['button_border']};
+  border-radius: 9px; min-height: 36px; padding: 0 11px; selection-background-color: {colors['selection']}; }}
+QLineEdit#SetupPathEdit:focus {{ border-color: {colors['focus']}; }}
+QPushButton#SetupPrimaryButton, QPushButton#SetupSecondaryButton, QPushButton#SetupBrowseButton {{
+  min-height: 34px; padding: 0 15px; border-radius: 9px; font-weight: 800; }}
+QPushButton#SetupPrimaryButton {{ color: {colors['accent_text']}; background: {colors['accent']}; border: 1px solid {colors['accent']}; }}
+QPushButton#SetupPrimaryButton:hover {{ background: {colors['active_hover']}; }}
+QPushButton#SetupPrimaryButton:pressed {{ background: {colors['active_pressed']}; }}
+QPushButton#SetupSecondaryButton, QPushButton#SetupBrowseButton {{ color: {colors['text']}; background: {colors['card']};
+  border: 1px solid {colors['button_border']}; }}
+QPushButton#SetupSecondaryButton:hover, QPushButton#SetupBrowseButton:hover {{ background: {colors['hover']}; }}
+QPushButton#SetupPrimaryButton:disabled, QPushButton#SetupSecondaryButton:disabled,
+QPushButton#SetupBrowseButton:disabled {{ color: {colors['faint']}; background: {colors['card']};
+  border-color: {colors['border']}; }}
+QLabel#SetupError {{ color: {colors['source_youtube_text']}; background: {colors['source_youtube_background']};
+  border: 1px solid {colors['source_youtube_border']};
+  border-radius: 9px; padding: 8px 11px; }}
+QProgressBar#SetupProgress {{ min-height: 5px; max-height: 5px; border: 0; border-radius: 2px; background: {colors['raised']}; }}
+QProgressBar#SetupProgress::chunk {{ background: {colors['accent']}; border-radius: 2px; }}
+QFrame#DiagnosticRow {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 11px; }}
+QFrame#DiagnosticRow[status='fail'] {{ border-color: #8a4437; }}
+QFrame#DiagnosticRow[status='warning'] {{ border-color: #7a6740; }}
+QLabel#DiagnosticTitle {{ color: {colors['text']}; font-size: 11px; font-weight: 800; }}
+QLabel#DiagnosticDetail {{ color: {colors['faint']}; font-size: 9px; }}
+QLabel#DiagnosticStatus {{ color: {colors['focus']}; background: {input_color}; border: 1px solid {colors['border']};
+  border-radius: 8px; min-width: 68px; padding: 4px 7px; font-size: 9px; font-weight: 800; }}
+QLabel#DiagnosticStatus[status='pass'] {{ color: {colors['source_output_text']};
+  border-color: {colors['source_output_border']}; background: {colors['source_output_background']}; }}
+QLabel#DiagnosticStatus[status='warning'] {{ color: {warning_text}; border-color: {warning_border};
+  background: {warning_background}; }}
+QLabel#DiagnosticStatus[status='fail'] {{ color: {colors['source_youtube_text']};
+  border-color: {colors['source_youtube_border']}; background: {colors['source_youtube_background']}; }}
 """

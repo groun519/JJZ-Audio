@@ -6,9 +6,12 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.floating_playback_panel import (
+    FLOATING_PLAYER_EDGE_MARGIN,
     FLOATING_PLAYER_HEIGHT,
+    FLOATING_PLAYER_STACK_GAP,
     FLOATING_PLAYER_WIDTH,
     FloatingPlaybackPanel,
+    floating_player_position,
 )
 from jang_app.qt_app.transport_controls import TRANSPORT_BUTTON_SIZE
 
@@ -48,6 +51,21 @@ class FloatingPlaybackPanelTests(unittest.TestCase):
         self.assertEqual(play_toggled.count(), 1)
         self.assertEqual(dismiss_requested.count(), 1)
         panel.close()
+
+    def test_position_uses_equal_left_and_bottom_edge_margins(self) -> None:
+        x_position, y_position = floating_player_position(500, FLOATING_PLAYER_HEIGHT)
+
+        self.assertEqual(x_position, FLOATING_PLAYER_EDGE_MARGIN)
+        self.assertEqual(500 - (y_position + FLOATING_PLAYER_HEIGHT), FLOATING_PLAYER_EDGE_MARGIN)
+
+    def test_position_uses_stack_gap_only_above_visible_dock(self) -> None:
+        _x_position, y_position = floating_player_position(
+            500,
+            FLOATING_PLAYER_HEIGHT,
+            anchor_top=420,
+        )
+
+        self.assertEqual(420 - (y_position + FLOATING_PLAYER_HEIGHT), FLOATING_PLAYER_STACK_GAP)
 
 
 if __name__ == "__main__":

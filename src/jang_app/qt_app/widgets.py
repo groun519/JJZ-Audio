@@ -149,7 +149,14 @@ class WindowTitleBar(QFrame):
     maximize_requested = Signal()
     close_requested = Signal()
 
-    def __init__(self, title: str, logo_path: Path) -> None:
+    def __init__(
+        self,
+        title: str,
+        logo_path: Path,
+        *,
+        allow_minimize: bool = True,
+        allow_maximize: bool = True,
+    ) -> None:
         super().__init__()
         self.setObjectName("WindowTitleBar")
         self.setFixedHeight(46)
@@ -195,10 +202,14 @@ class WindowTitleBar(QFrame):
         window_controls.setContentsMargins(5, 2, 5, 2)
         window_controls.setSpacing(2)
         window_controls.addWidget(self.action_widget)
-        window_controls.addWidget(_titlebar_control_divider())
+        self.control_divider = _titlebar_control_divider()
+        window_controls.addWidget(self.control_divider)
         window_controls.addWidget(self.minimize_button)
         window_controls.addWidget(self.maximize_button)
         window_controls.addWidget(self.close_button)
+        self.minimize_button.setVisible(allow_minimize)
+        self.maximize_button.setVisible(allow_maximize)
+        self.control_divider.setVisible(allow_minimize or allow_maximize)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 6, 10, 6)

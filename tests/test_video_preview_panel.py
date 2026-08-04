@@ -66,6 +66,23 @@ class VideoPreviewPanelTests(unittest.TestCase):
         self.assertEqual(requested.at(0)[0], source_url)
         panel.close()
 
+    def test_original_url_slot_is_transparent_while_hover_action_is_hidden(self) -> None:
+        panel = VideoPreviewPanel()
+        panel.setStyleSheet(build_stylesheet("dark"))
+        panel.set_source(
+            VideoSource(),
+            enabled=True,
+            original_song_url="https://youtube.com/watch?v=source",
+        )
+
+        self.assertEqual(panel.url_field.original_slot.objectName(), "VideoOriginalUrlSlot")
+        self.assertTrue(panel.url_field.original_button.isHidden())
+        self.assertIn(
+            "QWidget#VideoOriginalUrlSlot",
+            panel.styleSheet(),
+        )
+        panel.close()
+
     def test_youtube_download_uses_a_compact_icon_action(self) -> None:
         for theme_mode in ("dark", "white"):
             panel = VideoPreviewPanel()

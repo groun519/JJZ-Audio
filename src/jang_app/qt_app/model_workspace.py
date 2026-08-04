@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QInputDialog,
     QMessageBox,
     QProgressBar,
     QStackedWidget,
@@ -22,12 +21,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from jang_app.config import APP_ICON_PATH
 from jang_app.qt_app.model_badge import set_model_badge
 from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
 from jang_app.qt_app.model_detail_panel import ModelDetailPanel, ModelProfileValues
 from jang_app.qt_app.model_row import ModelListRow
 from jang_app.qt_app.model_training_panel import ModelTrainingPanel, ModelTrainingWorker
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
+from jang_app.qt_app.text_input_dialog import TextInputDialog
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
 from jang_app.qt_app.workers import TaskWorker
 from jang_app.services.clip_edit_history import REVIEW_READY
@@ -411,7 +412,15 @@ class ModelWorkspacePage(QWidget):
         self.status_label.setVisible(bool(message))
 
     def _create_model(self) -> None:
-        name, accepted = QInputDialog.getText(self, tr("New Model"), tr("Model Name"))
+        name, accepted = TextInputDialog.get_text(
+            self,
+            tr("New Model"),
+            tr("Model Name"),
+            APP_ICON_PATH,
+            theme_mode=self._theme_mode,
+            accept_label=tr("Create"),
+            cancel_label=tr("Cancel"),
+        )
         if not accepted:
             return
         try:

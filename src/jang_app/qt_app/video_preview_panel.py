@@ -348,9 +348,10 @@ class _VideoUrlField(QFrame):
         set_translated_tooltip(self.submit_button, "Use URL")
         self.submit_button.clicked.connect(self._submit)
 
-        original_slot = QWidget()
-        original_slot.setFixedSize(28, 28)
-        original_layout = QVBoxLayout(original_slot)
+        self.original_slot = QWidget()
+        self.original_slot.setObjectName("VideoOriginalUrlSlot")
+        self.original_slot.setFixedSize(28, 28)
+        original_layout = QVBoxLayout(self.original_slot)
         original_layout.setContentsMargins(0, 0, 0, 0)
         original_layout.addWidget(self.original_button)
 
@@ -358,7 +359,7 @@ class _VideoUrlField(QFrame):
         layout.setContentsMargins(12, 5, 5, 5)
         layout.setSpacing(5)
         layout.addWidget(self.edit, 1)
-        layout.addWidget(original_slot, 0)
+        layout.addWidget(self.original_slot, 0)
         layout.addWidget(self.submit_button, 0)
 
     def set_original_url_available(self, available: bool) -> None:

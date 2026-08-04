@@ -145,6 +145,7 @@ _KOREAN = {
     "Model Setup": "모델 설정",
     "New Model": "새 모델",
     "Model Name": "모델 이름",
+    "Create": "생성",
     "Resume": "이어 학습",
     "Managed": "관리됨",
     "Model Library": "모델 라이브러리",

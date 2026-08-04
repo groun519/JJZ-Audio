@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QDialog
 
 from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
@@ -32,6 +32,8 @@ class InitialSetupDialogTests(unittest.TestCase):
                 root / "logo.svg",
                 diagnostics_worker_type=_ReadyWorker,
             )
+            self.assertTrue(dialog.windowFlags() & Qt.WindowType.FramelessWindowHint)
+            self.assertEqual(dialog.title_bar.objectName(), "WindowTitleBar")
             dialog.media_edit.setText(str(media))
 
             dialog.primary_button.click()

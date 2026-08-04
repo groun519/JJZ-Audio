@@ -1,90 +1,93 @@
 from __future__ import annotations
 
-from jang_app.config import ASSETS_DIR
-
-
 def next_theme_mode(theme_mode: str) -> str:
     return "dark" if theme_mode == "white" else "white"
 
 
 def build_stylesheet(theme_mode: str) -> str:
+    from jang_app.config import ASSETS_DIR
+
     icon_tone = "light" if theme_mode == "dark" else "dark"
     chevron_down = (ASSETS_DIR / f"control_chevron_down_{icon_tone}.svg").as_posix()
     chevron_up = (ASSETS_DIR / f"control_chevron_up_{icon_tone}.svg").as_posix()
-    if theme_mode == "dark":
-        return _stylesheet(
-            background="#151515",
-            chrome="#111111",
-            surface="#1b1b1a",
-            card="#212120",
-            raised="#272725",
-            text="#ecebe7",
-            muted="#aaa8a1",
-            faint="#6c6b66",
-            border="#383835",
-            button_border="#484843",
-            accent="#efeee9",
-            accent_text="#171717",
-            hover="#30302e",
-            pressed="#3a3a37",
-            selection="#323230",
-            active_hover="#e0dfd9",
-            active_pressed="#c9c8c2",
-            focus="#898780",
-            tab_active="#30302e",
-            tab_active_text="#ecebe7",
-            tab_active_hover="#393936",
-            tab_active_pressed="#444440",
-            tab_active_border="#4b4b46",
-            source_local_text="#c7d6e8",
-            source_local_background="#202a34",
-            source_local_border="#40566c",
-            source_youtube_text="#ffd4d4",
-            source_youtube_background="#3a2022",
-            source_youtube_border="#7a3a3f",
-            source_output_text="#c9f0dc",
-            source_output_background="#1f3128",
-            source_output_border="#3f6b53",
-            chevron_down=chevron_down,
-            chevron_up=chevron_up,
-        )
-
     return _stylesheet(
-        background="#f6f3ec",
-        chrome="#fffdf7",
-        surface="#fffdf7",
-        card="#fffdf7",
-        raised="#ebe7dd",
-        text="#10100e",
-        muted="#6e6a61",
-        faint="#aaa397",
-        border="#d8d0c2",
-        button_border="#10100e",
-        accent="#10100e",
-        accent_text="#fffdf7",
-        hover="#e7e1d5",
-        pressed="#d1c8b8",
-        selection="#ded6ca",
-        active_hover="#2b2a26",
-        active_pressed="#46443e",
-        focus="#6e6a61",
-        tab_active="#10100e",
-        tab_active_text="#fffdf7",
-        tab_active_hover="#2b2a26",
-        tab_active_pressed="#46443e",
-        tab_active_border="#10100e",
-        source_local_text="#244664",
-        source_local_background="#e5eef5",
-        source_local_border="#9bb3c6",
-        source_youtube_text="#8a2930",
-        source_youtube_background="#f6e4e4",
-        source_youtube_border="#d7a2a5",
-        source_output_text="#24543c",
-        source_output_background="#e2f0e8",
-        source_output_border="#9abda8",
+        **theme_tokens(theme_mode),
         chevron_down=chevron_down,
         chevron_up=chevron_up,
     )
+
+
+def theme_tokens(theme_mode: str) -> dict[str, str]:
+    if theme_mode == "dark":
+        return {
+            "background": "#151515",
+            "chrome": "#111111",
+            "surface": "#1b1b1a",
+            "card": "#212120",
+            "raised": "#272725",
+            "text": "#ecebe7",
+            "muted": "#aaa8a1",
+            "faint": "#6c6b66",
+            "border": "#383835",
+            "button_border": "#484843",
+            "accent": "#efeee9",
+            "accent_text": "#171717",
+            "hover": "#30302e",
+            "pressed": "#3a3a37",
+            "selection": "#323230",
+            "active_hover": "#e0dfd9",
+            "active_pressed": "#c9c8c2",
+            "focus": "#898780",
+            "tab_active": "#30302e",
+            "tab_active_text": "#ecebe7",
+            "tab_active_hover": "#393936",
+            "tab_active_pressed": "#444440",
+            "tab_active_border": "#4b4b46",
+            "source_local_text": "#c7d6e8",
+            "source_local_background": "#202a34",
+            "source_local_border": "#40566c",
+            "source_youtube_text": "#ffd4d4",
+            "source_youtube_background": "#3a2022",
+            "source_youtube_border": "#7a3a3f",
+            "source_output_text": "#c9f0dc",
+            "source_output_background": "#1f3128",
+            "source_output_border": "#3f6b53",
+        }
+
+    return {
+        "background": "#f6f3ec",
+        "chrome": "#fffdf7",
+        "surface": "#fffdf7",
+        "card": "#fffdf7",
+        "raised": "#ebe7dd",
+        "text": "#10100e",
+        "muted": "#6e6a61",
+        "faint": "#aaa397",
+        "border": "#d8d0c2",
+        "button_border": "#10100e",
+        "accent": "#10100e",
+        "accent_text": "#fffdf7",
+        "hover": "#e7e1d5",
+        "pressed": "#d1c8b8",
+        "selection": "#ded6ca",
+        "active_hover": "#2b2a26",
+        "active_pressed": "#46443e",
+        "focus": "#6e6a61",
+        "tab_active": "#10100e",
+        "tab_active_text": "#fffdf7",
+        "tab_active_hover": "#2b2a26",
+        "tab_active_pressed": "#46443e",
+        "tab_active_border": "#10100e",
+        "source_local_text": "#244664",
+        "source_local_background": "#e5eef5",
+        "source_local_border": "#9bb3c6",
+        "source_youtube_text": "#8a2930",
+        "source_youtube_background": "#f6e4e4",
+        "source_youtube_border": "#d7a2a5",
+        "source_output_text": "#24543c",
+        "source_output_background": "#e2f0e8",
+        "source_output_border": "#9abda8",
+    }
 
 
 def _stylesheet(
@@ -309,6 +312,11 @@ def _stylesheet(
             border-radius: 0;
             padding: 0;
             min-height: 28px;
+        }}
+
+        QWidget#VideoOriginalUrlSlot {{
+            background: transparent;
+            border: 0;
         }}
 
         QScrollArea#StudioStepScroll {{

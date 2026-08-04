@@ -29,7 +29,7 @@ class ModelWorkspacePageTests(unittest.TestCase):
             page = ModelWorkspacePage(root / "rvc", workspace)
 
             with patch(
-                "jang_app.qt_app.model_workspace.QInputDialog.getText",
+                "jang_app.qt_app.model_workspace.TextInputDialog.get_text",
                 return_value=("Voice One", True),
             ):
                 page.new_model_button.click()
