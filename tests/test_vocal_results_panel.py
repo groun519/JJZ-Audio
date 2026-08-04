@@ -16,42 +16,43 @@ class VocalResultsPanelTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_selects_output_and_converted_versions_without_emitting_during_load(self) -> None:
+    def test_applies_one_active_result_and_selects_converted_versions(self) -> None:
         panel = VocalResultsPanel()
-        first = _version("first", (Path("first-a.wav"),))
         second = _version("second", (Path("second-a.wav"), Path("second-b.wav")), Path("second-b.wav"))
-        output_changed = QSignalSpy(panel.output_selected)
         converted_changed = QSignalSpy(panel.converted_selected)
 
-        panel.set_versions((first, second), second.job_dir)
+        panel.set_result(second)
 
-        self.assertEqual(output_changed.count(), 0)
         self.assertEqual(converted_changed.count(), 0)
-        self.assertEqual(panel.current_version(), second)
+        self.assertEqual(panel.current_result(), second)
         self.assertEqual(panel.converted_waveform.current_path(), Path("second-b.wav"))
+        self.assertFalse(panel.converted_waveform.path_combo.isHidden())
 
-        panel.version_combo.setCurrentIndex(0)
-        self.assertEqual(output_changed.count(), 1)
-        self.assertEqual(output_changed.at(0)[0], first.job_dir)
-
-        panel.version_combo.setCurrentIndex(1)
         panel.converted_waveform.path_combo.setCurrentIndex(0)
         self.assertEqual(converted_changed.count(), 1)
         self.assertEqual(converted_changed.at(0)[0], Path("second-a.wav"))
         panel.close()
 
-    def test_output_actions_emit_the_selected_job_directory(self) -> None:
+    def test_header_exposes_only_the_active_result_location(self) -> None:
         panel = VocalResultsPanel()
         version = _version("selected", ())
         opened = QSignalSpy(panel.open_location_requested)
-        removed = QSignalSpy(panel.remove_output_requested)
-        panel.set_versions((version,), version.job_dir)
+        panel.set_result(version)
 
         panel.open_location_button.click()
-        panel.remove_output_button.click()
 
         self.assertEqual(opened.at(0)[0], version.job_dir)
-        self.assertEqual(removed.at(0)[0], version.job_dir)
+        self.assertFalse(hasattr(panel, "version_combo"))
+        self.assertFalse(hasattr(panel, "remove_output_button"))
+        panel.close()
+
+    def test_converted_selector_is_hidden_until_multiple_versions_exist(self) -> None:
+        panel = VocalResultsPanel()
+        panel.set_result(_version("single", (Path("single.wav"),)))
+        self.assertTrue(panel.converted_waveform.path_combo.isHidden())
+
+        panel.set_result(_version("multiple", (Path("first.wav"), Path("second.wav"))))
+        self.assertFalse(panel.converted_waveform.path_combo.isHidden())
         panel.close()
 
     def test_studio_track_can_restore_a_converted_version_without_user_signal(self) -> None:

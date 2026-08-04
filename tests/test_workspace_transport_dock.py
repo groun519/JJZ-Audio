@@ -59,7 +59,8 @@ class WorkspaceTransportDockTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertGreaterEqual(dock.song_combo.minimumWidth(), 360)
-        self.assertFalse(dock.song_combo.lineEdit().isClearButtonEnabled())
+        self.assertFalse(dock.song_combo.isEditable())
+        self.assertIsNone(dock.song_combo.lineEdit())
         self.assertEqual(dock.song_combo.toolTip(), long_title)
         self.assertEqual(dock.song_combo.itemData(1, Qt.ItemDataRole.ToolTipRole), long_title)
         dock.close()

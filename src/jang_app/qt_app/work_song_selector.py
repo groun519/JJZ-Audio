@@ -3,8 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPainter, QPalette
-from PySide6.QtWidgets import QComboBox, QCompleter, QLineEdit, QSizePolicy
+from PySide6.QtWidgets import QStyle, QStyleOptionComboBox, QStylePainter, QSizePolicy
 
 from jang_app.qt_app.widgets import ScrollSafeComboBox
 from jang_app.services.i18n import tr
@@ -17,26 +16,15 @@ class WorkSongSelector(ScrollSafeComboBox):
         self,
         *,
         empty_text: str = "Select work song",
-        search_text: str = "Search work songs",
         object_name: str = "WorkSongCombo",
     ) -> None:
         super().__init__()
         self.setObjectName(object_name)
         self._empty_text = empty_text
-        self._search_text = search_text
-        self.setEditable(True)
-        self.setLineEdit(_ElidingLineEdit())
-        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setEditable(False)
         self.setMinimumWidth(360)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.lineEdit().setClearButtonEnabled(False)
         self.activated.connect(self._activate_index)
-        self.lineEdit().returnPressed.connect(self._activate_search_text)
-
-        completer = self.completer()
-        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
         self._loading = False
         self._selected_song_id = ""
@@ -76,8 +64,26 @@ class WorkSongSelector(ScrollSafeComboBox):
         if self.count() > 0:
             self.setItemText(0, tr(self._empty_text))
             self.setItemData(0, tr(self._empty_text), Qt.ItemDataRole.ToolTipRole)
-        self.lineEdit().setPlaceholderText(tr(self._search_text))
         self._update_current_tooltip()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        text_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox,
+            option,
+            QStyle.SubControl.SC_ComboBoxEditField,
+            self,
+        )
+        option.currentText = self.fontMetrics().elidedText(
+            option.currentText,
+            Qt.TextElideMode.ElideRight,
+            max(0, text_rect.width() - 4),
+        )
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
 
     def showPopup(self) -> None:  # noqa: N802
         content_width = max(
@@ -100,30 +106,5 @@ class WorkSongSelector(ScrollSafeComboBox):
         self._update_current_tooltip()
         self.song_changed.emit(selected_id)
 
-    def _activate_search_text(self) -> None:
-        query = self.currentText().strip().casefold()
-        if not query:
-            self.select_song("", emit=True)
-            return
-        for index in range(1, self.count()):
-            if self.itemText(index).strip().casefold() == query:
-                song_id = str(self.itemData(index) or "")
-                self.select_song(song_id, emit=True)
-                return
-        self.select_song(self._selected_song_id)
-
     def _update_current_tooltip(self, *_args) -> None:
         self.setToolTip(self.itemText(self.currentIndex()) if self.currentIndex() >= 0 else "")
-
-
-class _ElidingLineEdit(QLineEdit):
-    def paintEvent(self, event) -> None:  # noqa: N802
-        if self.hasFocus() or not self.text():
-            super().paintEvent(event)
-            return
-
-        painter = QPainter(self)
-        content = self.contentsRect().adjusted(8, 0, -30 if self.isClearButtonEnabled() else -8, 0)
-        elided = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, content.width())
-        painter.setPen(self.palette().color(QPalette.ColorRole.Text))
-        painter.drawText(content, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)

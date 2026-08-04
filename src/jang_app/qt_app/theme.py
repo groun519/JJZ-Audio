@@ -198,6 +198,33 @@ def _stylesheet(
             border-radius: 16px;
         }}
 
+        QFrame#FloatingPlaybackPanel {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 15px;
+        }}
+
+        QWidget#FloatingPlaybackHeader, QWidget#FloatingPlaybackTransport {{
+            background: transparent;
+            border: 0;
+        }}
+
+        #FloatingPlaybackTitle {{
+            color: {text};
+            font-size: 12px;
+            font-weight: 900;
+        }}
+
+        QPushButton#FloatingPlaybackClose {{
+            min-width: 28px;
+            max-width: 28px;
+            min-height: 28px;
+            max-height: 28px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+        }}
+
         QComboBox#WorkSongCombo {{
             min-height: 24px;
             max-height: 24px;
@@ -212,28 +239,6 @@ def _stylesheet(
             font-size: 13px;
             font-weight: 850;
             background: {raised};
-        }}
-
-        QComboBox#WorkSongCombo QLineEdit {{
-            min-height: 22px;
-            max-height: 22px;
-            padding: 0 8px;
-            background: transparent;
-            border: 0;
-            border-radius: 0;
-            font-size: 13px;
-            font-weight: 850;
-        }}
-
-        QComboBox#ExportSongCombo QLineEdit {{
-            min-height: 30px;
-            max-height: 30px;
-            padding: 0 8px;
-            background: transparent;
-            border: 0;
-            border-radius: 0;
-            font-size: 13px;
-            font-weight: 850;
         }}
 
         QWidget#TitleBarCenter, QWidget#TitleBarActions {{
@@ -460,16 +465,6 @@ def _stylesheet(
             color: {text};
             font-size: 14px;
             font-weight: 900;
-        }}
-
-        QFrame#LibraryPreviewDivider {{
-            background: {border};
-            border: 0;
-        }}
-
-        QWidget#LibraryPreviewTransport {{
-            background: transparent;
-            border: 0;
         }}
 
         QLabel#LibraryRowMeta {{

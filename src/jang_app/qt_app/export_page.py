@@ -39,7 +39,6 @@ class ExportPage(QWidget):
         target_label.setObjectName("SectionLabel")
         self.song_selector = WorkSongSelector(
             empty_text="Select export song",
-            search_text="Search export songs",
             object_name="ExportSongCombo",
         )
         self.song_selector.setMinimumWidth(0)
