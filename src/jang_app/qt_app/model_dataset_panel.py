@@ -41,6 +41,7 @@ class ModelDatasetPanel(QWidget):
         self._dataset = ModelDataset("")
         self._worker: TaskWorker | None = None
         self._worker_success: Callable[[object], None] | None = None
+        self._externally_locked = False
         self._theme_mode = "white"
         self._build_ui()
         self.set_model(None)
@@ -212,7 +213,12 @@ class ModelDatasetPanel(QWidget):
             self._dataset = ModelDataset(self._model_id)
             self._set_status(f"Load failed: {_last_error_line(exc)}")
         self._render()
-        self._set_enabled(True)
+        self._set_enabled(not self._externally_locked)
+
+    def set_training_locked(self, is_locked: bool) -> None:
+        self._externally_locked = is_locked
+        self._set_enabled(bool(self._model_id) and self._worker is None and not is_locked)
+        self.clip_editor.set_busy(self._worker is not None or is_locked)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
@@ -601,8 +607,8 @@ class ModelDatasetPanel(QWidget):
 
     def _set_busy(self, is_busy: bool) -> None:
         self.progress_bar.setVisible(is_busy)
-        self.clip_editor.set_busy(is_busy)
-        self._set_enabled(not is_busy and bool(self._model_id))
+        self.clip_editor.set_busy(is_busy or self._externally_locked)
+        self._set_enabled(not is_busy and not self._externally_locked and bool(self._model_id))
 
     def _set_enabled(self, is_enabled: bool) -> None:
         self.source_list.setEnabled(is_enabled)
@@ -622,7 +628,7 @@ class ModelDatasetPanel(QWidget):
             self._sync_action_state()
 
     def _sync_action_state(self) -> None:
-        available = bool(self._model_id) and self._worker is None
+        available = bool(self._model_id) and self._worker is None and not self._externally_locked
         source_selected = bool(self.source_list.selectedItems())
         training_selected = self.training_list.selectedItems()
         self.remove_button.setEnabled(available and source_selected)

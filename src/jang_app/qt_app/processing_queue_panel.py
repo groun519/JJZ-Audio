@@ -6,7 +6,13 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QScroll
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
 from jang_app.qt_app.overflow_title_label import OverflowTextLabel
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
-from jang_app.services.processing_queue import ProcessingQueue, ProcessingTask, TASK_COMPLETED, TASK_FAILED
+from jang_app.services.processing_queue import (
+    ProcessingQueue,
+    ProcessingTask,
+    TASK_CANCELLED,
+    TASK_COMPLETED,
+    TASK_FAILED,
+)
 
 
 _COLLAPSED_HEIGHT = 46
@@ -248,6 +254,8 @@ class ProcessingTaskRow(QFrame):
             status_text = "Complete"
         elif task.status == TASK_FAILED:
             status_text = "Failed"
+        elif task.status == TASK_CANCELLED:
+            status_text = "Stopped"
         else:
             status_text = f"{task.progress}%"
         set_translated_text(self.status_label, status_text)

@@ -21,7 +21,13 @@ from jang_app.qt_app.localization import apply_widget_language
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
 from jang_app.services.i18n import tr
 from jang_app.services.log_reader import read_log_tail
-from jang_app.services.processing_queue import ProcessingQueue, ProcessingTask, TASK_COMPLETED, TASK_FAILED
+from jang_app.services.processing_queue import (
+    ProcessingQueue,
+    ProcessingTask,
+    TASK_CANCELLED,
+    TASK_COMPLETED,
+    TASK_FAILED,
+)
 
 
 class LogDrawer(QFrame):
@@ -277,6 +283,8 @@ def _task_status_label(task: ProcessingTask) -> str:
         return tr("Complete")
     if task.status == TASK_FAILED:
         return tr("Failed")
+    if task.status == TASK_CANCELLED:
+        return tr("Stopped")
     return f"{task.progress}%"
 
 

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, QProcess, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QIcon
 from PySide6.QtWidgets import (
     QComboBox,
+    QApplication,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -25,13 +27,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from jang_app.config import APP_ICON_PATH, APP_NAME, LOG_FILE, SUPPORTED_AUDIO_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
+from jang_app.config import (
+    APP_ICON_PATH,
+    APP_NAME,
+    APP_PATHS,
+    LOG_FILE,
+    SUPPORTED_AUDIO_EXTENSIONS,
+    SUPPORTED_VIDEO_EXTENSIONS,
+)
 from jang_app.pipeline.rvc_convert import convert_vocal_with_rvc, list_index_files, list_voice_models
 from jang_app.pipeline.separate import SeparationResult, separate_audio
 from jang_app.qt_app.export_page import ExportPage
 from jang_app.qt_app.floating_playback_panel import FloatingPlaybackPanel
 from jang_app.qt_app.library_details_panel import LibraryDetailsPanel
 from jang_app.qt_app.library_row import SongListRow
+from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
 from jang_app.qt_app.localization import (
     apply_widget_language,
     set_translated_placeholder,
@@ -138,6 +148,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self.studio_session_autosave.flush()
         self.model_workspace_page.stop_preview()
+        self.model_workspace_page.shutdown_training()
         self.player.stop()
         self.video_preview_panel.stop()
         super().closeEvent(event)
@@ -271,8 +282,13 @@ class MainWindow(QMainWindow):
             self.language_action_group.addAction(action)
             self.language_actions[language] = action
         self.language_button.setMenu(self.language_menu)
+        self.settings_button = SvgIconButton("settings", size=26)
+        self.settings_button.setObjectName("TitleBarSettingsButton")
+        self.settings_button.setToolTip("System setup")
+        self.settings_button.clicked.connect(self._open_system_setup)
         self.title_bar.add_action_widget(self.language_button)
         self.title_bar.add_action_widget(self.theme_button)
+        self.title_bar.add_action_widget(self.settings_button)
 
         return self.primary_navigation
 
@@ -438,7 +454,10 @@ class MainWindow(QMainWindow):
         return self.export_page
 
     def _build_models_page(self) -> QWidget:
-        self.model_workspace_page = ModelWorkspacePage(self.settings.rvc.root)
+        self.model_workspace_page = ModelWorkspacePage(
+            self.settings.rvc.root,
+            processing_queue=self.processing_queue,
+        )
         self.model_workspace_page.use_in_convert_requested.connect(self._use_model_in_convert)
         self.model_workspace_page.open_location_requested.connect(self._open_model_location)
         self.model_workspace_page.preview_started.connect(self._on_model_preview_started)
@@ -586,6 +605,7 @@ class MainWindow(QMainWindow):
         self.title_bar.set_theme_mode(self.settings.theme_mode)
         self.primary_navigation.set_theme_mode(self.settings.theme_mode)
         self.theme_button.set_theme_mode(self.settings.theme_mode)
+        self.settings_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "workspace_dock"):
             self.workspace_dock.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "floating_playback_panel"):
@@ -742,6 +762,17 @@ class MainWindow(QMainWindow):
         self.settings = replace(self.settings, theme_mode=next_theme_mode(self.settings.theme_mode))
         save_app_settings(self.settings)
         self._apply_theme()
+
+    def _open_system_setup(self) -> None:
+        dialog = InitialSetupDialog(APP_PATHS, APP_ICON_PATH, first_run=False)
+        if dialog.exec() != dialog.DialogCode.Accepted or not dialog.restart_required:
+            return
+        if getattr(sys, "frozen", False):
+            arguments = sys.argv[1:]
+        else:
+            arguments = [str(Path(sys.argv[0]).resolve()), *sys.argv[1:]]
+        if QProcess.startDetached(sys.executable, arguments, str(Path.cwd())):
+            QApplication.quit()
 
     def _change_language(self, language: str) -> None:
         if language == self.settings.language:

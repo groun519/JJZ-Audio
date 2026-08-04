@@ -351,6 +351,37 @@ class RvcModelWorkspace:
             progress(100)
         return updated
 
+    def register_training_artifacts(
+        self,
+        model_id: str,
+        *,
+        inference_model: Path,
+        index_file: Path,
+        generator_checkpoint: Path,
+        discriminator_checkpoint: Path,
+    ) -> RvcModelRecord:
+        record = self._require_record(model_id)
+        if not record.is_managed:
+            raise RvcModelWorkspaceError("Training artifacts require a managed model package.")
+        package = RvcModelPackageLayout(self.library_dir / record.model_id, record.name)
+        artifacts = {
+            "inference_model": inference_model.expanduser().resolve(),
+            "index_file": index_file.expanduser().resolve(),
+            "generator_checkpoint": generator_checkpoint.expanduser().resolve(),
+            "discriminator_checkpoint": discriminator_checkpoint.expanduser().resolve(),
+        }
+        for name, path in artifacts.items():
+            _validate_replacement_artifact(name, path)
+            if not package.contains(path):
+                raise RvcModelWorkspaceError("Training artifacts must remain inside the model package.")
+        if _checkpoint_step(artifacts["generator_checkpoint"]) != _checkpoint_step(
+            artifacts["discriminator_checkpoint"]
+        ):
+            raise RvcModelWorkspaceError("Training checkpoint steps do not match.")
+        updated = replace(record, **artifacts)
+        self._replace_record(updated)
+        return updated
+
     def portable_rvc_root(self, model_id: str) -> Path:
         record = self._require_record(model_id)
         if not record.is_managed:

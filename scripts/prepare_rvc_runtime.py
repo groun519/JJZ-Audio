@@ -6,9 +6,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from jang_app.services.rvc_training_runtime import (
+    RVC_TRAINING_ASSET_FILES,
+    RVC_TRAINING_SCRIPT_FILES,
+)
+
 
 RUNTIME_DIRECTORIES = ("runtime", "configs", "lib")
 RUNTIME_FILES = (
+    *(path.name for path in RVC_TRAINING_SCRIPT_FILES),
     "infer_cli.py",
     "vc_infer_pipeline.py",
     "trainset_preprocess_pipeline_print.py",
@@ -17,13 +23,14 @@ RUNTIME_FILES = (
     "LICENSE",
     "requirements.txt",
 )
+TRAINING_ASSET_FILES = RVC_TRAINING_ASSET_FILES
 MANIFEST_FILE = "jjzero_runtime.json"
 DEMUCS_REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements-rvc-runtime.txt"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Copy the RVC inference runtime without modifying its source folder."
+        description="Copy the RVC inference and training runtime without modifying its source folder."
     )
     parser.add_argument("source", type=Path, help="Existing RVC WebUI root")
     parser.add_argument(
@@ -68,6 +75,10 @@ def prepare_rvc_runtime(
         )
     for file_name in RUNTIME_FILES:
         shutil.copy2(resolved_source / file_name, resolved_destination / file_name)
+    for relative_path in TRAINING_ASSET_FILES:
+        target = resolved_destination / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(resolved_source / relative_path, target)
 
     for model_directory in ("weights", "logs"):
         (resolved_destination / model_directory).mkdir(exist_ok=True)
@@ -90,6 +101,7 @@ def _validate_source(source: Path) -> None:
         for path in (
             *(source / name for name in RUNTIME_DIRECTORIES),
             *(source / name for name in RUNTIME_FILES),
+            *(source / path for path in TRAINING_ASSET_FILES),
             source / "runtime" / "python.exe",
         )
         if not path.exists()
@@ -101,11 +113,16 @@ def _validate_source(source: Path) -> None:
 
 def _write_manifest(destination: Path, source_name: str) -> None:
     data = {
-        "layout_version": 1,
+        "layout_version": 2,
         "source_name": source_name,
         "purpose": "JJZero Audio shared AI runtime",
         "demucs_requirements": DEMUCS_REQUIREMENTS.name,
         "model_storage": ["weights", "logs"],
+        "training_profile": {
+            "version": "v2",
+            "sample_rate": 40000,
+            "f0_method": "rmvpe",
+        },
     }
     (destination / MANIFEST_FILE).write_text(
         json.dumps(data, indent=2),

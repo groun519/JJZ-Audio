@@ -3,12 +3,18 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
+from jang_app.services.clip_edit_history import REVIEW_READY
+from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem
+from jang_app.services.processing_queue import ProcessingQueue, TASK_COMPLETED
 from jang_app.services.rvc_model_workspace import RvcModelWorkspace
+from jang_app.services.rvc_training_pipeline import RvcTrainingStage
+from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 
 
 class ModelWorkspacePageTests(unittest.TestCase):
@@ -32,7 +38,62 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual([record.name for record in records], ["Voice One"])
             self.assertEqual(page.view_stack.currentIndex(), 1)
             self.assertEqual(page.workspace_content_stack.currentIndex(), 1)
+            self.assertEqual(page.workspace_content_stack.count(), 3)
+            page.training_section_button.click()
+            self.assertEqual(page.workspace_content_stack.currentIndex(), 2)
             page.close()
+
+    def test_training_updates_global_processing_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.create_model("Voice One", root / "rvc")
+            queue = ProcessingQueue()
+            page = ModelWorkspacePage(root / "rvc", workspace, queue)
+            page._open_model(record.model_id)
+            dataset = ModelDataset(record.model_id, (_ready_dataset_item(root),))
+
+            def run_pipeline(*_args, progress, stage_callback, **_kwargs):
+                stage_callback(RvcTrainingStage.TRAIN)
+                progress(72)
+                return SimpleNamespace(stopped=False)
+
+            with (
+                patch("jang_app.qt_app.model_workspace.ModelDatasetStore.load", return_value=dataset),
+                patch("jang_app.qt_app.model_workspace.run_rvc_training_pipeline", side_effect=run_pipeline),
+                patch(
+                    "jang_app.qt_app.model_workspace.finalize_rvc_training_artifacts",
+                    return_value=SimpleNamespace(record=record),
+                ),
+            ):
+                page._start_training(RvcTrainingRunSettings(target_epoch=20))
+                worker = page._training_worker
+                self.assertIsNotNone(worker)
+                worker.wait()
+                self.app.processEvents()
+                self.app.processEvents()
+
+            task = queue.tasks()[0]
+            self.assertEqual(task.status, TASK_COMPLETED)
+            self.assertEqual(task.progress, 100)
+            self.assertIsNone(page._training_worker)
+            page.close()
+
+
+def _ready_dataset_item(root: Path) -> ModelDatasetItem:
+    audio = root / "voice.wav"
+    audio.write_bytes(b"audio")
+    return ModelDatasetItem(
+        item_id="item-1",
+        source_name="voice.wav",
+        source_path=audio,
+        original_path=audio,
+        working_path=audio,
+        added_at="2026-01-01T00:00:00+00:00",
+        duration_ms=1000,
+        selected_order=0,
+        review_state=REVIEW_READY,
+    )
 
 
 if __name__ == "__main__":

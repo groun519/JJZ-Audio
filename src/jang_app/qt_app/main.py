@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from jang_app.services.startup_timing import StartupTimeline
 
@@ -18,16 +19,36 @@ def main(started_at: float | None = None) -> None:
     ]
 
     from PySide6.QtGui import QIcon
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QDialog
 
     startup.mark("qt_imported")
+
+    app = QApplication(application_arguments)
+    app.setApplicationName("JJZero Audio")
+    app.setOrganizationName("JJZero")
+    package_root = Path(__file__).resolve().parents[1]
+    logo_path = package_root / "assets" / "jjzero_logo.svg"
+    from jang_app.services.app_paths import discover_app_paths
+    from jang_app.services.initial_setup import (
+        configure_default_storage,
+        is_initial_setup_complete,
+    )
+
+    setup_paths = discover_app_paths(package_root)
+    if not is_initial_setup_complete(setup_paths):
+        if smoke_test:
+            configure_default_storage(setup_paths)
+        else:
+            from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
+
+            setup_dialog = InitialSetupDialog(setup_paths, logo_path)
+            if setup_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
 
     from jang_app.config import APP_ICON_PATH, APP_NAME
     from jang_app.services.app_logging import get_logger
 
-    app = QApplication(application_arguments)
     app.setApplicationName(APP_NAME)
-    app.setOrganizationName("JJZero")
     app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
     startup.mark("application_created")
 

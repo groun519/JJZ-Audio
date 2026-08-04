@@ -344,6 +344,79 @@ def _stylesheet(
             font-weight: 800;
         }}
 
+        QFrame#TrainingStatusCard, QFrame#TrainingSettingsCard {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 14px;
+        }}
+
+        QLabel#TrainingStatusTitle {{
+            color: {text};
+            font-size: 15px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingStatusTitle[phase="complete"],
+        QLabel#TrainingStatusTitle[phase="index_ready"] {{
+            color: {accent};
+        }}
+
+        QLabel#TrainingStatusTitle[phase="failed"] {{
+            color: #c93d3d;
+        }}
+
+        QLabel#TrainingStageText, QLabel#TrainingFieldLabel {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QLabel#TrainingProfileBadge, QLabel#TrainingEpochBadge {{
+            color: {muted};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 9px;
+            padding: 4px 9px;
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingEpochBadge {{
+            color: {text};
+        }}
+
+        QSpinBox#TrainingSpinBox {{
+            min-height: 34px;
+            max-height: 34px;
+        }}
+
+        QCheckBox#TrainingFreshCheck {{
+            color: {muted};
+            spacing: 7px;
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QPushButton#TrainingStopButton {{
+            min-width: 90px;
+            min-height: 34px;
+            max-height: 34px;
+        }}
+
+        QProgressBar#TrainingProgress {{
+            min-height: 7px;
+            max-height: 7px;
+            border: 0;
+            border-radius: 3px;
+            background: {raised};
+            color: transparent;
+        }}
+
+        QProgressBar#TrainingProgress::chunk {{
+            background: {accent};
+            border-radius: 3px;
+        }}
+
         QWidget#SongListRow {{
             background: {raised};
             border: 1px solid {border};
@@ -1030,6 +1103,10 @@ def _stylesheet(
             border-color: #c93d3d;
         }}
 
+        QFrame#ProcessingTaskRow[status="cancelled"] {{
+            border-color: {muted};
+        }}
+
         #ProcessingTaskTitle {{
             color: {text};
             font-size: 12px;
@@ -1061,6 +1138,11 @@ def _stylesheet(
         QLabel#ProcessingTaskStatus[status="failed"] {{
             color: #c93d3d;
             border-color: #c93d3d;
+        }}
+
+        QLabel#ProcessingTaskStatus[status="cancelled"] {{
+            color: {muted};
+            border-color: {muted};
         }}
 
         QProgressBar#ProcessingTaskProgress {{

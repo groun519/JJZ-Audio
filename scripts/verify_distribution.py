@@ -9,6 +9,8 @@ import tempfile
 import wave
 from pathlib import Path
 
+from jang_app.services.rvc_training_runtime import required_rvc_training_paths
+
 
 EXECUTABLE_NAME = "JJZero Audio.exe"
 
@@ -20,25 +22,9 @@ def main() -> int:
 
     distribution = Path(sys.argv[1]).expanduser().resolve()
     executable = distribution / EXECUTABLE_NAME
-    rvc_python = distribution / "runtime" / "rvc" / "runtime" / "python.exe"
-    required_files = (
-        executable,
-        rvc_python,
-        distribution / "runtime" / "ffmpeg" / "bin" / "ffmpeg.exe",
-        distribution / "runtime" / "ffmpeg" / "bin" / "ffprobe.exe",
-        distribution
-        / "runtime"
-        / "demucs"
-        / "torch"
-        / "hub"
-        / "checkpoints"
-        / "955717e8-8726e21a.th",
-        distribution / "runtime" / "rvc" / "infer_cli.py",
-        distribution / "runtime" / "rvc" / "vc_infer_pipeline.py",
-        distribution / "runtime" / "rvc" / "hubert_base.pt",
-        distribution / "runtime" / "rvc" / "rmvpe.pt",
-        distribution / "_internal" / "jang_app" / "assets" / "jjzero_logo.svg",
-    )
+    rvc_root = distribution / "runtime" / "rvc"
+    rvc_python = rvc_root / "runtime" / "python.exe"
+    required_files = required_distribution_files(distribution)
     missing = tuple(path for path in required_files if not path.is_file())
     if missing:
         for path in missing:
@@ -94,9 +80,42 @@ def main() -> int:
         if "Startup timing" not in log_text:
             print(f"Packaged startup timing was not logged: {log_file}", file=sys.stderr)
             return 1
+        initialized_paths = (
+            temporary_root / "local-data" / "settings" / "storage.json",
+            temporary_root / "local-data" / "settings" / "initial_setup.json",
+            temporary_root / "media" / "workspace",
+            temporary_root / "media" / "output",
+        )
+        missing_setup = tuple(path for path in initialized_paths if not path.exists())
+        if missing_setup:
+            print(f"Packaged first-run setup was not completed: {missing_setup[0]}", file=sys.stderr)
+            return 1
 
     print(f"Verified distribution: {distribution}")
     return 0
+
+
+def required_distribution_files(distribution: Path) -> tuple[Path, ...]:
+    root = distribution.expanduser().resolve()
+    rvc_root = root / "runtime" / "rvc"
+    return (
+        root / EXECUTABLE_NAME,
+        rvc_root / "runtime" / "python.exe",
+        root / "runtime" / "ffmpeg" / "bin" / "ffmpeg.exe",
+        root / "runtime" / "ffmpeg" / "bin" / "ffprobe.exe",
+        root
+        / "runtime"
+        / "demucs"
+        / "torch"
+        / "hub"
+        / "checkpoints"
+        / "955717e8-8726e21a.th",
+        rvc_root / "infer_cli.py",
+        rvc_root / "vc_infer_pipeline.py",
+        root / "_internal" / "jang_app" / "assets" / "jjzero_logo.svg",
+        root / "_internal" / "jang_app" / "rvc_tools" / "rvc_artifact_worker.py",
+        *(rvc_root / path for path in required_rvc_training_paths()),
+    )
 
 
 def _verify_demucs_runtime(distribution: Path, runtime_python: Path) -> bool:

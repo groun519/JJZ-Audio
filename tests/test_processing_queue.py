@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from jang_app.services.processing_queue import ProcessingQueue, TASK_COMPLETED, TASK_FAILED, TASK_RUNNING
+from jang_app.services.processing_queue import (
+    ProcessingQueue,
+    TASK_CANCELLED,
+    TASK_COMPLETED,
+    TASK_FAILED,
+    TASK_RUNNING,
+)
 
 
 class ProcessingQueueTests(unittest.TestCase):
@@ -45,6 +51,20 @@ class ProcessingQueueTests(unittest.TestCase):
         queue.clear_finished()
 
         self.assertEqual([task.title for task in queue.tasks()], ["Running"])
+
+    def test_updates_detail_and_marks_task_cancelled(self) -> None:
+        queue = ProcessingQueue()
+        task_id = queue.start("Train Model", "Preparing")
+
+        queue.update_detail(task_id, "Training")
+        queue.update_progress(task_id, 64)
+        queue.cancel(task_id)
+
+        task = queue.tasks()[0]
+        self.assertEqual(task.status, TASK_CANCELLED)
+        self.assertEqual(task.detail, "Stopped")
+        self.assertEqual(task.progress, 64)
+        self.assertTrue(task.is_finished)
 
     def test_notifies_subscribers_for_each_change(self) -> None:
         queue = ProcessingQueue()

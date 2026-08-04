@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -24,12 +26,34 @@ from jang_app.qt_app.model_badge import set_model_badge
 from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
 from jang_app.qt_app.model_detail_panel import ModelDetailPanel, ModelProfileValues
 from jang_app.qt_app.model_row import ModelListRow
+from jang_app.qt_app.model_training_panel import ModelTrainingPanel, ModelTrainingWorker
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
 from jang_app.qt_app.workers import TaskWorker
-from jang_app.services.model_dataset import ModelDatasetStore
+from jang_app.services.clip_edit_history import REVIEW_READY
+from jang_app.services.command import CommandCancellation
+from jang_app.services.model_dataset import ModelDataset, ModelDatasetStore
 from jang_app.services.i18n import tr
+from jang_app.services.processing_queue import ProcessingQueue
+from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_model_workspace import RvcModelRecord, RvcModelWorkspace
+from jang_app.services.rvc_training_finalize import (
+    RvcTrainingFinalizeResult,
+    finalize_rvc_training_artifacts,
+)
+from jang_app.services.rvc_training_pipeline import (
+    RvcTrainingPipelineResult,
+    RvcTrainingStage,
+    run_rvc_training_pipeline,
+)
+from jang_app.services.rvc_training_state import RvcTrainingState, RvcTrainingStateStore
+from jang_app.services.rvc_training_train import RvcTrainingRunSettings
+
+
+@dataclass(frozen=True)
+class _ModelTrainingJobResult:
+    pipeline: RvcTrainingPipelineResult
+    finalized: RvcTrainingFinalizeResult | None
 
 
 class ModelWorkspacePage(QWidget):
@@ -37,7 +61,12 @@ class ModelWorkspacePage(QWidget):
     open_location_requested = Signal(object)
     preview_started = Signal()
 
-    def __init__(self, initial_folder: Path, workspace: RvcModelWorkspace | None = None) -> None:
+    def __init__(
+        self,
+        initial_folder: Path,
+        workspace: RvcModelWorkspace | None = None,
+        processing_queue: ProcessingQueue | None = None,
+    ) -> None:
         super().__init__()
         self._initial_folder = initial_folder.expanduser()
         self._workspace = workspace or RvcModelWorkspace()
@@ -46,6 +75,13 @@ class ModelWorkspacePage(QWidget):
         self._selected_model_id: str | None = None
         self._active_worker: TaskWorker | None = None
         self._active_action_label = ""
+        self._processing_queue = processing_queue
+        self._training_worker: ModelTrainingWorker | None = None
+        self._training_cancellation: CommandCancellation | None = None
+        self._training_model_id = ""
+        self._training_task_id = ""
+        self._training_progress = 0
+        self._training_stage = ""
         self._theme_mode = "white"
 
         self._build_ui()
@@ -229,7 +265,7 @@ class ModelWorkspacePage(QWidget):
 
         section_control = QFrame()
         section_control.setObjectName("SegmentedControl")
-        section_control.setMaximumWidth(300)
+        section_control.setMaximumWidth(450)
         section_layout = QHBoxLayout(section_control)
         section_layout.setContentsMargins(3, 3, 3, 3)
         section_layout.setSpacing(0)
@@ -240,13 +276,18 @@ class ModelWorkspacePage(QWidget):
         self.dataset_section_button = FeedbackButton("Dataset")
         self.dataset_section_button.setObjectName("SegmentButton")
         self.dataset_section_button.setCheckable(True)
+        self.training_section_button = FeedbackButton("Training")
+        self.training_section_button.setObjectName("SegmentButton")
+        self.training_section_button.setCheckable(True)
         self.section_button_group = QButtonGroup(self)
         self.section_button_group.setExclusive(True)
         self.section_button_group.addButton(self.overview_section_button, 0)
         self.section_button_group.addButton(self.dataset_section_button, 1)
+        self.section_button_group.addButton(self.training_section_button, 2)
         self.section_button_group.idClicked.connect(self._navigate_model_section)
         section_layout.addWidget(self.overview_section_button, 1)
         section_layout.addWidget(self.dataset_section_button, 1)
+        section_layout.addWidget(self.training_section_button, 1)
 
         section_row = QHBoxLayout()
         section_row.setContentsMargins(0, 0, 0, 0)
@@ -284,9 +325,23 @@ class ModelWorkspacePage(QWidget):
         dataset_layout.addWidget(dataset_title)
         dataset_layout.addWidget(self.dataset_panel, 1)
 
+        training = QFrame()
+        training.setObjectName("Panel")
+        training_layout = QVBoxLayout(training)
+        training_layout.setContentsMargins(20, 20, 20, 20)
+        training_layout.setSpacing(14)
+        training_title = QLabel("Training")
+        training_title.setObjectName("SectionTitle")
+        self.training_panel = ModelTrainingPanel()
+        self.training_panel.start_requested.connect(self._start_training)
+        self.training_panel.stop_requested.connect(self._stop_training)
+        training_layout.addWidget(training_title)
+        training_layout.addWidget(self.training_panel, 1)
+
         self.workspace_content_stack = QStackedWidget()
         self.workspace_content_stack.addWidget(overview)
         self.workspace_content_stack.addWidget(dataset)
+        self.workspace_content_stack.addWidget(training)
 
         layout.addWidget(header)
         layout.addLayout(section_row)
@@ -326,6 +381,7 @@ class ModelWorkspacePage(QWidget):
             self._selected_model_id = None
             self.detail_panel.set_record(None)
             self.dataset_panel.set_model(None)
+            self.training_panel.set_model(None, None, 0, 0)
             self._update_workspace_header(None)
             self.view_stack.setCurrentIndex(0)
 
@@ -341,6 +397,7 @@ class ModelWorkspacePage(QWidget):
         apply_widget_language(self)
         self.detail_panel.apply_language()
         self.dataset_panel.apply_language()
+        self.training_panel.apply_language()
         self._navigate_model_section(self.workspace_content_stack.currentIndex())
         self._update_workspace_header(self._selected_record())
         for row in self._rows_by_id.values():
@@ -459,6 +516,7 @@ class ModelWorkspacePage(QWidget):
         selected = self._selected_record()
         self.detail_panel.set_record(selected)
         self.dataset_panel.set_model(selected.model_id if selected is not None else None)
+        self._refresh_training_panel(selected)
         self._update_workspace_header(selected)
 
     def _open_model_from_item(self, item: QListWidgetItem) -> None:
@@ -473,6 +531,7 @@ class ModelWorkspacePage(QWidget):
         self._select_model_item(model_id)
         self.detail_panel.set_record(record)
         self.dataset_panel.set_model(record.model_id)
+        self._refresh_training_panel(record)
         self._update_workspace_header(record)
         self._navigate_model_section(0)
         self.view_stack.setCurrentIndex(1)
@@ -482,16 +541,207 @@ class ModelWorkspacePage(QWidget):
         self.view_stack.setCurrentIndex(0)
 
     def _navigate_model_section(self, index: int) -> None:
-        selected_index = max(0, min(1, index))
+        selected_index = max(0, min(2, index))
         self.workspace_content_stack.setCurrentIndex(selected_index)
         self.overview_section_button.setChecked(selected_index == 0)
         self.dataset_section_button.setChecked(selected_index == 1)
-        set_translated_text(self.workspace_section_label, "Overview" if selected_index == 0 else "Dataset")
+        self.training_section_button.setChecked(selected_index == 2)
+        section_name = ("Overview", "Dataset", "Training")[selected_index]
+        set_translated_text(self.workspace_section_label, section_name)
         if selected_index != 1:
             self.stop_preview()
 
     def stop_preview(self) -> None:
         self.dataset_panel.stop_preview()
+
+    def shutdown_training(self) -> None:
+        if self._training_worker is None:
+            return
+        self._stop_training()
+        self._training_worker.wait()
+
+    def _refresh_training_panel(self, record: RvcModelRecord | None) -> None:
+        if record is None or not record.is_managed:
+            self.training_panel.set_model(record, None, 0, 0)
+            self.dataset_panel.set_training_locked(False)
+            return
+        layout = self._training_layout(record)
+        try:
+            state_store = RvcTrainingStateStore(record.model_id, layout)
+            if self._training_model_id == record.model_id and self._training_worker is not None:
+                state = state_store.load()
+            else:
+                state = state_store.recover_interrupted()
+                state = state_store.refresh_checkpoint_pair()
+            dataset = ModelDatasetStore(self._workspace.root).load(record.model_id)
+        except Exception as exc:
+            self.training_panel.set_model(record, None, 0, 0)
+            self.training_panel.set_failure(str(exc))
+            return
+        training_items = dataset.training_items
+        ready_items = sum(item.review_state == REVIEW_READY for item in training_items)
+        is_running = self._training_worker is not None and self._training_model_id == record.model_id
+        self.training_panel.set_model(record, state, ready_items, len(training_items))
+        self.training_panel.set_running(is_running)
+        self.dataset_panel.set_training_locked(is_running)
+        if is_running:
+            self.training_panel.set_progress(self._training_progress)
+            self.training_panel.set_stage(self._training_stage)
+
+    def _start_training(self, settings: object) -> None:
+        record = self._selected_record()
+        if self._training_worker is not None or record is None or not record.is_managed:
+            return
+        if not isinstance(settings, RvcTrainingRunSettings):
+            return
+        try:
+            dataset = ModelDatasetStore(self._workspace.root).load(record.model_id)
+            self._validate_training_dataset(dataset)
+            settings.validate()
+        except Exception as exc:
+            self.training_panel.set_failure(str(exc))
+            return
+
+        layout = self._training_layout(record)
+        cancellation = CommandCancellation()
+        self._training_cancellation = cancellation
+        self._training_model_id = record.model_id
+        self._training_progress = 0
+        self._training_stage = "Preparing Training"
+        self._training_task_id = (
+            self._processing_queue.start("Train RVC Model", record.title)
+            if self._processing_queue is not None
+            else ""
+        )
+        self.training_panel.set_running(True)
+        self.training_panel.set_progress(0)
+        self.training_panel.set_stage(self._training_stage)
+        self.dataset_panel.set_training_locked(True)
+
+        worker = ModelTrainingWorker(
+            lambda progress, stage: self._run_training_job(
+                record,
+                layout,
+                dataset,
+                settings,
+                cancellation,
+                progress,
+                stage,
+            )
+        )
+        worker.setParent(self)
+        worker.progress_changed.connect(self._on_training_progress)
+        worker.stage_changed.connect(self._on_training_stage)
+        worker.succeeded.connect(self._on_training_succeeded)
+        worker.failed.connect(self._on_training_failed)
+        worker.finished.connect(self._on_training_finished)
+        self._training_worker = worker
+        worker.start()
+
+    def _run_training_job(
+        self,
+        record: RvcModelRecord,
+        layout: RvcModelPackageLayout,
+        dataset: ModelDataset,
+        settings: RvcTrainingRunSettings,
+        cancellation: CommandCancellation,
+        progress: Callable[[int], None],
+        stage: Callable[[str], None],
+    ) -> _ModelTrainingJobResult:
+        pipeline = run_rvc_training_pipeline(
+            record.model_id,
+            layout,
+            record.runtime_root,
+            dataset,
+            settings,
+            cancellation=cancellation,
+            progress=progress,
+            stage_callback=lambda current: stage(_training_stage_label(current)),
+        )
+        if pipeline.stopped:
+            return _ModelTrainingJobResult(pipeline, None)
+        stage("Registering Model")
+        finalized = finalize_rvc_training_artifacts(
+            self._workspace,
+            record.model_id,
+            layout,
+            record.runtime_root,
+        )
+        return _ModelTrainingJobResult(pipeline, finalized)
+
+    def _stop_training(self) -> None:
+        if self._training_cancellation is None:
+            return
+        self._training_stage = "Stopping Training"
+        self.training_panel.set_stage(self._training_stage)
+        if self._processing_queue is not None and self._training_task_id:
+            self._processing_queue.update_detail(self._training_task_id, self._training_stage)
+        self._training_cancellation.request_cancel()
+
+    def _on_training_progress(self, value: int) -> None:
+        self._training_progress = max(0, min(100, int(value)))
+        if self._selected_model_id == self._training_model_id:
+            self.training_panel.set_progress(self._training_progress)
+        if self._processing_queue is not None and self._training_task_id:
+            self._processing_queue.update_progress(self._training_task_id, self._training_progress)
+
+    def _on_training_stage(self, stage: str) -> None:
+        self._training_stage = stage
+        if self._selected_model_id == self._training_model_id:
+            self.training_panel.set_stage(stage)
+        if self._processing_queue is not None and self._training_task_id:
+            self._processing_queue.update_detail(self._training_task_id, stage)
+
+    def _on_training_succeeded(self, result: object) -> None:
+        if not isinstance(result, _ModelTrainingJobResult):
+            self._on_training_failed("Training returned an invalid result.")
+            return
+        if result.pipeline.stopped:
+            if self._processing_queue is not None and self._training_task_id:
+                self._processing_queue.cancel(self._training_task_id)
+            self.show_status("Training stopped.")
+            return
+        if result.finalized is None:
+            self._on_training_failed("Training artifacts were not registered.")
+            return
+        self._apply_updated_record(result.finalized.record)
+        if self._processing_queue is not None and self._training_task_id:
+            self._processing_queue.complete(self._training_task_id)
+        self.show_status("Training completed.")
+
+    def _on_training_failed(self, traceback_text: str) -> None:
+        if self._processing_queue is not None and self._training_task_id:
+            self._processing_queue.fail(self._training_task_id, traceback_text)
+        if self._selected_model_id == self._training_model_id:
+            self.training_panel.set_failure(traceback_text)
+        self.show_status(f"Training failed: {_last_error_line(traceback_text)}")
+
+    def _on_training_finished(self) -> None:
+        worker = self._training_worker
+        trained_model_id = self._training_model_id
+        self._training_worker = None
+        self._training_cancellation = None
+        self._training_model_id = ""
+        self._training_task_id = ""
+        self._training_progress = 0
+        self._training_stage = ""
+        if worker is not None:
+            worker.deleteLater()
+        if self._selected_model_id == trained_model_id:
+            self._refresh_training_panel(self._selected_record())
+        else:
+            self.dataset_panel.set_training_locked(False)
+
+    def _training_layout(self, record: RvcModelRecord) -> RvcModelPackageLayout:
+        return RvcModelPackageLayout(self._workspace.library_dir / record.model_id, record.name)
+
+    @staticmethod
+    def _validate_training_dataset(dataset: ModelDataset) -> None:
+        training_items = dataset.training_items
+        if not training_items:
+            raise ValueError("Add training materials before starting.")
+        if any(item.review_state != REVIEW_READY for item in training_items):
+            raise ValueError("Mark every training material ready before starting.")
 
     def _select_model_item(self, model_id: str) -> None:
         for index in range(self.model_list.count()):
@@ -612,6 +862,7 @@ class ModelWorkspacePage(QWidget):
                 self.detail_panel.set_record(record)
             else:
                 self.detail_panel.apply_saved_record(record)
+            self._refresh_training_panel(record)
             self._update_workspace_header(record)
         self._update_summary(list(self._records_by_id.values()))
 
@@ -667,3 +918,14 @@ def _artifact_label(artifact_name: str) -> str:
 def _last_error_line(error: object) -> str:
     lines = [line.strip() for line in str(error).splitlines() if line.strip()]
     return lines[-1] if lines else "Unknown error"
+
+
+def _training_stage_label(stage: RvcTrainingStage) -> str:
+    return {
+        RvcTrainingStage.SNAPSHOT: "Preparing Training",
+        RvcTrainingStage.PREPROCESS: "Preparing Audio",
+        RvcTrainingStage.EXTRACT: "Extracting Features",
+        RvcTrainingStage.FILELIST: "Building File List",
+        RvcTrainingStage.TRAIN: "Training",
+        RvcTrainingStage.INDEX: "Building Index",
+    }[stage]

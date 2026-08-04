@@ -100,6 +100,13 @@ can still be selected or imported when its own runtime and models should be used
 - `RVC root`: local RVC folder that contains `runtime\python.exe` and `infer_cli.py`.
 - `Voice model`: `.pth` file under the RVC `weights` folder.
 - `Index file`: optional `.index` file under the RVC `logs` folder.
+
+On the first launch, JJZero Audio asks for one media storage location and creates
+`workspace` and `output` below it. App preferences, logs, and cache remain under
+`%LOCALAPPDATA%\JJZero Audio`. The next step checks storage access, FFmpeg,
+Demucs, RVC conversion/training assets, Torch/Fairseq/FAISS, and the NVIDIA CUDA
+device before opening the workspace. The same setup and diagnostics screen is
+available from the settings button in the title bar.
 - `F0 method`: fixed to `rmvpe`.
 
 ## Smoke Test

@@ -8,6 +8,7 @@ from jang_app.qt_app.widgets import SvgIconButton
 from jang_app.services.processing_queue import (
     ProcessingQueue,
     ProcessingTask,
+    TASK_CANCELLED,
     TASK_COMPLETED,
     TASK_FAILED,
     TASK_RUNNING,
@@ -60,7 +61,7 @@ class ToastStack(QWidget):
         next_statuses = {task.task_id: task.status for task in tasks}
         for task in reversed(tasks):
             previous = self._known_statuses.get(task.task_id)
-            if previous == TASK_RUNNING and task.status in {TASK_COMPLETED, TASK_FAILED}:
+            if previous == TASK_RUNNING and task.status in {TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED}:
                 self._show_task_toast(task)
         self._known_statuses = next_statuses
 
@@ -111,7 +112,7 @@ class ToastCard(QFrame):
 
         self.title_label = QLabel(task.title)
         self.title_label.setObjectName("ToastTitle")
-        self.status_label = QLabel("Complete" if task.status == TASK_COMPLETED else "Failed")
+        self.status_label = QLabel(_toast_status(task))
         self.status_label.setObjectName("ToastStatus")
         self.status_label.setProperty("status", task.status)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -149,7 +150,7 @@ class ToastCard(QFrame):
         set_translated_text(self.title_label, self._task.title)
         set_translated_text(
             self.status_label,
-            "Complete" if self._task.status == TASK_COMPLETED else "Failed",
+            _toast_status(self._task),
         )
         set_translated_text(self.message_label, _toast_message(self._task))
         apply_widget_language(self)
@@ -165,3 +166,11 @@ def _toast_message(task: ProcessingTask) -> str:
         lines = [line.strip() for line in task.error.splitlines() if line.strip()]
         return lines[-1] if lines else "Processing failed"
     return task.detail or "Processing completed"
+
+
+def _toast_status(task: ProcessingTask) -> str:
+    if task.status == TASK_COMPLETED:
+        return "Complete"
+    if task.status == TASK_CANCELLED:
+        return "Stopped"
+    return "Failed"

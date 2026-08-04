@@ -5,14 +5,14 @@ import unittest
 from pathlib import Path
 
 from jang_app.config import FFMPEG_BIN_DIR
-from jang_app.pipeline.rvc_convert import _build_rvc_environment
+from jang_app.services.rvc_environment import build_rvc_environment
 
 
 class RvcConvertTests(unittest.TestCase):
     def test_environment_prefers_bundled_ffmpeg(self) -> None:
         rvc_root = Path("C:/rvc")
 
-        environment = _build_rvc_environment(rvc_root)
+        environment = build_rvc_environment(rvc_root)
 
         path_parts = environment["PATH"].split(os.pathsep)
         self.assertEqual(path_parts[0], str(FFMPEG_BIN_DIR))

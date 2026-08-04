@@ -10,7 +10,8 @@ from uuid import uuid4
 TASK_RUNNING = "running"
 TASK_COMPLETED = "completed"
 TASK_FAILED = "failed"
-FINISHED_TASK_STATES = {TASK_COMPLETED, TASK_FAILED}
+TASK_CANCELLED = "cancelled"
+FINISHED_TASK_STATES = {TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED}
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,9 @@ class ProcessingQueue:
     def update_progress(self, task_id: str, progress: int) -> None:
         self._update_task(task_id, lambda task: replace(task, progress=_clamp_progress(progress)))
 
+    def update_detail(self, task_id: str, detail: str) -> None:
+        self._update_task(task_id, lambda task: replace(task, detail=detail.strip()))
+
     def complete(self, task_id: str) -> None:
         self._update_task(
             task_id,
@@ -99,6 +103,18 @@ class ProcessingQueue:
                 status=TASK_FAILED,
                 finished_at=datetime.now(UTC),
                 error=error.strip(),
+            ),
+        )
+
+    def cancel(self, task_id: str, detail: str = "Stopped") -> None:
+        self._update_task(
+            task_id,
+            lambda task: replace(
+                task,
+                detail=detail.strip(),
+                status=TASK_CANCELLED,
+                finished_at=datetime.now(UTC),
+                error="",
             ),
         )
 

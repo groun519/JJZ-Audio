@@ -1,0 +1,313 @@
+from __future__ import annotations
+
+import re
+import shutil
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from jang_app.services.app_logging import get_logger
+from jang_app.services.command import (
+    CommandCancellation,
+    CommandResult,
+    run_cancellable_command,
+)
+from jang_app.services.managed_files import copy_file_atomic, file_sha256
+from jang_app.services.rvc_environment import build_rvc_environment
+from jang_app.services.rvc_model_package import RvcModelPackageLayout
+from jang_app.services.rvc_training_filelist import load_rvc_training_filelist
+from jang_app.services.rvc_training_runtime import (
+    RVC_TRAINING_SAMPLE_RATE,
+    RVC_TRAINING_VERSION,
+    RvcTrainingRuntimeInspection,
+    inspect_rvc_training_runtime,
+)
+from jang_app.services.rvc_training_state import (
+    RvcTrainingPhase,
+    RvcTrainingState,
+    RvcTrainingStateStore,
+)
+
+
+_EPOCH_PATTERN = re.compile(r"====>\s*Epoch:\s*(?P<epoch>\d+)", re.IGNORECASE)
+_COMPLETE_MARKER = "training is done"
+
+
+class RvcTrainingRunError(RuntimeError):
+    """Raised when the RVC trainer cannot start or produce a valid result."""
+
+
+@dataclass(frozen=True)
+class RvcTrainingRunSettings:
+    target_epoch: int = 20
+    batch_size: int = 4
+    save_every_epoch: int = 5
+    gpu_index: int = 0
+    cache_in_gpu: bool = False
+    resume: bool = True
+
+    def validate(self) -> None:
+        if self.target_epoch <= 0:
+            raise RvcTrainingRunError("Target epoch must be greater than zero.")
+        if self.batch_size <= 0 or self.batch_size > 64:
+            raise RvcTrainingRunError("Batch size must be between 1 and 64.")
+        if self.save_every_epoch <= 0 or self.save_every_epoch > self.target_epoch:
+            raise RvcTrainingRunError("Checkpoint interval must fit inside the target epoch.")
+        if self.gpu_index < 0:
+            raise RvcTrainingRunError("GPU index cannot be negative.")
+
+
+@dataclass(frozen=True)
+class RvcTrainingRunResult:
+    state: RvcTrainingState
+    inference_model: Path | None
+    log_path: Path
+    resumed: bool
+    stopped: bool
+
+    @property
+    def completed(self) -> bool:
+        return self.state.phase == RvcTrainingPhase.COMPLETE
+
+
+TrainingCommandRunner = Callable[..., CommandResult]
+
+
+def train_rvc_model(
+    model_id: str,
+    layout: RvcModelPackageLayout,
+    runtime_root: Path,
+    settings: RvcTrainingRunSettings,
+    *,
+    cancellation: CommandCancellation | None = None,
+    progress: Callable[[int], None] | None = None,
+    output_callback: Callable[[str], None] | None = None,
+    command_runner: TrainingCommandRunner = run_cancellable_command,
+    runtime_inspector: Callable[..., RvcTrainingRuntimeInspection] = inspect_rvc_training_runtime,
+) -> RvcTrainingRunResult:
+    settings.validate()
+    runtime = runtime_root.expanduser().resolve()
+    inspection = runtime_inspector(runtime, check_cuda=True)
+    if not inspection.assets_ready:
+        missing = ", ".join(path.as_posix() for path in inspection.missing_paths)
+        raise RvcTrainingRunError(f"RVC training runtime is incomplete: {missing}")
+    if not inspection.ready or settings.gpu_index >= inspection.cuda_device_count:
+        raise RvcTrainingRunError("The selected CUDA device is not available for RVC training.")
+
+    load_rvc_training_filelist(model_id, layout)
+    layout.create()
+    _prepare_package_config(runtime, layout)
+    state_store = RvcTrainingStateStore(model_id, layout)
+    state = state_store.refresh_checkpoint_pair()
+    resumed = settings.resume and state.can_resume
+    if not settings.resume:
+        _archive_checkpoints(layout)
+        state = state_store.reset_for_new_training()
+    if settings.target_epoch <= state.current_epoch:
+        raise RvcTrainingRunError("Target epoch must be greater than the current epoch.")
+
+    final_model = layout.weights_dir / f"{layout.rvc_name}.pth"
+    backup = _backup_final_model(final_model, layout)
+    log_path = layout.experiment_dir / "train.log"
+    log_offset = log_path.stat().st_size if log_path.is_file() else 0
+    token = cancellation or CommandCancellation()
+    try:
+        state_store.begin_training(settings.target_epoch)
+    except Exception:
+        _discard_backup(backup, layout)
+        raise
+    _report(progress, state.current_epoch, settings.target_epoch)
+    logger = get_logger()
+    logger.info(
+        "Starting RVC training: model=%s target_epoch=%s resumed=%s",
+        model_id,
+        settings.target_epoch,
+        resumed,
+    )
+
+    def handle_output(line: str) -> None:
+        match = _EPOCH_PATTERN.search(line)
+        if match is not None:
+            epoch = min(settings.target_epoch, int(match.group("epoch")))
+            state_store.record_epoch(epoch)
+            _report(progress, epoch, settings.target_epoch)
+        if output_callback is not None:
+            output_callback(line)
+
+    try:
+        result = command_runner(
+            _training_command(runtime, layout, settings),
+            cwd=layout.root,
+            env=build_rvc_environment(runtime),
+            output_callback=handle_output,
+            cancellation=token,
+        )
+        refreshed = state_store.refresh_checkpoint_pair()
+        if result.cancelled or token.is_requested:
+            _restore_final_model(final_model, backup, layout)
+            stopped = state_store.update_phase(RvcTrainingPhase.STOPPED)
+            logger.info("RVC training stopped: model=%s", model_id)
+            return RvcTrainingRunResult(stopped, _existing(final_model), log_path, resumed, True)
+
+        output = f"{result.output}\n{_log_delta(log_path, log_offset)}".casefold()
+        if (
+            _COMPLETE_MARKER not in output
+            or not final_model.is_file()
+            or final_model.stat().st_size == 0
+            or not refreshed.can_resume
+            or _model_is_unchanged(final_model, backup)
+        ):
+            detail = result.output or f"trainer exited with code {result.returncode}"
+            raise RvcTrainingRunError(f"RVC training did not produce a complete model: {detail}")
+        state_store.record_epoch(settings.target_epoch)
+        completed = state_store.update_phase(RvcTrainingPhase.COMPLETE)
+        _discard_backup(backup, layout)
+        _report(progress, settings.target_epoch, settings.target_epoch)
+        logger.info("RVC training complete: model=%s output=%s", model_id, final_model)
+        return RvcTrainingRunResult(completed, final_model, log_path, resumed, False)
+    except Exception as exc:
+        _restore_final_model(final_model, backup, layout)
+        state_store.refresh_checkpoint_pair()
+        state_store.update_phase(RvcTrainingPhase.FAILED, last_error=str(exc))
+        logger.error("RVC training failed: model=%s error=%s", model_id, exc)
+        if isinstance(exc, RvcTrainingRunError):
+            raise
+        raise RvcTrainingRunError(str(exc)) from exc
+
+
+def _training_command(
+    runtime: Path,
+    layout: RvcModelPackageLayout,
+    settings: RvcTrainingRunSettings,
+) -> list[str]:
+    return [
+        str(runtime / "runtime" / "python.exe"),
+        str(runtime / "train_nsf_sim_cache_sid_load_pretrain.py"),
+        "-e",
+        layout.rvc_name,
+        "-sr",
+        "40k",
+        "-f0",
+        "1",
+        "-bs",
+        str(settings.batch_size),
+        "-g",
+        str(settings.gpu_index),
+        "-te",
+        str(settings.target_epoch),
+        "-se",
+        str(settings.save_every_epoch),
+        "-pg",
+        str(runtime / "pretrained_v2" / "f0G40k.pth"),
+        "-pd",
+        str(runtime / "pretrained_v2" / "f0D40k.pth"),
+        "-l",
+        "0",
+        "-c",
+        "1" if settings.cache_in_gpu else "0",
+        "-sw",
+        "1",
+        "-v",
+        RVC_TRAINING_VERSION,
+    ]
+
+
+def _prepare_package_config(runtime: Path, layout: RvcModelPackageLayout) -> None:
+    source = runtime / "configs" / "40k.json"
+    if not source.is_file():
+        raise RvcTrainingRunError(f"RVC training config is missing: {source}")
+    copy_file_atomic(source, layout.root / "configs" / "40k.json")
+
+
+def _archive_checkpoints(layout: RvcModelPackageLayout) -> Path | None:
+    checkpoints = tuple(
+        sorted(
+            (*layout.experiment_dir.glob("G_*.pth"), *layout.experiment_dir.glob("D_*.pth")),
+            key=lambda path: path.name.casefold(),
+        )
+    )
+    if not checkpoints:
+        return None
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    archive = layout.model_dir / "training" / "history" / f"{stamp}-{uuid.uuid4().hex[:8]}"
+    moved: list[Path] = []
+    try:
+        archive.mkdir(parents=True, exist_ok=False)
+        for checkpoint in checkpoints:
+            target = archive / checkpoint.name
+            shutil.move(str(checkpoint), str(target))
+            moved.append(target)
+    except Exception:
+        for target in reversed(moved):
+            shutil.move(str(target), str(layout.experiment_dir / target.name))
+        if archive.is_dir() and not tuple(archive.iterdir()):
+            archive.rmdir()
+        raise
+    return archive
+
+
+def _backup_final_model(final_model: Path, layout: RvcModelPackageLayout) -> Path | None:
+    if not final_model.is_file():
+        return None
+    backup = layout.model_dir / "training" / "run-backups" / uuid.uuid4().hex / final_model.name
+    copy_file_atomic(final_model, backup)
+    return backup
+
+
+def _restore_final_model(
+    final_model: Path,
+    backup: Path | None,
+    layout: RvcModelPackageLayout,
+) -> None:
+    if backup is not None and backup.is_file():
+        copy_file_atomic(backup, final_model)
+        _discard_backup(backup, layout)
+        return
+    if final_model.is_file() and _is_within(final_model, layout.weights_dir):
+        final_model.unlink()
+
+
+def _discard_backup(backup: Path | None, layout: RvcModelPackageLayout) -> None:
+    if backup is None:
+        return
+    root = layout.model_dir / "training" / "run-backups"
+    directory = backup.parent
+    if directory.is_dir() and _is_within(directory, root):
+        shutil.rmtree(directory)
+
+
+def _model_is_unchanged(final_model: Path, backup: Path | None) -> bool:
+    return (
+        backup is not None
+        and backup.is_file()
+        and final_model.is_file()
+        and file_sha256(final_model) == file_sha256(backup)
+    )
+
+
+def _log_delta(path: Path, offset: int) -> str:
+    if not path.is_file():
+        return ""
+    with path.open("rb") as source:
+        if path.stat().st_size >= offset:
+            source.seek(offset)
+        return source.read().decode("utf-8", errors="replace")
+
+
+def _report(progress: Callable[[int], None] | None, epoch: int, target: int) -> None:
+    if progress is not None:
+        progress(max(0, min(100, round(epoch * 100 / target))))
+
+
+def _existing(path: Path) -> Path | None:
+    return path if path.is_file() else None
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False

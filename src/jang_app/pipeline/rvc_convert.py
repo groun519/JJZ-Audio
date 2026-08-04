@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import os
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from jang_app.config import FFMPEG_BIN_DIR, RVC_WORKSPACE_DIR
+from jang_app.config import RVC_WORKSPACE_DIR
 from jang_app.services.app_logging import get_logger
 from jang_app.services.command import run_command
+from jang_app.services.managed_files import link_or_copy_file
+from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.settings import RvcSettings
 
 
@@ -54,7 +55,7 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
             settings.f0_method,
         ],
         cwd=workspace,
-        env=_build_rvc_environment(rvc_root),
+        env=build_rvc_environment(rvc_root),
     )
     if completed.returncode != 0:
         logger.error("RVC conversion failed with exit code %s\n%s", completed.returncode, completed.output)
@@ -110,22 +111,13 @@ def _prepare_rvc_workspace(rvc_root: Path) -> Path:
     RVC_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     _copy_tree(rvc_root / "configs", RVC_WORKSPACE_DIR / "configs")
     _copy_file(rvc_root / "trainset_preprocess_pipeline_print.py", RVC_WORKSPACE_DIR / "trainset_preprocess_pipeline_print.py")
-    _link_or_copy_file(rvc_root / "hubert_base.pt", RVC_WORKSPACE_DIR / "hubert_base.pt")
-    _link_or_copy_file(rvc_root / "rmvpe.pt", RVC_WORKSPACE_DIR / "rmvpe.pt")
+    for name in ("hubert_base.pt", "rmvpe.pt"):
+        source = rvc_root / name
+        if not source.is_file():
+            raise RvcConversionError(f"Required RVC file was not found: {source}")
+        link_or_copy_file(source, RVC_WORKSPACE_DIR / name)
     _write_cli_wrapper(RVC_WORKSPACE_DIR / "run_infer_cli.py")
     return RVC_WORKSPACE_DIR
-
-
-def _build_rvc_environment(rvc_root: Path) -> dict[str, str]:
-    env = os.environ.copy()
-    path_parts = [
-        str(FFMPEG_BIN_DIR),
-        str(rvc_root),
-        str(rvc_root / "runtime"),
-        env.get("PATH", ""),
-    ]
-    env["PATH"] = os.pathsep.join(part for part in path_parts if part)
-    return env
 
 
 def _write_cli_wrapper(target: Path) -> None:
@@ -223,19 +215,6 @@ def _copy_file(source: Path, target: Path) -> None:
     if not source.exists():
         raise RvcConversionError(f"Required RVC file was not found: {source}")
     shutil.copy2(source, target)
-
-
-def _link_or_copy_file(source: Path, target: Path) -> None:
-    if not source.exists():
-        raise RvcConversionError(f"Required RVC file was not found: {source}")
-    if target.exists() and target.stat().st_size == source.stat().st_size:
-        return
-    if target.exists():
-        target.unlink()
-    try:
-        os.link(source, target)
-    except OSError:
-        shutil.copy2(source, target)
 
 
 def _relative_to_root(path: Path, root: Path) -> str:

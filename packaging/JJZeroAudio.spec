@@ -9,6 +9,7 @@ PACKAGE_ROOT = SOURCE_ROOT / "jang_app"
 
 datas = [
     (str(PACKAGE_ROOT / "assets"), "jang_app/assets"),
+    (str(PACKAGE_ROOT / "rvc_tools"), "jang_app/rvc_tools"),
 ]
 
 analysis = Analysis(
