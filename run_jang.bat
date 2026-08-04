@@ -6,19 +6,19 @@ set "PAUSE_ON_ERROR=1"
 if /i "%~1"=="--no-pause" set "PAUSE_ON_ERROR=0"
 
 if not exist ".venv\Scripts\python.exe" (
-    echo Creating virtual environment...
-    python -m venv .venv
+    echo JJZero Audio is not set up yet. Running setup...
+    call "%~dp0setup_jang.bat" --no-pause
     if errorlevel 1 (
-        echo Failed to create virtual environment.
+        echo JJZero Audio setup failed.
         if "%PAUSE_ON_ERROR%"=="1" pause
         exit /b 1
     )
 )
 
-echo Installing or updating dependencies...
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
+".venv\Scripts\python.exe" -c "import jang_app" >nul 2>&1
 if errorlevel 1 (
-    echo Failed to install dependencies.
+    echo JJZero Audio dependencies are not installed.
+    echo Run setup_jang.bat and try again.
     if "%PAUSE_ON_ERROR%"=="1" pause
     exit /b 1
 )

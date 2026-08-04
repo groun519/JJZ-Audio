@@ -17,6 +17,8 @@ Mixing, video replacement, packaging, and link downloading are intentionally out
 
 Python 3.11 is recommended.
 
+Double-click `setup_jang.bat` to create or update the development environment. Setup is separate from normal app startup, so dependencies are not checked and installed on every launch.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -29,7 +31,7 @@ Demucs requires FFmpeg tools to decode many audio formats. Put `ffmpeg.exe` and 
 
 Double-click `run_jang_hidden.vbs` to start without showing a CMD window.
 
-For setup/debug output, double-click `run_jang.bat`, or run manually:
+For debug output, double-click `run_jang.bat`, or run manually:
 
 ```powershell
 python -m jang_app
@@ -44,6 +46,7 @@ jang-audio
 Outputs are written under `output\separations` by default.
 
 Runtime logs are written to `logs\jang.log`.
+Each launch writes cumulative startup timing marks to the runtime log.
 Local settings are written to `settings\app_settings.json`.
 
 RVC settings are configured from the app settings dialog:
