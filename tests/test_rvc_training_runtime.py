@@ -7,12 +7,32 @@ from pathlib import Path
 
 from jang_app.services.command import CommandResult
 from jang_app.services.rvc_training_runtime import (
+    RvcTrainingRuntimeInspection,
     inspect_rvc_training_runtime,
     required_rvc_training_paths,
+    training_backend_for_profile,
 )
+from jang_app.services.rvc_hardware import RvcComputeBackend
 
 
 class RvcTrainingRuntimeTests(unittest.TestCase):
+    def test_maps_runtime_profiles_to_supported_training_backends(self) -> None:
+        self.assertEqual(training_backend_for_profile("cu128"), RvcComputeBackend.CUDA)
+        self.assertEqual(training_backend_for_profile("rocm-win"), RvcComputeBackend.ROCM)
+        self.assertEqual(training_backend_for_profile("directml"), RvcComputeBackend.CPU)
+
+    def test_cpu_runtime_is_training_ready_without_cuda(self) -> None:
+        inspection = RvcTrainingRuntimeInspection(
+            Path("C:/rvc"),
+            (),
+            cuda_available=False,
+            cpu_ready=True,
+        )
+
+        self.assertTrue(inspection.ready)
+        self.assertFalse(inspection.training_accelerated)
+        self.assertEqual(inspection.training_device, "cpu")
+
     def test_reports_missing_training_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -65,6 +85,27 @@ class RvcTrainingRuntimeTests(unittest.TestCase):
 
             self.assertFalse(inspection.ready)
             self.assertEqual(inspection.cuda_error, "torch import failed")
+
+    def test_blackwell_with_legacy_cu118_runtime_is_not_training_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _create_runtime(root)
+
+            def runner(args, cwd=None):
+                output = {
+                    "available": True,
+                    "device_count": 1,
+                    "torch_version": "2.0.0+cu118",
+                    "cuda_version": "11.8",
+                    "device_capability": [12, 0],
+                    "cuda_arch_list": ["sm_86", "sm_90"],
+                }
+                return CommandResult(args, 0, json.dumps(output), "")
+
+            inspection = inspect_rvc_training_runtime(root, check_cuda=True, command_runner=runner)
+
+            self.assertFalse(inspection.ready)
+            self.assertIn("sm_120", inspection.cuda_error)
 
 
 def _create_runtime(root: Path) -> None:

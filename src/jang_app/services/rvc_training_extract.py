@@ -78,8 +78,14 @@ def extract_rvc_training_features(
     if not inspection.assets_ready:
         missing = ", ".join(path.as_posix() for path in inspection.missing_paths)
         raise RvcTrainingExtractError(f"RVC training runtime is incomplete: {missing}")
-    if not inspection.ready or gpu_index < 0 or gpu_index >= inspection.cuda_device_count:
-        raise RvcTrainingExtractError("A usable CUDA device is required for RMVPE extraction.")
+    if not inspection.ready:
+        raise RvcTrainingExtractError(
+            inspection.cuda_error or "The RVC runtime cannot run feature extraction on this PC."
+        )
+    if inspection.training_accelerated and (
+        gpu_index < 0 or gpu_index >= inspection.cuda_device_count
+    ):
+        raise RvcTrainingExtractError("The selected GPU is not available for RVC extraction.")
 
     preprocess = load_rvc_preprocess_result(model_id, layout)
     state_store = RvcTrainingStateStore(model_id, layout)
@@ -99,15 +105,18 @@ def extract_rvc_training_features(
         }
         if cancellation is not None:
             runner_kwargs["cancellation"] = cancellation
+        extraction_device = (
+            f"cuda:{gpu_index}" if inspection.training_accelerated else "cpu"
+        )
         f0_result = runner(
             [
                 str(runtime / "runtime" / "python.exe"),
                 str(runtime / "extract_f0_rmvpe.py"),
                 "1",
                 "0",
-                str(gpu_index),
+                extraction_device,
                 str(staging),
-                "True",
+                "True" if inspection.training_accelerated else "False",
             ],
             **runner_kwargs,
         )
@@ -117,16 +126,7 @@ def extract_rvc_training_features(
         _report(progress, 45)
         raise_if_training_cancelled(cancellation)
         feature_result = runner(
-            [
-                str(runtime / "runtime" / "python.exe"),
-                str(runtime / "extract_feature_print.py"),
-                f"cuda:{gpu_index}",
-                "1",
-                "0",
-                str(gpu_index),
-                str(staging),
-                RVC_TRAINING_VERSION,
-            ],
+            _feature_command(runtime, staging, extraction_device, gpu_index),
             **runner_kwargs,
         )
         if feature_result.cancelled:
@@ -253,6 +253,25 @@ def _require_command_success(label: str, result: CommandResult) -> None:
         raise RvcTrainingExtractError(
             f"{label} failed with exit code {result.returncode}: {result.output}"
         )
+
+
+def _feature_command(
+    runtime: Path,
+    staging: Path,
+    device: str,
+    gpu_index: int,
+) -> list[str]:
+    command = [
+        str(runtime / "runtime" / "python.exe"),
+        str(runtime / "extract_feature_print.py"),
+        device,
+        "1",
+        "0",
+    ]
+    if device.startswith("cuda"):
+        command.append(str(gpu_index))
+    command.extend((str(staging), RVC_TRAINING_VERSION))
+    return command
 
 
 def _write_extract_manifest(root: Path, fingerprint: str, feature_count: int) -> None:

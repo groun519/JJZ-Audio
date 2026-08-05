@@ -28,6 +28,8 @@ class TextInputDialogTests(unittest.TestCase):
         self.assertEqual(dialog.title_bar.objectName(), "WindowTitleBar")
         self.assertTrue(dialog.title_bar.minimize_button.isHidden())
         self.assertTrue(dialog.title_bar.maximize_button.isHidden())
+        self.assertTrue(dialog.title_bar.window_control_group.property("compactControls"))
+        self.assertEqual(dialog.title_bar.close_button.size().toTuple(), (30, 30))
         self.assertFalse(dialog.accept_button.isEnabled())
 
         dialog.input_edit.setText("  Voice One  ")

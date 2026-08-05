@@ -21,6 +21,7 @@ from jang_app.qt_app.localization import apply_widget_language, set_translated_t
 from jang_app.qt_app.widgets import FeedbackButton, ScrollSafeComboBox, ScrollSafeSpinBox, SvgIconButton
 from jang_app.services.i18n import tr
 from jang_app.services.rvc_model_workspace import RvcModelRecord
+from jang_app.services.settings import RVC_DEVICE_AUTO, RVC_DEVICE_OPTIONS
 
 
 @dataclass(frozen=True)
@@ -118,7 +119,7 @@ class ModelDetailPanel(QFrame):
         self.pitch_spin.setRange(-9999, 9999)
         self.device_combo = ScrollSafeComboBox()
         self.device_combo.setObjectName("ModelProfileInput")
-        self.device_combo.addItems(["cuda:0", "cpu"])
+        self.device_combo.addItems(list(RVC_DEVICE_OPTIONS))
         self.notes_edit = QPlainTextEdit()
         self.notes_edit.setObjectName("ModelNotesInput")
         self.notes_edit.setMinimumHeight(60)
@@ -267,7 +268,7 @@ class ModelDetailPanel(QFrame):
         self.display_name_edit.setPlaceholderText(record.name if record else "")
         self.tags_edit.setText(", ".join(record.tags) if record else "")
         self.pitch_spin.setValue(record.default_pitch if record else 0)
-        self.device_combo.setCurrentText(record.default_device if record else "cuda:0")
+        self.device_combo.setCurrentText(record.default_device if record else RVC_DEVICE_AUTO)
         self.notes_edit.setPlainText(record.notes if record else "")
 
         if record is None:

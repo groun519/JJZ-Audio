@@ -15,6 +15,7 @@ from jang_app.services.rvc_inference_runtime import (
     select_rvc_inference_device,
 )
 from jang_app.services.settings import RvcSettings
+from jang_app.services.text_tail import combined_output, text_tail
 
 
 class RvcConversionError(RuntimeError):
@@ -58,6 +59,17 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
     )
     if device.fallback_reason:
         logger.warning("RVC device fallback: %s", device.fallback_reason)
+    capabilities = device.capabilities
+    logger.info(
+        "RVC runtime: backend=%s torch=%s cuda=%s hip=%s gpu=%s capability=%s architectures=%s",
+        capabilities.accelerator_backend.value,
+        capabilities.torch_version or "unknown",
+        capabilities.cuda_version or "unknown",
+        capabilities.hip_version or "none",
+        capabilities.device_name or capabilities.directml_device_name or "none",
+        ".".join(str(part) for part in capabilities.device_capability) or "unknown",
+        ",".join(capabilities.cuda_arch_list) or "unknown",
+    )
     completed = run_command(
         [
             runtime_python,
@@ -75,8 +87,15 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
         env=build_rvc_environment(rvc_root),
     )
     if completed.returncode != 0:
-        logger.error("RVC conversion failed with exit code %s\n%s", completed.returncode, completed.output)
-        raise RvcConversionError(_conversion_failure_message(completed.returncode, device.effective_device))
+        process_output = text_tail(combined_output(completed.stdout, completed.stderr))
+        logger.error("RVC conversion failed with exit code %s\n%s", completed.returncode, process_output)
+        raise RvcConversionError(
+            _conversion_failure_message(
+                completed.returncode,
+                device.effective_device,
+                process_output,
+            )
+        )
     if not output_path.exists():
         raise RvcConversionError(f"RVC conversion did not create output: {output_path}")
 
@@ -241,11 +260,15 @@ def _relative_to_root(path: Path, root: Path) -> str:
         return str(path)
 
 
-def _conversion_failure_message(returncode: int, device: str) -> str:
+def _conversion_failure_message(returncode: int, device: str, process_output: str = "") -> str:
     windows_code = returncode & 0xFFFFFFFF
     if windows_code == 0xC0000094:
-        return (
+        message = (
             "RVC runtime crashed with Windows status 0xC0000094 (integer divide by zero). "
-            f"Selected device: {device}. See logs for details."
+            f"Selected device: {device}."
         )
-    return f"RVC conversion failed with exit code {returncode}. See logs for details."
+    else:
+        message = f"RVC conversion failed with exit code {returncode}. Selected device: {device}."
+    if process_output:
+        return f"{message}\n\nRVC output:\n{process_output}"
+    return f"{message} See logs for details."

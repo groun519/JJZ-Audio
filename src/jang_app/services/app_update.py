@@ -9,10 +9,19 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
+from urllib.error import HTTPError
 from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 
 from jang_app.runtime_version import AI_RUNTIME_VERSION
+from jang_app.services.rvc_runtime_profile import (
+    RVC_BASE_RUNTIME_PROFILES,
+    RVC_PROFILE_CPU,
+    normalize_rvc_profile,
+    rvc_profile_candidates,
+    rvc_profile_component_id,
+    rvc_profile_requires_overlay,
+)
 from jang_app.version import __version__
 
 
@@ -82,16 +91,37 @@ class ReleaseManifest:
     def ai_runtime(self) -> ReleaseComponent | None:
         return self.component("ai-runtime")
 
+    def rvc_runtime_profile(self, profile: str) -> ReleaseComponent | None:
+        return self.component(rvc_profile_component_id(profile))
+
 
 @dataclass(frozen=True)
 class UpdatePlan:
     release: ReleaseManifest
     application_required: bool
     runtime_required: bool
+    rvc_profile_required: bool = False
+    rvc_profile: str = ""
+    rvc_preferred_profile: str = ""
+    rvc_preferred_version: str = ""
+    rvc_fallback_profile: str = ""
+    rvc_fallback_reason: str = ""
 
     @property
     def required(self) -> bool:
-        return self.application_required or self.runtime_required
+        return self.application_required or self.runtime_required or self.rvc_profile_required
+
+    @property
+    def rvc_profile_component(self) -> ReleaseComponent | None:
+        return self.release.rvc_runtime_profile(self.rvc_profile) if self.rvc_profile else None
+
+    @property
+    def rvc_fallback_component(self) -> ReleaseComponent | None:
+        return (
+            self.release.rvc_runtime_profile(self.rvc_fallback_profile)
+            if self.rvc_fallback_profile
+            else None
+        )
 
     @property
     def artifacts(self) -> tuple[ReleaseArtifact, ...]:
@@ -100,7 +130,19 @@ class UpdatePlan:
             selected.extend(self.release.application.artifacts)
         if self.runtime_required and self.release.ai_runtime is not None:
             selected.extend(self.release.ai_runtime.artifacts)
+        if self.rvc_profile_required and self.rvc_profile_component is not None:
+            selected.extend(self.rvc_profile_component.artifacts)
+        if self.rvc_profile_required and self.rvc_fallback_component is not None:
+            selected.extend(self.rvc_fallback_component.artifacts)
         return tuple(selected)
+
+
+@dataclass(frozen=True)
+class ReleaseManifestCheck:
+    release: ReleaseManifest | None
+    etag: str = ""
+    last_modified: str = ""
+    not_modified: bool = False
 
 
 def fetch_release_manifest(
@@ -126,6 +168,60 @@ def fetch_release_manifest(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise UpdateError("The release manifest is not valid JSON.") from exc
     return parse_release_manifest(data, manifest_url)
+
+
+def fetch_release_manifest_if_changed(
+    manifest_url: str = DEFAULT_MANIFEST_URL,
+    *,
+    etag: str = "",
+    last_modified: str = "",
+    timeout: float = 10.0,
+    opener: OpenUrl | None = None,
+) -> ReleaseManifestCheck:
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": f"JJZero-Audio/{__version__}",
+    }
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+    request = Request(manifest_url, headers=headers)
+    open_request = opener or _open_url
+    try:
+        with open_request(request, timeout) as response:
+            response_etag = _response_header(response, "ETag") or etag
+            response_modified = _response_header(response, "Last-Modified") or last_modified
+            if getattr(response, "status", 200) == 304:
+                return ReleaseManifestCheck(
+                    None,
+                    response_etag,
+                    response_modified,
+                    not_modified=True,
+                )
+            payload = response.read(MAX_MANIFEST_BYTES + 1)
+    except HTTPError as exc:
+        if exc.code == 304:
+            return ReleaseManifestCheck(
+                None,
+                _response_header(exc, "ETag") or etag,
+                _response_header(exc, "Last-Modified") or last_modified,
+                not_modified=True,
+            )
+        raise UpdateError(f"Could not retrieve the release manifest: {exc}") from exc
+    except OSError as exc:
+        raise UpdateError(f"Could not retrieve the release manifest: {exc}") from exc
+    if len(payload) > MAX_MANIFEST_BYTES:
+        raise UpdateError("The release manifest is too large.")
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("The release manifest is not valid JSON.") from exc
+    return ReleaseManifestCheck(
+        parse_release_manifest(data, manifest_url),
+        response_etag,
+        response_modified,
+    )
 
 
 def parse_release_manifest(data: object, manifest_url: str) -> ReleaseManifest:
@@ -160,13 +256,127 @@ def create_update_plan(
     current_version: str = __version__,
     runtime_version: str | None = AI_RUNTIME_VERSION,
     runtime_ready: bool = True,
+    desired_rvc_profile: str = "",
+    installed_rvc_profile: str = "",
+    installed_rvc_profile_version: str = "",
+    installed_rvc_preferred_profile: str = "",
+    installed_rvc_preferred_version: str = "",
+    installed_rvc_failed_fallback_profile: str = "",
+    installed_rvc_failed_fallback_version: str = "",
 ) -> UpdatePlan:
     application_required = _version_tuple(release.version) > _version_tuple(current_version)
     runtime = release.ai_runtime
     runtime_required = runtime is not None and (
         not runtime_ready or runtime_version != runtime.version
     )
-    return UpdatePlan(release, application_required, runtime_required)
+    preferred_profile = (
+        normalize_rvc_profile(desired_rvc_profile) if desired_rvc_profile.strip() else ""
+    )
+    preferred_component = (
+        release.rvc_runtime_profile(preferred_profile) if preferred_profile else None
+    )
+    preferred_version = preferred_component.version if preferred_component is not None else ""
+    preferred_quarantined = bool(
+        preferred_profile
+        and installed_rvc_profile
+        and normalize_rvc_profile(installed_rvc_profile) != preferred_profile
+        and normalize_rvc_profile(installed_rvc_preferred_profile) == preferred_profile
+        and installed_rvc_preferred_version == preferred_version
+        and preferred_version
+    )
+    skipped_profiles = {preferred_profile} if preferred_quarantined else set()
+    failed_fallback_component = (
+        release.rvc_runtime_profile(installed_rvc_failed_fallback_profile)
+        if installed_rvc_failed_fallback_profile
+        else None
+    )
+    if (
+        failed_fallback_component is not None
+        and failed_fallback_component.version == installed_rvc_failed_fallback_version
+    ):
+        skipped_profiles.add(normalize_rvc_profile(installed_rvc_failed_fallback_profile))
+    selected_profile, fallback_profile = select_release_rvc_profiles(
+        release,
+        preferred_profile,
+        skipped_profiles=frozenset(skipped_profiles),
+    )
+    profile_component = (
+        release.rvc_runtime_profile(selected_profile)
+        if selected_profile and rvc_profile_requires_overlay(selected_profile)
+        else None
+    )
+    base_fallback_recorded = bool(
+        selected_profile in RVC_BASE_RUNTIME_PROFILES
+        and installed_rvc_profile
+        and normalize_rvc_profile(installed_rvc_profile) in RVC_BASE_RUNTIME_PROFILES
+        and normalize_rvc_profile(installed_rvc_preferred_profile) == preferred_profile
+        and installed_rvc_preferred_version == preferred_version
+    )
+    if (
+        selected_profile in RVC_BASE_RUNTIME_PROFILES
+        and installed_rvc_profile
+        and normalize_rvc_profile(installed_rvc_profile) not in RVC_BASE_RUNTIME_PROFILES
+        and runtime is not None
+    ):
+        runtime_required = True
+    base_fallback_required = bool(
+        preferred_profile
+        and selected_profile in RVC_BASE_RUNTIME_PROFILES
+        and selected_profile != preferred_profile
+        and not base_fallback_recorded
+    )
+    profile_required = base_fallback_required or (
+        profile_component is not None
+        and (
+            runtime_required
+            or normalize_rvc_profile(installed_rvc_profile) != selected_profile
+            or installed_rvc_profile_version != profile_component.version
+            or normalize_rvc_profile(installed_rvc_preferred_profile or installed_rvc_profile)
+            != preferred_profile
+            or installed_rvc_preferred_version != preferred_version
+        )
+    )
+    if profile_component is not None and profile_required and runtime is not None:
+        runtime_required = True
+    fallback_reason = ""
+    if selected_profile and preferred_profile and selected_profile != preferred_profile:
+        fallback_reason = (
+            f"RVC {preferred_profile} activation previously failed for version {preferred_version}."
+            if preferred_quarantined
+            else f"RVC {preferred_profile} is unavailable in this release."
+        )
+    return UpdatePlan(
+        release=release,
+        application_required=application_required,
+        runtime_required=runtime_required,
+        rvc_profile_required=profile_required,
+        rvc_profile=selected_profile,
+        rvc_preferred_profile=preferred_profile,
+        rvc_preferred_version=preferred_version,
+        rvc_fallback_profile=fallback_profile,
+        rvc_fallback_reason=fallback_reason,
+    )
+
+
+def select_release_rvc_profiles(
+    release: ReleaseManifest,
+    preferred_profile: str,
+    *,
+    skipped_profiles: frozenset[str] = frozenset(),
+) -> tuple[str, str]:
+    candidates = list(rvc_profile_candidates(preferred_profile or RVC_PROFILE_CPU))
+    candidates = [profile for profile in candidates if profile not in skipped_profiles]
+    available = [
+        profile
+        for profile in candidates
+        if not rvc_profile_requires_overlay(profile)
+        or release.rvc_runtime_profile(profile) is not None
+    ]
+    if not available:
+        return RVC_PROFILE_CPU, ""
+    selected = available[0]
+    fallback = available[1] if len(available) > 1 else ""
+    return selected, fallback
 
 
 def download_artifact(
@@ -377,6 +587,15 @@ def _artifact_ready(path: Path, artifact: ReleaseArtifact) -> bool:
 def _report(progress: ProgressReporter | None, value: int) -> None:
     if progress is not None:
         progress(max(0, min(value, 100)))
+
+
+def _response_header(response: object, name: str) -> str:
+    headers = getattr(response, "headers", None)
+    get_header = getattr(headers, "get", None)
+    if not callable(get_header):
+        return ""
+    value = get_header(name, "")
+    return str(value).strip() if value else ""
 
 
 def _open_url(request: Request, timeout: float) -> Response:

@@ -35,7 +35,8 @@ def main(started_at: float | None = None) -> None:
     )
 
     setup_paths = discover_app_paths(package_root)
-    if not is_initial_setup_complete(setup_paths):
+    setup_complete = is_initial_setup_complete(setup_paths)
+    if not setup_complete:
         if smoke_test:
             configure_default_storage(setup_paths)
         else:
@@ -44,6 +45,18 @@ def main(started_at: float | None = None) -> None:
             setup_dialog = InitialSetupDialog(setup_paths, logo_path)
             if setup_dialog.exec() != QDialog.DialogCode.Accepted:
                 return
+    elif not smoke_test:
+        from jang_app.services.hardware_diagnostics_state import hardware_diagnostics_required
+
+        if hardware_diagnostics_required(setup_paths):
+            from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
+
+            InitialSetupDialog(
+                setup_paths,
+                logo_path,
+                first_run=False,
+                diagnostics_only=True,
+            ).exec()
 
     from jang_app.config import APP_ICON_PATH, APP_NAME
     from jang_app.services.app_logging import get_logger, install_exception_logging

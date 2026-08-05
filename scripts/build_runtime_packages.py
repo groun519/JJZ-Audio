@@ -11,6 +11,7 @@ from pathlib import Path
 DEFAULT_PART_LIMIT = 1700 * 1024 * 1024
 GITHUB_ASSET_LIMIT = 2 * 1024 * 1024 * 1024
 INDEX_NAME = "runtime-packages.json"
+DEFAULT_EXCLUDED_TOP_LEVEL = {"rvc_profiles"}
 
 
 @dataclass(frozen=True)
@@ -27,14 +28,43 @@ def build_runtime_packages(
     *,
     part_limit: int = DEFAULT_PART_LIMIT,
 ) -> Path:
-    source = runtime_root.expanduser().resolve()
+    return build_component_packages(
+        runtime_root,
+        release_dir,
+        runtime_version,
+        component="ai-runtime",
+        package_prefix=f"JJZero-Runtime-{runtime_version}",
+        index_name=INDEX_NAME,
+        part_limit=part_limit,
+        excluded_top_level=DEFAULT_EXCLUDED_TOP_LEVEL,
+    )
+
+
+def build_component_packages(
+    source_root: Path,
+    release_dir: Path,
+    version: str,
+    *,
+    component: str,
+    package_prefix: str,
+    index_name: str,
+    part_limit: int = DEFAULT_PART_LIMIT,
+    excluded_top_level: set[str] | None = None,
+) -> Path:
+    source = source_root.expanduser().resolve()
     destination = release_dir.expanduser().resolve()
     if not source.is_dir():
         raise FileNotFoundError(f"Runtime directory was not found: {source}")
     if part_limit <= 0 or part_limit >= GITHUB_ASSET_LIMIT:
         raise ValueError("Runtime package part limit must be between 1 and 2 GiB.")
     files = sorted(
-        (path for path in source.rglob("*") if path.is_file()),
+        (
+            path
+            for path in source.rglob("*")
+            if path.is_file()
+            and path.relative_to(source).parts[0]
+            not in (excluded_top_level or set())
+        ),
         key=lambda path: path.relative_to(source).as_posix(),
     )
     if not files:
@@ -46,13 +76,13 @@ def build_runtime_packages(
     destination.mkdir(parents=True, exist_ok=True)
     groups = _group_files(files, part_limit)
     packages = [
-        _write_package(source, destination, runtime_version, index, group)
+        _write_package(source, destination, package_prefix, index, group)
         for index, group in enumerate(groups, start=1)
     ]
     data = {
         "schema_version": 1,
-        "component": "ai-runtime",
-        "version": runtime_version,
+        "component": component,
+        "version": version,
         "unpacked_size": sum(item.unpacked_size for item in packages),
         "artifacts": [
             {
@@ -65,7 +95,7 @@ def build_runtime_packages(
             for item in packages
         ],
     }
-    index_path = destination / INDEX_NAME
+    index_path = destination / index_name
     index_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return index_path
 
@@ -91,11 +121,11 @@ def _group_files(files: list[Path], part_limit: int) -> list[list[Path]]:
 def _write_package(
     source: Path,
     destination: Path,
-    version: str,
+    package_prefix: str,
     index: int,
     files: list[Path],
 ) -> RuntimePackage:
-    output = destination / f"JJZero-Runtime-{version}-part{index:02d}.zip"
+    output = destination / f"{package_prefix}-part{index:02d}.zip"
     with zipfile.ZipFile(
         output,
         "w",
@@ -129,13 +159,30 @@ def main() -> int:
     parser.add_argument("release_dir", type=Path)
     parser.add_argument("runtime_version")
     parser.add_argument("--part-limit", type=int, default=DEFAULT_PART_LIMIT)
+    parser.add_argument("--component", default="ai-runtime")
+    parser.add_argument("--package-prefix", default="")
+    parser.add_argument("--index-name", default=INDEX_NAME)
+    parser.add_argument("--exclude-top-level", action="append", default=[])
     arguments = parser.parse_args()
-    index = build_runtime_packages(
-        arguments.runtime_root,
-        arguments.release_dir,
-        arguments.runtime_version,
-        part_limit=arguments.part_limit,
-    )
+    if arguments.component == "ai-runtime" and not arguments.package_prefix:
+        index = build_runtime_packages(
+            arguments.runtime_root,
+            arguments.release_dir,
+            arguments.runtime_version,
+            part_limit=arguments.part_limit,
+        )
+    else:
+        prefix = arguments.package_prefix or f"JJZero-{arguments.component}-{arguments.runtime_version}"
+        index = build_component_packages(
+            arguments.runtime_root,
+            arguments.release_dir,
+            arguments.runtime_version,
+            component=arguments.component,
+            package_prefix=prefix,
+            index_name=arguments.index_name,
+            part_limit=arguments.part_limit,
+            excluded_top_level=set(arguments.exclude_top_level),
+        )
     print(f"Created runtime package index: {index}")
     return 0
 

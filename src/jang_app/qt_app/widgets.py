@@ -198,8 +198,13 @@ class WindowTitleBar(QFrame):
 
         self.window_control_group = QFrame()
         self.window_control_group.setObjectName("WindowControlGroup")
+        compact_controls = not (allow_minimize or allow_maximize)
+        self.window_control_group.setProperty("compactControls", compact_controls)
         window_controls = QHBoxLayout(self.window_control_group)
-        window_controls.setContentsMargins(5, 2, 5, 2)
+        if compact_controls:
+            window_controls.setContentsMargins(0, 0, 0, 0)
+        else:
+            window_controls.setContentsMargins(5, 2, 5, 2)
         window_controls.setSpacing(2)
         window_controls.addWidget(self.action_widget)
         self.control_divider = _titlebar_control_divider()
@@ -283,7 +288,7 @@ def _window_control_button(icon_name: str, tooltip: str) -> QPushButton:
     button = SvgIconButton(icon_name, size=26)
     button.setObjectName("WindowControlButton")
     set_translated_tooltip(button, tooltip)
-    button.setFixedSize(30, 26)
+    button.setFixedSize(30, 30)
     return button
 
 

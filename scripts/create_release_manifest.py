@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from jang_app.runtime_version import AI_RUNTIME_VERSION
+from jang_app.runtime_version import AI_RUNTIME_VERSION, RVC_RUNTIME_PROFILE_VERSIONS
 
 
 MANIFEST_NAME = "latest.json"
@@ -81,6 +81,22 @@ def create_release_manifest(
             }
         )
 
+    for profile, profile_version in RVC_RUNTIME_PROFILE_VERSIONS.items():
+        component = f"rvc-runtime-{profile}"
+        profile_index = resolved_release / f"{component}-packages.json"
+        if profile_index.is_file():
+            _append_component_index(
+                components,
+                resolved_release,
+                profile_index,
+                expected_component=component,
+                expected_version=profile_version,
+            )
+
+    component_ids = {str(component.get("id", "")) for component in components}
+    if "rvc-runtime-rocm-win" in component_ids and "rvc-runtime-directml" not in component_ids:
+        raise ValueError("The Windows ROCm release requires a DirectML fallback component.")
+
     data = {
         "schema_version": 2,
         "product": "JJZero Audio",
@@ -92,6 +108,34 @@ def create_release_manifest(
     manifest = resolved_release / MANIFEST_NAME
     manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return manifest
+
+
+def _append_component_index(
+    components: list[dict[str, object]],
+    release_dir: Path,
+    index_path: Path,
+    *,
+    expected_component: str,
+    expected_version: str,
+) -> None:
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    if data.get("component") != expected_component or data.get("version") != expected_version:
+        raise ValueError(f"{expected_component} package index metadata does not match.")
+    raw_artifacts = data.get("artifacts")
+    if not isinstance(raw_artifacts, list) or not raw_artifacts:
+        raise ValueError(f"{expected_component} package index has no artifacts.")
+    artifacts = [
+        _validated_index_artifact(release_dir, artifact)
+        for artifact in raw_artifacts
+    ]
+    components.append(
+        {
+            "id": expected_component,
+            "version": expected_version,
+            "install_mode": "extract",
+            "artifacts": artifacts,
+        }
+    )
 
 
 def _artifact_data(path: Path, *, signing_publisher: str = "") -> dict[str, object]:

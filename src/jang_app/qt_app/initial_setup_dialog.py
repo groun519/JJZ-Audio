@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -28,6 +28,7 @@ from jang_app.services.initial_setup import (
     persist_storage_layout,
     prepare_storage_layout,
 )
+from jang_app.services.hardware_diagnostics_state import record_hardware_diagnostics
 from jang_app.services.system_diagnostics import (
     DiagnosticCheck,
     DiagnosticStatus,
@@ -96,6 +97,7 @@ class InitialSetupDialog(AppDialog):
         logo_path: Path,
         *,
         first_run: bool = True,
+        diagnostics_only: bool = False,
         theme_mode: str = "dark",
         diagnostics_worker_type: type[DiagnosticsWorker] = DiagnosticsWorker,
         runtime_worker_type: type[RuntimeProvisionWorker] = RuntimeProvisionWorker,
@@ -111,6 +113,7 @@ class InitialSetupDialog(AppDialog):
         self._paths = paths
         self._configured_paths = paths
         self._first_run = first_run
+        self._diagnostics_only = diagnostics_only
         self._theme_mode = theme_mode
         self._diagnostics_worker_type = diagnostics_worker_type
         self._runtime_worker_type = runtime_worker_type
@@ -122,6 +125,13 @@ class InitialSetupDialog(AppDialog):
         self.resize(820, 590)
         self.setStyleSheet(_build_setup_stylesheet(theme_mode))
         self._build_ui()
+        if diagnostics_only:
+            self.stack.setCurrentIndex(1)
+            self.step_label.setText(tr("SYSTEM CHECK"))
+            self.step_count_label.setText("01 / 01")
+            self.back_button.hide()
+            self.primary_button.setText(tr("Close"))
+            QTimer.singleShot(0, self._start_diagnostics)
 
     @property
     def configured_paths(self) -> AppPaths:
@@ -244,7 +254,7 @@ class InitialSetupDialog(AppDialog):
         page = QWidget()
         title = QLabel(tr("System Diagnostics"))
         title.setObjectName("SetupTitle")
-        self.diagnostic_summary = QLabel(tr("Checking bundled tools and NVIDIA GPU..."))
+        self.diagnostic_summary = QLabel(tr("Checking bundled tools and GPU acceleration..."))
         self.diagnostic_summary.setObjectName("SetupDescription")
         self.diagnostic_progress = QProgressBar()
         self.diagnostic_progress.setRange(0, 0)
@@ -257,7 +267,7 @@ class InitialSetupDialog(AppDialog):
             ("demucs", "Demucs"),
             ("rvc_assets", "RVC Assets"),
             ("ai_runtime", "AI Runtime"),
-            ("cuda", "NVIDIA GPU"),
+            ("cuda", "GPU Acceleration"),
         )
         self.diagnostic_rows: dict[str, DiagnosticRow] = {}
         checks_layout = QVBoxLayout()
@@ -321,6 +331,7 @@ class InitialSetupDialog(AppDialog):
             complete_initial_setup(self._configured_paths, diagnostics_ready=self._diagnostics.ready)
         else:
             persist_storage_layout(self._configured_paths)
+        record_hardware_diagnostics(self._configured_paths, self._diagnostics)
         self.restart_required = self._configured_paths.workspace_anchor != self._paths.workspace_anchor
         self.accept()
 
@@ -341,6 +352,8 @@ class InitialSetupDialog(AppDialog):
         self._start_diagnostics()
 
     def _go_back(self) -> None:
+        if self._diagnostics_only:
+            return
         if self._worker is not None and self._worker.isRunning():
             return
         self.stack.setCurrentIndex(0)
@@ -356,7 +369,7 @@ class InitialSetupDialog(AppDialog):
         self._diagnostics = None
         for row in self.diagnostic_rows.values():
             row.set_waiting()
-        self.diagnostic_summary.setText(tr("Checking bundled tools and NVIDIA GPU..."))
+        self.diagnostic_summary.setText(tr("Checking bundled tools and GPU acceleration..."))
         self.diagnostic_progress.show()
         self.diagnostic_progress.setRange(0, 0)
         self.rerun_button.hide()
@@ -383,10 +396,12 @@ class InitialSetupDialog(AppDialog):
             self._on_diagnostics_failed("Diagnostics returned an invalid result.")
             return
         self._diagnostics = diagnostics
+        if self._diagnostics_only:
+            record_hardware_diagnostics(self._configured_paths, diagnostics)
         for check in diagnostics.checks:
             self._on_check_ready(check)
         if diagnostics.ready and diagnostics.has_warnings:
-            summary = "Setup is usable, but the NVIDIA GPU needs attention."
+            summary = "Setup is usable, but GPU acceleration needs attention."
         elif diagnostics.ready:
             summary = "This PC is ready for JJZero Audio."
         else:

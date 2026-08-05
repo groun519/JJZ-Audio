@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from jang_app.config import LOG_DIR
+from jang_app.services.text_tail import text_tail
 from jang_app.version import __version__
 
 
@@ -53,7 +54,10 @@ def classify_error(error: str) -> ErrorClassification:
     rules = (
         (("3221225620", "0xc0000094", "integer division by zero"), "RVC_CPU_RUNTIME_INCOMPATIBLE", "RVC runtime crashed on the selected CPU path."),
         (("cuda out of memory", "cublas_status_alloc_failed"), "CUDA_OUT_OF_MEMORY", "The GPU did not have enough free memory."),
+        (("no kernel image is available", "not compatible with the current pytorch", "cuda architecture sm_120", "requires torch 2.7.1+cu128"), "CUDA_ARCHITECTURE_UNSUPPORTED", "The bundled RVC runtime does not support this GPU architecture."),
         (("cuda is not available", "no cuda gpus are available", "invalid device ordinal"), "CUDA_UNAVAILABLE", "The selected CUDA device is unavailable."),
+        (("torch_directml", "privateuseone", "directml device"), "DIRECTML_RUNTIME_FAILED", "The DirectML runtime or selected DirectML device failed."),
+        (("rocm", "hip error", "hip runtime"), "ROCM_RUNTIME_FAILED", "The AMD ROCm runtime or selected AMD GPU failed."),
         (("no space left on device", "not enough space on the disk", "disk full"), "STORAGE_INSUFFICIENT", "The storage device does not have enough free space."),
         (("ffmpeg is not available", "ffmpeg was not found", "no such file or directory: 'ffmpeg'"), "FFMPEG_UNAVAILABLE", "FFmpeg is unavailable."),
         (("modulenotfounderror", "no module named"), "PYTHON_MODULE_MISSING", "A required Python module is unavailable."),
@@ -246,6 +250,10 @@ class JobDiagnostics:
         environment = summary.get("environment") if isinstance(summary.get("environment"), dict) else {}
         error = str(summary.get("error") or "")
         error_tail = "\n".join(error.splitlines()[-max(1, error_tail_lines):])
+        command_tail = _read_text_tail(
+            self.job_path(task_id) / "command.log",
+            max_lines=error_tail_lines,
+        )
         lines = [
             "JJZero Audio diagnostics",
             f"App: {summary.get('app_version', '')}",
@@ -258,11 +266,24 @@ class JobDiagnostics:
             f"OS: {environment.get('platform', '')}",
             f"Python: {environment.get('python', '')}",
             f"Frozen: {environment.get('frozen', False)}",
+            f"RVC backend: {environment.get('rvc_backend', '')}",
+            f"RVC adapter: {environment.get('rvc_adapter', '')}",
+            f"RVC desired profile: {environment.get('rvc_desired_profile', '')}",
+            f"RVC installed profile: {environment.get('rvc_installed_profile', '')}",
+            f"RVC profile version: {environment.get('rvc_profile_version', '')}",
+            f"RVC preferred profile: {environment.get('rvc_preferred_profile', '')}",
+            f"RVC preferred version: {environment.get('rvc_preferred_version', '')}",
+            f"RVC activation: {environment.get('rvc_activation_status', '')}",
+            f"RVC activation detail: {environment.get('rvc_activation_detail', '')}",
+            f"RVC failed fallback: {environment.get('rvc_failed_fallback_profile', '')}",
+            f"RVC failed fallback version: {environment.get('rvc_failed_fallback_version', '')}",
             f"Detail: {summary.get('detail', '')}",
             f"Log folder: {self.job_path(task_id)}",
         ]
         if error_tail:
             lines.extend(("", "Error tail:", error_tail))
+        if command_tail:
+            lines.extend(("", "Command output tail:", command_tail))
         return "\n".join(lines)
 
     def _prepare_root(self) -> None:
@@ -362,7 +383,7 @@ def get_job_diagnostics() -> JobDiagnostics:
 
 
 def _environment_summary() -> dict[str, object]:
-    return {
+    summary: dict[str, object] = {
         "platform": platform.platform(),
         "machine": platform.machine(),
         "python": platform.python_version(),
@@ -370,6 +391,45 @@ def _environment_summary() -> dict[str, object]:
         "executable": str(Path(sys.executable)),
         "pid": os.getpid(),
     }
+    try:
+        from jang_app.config import APP_PATHS
+        from jang_app.services.runtime_installation import installed_rvc_runtime_profile
+        from jang_app.services.rvc_runtime_profile import detect_rvc_hardware
+
+        hardware = detect_rvc_hardware()
+        installed = installed_rvc_runtime_profile(APP_PATHS.runtime_root / "rvc")
+        summary.update(
+            rvc_backend=hardware.backend.value,
+            rvc_adapter=hardware.adapter.name if hardware.adapter is not None else "CPU",
+            rvc_desired_profile=hardware.profile,
+            rvc_installed_profile=installed.profile if installed is not None else "",
+            rvc_profile_version=installed.version if installed is not None else "",
+            rvc_preferred_profile=installed.preferred_profile if installed is not None else "",
+            rvc_preferred_version=installed.preferred_version if installed is not None else "",
+            rvc_activation_status=installed.activation_status if installed is not None else "",
+            rvc_activation_detail=installed.validation_detail if installed is not None else "",
+            rvc_failed_fallback_profile=(
+                installed.failed_fallback_profile if installed is not None else ""
+            ),
+            rvc_failed_fallback_version=(
+                installed.failed_fallback_version if installed is not None else ""
+            ),
+        )
+    except Exception:
+        summary.update(
+            rvc_backend="unknown",
+            rvc_adapter="unknown",
+            rvc_desired_profile="",
+            rvc_installed_profile="",
+            rvc_profile_version="",
+            rvc_preferred_profile="",
+            rvc_preferred_version="",
+            rvc_activation_status="",
+            rvc_activation_detail="",
+            rvc_failed_fallback_profile="",
+            rvc_failed_fallback_version="",
+        )
+    return summary
 
 
 def _sanitize_json(value: object) -> object:
@@ -380,6 +440,13 @@ def _sanitize_json(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return redact_text(value)
+
+
+def _read_text_tail(path: Path, *, max_lines: int) -> str:
+    try:
+        return text_tail(path.read_text(encoding="utf-8", errors="replace"), max_lines=max_lines)
+    except OSError:
+        return ""
 
 
 def _redact_url(value: str) -> str:

@@ -59,6 +59,76 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertEqual(records[0].status_label, "Resume Ready")
             self.assertFalse(records[0].is_managed)
 
+    def test_link_inference_file_accepts_pth_without_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            model_file = base / "solo_voice.pth"
+            model_file.write_bytes(b"inference")
+            workspace = RvcModelWorkspace(base / "workspace")
+
+            record = workspace.link_inference_file(model_file)
+
+            self.assertEqual(record.name, "solo_voice")
+            self.assertEqual(record.inference_model, model_file.resolve())
+            self.assertIsNone(record.index_file)
+            self.assertTrue(record.can_convert)
+            self.assertEqual(record.status_label, "Inference Only")
+            self.assertFalse(record.is_managed)
+
+    def test_import_inference_file_copies_only_pth_and_matching_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source"
+            source.mkdir()
+            model_file = source / "voice_e100_s200.pth"
+            index_file = source / "added_voice.index"
+            unrelated = source / "unrelated.pth"
+            model_file.write_bytes(b"inference")
+            index_file.write_bytes(b"index")
+            unrelated.write_bytes(b"unrelated")
+            workspace = RvcModelWorkspace(base / "workspace")
+
+            record = workspace.import_inference_file(model_file)
+
+            self.assertEqual(record.name, "voice")
+            self.assertTrue(record.is_managed)
+            self.assertEqual(record.inference_model.read_bytes(), b"inference")
+            self.assertEqual(record.index_file.read_bytes(), b"index")
+            self.assertFalse(any(path.name == unrelated.name for path in workspace.library_dir.rglob("*.pth")))
+            self.assertEqual(model_file.read_bytes(), b"inference")
+            self.assertEqual(index_file.read_bytes(), b"index")
+            self.assertEqual(unrelated.read_bytes(), b"unrelated")
+
+    def test_inference_file_in_weights_finds_index_in_webui_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = base / "rvc"
+            weights = runtime / "weights"
+            experiment = runtime / "logs" / "voice"
+            weights.mkdir(parents=True)
+            experiment.mkdir(parents=True)
+            model_file = weights / "voice.pth"
+            index_file = experiment / "added_voice.index"
+            model_file.write_bytes(b"inference")
+            index_file.write_bytes(b"index")
+            workspace = RvcModelWorkspace(base / "workspace")
+
+            record = workspace.link_inference_file(model_file)
+
+            self.assertEqual(record.runtime_root, runtime.resolve())
+            self.assertEqual(record.index_file, index_file.resolve())
+            self.assertTrue(record.has_index)
+
+    def test_inference_file_rejects_training_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            checkpoint = base / "G_100.pth"
+            checkpoint.write_bytes(b"checkpoint")
+            workspace = RvcModelWorkspace(base / "workspace")
+
+            with self.assertRaisesRegex(RvcModelWorkspaceError, "training checkpoints"):
+                workspace.link_inference_file(checkpoint)
+
     def test_import_preserves_webui_layout_without_changing_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

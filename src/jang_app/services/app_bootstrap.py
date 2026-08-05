@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +11,7 @@ from jang_app.services.managed_files import copy_file_atomic, write_json_atomic
 
 _LEGACY_SETTINGS_FILES = ("app_settings.json", "song_library.json", "work_song.json")
 _MIGRATION_FILE_NAME = "source-layout-v1.json"
+_LOGGER = logging.getLogger("jang_app")
 
 
 @dataclass(frozen=True)
@@ -55,9 +57,18 @@ def prepare_app_environment(paths: AppPaths | None = None) -> AppBootstrapResult
                 "migrated_at": datetime.now(UTC).isoformat(),
                 "legacy_root": str(paths.legacy_root) if paths.legacy_root is not None else "",
                 "workspace_root": str(paths.workspace_root),
+                "workspace_source": paths.workspace_source,
                 "copied_settings": [path.name for path in copied],
             },
         )
+    _LOGGER.info(
+        "Storage layout | source=%s | data=%s | workspace=%s | output=%s | copied_settings=%s",
+        paths.workspace_source,
+        paths.data_root,
+        paths.workspace_root,
+        paths.output_root,
+        ",".join(path.name for path in copied) or "none",
+    )
     return AppBootstrapResult(tuple(copied), paths.storage_file, migration_file)
 
 

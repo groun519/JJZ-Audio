@@ -34,6 +34,7 @@ def prepare_rvc_script_launcher(
     atomic_torch_saves: bool = False,
     compact_rvc_checkpoints: bool = False,
     conservative_data_loading: bool = False,
+    rocm_single_process_training: bool = False,
 ) -> Path:
     root = rvc_root.expanduser().resolve()
     source = script.expanduser().resolve()
@@ -59,6 +60,8 @@ def prepare_rvc_script_launcher(
         lines.extend(("", _COMPACT_RVC_CHECKPOINT_BOOTSTRAP.rstrip(), ""))
     if conservative_data_loading:
         lines.extend(("", _CONSERVATIVE_DATA_LOADER_BOOTSTRAP.rstrip(), ""))
+    if rocm_single_process_training:
+        lines.extend(("", _ROCM_SINGLE_PROCESS_TRAINING_BOOTSTRAP.rstrip(), ""))
     lines.extend(
         (
             "sys.argv[0] = str(RVC_SCRIPT)",
@@ -226,4 +229,30 @@ class _JjzeroConservativeDataLoader(_jjzero_original_data_loader):
 
 
 torch.utils.data.DataLoader = _JjzeroConservativeDataLoader
+'''
+
+
+_ROCM_SINGLE_PROCESS_TRAINING_BOOTSTRAP = '''import torch
+import torch.distributed
+import torch.nn.parallel
+
+
+if getattr(torch.version, "hip", None):
+    class _JjzeroSingleProcessDistributedDataParallel(torch.nn.Module):
+        def __init__(self, module, *args, **kwargs):
+            super().__init__()
+            self.module = module
+
+        def forward(self, *args, **kwargs):
+            return self.module(*args, **kwargs)
+
+
+    def _jjzero_skip_single_process_group(*args, **kwargs):
+        return None
+
+
+    torch.distributed.init_process_group = _jjzero_skip_single_process_group
+    torch.nn.parallel.DistributedDataParallel = (
+        _JjzeroSingleProcessDistributedDataParallel
+    )
 '''

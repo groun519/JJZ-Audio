@@ -8,6 +8,12 @@ from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
+from jang_app.qt_app.model_add_dialog import (
+    ModelAddAction,
+    ModelAddRequest,
+    ModelImportMode,
+    ModelImportSource,
+)
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.services.clip_edit_history import REVIEW_READY
 from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem
@@ -28,11 +34,17 @@ class ModelWorkspacePageTests(unittest.TestCase):
             workspace = RvcModelWorkspace(root / "models")
             page = ModelWorkspacePage(root / "rvc", workspace)
 
-            with patch(
-                "jang_app.qt_app.model_workspace.TextInputDialog.get_text",
-                return_value=("Voice One", True),
+            with (
+                patch(
+                    "jang_app.qt_app.model_workspace.ModelAddDialog.get_request",
+                    return_value=ModelAddRequest(ModelAddAction.CREATE),
+                ),
+                patch(
+                    "jang_app.qt_app.model_workspace.TextInputDialog.get_text",
+                    return_value=("Voice One", True),
+                ),
             ):
-                page.new_model_button.click()
+                page.add_model_button.click()
 
             records = workspace.records()
             self.assertEqual([record.name for record in records], ["Voice One"])
@@ -43,17 +55,57 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual(page.workspace_content_stack.currentIndex(), 2)
             page.close()
 
+    def test_add_model_dialog_routes_linked_inference_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_file = root / "voice.pth"
+            model_file.write_bytes(b"inference")
+            workspace = RvcModelWorkspace(root / "models")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+
+            request = ModelAddRequest(
+                ModelAddAction.IMPORT,
+                ModelImportSource.INFERENCE_FILE,
+                ModelImportMode.LINKED,
+            )
+            with (
+                patch(
+                    "jang_app.qt_app.model_workspace.ModelAddDialog.get_request",
+                    return_value=request,
+                ),
+                patch(
+                    "jang_app.qt_app.model_workspace.QFileDialog.getOpenFileName",
+                    return_value=(str(model_file), ""),
+                ),
+            ):
+                page.add_model_button.click()
+
+            records = workspace.records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].inference_model, model_file.resolve())
+            self.assertTrue(records[0].can_convert)
+            page.close()
+
     def test_training_updates_global_processing_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             workspace = RvcModelWorkspace(root / "models")
             record = workspace.create_model("Voice One", root / "rvc")
             queue = ProcessingQueue()
-            page = ModelWorkspacePage(root / "rvc", workspace, queue)
+            execution_runtime = root / "managed-rvc"
+            page = ModelWorkspacePage(
+                root / "rvc",
+                workspace,
+                queue,
+                execution_runtime,
+            )
             page._open_model(record.model_id)
             dataset = ModelDataset(record.model_id, (_ready_dataset_item(root),))
 
-            def run_pipeline(*_args, progress, stage_callback, **_kwargs):
+            pipeline_roots: list[Path] = []
+
+            def run_pipeline(*args, progress, stage_callback, **_kwargs):
+                pipeline_roots.append(args[2])
                 stage_callback(RvcTrainingStage.TRAIN)
                 progress(72)
                 return SimpleNamespace(stopped=False)
@@ -76,6 +128,7 @@ class ModelWorkspacePageTests(unittest.TestCase):
             task = queue.tasks()[0]
             self.assertEqual(task.status, TASK_COMPLETED)
             self.assertEqual(task.progress, 100)
+            self.assertEqual(pipeline_roots, [execution_runtime.resolve()])
             self.assertIsNone(page._training_worker)
             page.close()
 

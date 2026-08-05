@@ -4,12 +4,13 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
-from jang_app.services.app_paths import AppPaths, STORAGE_LAYOUT_VERSION
+from jang_app.services.app_paths import (
+    INITIAL_SETUP_FILE_NAME,
+    INITIAL_SETUP_VERSION,
+    AppPaths,
+    STORAGE_LAYOUT_VERSION,
+)
 from jang_app.services.managed_files import write_json_atomic
-
-
-INITIAL_SETUP_VERSION = 1
-INITIAL_SETUP_FILE_NAME = "initial_setup.json"
 
 
 class InitialSetupError(RuntimeError):

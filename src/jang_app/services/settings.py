@@ -7,6 +7,11 @@ from pathlib import Path
 from jang_app.config import DEFAULT_RVC_ROOT, SEPARATION_OUTPUT_DIR, SETTINGS_FILE
 from jang_app.services.i18n import LANGUAGE_KOREAN, normalize_language
 
+RVC_DEVICE_AUTO = "auto"
+RVC_DEVICE_GPU = "gpu"
+RVC_DEVICE_CPU = "cpu"
+RVC_DEVICE_OPTIONS = (RVC_DEVICE_AUTO, RVC_DEVICE_GPU, RVC_DEVICE_CPU)
+
 
 @dataclass(frozen=True)
 class RvcSettings:
@@ -14,7 +19,7 @@ class RvcSettings:
     voice_model: str = ""
     index_file: str = ""
     pitch: int = 0
-    device: str = "cuda:0"
+    device: str = RVC_DEVICE_AUTO
     f0_method: str = "rmvpe"
 
 
@@ -45,7 +50,7 @@ def load_app_settings() -> AppSettings:
         voice_model=_string_from_data(rvc_data.get("voice_model"), default_settings.rvc.voice_model),
         index_file=_string_from_data(rvc_data.get("index_file"), default_settings.rvc.index_file),
         pitch=_int_from_data(rvc_data.get("pitch"), default_settings.rvc.pitch),
-        device=_string_from_data(rvc_data.get("device"), default_settings.rvc.device),
+        device=normalize_rvc_device(rvc_data.get("device")),
         f0_method="rmvpe",
     )
     return AppSettings(output_root=output_root, rvc=rvc, theme_mode=theme_mode, language=language)
@@ -92,3 +97,17 @@ def _theme_mode_from_data(value: object, default: str) -> str:
     if isinstance(value, str) and value in {"dark", "white"}:
         return value
     return default
+
+
+def normalize_rvc_device(value: object) -> str:
+    device = str(value or "").strip().lower()
+    if device in RVC_DEVICE_OPTIONS:
+        return device
+    if device.startswith("cuda") or device in {
+        "directml",
+        "dml",
+        "privateuseone",
+        "privateuseone:0",
+    }:
+        return RVC_DEVICE_GPU
+    return RVC_DEVICE_AUTO

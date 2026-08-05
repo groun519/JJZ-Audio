@@ -25,6 +25,13 @@ try {
     }
 
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $componentIds = @($manifest.components | Select-Object -ExpandProperty id)
+    foreach ($requiredProfile in @("cu128", "directml", "rocm-win")) {
+        $componentId = "rvc-runtime-$requiredProfile"
+        if ($componentId -notin $componentIds) {
+            throw "Required RVC profile is missing from the release: $componentId"
+        }
+    }
     $application = $manifest.components | Where-Object { $_.id -eq "application" }
     $installer = $application.artifacts | Select-Object -First 1
     if (-not $AllowUnsigned -and -not $installer.authenticode.required) {

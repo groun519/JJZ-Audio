@@ -34,7 +34,10 @@ class JobDiagnosticsTests(unittest.TestCase):
             self.assertEqual(summary["progress"], 42)
             self.assertEqual(summary["diagnostic_code"], classification.code)
             self.assertIn("runtime output", (Path(temporary) / "task-1" / "command.log").read_text(encoding="utf-8"))
-            self.assertIn("Task ID: task-1", diagnostics.build_report("task-1"))
+            report = diagnostics.build_report("task-1")
+            self.assertIn("Task ID: task-1", report)
+            self.assertIn("Command output tail:", report)
+            self.assertIn("runtime output", report)
 
     def test_redacts_command_secrets_and_url_queries(self) -> None:
         command = redact_command(
@@ -55,7 +58,16 @@ class JobDiagnosticsTests(unittest.TestCase):
 
     def test_classifies_common_runtime_failures(self) -> None:
         self.assertEqual(classify_error("CUDA out of memory").code, "CUDA_OUT_OF_MEMORY")
+        self.assertEqual(
+            classify_error("CUDA error: no kernel image is available for execution").code,
+            "CUDA_ARCHITECTURE_UNSUPPORTED",
+        )
         self.assertEqual(classify_error("No module named 'lib.train'").code, "PYTHON_MODULE_MISSING")
+        self.assertEqual(
+            classify_error("Could not run operator on privateuseone:0").code,
+            "DIRECTML_RUNTIME_FAILED",
+        )
+        self.assertEqual(classify_error("HIP runtime failure in ROCm").code, "ROCM_RUNTIME_FAILED")
         self.assertEqual(classify_error("unknown").code, "UNEXPECTED_ERROR")
 
 

@@ -5,6 +5,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from time import monotonic
 
 from PySide6.QtCore import QEvent, QProcess, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QIcon
@@ -33,6 +34,7 @@ from jang_app.config import (
     APP_NAME,
     APP_PATHS,
     LOG_FILE,
+    RVC_RUNTIME_DIR,
     SUPPORTED_AUDIO_EXTENSIONS,
     SUPPORTED_VIDEO_EXTENSIONS,
 )
@@ -58,6 +60,12 @@ from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
 from jang_app.qt_app.toast_stack import ToastStack
 from jang_app.qt_app.update_dialog import UpdateDialog
+from jang_app.qt_app.update_status_button import (
+    STATE_FAILED,
+    STATE_READY,
+    UpdateStatusButton,
+    update_button_position,
+)
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
 from jang_app.qt_app.video_preview_panel import VideoPreviewPanel
 from jang_app.qt_app.window_chrome import apply_window_corner_style
@@ -82,7 +90,7 @@ from jang_app.services.app_update import (
     UpdatePlan,
     create_update_plan,
     download_artifact,
-    fetch_release_manifest,
+    fetch_release_manifest_if_changed,
 )
 from jang_app.services.audio_export import export_audio_file
 from jang_app.services.audio_metadata import read_audio_metadata
@@ -91,21 +99,32 @@ from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.file_browser import open_in_file_browser
 from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language, tr
 from jang_app.services.job_diagnostics import get_job_diagnostics
+from jang_app.services.hardware_diagnostics_state import recorded_hardware_profile
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set, scan_output_sound_sets
 from jang_app.services.playback_queue import PlaybackQueue
 from jang_app.services.processing_queue import ProcessingQueue
 from jang_app.services.rvc_model_workspace import RvcModelRecord
+from jang_app.services.rvc_execution_runtime import settings_for_managed_rvc_runtime
 from jang_app.services.runtime_installation import (
-    install_runtime_packages,
+    installed_rvc_runtime_profile,
     installed_runtime_version,
 )
-from jang_app.services.settings import AppSettings, RvcSettings, save_app_settings
+from jang_app.services.runtime_bootstrap import install_update_runtime_components
+from jang_app.services.rvc_runtime_profile import detect_rvc_runtime_profile
+from jang_app.services.settings import (
+    RVC_DEVICE_OPTIONS,
+    AppSettings,
+    RvcSettings,
+    normalize_rvc_device,
+    save_app_settings,
+)
 from jang_app.services.song_metadata import build_song_display_metadata
 from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
 from jang_app.services.work_song import WorkSongStore
 from jang_app.services.video_source import VideoSource
 from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion, sort_song_items
 from jang_app.services.studio_session import StudioSession, StudioTrackState
+from jang_app.services.update_polling import UpdateCheckOutcome, UpdatePollingPolicy
 from jang_app.services.youtube_download import YouTubeDownloadResult, download_youtube_audio
 from jang_app.version import __version__
 
@@ -133,6 +152,15 @@ class MainWindow(QMainWindow):
         self._update_dialog: UpdateDialog | None = None
         self._downloaded_update: tuple[Path, ...] = ()
         self._downloaded_update_plan: UpdatePlan | None = None
+        self._available_update_plan: UpdatePlan | None = None
+        self._update_download_error = ""
+        self._update_manifest_etag = ""
+        self._update_manifest_last_modified = ""
+        self._update_polling_policy = UpdatePollingPolicy()
+        self._update_polling_enabled = bool(
+            getattr(sys, "frozen", False)
+            or os.environ.get("JJZERO_UPDATE_MANIFEST_URL")
+        )
         self._action_task_ids: dict[int, str] = {}
         self._song_items_by_id: dict[str, SongItem] = {}
         self.current_song: SongItem | None = None
@@ -158,6 +186,10 @@ class MainWindow(QMainWindow):
         self.playback_timer.setInterval(120)
         self.playback_timer.timeout.connect(self._sync_global_playback_state)
 
+        self.update_poll_timer = QTimer(self)
+        self.update_poll_timer.setSingleShot(True)
+        self.update_poll_timer.timeout.connect(self._start_update_check)
+
         self._build_ui()
         self._apply_theme()
         self._apply_language()
@@ -165,10 +197,14 @@ class MainWindow(QMainWindow):
         self._refresh_rvc_choices()
         self._refresh_output_sets()
         self._restore_work_song()
-        if getattr(sys, "frozen", False) or os.environ.get("JJZERO_UPDATE_MANIFEST_URL"):
-            QTimer.singleShot(2500, self._start_update_check)
+        application = QApplication.instance()
+        if application is not None:
+            application.applicationStateChanged.connect(self._on_application_state_changed)
+        if self._update_polling_enabled:
+            self.update_poll_timer.start(2500)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.update_poll_timer.stop()
         self.studio_session_autosave.flush()
         self.model_workspace_page.stop_preview()
         self.model_workspace_page.shutdown_training()
@@ -188,6 +224,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._position_floating_playback()
+        self._position_update_status()
         self._position_processing_queue()
         self._position_size_grip()
         if self.isVisible() and not self.isMaximized():
@@ -246,6 +283,9 @@ class MainWindow(QMainWindow):
         self.floating_playback_panel.dismiss_requested.connect(self._dismiss_floating_playback)
         self.floating_playback_panel.hide()
 
+        self.update_status_button = UpdateStatusButton(content_widget)
+        self.update_status_button.clicked.connect(self._open_available_update)
+
         self.processing_queue_panel = ProcessingQueuePanel(self.processing_queue, content_widget)
         self.processing_queue_panel.geometry_changed.connect(self._position_processing_queue)
         self.processing_queue_panel.log_requested.connect(self._open_log_drawer)
@@ -258,6 +298,7 @@ class MainWindow(QMainWindow):
         self.log_drawer.close_requested.connect(self._close_log_drawer)
         self.log_drawer.open_location_requested.connect(self._open_log_location)
         QTimer.singleShot(0, self._position_floating_playback)
+        QTimer.singleShot(0, self._position_update_status)
         QTimer.singleShot(0, self._position_processing_queue)
 
         root_layout.addWidget(content_widget, 1)
@@ -478,6 +519,8 @@ class MainWindow(QMainWindow):
         self.model_workspace_page = ModelWorkspacePage(
             self.settings.rvc.root,
             processing_queue=self.processing_queue,
+            execution_runtime_root=RVC_RUNTIME_DIR,
+            runtime_profile=recorded_hardware_profile(APP_PATHS),
         )
         self.model_workspace_page.use_in_convert_requested.connect(self._use_model_in_convert)
         self.model_workspace_page.open_location_requested.connect(self._open_model_location)
@@ -541,8 +584,8 @@ class MainWindow(QMainWindow):
         self.pitch_spin.valueChanged.connect(self._save_rvc_settings_from_controls)
 
         self.device_combo = ScrollSafeComboBox()
-        self.device_combo.addItems(["cuda:0", "cpu"])
-        selected_device = self.settings.rvc.device if self.settings.rvc.device in {"cuda:0", "cpu"} else "cuda:0"
+        self.device_combo.addItems(list(RVC_DEVICE_OPTIONS))
+        selected_device = normalize_rvc_device(self.settings.rvc.device)
         self.device_combo.setCurrentText(selected_device)
         self.device_combo.currentIndexChanged.connect(self._save_rvc_settings_from_controls)
 
@@ -631,6 +674,8 @@ class MainWindow(QMainWindow):
             self.workspace_dock.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "floating_playback_panel"):
             self.floating_playback_panel.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "update_status_button"):
+            self.update_status_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "processing_queue_panel"):
             self.processing_queue_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "toast_stack"):
@@ -670,6 +715,7 @@ class MainWindow(QMainWindow):
             action.setChecked(language == self.settings.language)
         self.workspace_dock.apply_language()
         self.floating_playback_panel.apply_language()
+        self.update_status_button.apply_language()
         self.processing_queue_panel.apply_language()
         self.toast_stack.apply_language()
         self.log_drawer.apply_language()
@@ -701,6 +747,26 @@ class MainWindow(QMainWindow):
         )
         panel.raise_()
 
+    def _position_update_status(self) -> None:
+        if not hasattr(self, "update_status_button"):
+            return
+        button = self.update_status_button
+        if not button.isVisible():
+            return
+        anchor_tops: list[int] = []
+        if self.workspace_dock.isVisible():
+            anchor_tops.append(self.workspace_dock.geometry().top())
+        if self.floating_playback_panel.isVisible():
+            anchor_tops.append(self.floating_playback_panel.geometry().top())
+        button.move(
+            *update_button_position(
+                self._content_widget.height(),
+                button.height(),
+                anchor_tops=tuple(anchor_tops),
+            )
+        )
+        button.raise_()
+
     def _sync_playback_surfaces(self) -> None:
         if not hasattr(self, "floating_playback_panel") or not hasattr(self, "workspace_dock"):
             return
@@ -712,6 +778,9 @@ class MainWindow(QMainWindow):
             queue is not None and (not is_workspace_page or queue.context == "library")
         )
         self._position_floating_playback()
+        position_update_status = getattr(self, "_position_update_status", None)
+        if callable(position_update_status):
+            position_update_status()
         self._position_processing_queue()
 
     def _position_processing_queue(self) -> None:
@@ -805,18 +874,47 @@ class MainWindow(QMainWindow):
             QApplication.quit()
 
     def _start_update_check(self) -> None:
-        if self._update_check_worker is not None:
+        if (
+            not self._update_polling_enabled
+            or self._update_check_worker is not None
+            or self._available_update_plan is not None
+        ):
             return
+        self.update_poll_timer.stop()
         manifest_url = os.environ.get("JJZERO_UPDATE_MANIFEST_URL", DEFAULT_MANIFEST_URL)
-        worker = TaskWorker(lambda progress: _check_for_updates(manifest_url, progress))
+        etag = self._update_manifest_etag
+        last_modified = self._update_manifest_last_modified
+        worker = TaskWorker(
+            lambda progress: _check_for_updates(
+                manifest_url,
+                progress,
+                etag=etag,
+                last_modified=last_modified,
+            )
+        )
         self._update_check_worker = worker
         self._workers.append(worker)
 
         def complete(result: object) -> None:
-            if isinstance(result, UpdatePlan) and result.required:
-                self._show_update_dialog(result)
+            self._update_polling_policy.record_success(monotonic())
+            if not isinstance(result, UpdateCheckOutcome):
+                return
+            self._update_manifest_etag = result.etag
+            self._update_manifest_last_modified = result.last_modified
+            plan = result.plan
+            if plan is not None and plan.required:
+                self._available_update_plan = plan
+                self.update_status_button.set_available(
+                    plan.release.version,
+                    runtime_only=not plan.application_required,
+                )
+                self.update_status_button.show()
+                self._position_update_status()
+            elif plan is not None:
+                self.update_status_button.hide()
 
         def failed(error: str) -> None:
+            self._update_polling_policy.record_failure(monotonic())
             self._logger.info("Automatic update check failed: %s", _last_error_line(error))
 
         def cleanup() -> None:
@@ -824,11 +922,39 @@ class MainWindow(QMainWindow):
             if worker in self._workers:
                 self._workers.remove(worker)
             worker.deleteLater()
+            self._schedule_next_update_check()
 
         worker.succeeded.connect(complete)
         worker.failed.connect(failed)
         worker.finished.connect(cleanup)
         worker.start()
+
+    def _schedule_next_update_check(self) -> None:
+        if not self._update_polling_enabled or self._available_update_plan is not None:
+            self.update_poll_timer.stop()
+            return
+        delay = self._update_polling_policy.next_delay_ms(
+            monotonic(),
+            QApplication.applicationState() == Qt.ApplicationState.ApplicationActive,
+        )
+        self.update_poll_timer.start(max(1, delay))
+
+    def _on_application_state_changed(self, state: Qt.ApplicationState) -> None:
+        if not self._update_polling_enabled or self._available_update_plan is not None:
+            return
+        if self._update_polling_policy.last_checked_at is None:
+            return
+        if (
+            state == Qt.ApplicationState.ApplicationActive
+            and self._update_polling_policy.should_check_on_activation(monotonic())
+        ):
+            self.update_poll_timer.start(1)
+            return
+        self._schedule_next_update_check()
+
+    def _open_available_update(self) -> None:
+        if self._available_update_plan is not None:
+            self._show_update_dialog(self._available_update_plan)
 
     def _show_update_dialog(self, plan: UpdatePlan) -> None:
         if self._update_dialog is not None:
@@ -846,6 +972,12 @@ class MainWindow(QMainWindow):
         dialog.download_requested.connect(lambda: self._start_update_download(plan))
         dialog.install_requested.connect(self._install_downloaded_update)
         dialog.finished.connect(lambda _result: self._clear_update_dialog(dialog))
+        if self.update_status_button.state == STATE_READY and self._downloaded_update:
+            dialog.set_ready_to_install()
+        elif self.update_status_button.state == STATE_FAILED:
+            dialog.set_download_failed(
+                self._update_download_error or tr("The update installer is unavailable.")
+            )
         dialog.show()
 
     def _clear_update_dialog(self, dialog: UpdateDialog) -> None:
@@ -858,6 +990,8 @@ class MainWindow(QMainWindow):
         if dialog is None:
             return
         dialog.set_downloading()
+        self._update_download_error = ""
+        self.update_status_button.set_downloading()
         worker = TaskWorker(
             lambda progress: _download_update_artifacts(plan, APP_PATHS.cache_dir, progress)
         )
@@ -871,12 +1005,18 @@ class MainWindow(QMainWindow):
             self._downloaded_update = paths
             self._downloaded_update_plan = plan
             if not paths:
-                dialog.set_download_failed(tr("No update installer was downloaded."))
+                self._set_update_download_failed(
+                    dialog,
+                    tr("No update installer was downloaded."),
+                )
                 return
             dialog.set_ready_to_install()
+            self.update_status_button.set_ready()
 
         def failed(error: str) -> None:
-            dialog.set_download_failed(_last_error_line(error))
+            self._set_update_download_failed(dialog, _last_error_line(error))
+
+        worker.progress_changed.connect(self.update_status_button.set_progress)
 
         self._run_worker(
             worker,
@@ -887,19 +1027,24 @@ class MainWindow(QMainWindow):
             task_detail=f"JJZero Audio {plan.release.version}",
         )
 
+    def _set_update_download_failed(self, dialog: UpdateDialog, error: str) -> None:
+        self._update_download_error = error
+        self.update_status_button.set_failed()
+        dialog.set_download_failed(error)
+
     def _install_downloaded_update(self) -> None:
         plan = self._downloaded_update_plan
         if plan is None:
             return
-        runtime = plan.release.ai_runtime
         runtime_packages = tuple(
             path for path in self._downloaded_update if path.suffix.lower() == ".zip"
         )
-        if plan.runtime_required and runtime is not None:
+        if plan.runtime_required or plan.rvc_profile_required:
             if not runtime_packages:
                 if self._update_dialog is not None:
-                    self._update_dialog.set_download_failed(
-                        tr("AI runtime packages are unavailable.")
+                    self._set_update_download_failed(
+                        self._update_dialog,
+                        tr("AI runtime packages are unavailable."),
                     )
                 return
             self.player.stop()
@@ -909,20 +1054,27 @@ class MainWindow(QMainWindow):
                 return
             dialog.set_installing_runtime()
             worker = TaskWorker(
-                lambda progress: install_runtime_packages(
-                    runtime_packages,
+                lambda progress: install_update_runtime_components(
+                    plan,
+                    self._downloaded_update,
                     APP_PATHS.runtime_root,
-                    runtime.version,
                     progress=progress,
                 )
             )
             self._run_worker(
                 worker,
                 lambda _result: self._launch_downloaded_installer_or_restart(),
-                lambda error: dialog.set_download_failed(_last_error_line(error)),
+                lambda error: self._set_update_download_failed(
+                    dialog,
+                    _last_error_line(error),
+                ),
                 dialog,
                 task_title="Install AI Runtime",
-                task_detail=f"Runtime {runtime.version}",
+                task_detail=(
+                    f"RVC {plan.rvc_profile}"
+                    if plan.rvc_profile_required and not plan.runtime_required
+                    else f"Runtime {plan.release.ai_runtime.version if plan.release.ai_runtime else ''}"
+                ),
             )
             return
         self._launch_downloaded_installer_or_restart()
@@ -943,8 +1095,9 @@ class MainWindow(QMainWindow):
                     QApplication.quit()
                     return
             if self._update_dialog is not None:
-                self._update_dialog.set_download_failed(
-                    tr("The update installer is unavailable.")
+                self._set_update_download_failed(
+                    self._update_dialog,
+                    tr("The update installer is unavailable."),
                 )
             return
         arguments = (
@@ -956,8 +1109,9 @@ class MainWindow(QMainWindow):
         )
         if not QProcess.startDetached(str(installer), list(arguments), str(installer.parent)):
             if self._update_dialog is not None:
-                self._update_dialog.set_download_failed(
-                    tr("Could not start the update installer.")
+                self._set_update_download_failed(
+                    self._update_dialog,
+                    tr("Could not start the update installer."),
                 )
             return
         QApplication.quit()
@@ -1890,7 +2044,10 @@ class MainWindow(QMainWindow):
         self.rvc_action.set_status("Converting")
         sound_set = self.current_output_set
         scope = WorkTaskScope(self.current_work_item.id)
-        settings = self.settings.rvc
+        settings = settings_for_managed_rvc_runtime(
+            self.settings.rvc,
+            RVC_RUNTIME_DIR,
+        )
         worker = TaskWorker(
             lambda progress: _convert_with_progress(
                 sound_set.vocals_path,
@@ -2526,15 +2683,49 @@ class MainWindow(QMainWindow):
         worker.start()
 
 
-def _check_for_updates(manifest_url: str, progress: Callable[[int], None]) -> UpdatePlan:
+def _check_for_updates(
+    manifest_url: str,
+    progress: Callable[[int], None],
+    *,
+    etag: str = "",
+    last_modified: str = "",
+) -> UpdateCheckOutcome:
     progress(10)
-    release = fetch_release_manifest(manifest_url)
+    check = fetch_release_manifest_if_changed(
+        manifest_url,
+        etag=etag,
+        last_modified=last_modified,
+    )
     progress(100)
+    if check.release is None:
+        return UpdateCheckOutcome(
+            None,
+            check.etag,
+            check.last_modified,
+            check.not_modified,
+        )
     runtime_version = installed_runtime_version(APP_PATHS.runtime_root)
-    return create_update_plan(
-        release,
-        runtime_version=runtime_version,
-        runtime_ready=runtime_version is not None,
+    profile = installed_rvc_runtime_profile(APP_PATHS.runtime_root / "rvc")
+    return UpdateCheckOutcome(
+        create_update_plan(
+            check.release,
+            runtime_version=runtime_version,
+            runtime_ready=runtime_version is not None,
+            desired_rvc_profile=detect_rvc_runtime_profile(),
+            installed_rvc_profile=profile.profile if profile else "",
+            installed_rvc_profile_version=profile.version if profile else "",
+            installed_rvc_preferred_profile=profile.preferred_profile if profile else "",
+            installed_rvc_preferred_version=profile.preferred_version if profile else "",
+            installed_rvc_failed_fallback_profile=(
+                profile.failed_fallback_profile if profile else ""
+            ),
+            installed_rvc_failed_fallback_version=(
+                profile.failed_fallback_version if profile else ""
+            ),
+        ),
+        check.etag,
+        check.last_modified,
+        check.not_modified,
     )
 
 

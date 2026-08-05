@@ -255,6 +255,12 @@ def _stylesheet(
             border-radius: 12px;
         }}
 
+        QFrame#WindowControlGroup[compactControls="true"] {{
+            background: transparent;
+            border: 0;
+            border-radius: 0;
+        }}
+
         QFrame#TitleBarControlDivider {{
             background: {border};
             border: 0;
@@ -408,6 +414,18 @@ def _stylesheet(
         QSpinBox#TrainingSpinBox {{
             min-height: 34px;
             max-height: 34px;
+        }}
+
+        QLabel#TrainingDeviceValue {{
+            min-height: 34px;
+            max-height: 34px;
+            padding: 0 11px;
+            color: {text};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 9px;
+            font-size: 11px;
+            font-weight: 800;
         }}
 
         QCheckBox#TrainingFreshCheck {{
@@ -1553,6 +1571,34 @@ def _stylesheet(
             background: transparent;
         }}
 
+        QPushButton#ModelAddButton {{
+            min-height: 32px;
+            padding: 0 14px;
+            border-radius: 9px;
+            font-weight: 800;
+        }}
+
+        QPushButton#ModelAddChoice, QPushButton#ModelAddOption {{
+            text-align: left;
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-weight: 800;
+        }}
+
+        QPushButton#ModelAddChoice:hover,
+        QPushButton#ModelAddChoice[pointerState="hover"],
+        QPushButton#ModelAddOption:hover,
+        QPushButton#ModelAddOption[pointerState="hover"] {{
+            background: {hover};
+            border-color: {focus};
+        }}
+
+        QPushButton#ModelAddOption:checked {{
+            color: {accent_text};
+            background: {accent};
+            border-color: {accent};
+        }}
+
         QPushButton#ModelWorkspaceBackButton {{
             min-width: 34px;
             max-width: 34px;
@@ -1844,8 +1890,8 @@ def _stylesheet(
         QPushButton#WindowControlButton, QPushButton#WindowCloseButton {{
             min-width: 30px;
             max-width: 30px;
-            min-height: 26px;
-            max-height: 26px;
+            min-height: 30px;
+            max-height: 30px;
             padding: 0;
             border: 0;
             border-radius: 8px;

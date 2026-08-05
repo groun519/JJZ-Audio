@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from jang_app.runtime_version import RVC_RUNTIME_PROFILE_VERSIONS
 from scripts.create_release_manifest import create_release_manifest
 
 
@@ -63,6 +64,100 @@ class ReleaseManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(FileNotFoundError):
                 create_release_manifest(Path(temporary), "0.1.0")
+
+    def test_manifest_includes_optional_cu128_runtime_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.2.2-Setup.exe").write_bytes(b"installer")
+            package = release / "JJZero-RVC-cu128-1-part01.zip"
+            package.write_bytes(b"cu128")
+            (release / "rvc-runtime-cu128-packages.json").write_text(
+                json.dumps(
+                    {
+                        "component": "rvc-runtime-cu128",
+                        "version": "1",
+                        "artifacts": [
+                            {
+                                "name": package.name,
+                                "size": package.stat().st_size,
+                                "sha256": hashlib.sha256(b"cu128").hexdigest(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = create_release_manifest(release, "0.2.2")
+
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            profile = next(
+                component
+                for component in data["components"]
+                if component["id"] == "rvc-runtime-cu128"
+            )
+            self.assertEqual(profile["version"], "1")
+
+    def test_manifest_includes_optional_amd_runtime_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.2.2-Setup.exe").write_bytes(b"installer")
+            for profile in ("directml", "rocm-win"):
+                version = RVC_RUNTIME_PROFILE_VERSIONS[profile]
+                package = release / f"JJZero-RVC-{profile}-{version}-part01.zip"
+                package.write_bytes(profile.encode())
+                (release / f"rvc-runtime-{profile}-packages.json").write_text(
+                    json.dumps(
+                        {
+                            "component": f"rvc-runtime-{profile}",
+                            "version": version,
+                            "artifacts": [
+                                {
+                                    "name": package.name,
+                                    "size": package.stat().st_size,
+                                    "sha256": hashlib.sha256(profile.encode()).hexdigest(),
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            manifest = create_release_manifest(release, "0.2.2")
+
+            component_ids = {
+                component["id"]
+                for component in json.loads(manifest.read_text(encoding="utf-8"))["components"]
+            }
+            self.assertIn("rvc-runtime-directml", component_ids)
+            self.assertIn("rvc-runtime-rocm-win", component_ids)
+
+    def test_rocm_release_requires_a_directml_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.2.2-Setup.exe").write_bytes(b"installer")
+            version = RVC_RUNTIME_PROFILE_VERSIONS["rocm-win"]
+            package = release / f"JJZero-RVC-rocm-win-{version}-part01.zip"
+            package.write_bytes(b"rocm")
+            (release / "rvc-runtime-rocm-win-packages.json").write_text(
+                json.dumps(
+                    {
+                        "component": "rvc-runtime-rocm-win",
+                        "version": version,
+                        "artifacts": [
+                            {
+                                "name": package.name,
+                                "size": package.stat().st_size,
+                                "sha256": hashlib.sha256(b"rocm").hexdigest(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "DirectML fallback"):
+                create_release_manifest(release, "0.2.2")
 
     def test_rejects_runtime_index_when_package_changed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

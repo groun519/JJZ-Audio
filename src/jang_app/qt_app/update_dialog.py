@@ -45,7 +45,7 @@ class UpdateDialog(AppDialog):
 
         title = QLabel(tr("Update Available"))
         title.setObjectName("SectionTitle")
-        versions = QLabel(f"{current_version}  ->  {self._plan.release.version}")
+        versions = QLabel(self._version_text(current_version))
         versions.setObjectName("MutedText")
         detail = QLabel(self._detail_text())
         detail.setObjectName("BodyText")
@@ -125,10 +125,24 @@ class UpdateDialog(AppDialog):
         self.status.show()
 
     def _detail_text(self) -> str:
-        details = [tr("A new application version is ready.")]
+        details = (
+            [tr("A new application version is ready.")]
+            if self._plan.application_required
+            else []
+        )
         if self._plan.runtime_required:
             details.append(tr("This release also updates the AI runtime."))
+        if self._plan.rvc_profile_required:
+            details.append(tr("The RVC runtime will be configured for the detected GPU."))
         return "\n".join(details)
+
+    def _version_text(self, current_version: str) -> str:
+        if self._plan.application_required:
+            return f"{current_version}  ->  {self._plan.release.version}"
+        if self._plan.rvc_profile_required:
+            return f"{tr('GPU Runtime')}  ->  {self._plan.rvc_profile.upper()}"
+        runtime = self._plan.release.ai_runtime
+        return f"{tr('AI Runtime')}  ->  {runtime.version if runtime is not None else ''}"
 
     def reject(self) -> None:
         if not self._is_downloading:

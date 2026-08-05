@@ -6,7 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from jang_app.pipeline.rvc_convert import list_index_files, list_voice_models
-from jang_app.services.settings import AppSettings, RvcSettings, save_app_settings
+from jang_app.services.settings import AppSettings, RVC_DEVICE_OPTIONS, RvcSettings, save_app_settings
 
 
 class OutputSettingsDialog(tk.Toplevel):
@@ -94,7 +94,7 @@ class OutputSettingsDialog(tk.Toplevel):
         ttk.Entry(panel, textvariable=self._pitch, width=12).grid(row=6, column=1, sticky="w", pady=(8, 0))
 
         ttk.Label(panel, text="Device", style="Panel.TLabel").grid(row=7, column=0, sticky="w", padx=(0, 12), pady=(8, 0))
-        ttk.Combobox(panel, textvariable=self._device, values=["cuda:0", "cpu"], width=12).grid(
+        ttk.Combobox(panel, textvariable=self._device, values=RVC_DEVICE_OPTIONS, width=12).grid(
             row=7,
             column=1,
             sticky="w",
@@ -154,7 +154,7 @@ class OutputSettingsDialog(tk.Toplevel):
                 voice_model=self._voice_model.get().strip(),
                 index_file=self._index_file.get().strip(),
                 pitch=pitch,
-                device=self._device.get().strip() or "cuda:0",
+                device=self._device.get().strip() or "auto",
                 f0_method="rmvpe",
             ),
         )

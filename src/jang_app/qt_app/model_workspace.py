@@ -23,6 +23,12 @@ from PySide6.QtWidgets import (
 )
 
 from jang_app.config import APP_ICON_PATH
+from jang_app.qt_app.model_add_dialog import (
+    ModelAddAction,
+    ModelAddDialog,
+    ModelImportMode,
+    ModelImportSource,
+)
 from jang_app.qt_app.model_badge import set_model_badge
 from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
 from jang_app.qt_app.model_detail_panel import ModelDetailPanel, ModelProfileValues
@@ -54,6 +60,13 @@ from jang_app.services.rvc_training_pipeline import (
 )
 from jang_app.services.rvc_training_state import RvcTrainingState, RvcTrainingStateStore
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
+from jang_app.services.runtime_installation import installed_rvc_runtime_profile
+from jang_app.services.rvc_hardware import RvcComputeBackend
+from jang_app.services.rvc_runtime_profile import (
+    RVC_PROFILE_DIRECTML,
+    normalize_rvc_profile,
+)
+from jang_app.services.rvc_training_runtime import training_backend_for_profile
 
 
 @dataclass(frozen=True)
@@ -72,10 +85,16 @@ class ModelWorkspacePage(QWidget):
         initial_folder: Path,
         workspace: RvcModelWorkspace | None = None,
         processing_queue: ProcessingQueue | None = None,
+        execution_runtime_root: Path | None = None,
+        runtime_profile: str = "",
     ) -> None:
         super().__init__()
         self._initial_folder = initial_folder.expanduser()
+        self._execution_runtime_root = (
+            execution_runtime_root or initial_folder
+        ).expanduser().resolve()
         self._workspace = workspace or RvcModelWorkspace()
+        self._runtime_profile = runtime_profile
         self._records_by_id: dict[str, RvcModelRecord] = {}
         self._rows_by_id: dict[str, ModelListRow] = {}
         self._selected_model_id: str | None = None
@@ -98,7 +117,23 @@ class ModelWorkspacePage(QWidget):
         self._training_runtime_timer.timeout.connect(self._refresh_training_runtime)
 
         self._build_ui()
+        self._configure_training_backend()
         self.refresh_models()
+
+    def _configure_training_backend(self) -> None:
+        installed = installed_rvc_runtime_profile(self._execution_runtime_root)
+        profile = normalize_rvc_profile(
+            self._runtime_profile or (installed.profile if installed is not None else "")
+        )
+        inference_backend = (
+            RvcComputeBackend.DIRECTML
+            if profile == RVC_PROFILE_DIRECTML
+            else training_backend_for_profile(profile)
+        )
+        self.training_panel.set_compute_backends(
+            inference_backend,
+            training_backend_for_profile(profile),
+        )
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -135,40 +170,14 @@ class ModelWorkspacePage(QWidget):
     def _build_library_controls(self) -> QFrame:
         controls = QFrame()
         controls.setObjectName("Panel")
-        controls.setMinimumWidth(330)
-        controls.setMaximumWidth(390)
+        controls.setMinimumWidth(270)
+        controls.setMaximumWidth(320)
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(20, 20, 20, 20)
         controls_layout.setSpacing(16)
 
         heading = QLabel("Models")
         heading.setObjectName("SectionTitle")
-
-        add_card = QFrame()
-        add_card.setObjectName("InsetCard")
-        add_layout = QVBoxLayout(add_card)
-        add_layout.setContentsMargins(16, 16, 16, 16)
-        add_layout.setSpacing(12)
-
-        add_title = QLabel("Model Setup")
-        add_title.setObjectName("CardTitle")
-
-        self.new_model_button = FeedbackButton("New Model")
-        self.new_model_button.setObjectName("PrimaryButton")
-        self.new_model_button.clicked.connect(self._create_model)
-        self.link_button = FeedbackButton("Link Folder")
-        self.link_button.clicked.connect(self._choose_link_folder)
-        self.import_button = FeedbackButton("Import Copy")
-        self.import_button.clicked.connect(self._choose_import_folder)
-
-        add_actions = QHBoxLayout()
-        add_actions.setContentsMargins(0, 0, 0, 0)
-        add_actions.setSpacing(8)
-        add_actions.addWidget(self.link_button, 1)
-        add_actions.addWidget(self.import_button, 1)
-        add_layout.addWidget(add_title)
-        add_layout.addWidget(self.new_model_button)
-        add_layout.addLayout(add_actions)
 
         summary = QFrame()
         summary.setObjectName("ModelSummaryCard")
@@ -187,7 +196,6 @@ class ModelWorkspacePage(QWidget):
         summary_layout.addWidget(_summary_label("Managed"), 1, 2)
 
         controls_layout.addWidget(heading)
-        controls_layout.addWidget(add_card)
         controls_layout.addWidget(summary)
         controls_layout.addStretch(1)
         return controls
@@ -203,12 +211,16 @@ class ModelWorkspacePage(QWidget):
         library_heading.setContentsMargins(0, 0, 0, 0)
         title = QLabel("Model Library")
         title.setObjectName("SectionTitle")
+        self.add_model_button = FeedbackButton("Add Model")
+        self.add_model_button.setObjectName("ModelAddButton")
+        self.add_model_button.clicked.connect(self._show_add_model_dialog)
         self.refresh_button = SvgIconButton("refresh", size=30)
         self.refresh_button.setObjectName("ModelIconButton")
         self.refresh_button.setToolTip("Refresh models")
         self.refresh_button.clicked.connect(self.refresh_models)
         library_heading.addWidget(title)
         library_heading.addStretch(1)
+        library_heading.addWidget(self.add_model_button)
         library_heading.addWidget(self.refresh_button)
 
         list_surface = QFrame()
@@ -446,6 +458,50 @@ class ModelWorkspacePage(QWidget):
         self._navigate_model_section(1)
         self.show_status("Model created.")
 
+    def _show_add_model_dialog(self) -> None:
+        request = ModelAddDialog.get_request(
+            self,
+            APP_ICON_PATH,
+            theme_mode=self._theme_mode,
+        )
+        if request is None:
+            return
+        if request.action == ModelAddAction.CREATE:
+            self._create_model()
+            return
+        if request.source == ModelImportSource.INFERENCE_FILE:
+            self._choose_inference_file(request.mode)
+            return
+        if request.mode == ModelImportMode.LINKED:
+            self._choose_link_folder()
+        else:
+            self._choose_import_folder()
+
+    def _choose_inference_file(self, mode: ModelImportMode) -> None:
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            tr("Select RVC Inference Model"),
+            str(self._initial_folder),
+            tr("RVC Inference Model (*.pth)"),
+        )
+        if not selected:
+            return
+        model_file = Path(selected)
+        if mode == ModelImportMode.MANAGED:
+            self._start_import_task(
+                lambda progress: [self._workspace.import_inference_file(model_file, progress)]
+            )
+            return
+        try:
+            record = self._workspace.link_inference_file(model_file)
+        except Exception as exc:
+            self.show_status(f"Link failed: {_last_error_line(exc)}")
+            return
+        self._selected_model_id = record.model_id
+        self.refresh_models()
+        index_status = "Index detected." if record.has_index else "PTH-only inference model."
+        self.show_status(f"Linked {record.title}. {index_status}")
+
     def _choose_link_folder(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, tr("Select RVC Model Folder"), str(self._initial_folder))
         if not selected:
@@ -485,13 +541,18 @@ class ModelWorkspacePage(QWidget):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        self._start_import(folder)
+        self._start_import_task(
+            lambda progress: self._workspace.import_folder(folder, progress)
+        )
 
-    def _start_import(self, folder: Path) -> None:
+    def _start_import_task(
+        self,
+        task: Callable[[Callable[[int], None]], object],
+    ) -> None:
         self._set_busy(True)
         self.import_progress.setValue(0)
         self.show_status("Importing model files...")
-        worker = TaskWorker(lambda progress: self._workspace.import_folder(folder, progress))
+        worker = TaskWorker(task)
         worker.setParent(self)
         worker.progress_changed.connect(self.import_progress.setValue)
         worker.succeeded.connect(self._on_import_succeeded)
@@ -518,9 +579,7 @@ class ModelWorkspacePage(QWidget):
             worker.deleteLater()
 
     def _set_busy(self, is_busy: bool) -> None:
-        self.new_model_button.setDisabled(is_busy)
-        self.link_button.setDisabled(is_busy)
-        self.import_button.setDisabled(is_busy)
+        self.add_model_button.setDisabled(is_busy)
         self.refresh_button.setDisabled(is_busy)
         self.workspace_back_button.setDisabled(is_busy)
         selected = self._selected_record()
@@ -689,7 +748,7 @@ class ModelWorkspacePage(QWidget):
         pipeline = run_rvc_training_pipeline(
             record.model_id,
             layout,
-            record.runtime_root,
+            self._execution_runtime_root,
             dataset,
             settings,
             cancellation=cancellation,
@@ -705,7 +764,7 @@ class ModelWorkspacePage(QWidget):
             self._workspace,
             record.model_id,
             layout,
-            record.runtime_root,
+            self._execution_runtime_root,
         )
         return _ModelTrainingJobResult(pipeline, finalized)
 

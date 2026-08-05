@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from jang_app.services.rvc_training_train import (
     RvcTrainingRunSettings,
     train_rvc_model,
 )
+from jang_app.services.rvc_training_runtime import RvcTrainingRuntimeInspection
 from tests.test_rvc_training_extract import _ready_runtime
 from tests.test_rvc_training_filelist import _ready_extraction
 
@@ -71,6 +73,42 @@ class RvcTrainingRunTests(unittest.TestCase):
             self.assertEqual(result.state.current_epoch, 20)
             self.assertEqual(progress[-1], 100)
             self.assertFalse((runtime / "weights" / "voice.pth").exists())
+
+    def test_cpu_training_disables_half_precision_and_gpu_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            (runtime / "configs" / "40k.json").write_text(
+                json.dumps({"train": {"fp16_run": True}}),
+                encoding="utf-8",
+            )
+
+            def cpu_runtime(root, check_cuda=False):
+                return RvcTrainingRuntimeInspection(
+                    Path(root).resolve(),
+                    (),
+                    cuda_available=False,
+                    cpu_ready=True,
+                )
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                config = json.loads(
+                    (layout.root / "configs" / "40k.json").read_text(encoding="utf-8")
+                )
+                self.assertFalse(config["train"]["fp16_run"])
+                self.assertEqual(_argument(args, "-c"), "0")
+                _write_training_success(layout, output_callback, target_epoch=20)
+                return CommandResult(args, 2333333, "", "Training is done.")
+
+            result = train_rvc_model(
+                model_id,
+                layout,
+                runtime,
+                RvcTrainingRunSettings(cache_in_gpu=True),
+                command_runner=runner,
+                runtime_inspector=cpu_runtime,
+            )
+
+            self.assertTrue(result.completed)
 
     def test_existing_checkpoint_pair_is_resumed_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

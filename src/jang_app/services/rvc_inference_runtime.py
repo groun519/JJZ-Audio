@@ -9,6 +9,13 @@ from functools import lru_cache
 from pathlib import Path
 
 from jang_app.services.rvc_environment import build_rvc_environment
+from jang_app.services.rvc_cuda_compatibility import (
+    cuda_architecture_error,
+    parse_cuda_arch_list,
+    parse_cuda_capability,
+)
+from jang_app.services.rvc_hardware import RvcComputeBackend
+from jang_app.services.rvc_runtime_profile import RVC_PROFILE_DIRECTML
 
 
 @dataclass(frozen=True)
@@ -23,10 +30,35 @@ class RvcInferenceCapabilities:
     torch_version: str = ""
     cpu_detail: str = ""
     cuda_detail: str = ""
+    cuda_version: str = ""
+    device_capability: tuple[int, int] = ()
+    cuda_arch_list: tuple[str, ...] = ()
+    hip_version: str = ""
+    directml_available: bool = False
+    directml_ready: bool = False
+    directml_device: str = "privateuseone:0"
+    directml_device_name: str = ""
+    directml_detail: str = ""
 
     @property
     def runtime_ready(self) -> bool:
         return self.imports_ready and self.cpu_ready and self.faiss_ready
+
+    @property
+    def accelerator_backend(self) -> RvcComputeBackend:
+        if self.directml_ready:
+            return RvcComputeBackend.DIRECTML
+        if self.cuda_ready:
+            return RvcComputeBackend.ROCM if self.hip_version else RvcComputeBackend.CUDA
+        return RvcComputeBackend.CPU
+
+    @property
+    def accelerator_ready(self) -> bool:
+        return self.directml_ready or self.cuda_ready
+
+    @property
+    def accelerator_detail(self) -> str:
+        return self.directml_detail if self.directml_available else self.cuda_detail
 
 
 @dataclass(frozen=True)
@@ -64,19 +96,35 @@ def select_rvc_inference_device(
         detail = capabilities.cpu_detail or "CPU inference or FAISS validation failed."
         raise RvcInferenceRuntimeError(f"RVC inference runtime is not compatible with this PC: {detail}")
 
-    requested = requested_device.strip().lower() or "cpu"
+    requested = requested_device.strip().lower() or "auto"
     if requested == "cpu":
         return RvcDeviceSelection(requested, "cpu", capabilities)
 
+    if requested in {"directml", "dml", "privateuseone", "privateuseone:0"}:
+        if capabilities.directml_ready:
+            return RvcDeviceSelection(requested, capabilities.directml_device, capabilities)
+        reason = capabilities.directml_detail or "DirectML is unavailable; using CPU."
+        return RvcDeviceSelection(requested, "cpu", capabilities, reason)
+
     match = re.fullmatch(r"cuda(?::(?P<index>\d+))?", requested)
-    if match is None:
+    is_automatic = requested in {"auto", "gpu", "accelerator"}
+    if match is None and not is_automatic:
         return RvcDeviceSelection(requested, "cpu", capabilities, "Unsupported device setting; using CPU.")
 
-    index = int(match.group("index") or 0)
+    if capabilities.directml_ready:
+        return RvcDeviceSelection(requested, capabilities.directml_device, capabilities)
+
+    if capabilities.device_capability >= (12, 0) and not capabilities.cuda_ready:
+        detail = capabilities.cuda_detail or (
+            "RTX 50-series CUDA validation failed. Install or repair the cu128 AI runtime."
+        )
+        raise RvcInferenceRuntimeError(detail)
+
+    index = int(match.group("index") or 0) if match is not None else 0
     if capabilities.cuda_ready and index < capabilities.device_count:
         return RvcDeviceSelection(requested, f"cuda:{index}", capabilities)
 
-    reason = capabilities.cuda_detail or "CUDA is unavailable; using CPU."
+    reason = capabilities.accelerator_detail or "GPU acceleration is unavailable; using CPU."
     return RvcDeviceSelection(requested, "cpu", capabilities, reason)
 
 
@@ -108,21 +156,63 @@ def _probe_rvc_inference_runtime_cached(rvc_root: str) -> RvcInferenceCapabiliti
             cuda_detail="CUDA check was skipped.",
         )
 
-    cuda_result = _run_probe(python, root, _CUDA_PROBE)
-    cuda_data, cuda_error = _parse_probe_result(cuda_result, "CUDA inference")
+    profile = _installed_profile(root)
+    accelerator_label = "DirectML inference" if profile == RVC_PROFILE_DIRECTML else "CUDA inference"
+    accelerator_script = _DIRECTML_PROBE if profile == RVC_PROFILE_DIRECTML else _CUDA_PROBE
+    cuda_result = _run_probe(python, root, accelerator_script)
+    cuda_data, cuda_error = _parse_probe_result(cuda_result, accelerator_label)
     cuda_data = cuda_data or {}
+    torch_version = str(cpu_data.get("torch_version", "")).strip()
+    cuda_version = str(cuda_data.get("cuda_version", "")).strip()
+    device_capability = parse_cuda_capability(cuda_data.get("device_capability"))
+    cuda_arch_list = parse_cuda_arch_list(cuda_data.get("cuda_arch_list"))
+    directml_profile = profile == RVC_PROFILE_DIRECTML
+    cuda_ready = bool(cuda_data.get("cuda_ready")) if not directml_profile else False
+    cuda_detail = cuda_error or str(cuda_data.get("detail", "")).strip()
+    compatibility_error = cuda_architecture_error(
+        torch_version,
+        cuda_version,
+        device_capability,
+        cuda_arch_list,
+    )
+    if compatibility_error and not directml_profile:
+        cuda_ready = False
+        cuda_detail = " ".join(filter(None, (compatibility_error, cuda_detail, "Using CPU.")))
     return RvcInferenceCapabilities(
         imports_ready=bool(cpu_data.get("imports_ready")),
         cpu_ready=bool(cpu_data.get("cpu_ready")),
         faiss_ready=bool(cpu_data.get("faiss_ready")),
         cuda_available=bool(cuda_data.get("cuda_available")),
-        cuda_ready=bool(cuda_data.get("cuda_ready")),
+        cuda_ready=cuda_ready,
         device_count=_safe_int(cuda_data.get("device_count")),
         device_name=str(cuda_data.get("device_name", "")).strip(),
-        torch_version=str(cpu_data.get("torch_version", "")).strip(),
+        torch_version=torch_version,
         cpu_detail=str(cpu_data.get("detail", "")).strip(),
-        cuda_detail=cuda_error or str(cuda_data.get("detail", "")).strip(),
+        cuda_detail=cuda_detail,
+        cuda_version=cuda_version,
+        device_capability=device_capability,
+        cuda_arch_list=cuda_arch_list,
+        hip_version=str(cuda_data.get("hip_version", "")).strip(),
+        directml_available=bool(cuda_data.get("directml_available")),
+        directml_ready=bool(cuda_data.get("directml_ready")),
+        directml_device=str(cuda_data.get("directml_device", "privateuseone:0")).strip()
+        or "privateuseone:0",
+        directml_device_name=str(cuda_data.get("device_name", "")).strip(),
+        directml_detail=(
+            cuda_error or str(cuda_data.get("detail", "")).strip()
+            if directml_profile
+            else ""
+        ),
     )
+
+
+def _installed_profile(root: Path) -> str:
+    state = root / "runtime" / "jjzero-runtime-profile.json"
+    try:
+        data = json.loads(state.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(data.get("profile", "")).strip().lower() if isinstance(data, dict) else ""
 
 
 @dataclass(frozen=True)
@@ -232,6 +322,10 @@ result = {
     "cuda_ready": False,
     "device_count": 0,
     "device_name": "",
+    "cuda_version": "",
+    "device_capability": [],
+    "cuda_arch_list": [],
+    "hip_version": "",
     "detail": "",
 }
 try:
@@ -239,12 +333,61 @@ try:
 
     result["cuda_available"] = bool(torch.cuda.is_available())
     result["device_count"] = int(torch.cuda.device_count())
+    result["cuda_version"] = str(torch.version.cuda or "")
+    result["hip_version"] = str(getattr(torch.version, "hip", "") or "")
+    result["cuda_arch_list"] = list(torch.cuda.get_arch_list())
     if result["cuda_available"] and result["device_count"]:
         result["device_name"] = torch.cuda.get_device_name(0)
+        result["device_capability"] = list(torch.cuda.get_device_capability(0))
         left = torch.arange(1024, dtype=torch.float32, device="cuda:0").reshape(32, 32)
         product = left @ left.T
+        conv1d = torch.nn.Conv1d(4, 8, kernel_size=3, padding=1).to("cuda:0")
+        conv2d = torch.nn.Conv2d(1, 4, kernel_size=3, padding=1).to("cuda:0")
+        one_d = conv1d(torch.randn(1, 4, 128, device="cuda:0"))
+        two_d = conv2d(torch.randn(1, 1, 32, 32, device="cuda:0"))
         torch.cuda.synchronize(0)
-        result["cuda_ready"] = bool(torch.isfinite(product).all().item())
+        result["cuda_ready"] = all(
+            bool(torch.isfinite(value).all().item())
+            for value in (product, one_d, two_d)
+        )
+except BaseException as exc:
+    result["detail"] = f"{type(exc).__name__}: {exc}"
+print(json.dumps(result, ensure_ascii=False))
+""".strip()
+
+
+_DIRECTML_PROBE = """
+import json
+
+result = {
+    "directml_available": False,
+    "directml_ready": False,
+    "directml_device": "privateuseone:0",
+    "device_name": "",
+    "detail": "",
+}
+try:
+    import torch
+    import torch_directml
+
+    result["directml_available"] = True
+    index = int(torch_directml.default_device())
+    device = torch_directml.device(index)
+    result["directml_device"] = str(device)
+    try:
+        result["device_name"] = str(torch_directml.device_name(index))
+    except BaseException:
+        result["device_name"] = f"DirectML device {index}"
+    left = torch.arange(1024, dtype=torch.float32).reshape(32, 32).to(device)
+    product = left @ left.T
+    conv1d = torch.nn.Conv1d(4, 8, kernel_size=3, padding=1).to(device)
+    conv2d = torch.nn.Conv2d(1, 4, kernel_size=3, padding=1).to(device)
+    one_d = conv1d(torch.randn(1, 4, 128).to(device))
+    two_d = conv2d(torch.randn(1, 1, 32, 32).to(device))
+    result["directml_ready"] = all(
+        bool(torch.isfinite(value.cpu()).all().item())
+        for value in (product, one_d, two_d)
+    )
 except BaseException as exc:
     result["detail"] = f"{type(exc).__name__}: {exc}"
 print(json.dumps(result, ensure_ascii=False))

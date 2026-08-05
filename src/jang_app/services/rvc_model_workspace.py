@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +19,7 @@ from jang_app.services.rvc_model_package import (
     packaged_target,
     relative_package_path,
 )
+from jang_app.services.settings import RVC_DEVICE_AUTO, normalize_rvc_device
 
 
 CATALOG_VERSION = 1
@@ -72,7 +73,7 @@ class RvcModelRecord:
     tags: tuple[str, ...] = ()
     notes: str = ""
     default_pitch: int = 0
-    default_device: str = "cuda:0"
+    default_device: str = RVC_DEVICE_AUTO
 
     @property
     def title(self) -> str:
@@ -111,11 +112,11 @@ class RvcModelRecord:
 
     @property
     def can_convert(self) -> bool:
-        return self.runtime_ready and self.inference_model is not None and self.inference_model.is_file()
+        return self.inference_model is not None and self.inference_model.is_file()
 
     @property
     def can_resume(self) -> bool:
-        return self.runtime_ready and self.checkpoint_pair_ready
+        return self.checkpoint_pair_ready
 
     @property
     def has_index(self) -> bool:
@@ -135,8 +136,6 @@ class RvcModelRecord:
     def status_key(self) -> str:
         if self.has_missing_files:
             return "missing"
-        if not self.runtime_ready:
-            return "runtime"
         if self.can_resume:
             return "resume"
         if self.generator_checkpoint is not None or self.discriminator_checkpoint is not None:
@@ -154,7 +153,6 @@ class RvcModelRecord:
             "indexed": "Indexed",
             "inference": "Inference Only",
             "checkpoint": "Checkpoint Incomplete",
-            "runtime": "Runtime Missing",
             "missing": "Missing Files",
             "incomplete": "Incomplete",
         }[self.status_key]
@@ -211,6 +209,9 @@ class RvcModelWorkspace:
     def inspect_folder(self, folder: Path) -> list[DiscoveredRvcModel]:
         return discover_rvc_models(folder)
 
+    def inspect_inference_file(self, model_file: Path) -> DiscoveredRvcModel:
+        return discover_rvc_inference_file(model_file)
+
     def create_model(self, name: str, runtime_root: Path) -> RvcModelRecord:
         model_name = " ".join(name.split())[:80]
         if not model_name:
@@ -241,7 +242,15 @@ class RvcModelWorkspace:
         return record
 
     def link_folder(self, folder: Path) -> list[RvcModelRecord]:
-        discovered = self.inspect_folder(folder)
+        return self._link_discovered(self.inspect_folder(folder))
+
+    def link_inference_file(self, model_file: Path) -> RvcModelRecord:
+        return self._link_discovered((self.inspect_inference_file(model_file),))[0]
+
+    def _link_discovered(
+        self,
+        discovered: Sequence[DiscoveredRvcModel],
+    ) -> list[RvcModelRecord]:
         existing = {record.model_id: record for record in self.records()}
         linked: list[RvcModelRecord] = []
         for model in discovered:
@@ -257,7 +266,30 @@ class RvcModelWorkspace:
         folder: Path,
         progress: Callable[[int], None] | None = None,
     ) -> list[RvcModelRecord]:
-        discovered = self.inspect_folder(folder)
+        return self._import_discovered(
+            self.inspect_folder(folder),
+            include_related_files=True,
+            progress=progress,
+        )
+
+    def import_inference_file(
+        self,
+        model_file: Path,
+        progress: Callable[[int], None] | None = None,
+    ) -> RvcModelRecord:
+        return self._import_discovered(
+            (self.inspect_inference_file(model_file),),
+            include_related_files=False,
+            progress=progress,
+        )[0]
+
+    def _import_discovered(
+        self,
+        discovered: Sequence[DiscoveredRvcModel],
+        *,
+        include_related_files: bool,
+        progress: Callable[[int], None] | None,
+    ) -> list[RvcModelRecord]:
         existing = {record.model_id: record for record in self.records()}
         imported: list[RvcModelRecord] = []
         package_plans: list[tuple[DiscoveredRvcModel, str, RvcModelPackageLayout, tuple]] = []
@@ -266,11 +298,19 @@ class RvcModelWorkspace:
             model_id = _model_id("managed", model)
             model_dir = self.library_dir / model_id
             package = RvcModelPackageLayout(model_dir, model.name)
-            experiment_source = model.runtime_root / "logs" / model.name
-            if not experiment_source.is_dir():
+            experiment_source = (
+                model.runtime_root / "logs" / model.name
+                if include_related_files
+                else None
+            )
+            if experiment_source is not None and not experiment_source.is_dir():
                 experiment_source = None
             create_rvc_package_directories(package, experiment_source)
-            weight_sources = _group_inference_weights(model.runtime_root / "weights").get(model.name, [])
+            weight_sources = (
+                _group_inference_weights(model.runtime_root / "weights").get(model.name, [])
+                if include_related_files
+                else ()
+            )
             plan = build_rvc_package_plan(
                 package,
                 experiment_source=experiment_source,
@@ -312,7 +352,7 @@ class RvcModelWorkspace:
     ) -> RvcModelRecord:
         record = self._require_record(model_id)
         normalized_tags = _normalize_tags(tags)
-        device = default_device if default_device in {"cuda:0", "cpu"} else "cuda:0"
+        device = normalize_rvc_device(default_device)
         updated = replace(
             record,
             display_name=display_name.strip()[:80],
@@ -559,11 +599,33 @@ def discover_rvc_models(folder: Path) -> list[DiscoveredRvcModel]:
     return models
 
 
+def discover_rvc_inference_file(model_file: Path) -> DiscoveredRvcModel:
+    selected = model_file.expanduser().resolve()
+    if not selected.is_file() or selected.suffix.casefold() != ".pth":
+        raise RvcModelWorkspaceError(f"RVC inference model does not exist: {selected}")
+    if _CHECKPOINT_PATTERN.match(selected.name):
+        raise RvcModelWorkspaceError("G/D training checkpoints cannot be used as inference models.")
+
+    runtime_root, _experiment_filter = _resolve_rvc_layout(selected.parent)
+    match = _EPOCH_WEIGHT_PATTERN.match(selected.stem)
+    name = match.group("name") if match is not None else selected.stem
+    indexes = _inference_index_candidates(selected.parent, runtime_root)
+    return DiscoveredRvcModel(
+        name=name,
+        runtime_root=runtime_root,
+        source_folder=selected.parent,
+        inference_model=selected,
+        index_file=_match_flat_index(name, indexes),
+    )
+
+
 def _resolve_rvc_layout(selected: Path) -> tuple[Path, str | None]:
     if (selected / "weights").is_dir() and (selected / "logs").is_dir():
         return selected, None
     if (selected / "rvc" / "weights").is_dir() and (selected / "rvc" / "logs").is_dir():
         return selected / "rvc", None
+    if selected.name.casefold() == "weights" and (selected.parent / "logs").is_dir():
+        return selected.parent, None
     if selected.parent.name.casefold() == "logs" and (selected.parent.parent / "weights").is_dir():
         return selected.parent.parent, selected.name
 
@@ -647,6 +709,22 @@ def _match_flat_index(name: str, indexes: list[Path]) -> Path | None:
     return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
 
 
+def _inference_index_candidates(model_folder: Path, runtime_root: Path) -> list[Path]:
+    candidates = {
+        path.resolve()
+        for path in model_folder.glob("*.index")
+        if "trained" not in path.name.casefold()
+    }
+    logs = runtime_root / "logs"
+    if logs.is_dir():
+        candidates.update(
+            path.resolve()
+            for path in logs.rglob("*.index")
+            if "trained" not in path.name.casefold()
+        )
+    return sorted(candidates, key=lambda path: str(path).casefold())
+
+
 def _latest_checkpoint_pair(folder: Path) -> tuple[Path | None, Path | None]:
     if not folder.is_dir():
         return None, None
@@ -700,7 +778,7 @@ def _record_from_discovery(
         tags=existing.tags if existing is not None else (),
         notes=existing.notes if existing is not None else "",
         default_pitch=existing.default_pitch if existing is not None else 0,
-        default_device=existing.default_device if existing is not None else "cuda:0",
+        default_device=existing.default_device if existing is not None else RVC_DEVICE_AUTO,
     )
 
 
@@ -839,4 +917,4 @@ def _int_value(value: object, default: int) -> int:
 
 
 def _device_value(value: object) -> str:
-    return value if value in {"cuda:0", "cpu"} else "cuda:0"
+    return normalize_rvc_device(value)

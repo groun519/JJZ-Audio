@@ -6,6 +6,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 
+from jang_app.services.rvc_cuda_compatibility import (
+    cuda_architecture_error,
+    parse_cuda_arch_list,
+    parse_cuda_capability,
+)
+from jang_app.services.rvc_hardware import RvcComputeBackend
+from jang_app.services.rvc_runtime_profile import RVC_PROFILE_DIRECTML
+from jang_app.services.rvc_runtime_profile import (
+    RVC_PROFILE_CU118,
+    RVC_PROFILE_CU128,
+    RVC_PROFILE_ROCM_WINDOWS,
+    normalize_rvc_profile,
+)
+
 
 class CommandResultLike(Protocol):
     args: Sequence[str]
@@ -53,8 +67,14 @@ _REQUIRED_PATHS = (
 
 _RUNTIME_PROBE = (
     "import json, torch; "
-    "print(json.dumps({'available': torch.cuda.is_available(), "
-    "'device_count': torch.cuda.device_count()}))"
+    "cpu_tensor=torch.arange(256, dtype=torch.float32).reshape(16, 16); "
+    "cpu_ready=bool(torch.isfinite(cpu_tensor @ cpu_tensor.T).all().item()); "
+    "available=torch.cuda.is_available(); count=torch.cuda.device_count(); "
+    "print(json.dumps({'cpu_ready': cpu_ready, 'available': available, 'device_count': count, "
+    "'torch_version': torch.__version__, 'cuda_version': torch.version.cuda or '', "
+    "'hip_version': getattr(torch.version, 'hip', '') or '', "
+    "'device_capability': list(torch.cuda.get_device_capability(0)) if available and count else [], "
+    "'cuda_arch_list': list(torch.cuda.get_arch_list())}))"
 )
 
 
@@ -65,6 +85,12 @@ class RvcTrainingRuntimeInspection:
     cuda_available: bool | None = None
     cuda_device_count: int = 0
     cuda_error: str = ""
+    torch_version: str = ""
+    cuda_version: str = ""
+    device_capability: tuple[int, int] = ()
+    cpu_ready: bool | None = None
+    backend: RvcComputeBackend = RvcComputeBackend.CPU
+    hip_version: str = ""
 
     @property
     def assets_ready(self) -> bool:
@@ -72,7 +98,34 @@ class RvcTrainingRuntimeInspection:
 
     @property
     def ready(self) -> bool:
-        return self.assets_ready and self.cuda_available is True and not self.cuda_error
+        cpu_valid = self.cpu_ready is True or (
+            self.cpu_ready is None and self.cuda_available is True
+        )
+        return self.assets_ready and cpu_valid and not self.cuda_error
+
+    @property
+    def accelerator_ready(self) -> bool:
+        return self.cuda_available is True and not self.cuda_error and self.cuda_device_count > 0
+
+    @property
+    def training_accelerated(self) -> bool:
+        backend = (
+            RvcComputeBackend.CUDA
+            if self.backend == RvcComputeBackend.CPU and self.cuda_available is True
+            else self.backend
+        )
+        return self.accelerator_ready and backend in {
+            RvcComputeBackend.CUDA,
+            RvcComputeBackend.ROCM,
+        }
+
+    @property
+    def feature_device(self) -> str:
+        return "cuda:0" if self.training_accelerated else "cpu"
+
+    @property
+    def training_device(self) -> str:
+        return "cuda:0" if self.training_accelerated else "cpu"
 
 
 def inspect_rvc_training_runtime(
@@ -99,6 +152,7 @@ def inspect_rvc_training_runtime(
             resolved_root,
             (),
             cuda_error=result.output or f"CUDA probe failed with exit code {result.returncode}.",
+            backend=_profile_backend(resolved_root),
         )
     try:
         data = json.loads(_last_output_line(result.stdout))
@@ -106,20 +160,50 @@ def inspect_rvc_training_runtime(
         if not isinstance(raw_available, bool):
             raise TypeError("available must be a boolean")
         available = raw_available
+        raw_cpu_ready = data.get("cpu_ready", True)
+        if not isinstance(raw_cpu_ready, bool):
+            raise TypeError("cpu_ready must be a boolean")
         device_count = max(0, int(data["device_count"]))
         if available and device_count == 0:
             raise ValueError("CUDA was reported available without a device")
+        torch_version = str(data.get("torch_version", "")).strip()
+        cuda_version = str(data.get("cuda_version", "")).strip()
+        device_capability = parse_cuda_capability(data.get("device_capability"))
+        cuda_arch_list = parse_cuda_arch_list(data.get("cuda_arch_list"))
+        hip_version = str(data.get("hip_version", "")).strip()
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return RvcTrainingRuntimeInspection(
             resolved_root,
             (),
             cuda_error=f"CUDA probe returned an invalid response: {exc}",
+            backend=_profile_backend(resolved_root),
         )
+    compatibility_error = cuda_architecture_error(
+        torch_version,
+        cuda_version,
+        device_capability,
+        cuda_arch_list,
+    )
+    profile_backend = _profile_backend(resolved_root)
+    backend = (
+        RvcComputeBackend.ROCM
+        if hip_version
+        else RvcComputeBackend.CUDA
+        if available
+        else profile_backend
+    )
     return RvcTrainingRuntimeInspection(
         resolved_root,
         (),
         cuda_available=available,
         cuda_device_count=device_count,
+        cuda_error=compatibility_error,
+        torch_version=torch_version,
+        cuda_version=cuda_version,
+        device_capability=device_capability,
+        cpu_ready=raw_cpu_ready,
+        backend=backend,
+        hip_version=hip_version,
     )
 
 
@@ -127,6 +211,27 @@ def required_rvc_training_paths() -> tuple[Path, ...]:
     return _REQUIRED_PATHS
 
 
+def training_backend_for_profile(profile: object) -> RvcComputeBackend:
+    normalized = normalize_rvc_profile(profile)
+    if normalized in {RVC_PROFILE_CU118, RVC_PROFILE_CU128}:
+        return RvcComputeBackend.CUDA
+    if normalized == RVC_PROFILE_ROCM_WINDOWS:
+        return RvcComputeBackend.ROCM
+    return RvcComputeBackend.CPU
+
+
 def _last_output_line(output: str) -> str:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     return lines[-1] if lines else ""
+
+
+def _profile_backend(root: Path) -> RvcComputeBackend:
+    state = root / "runtime" / "jjzero-runtime-profile.json"
+    try:
+        data = json.loads(state.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return RvcComputeBackend.CPU
+    profile = str(data.get("profile", "")).strip().lower() if isinstance(data, dict) else ""
+    if profile == RVC_PROFILE_DIRECTML:
+        return RvcComputeBackend.DIRECTML
+    return training_backend_for_profile(profile)

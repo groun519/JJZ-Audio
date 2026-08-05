@@ -10,6 +10,7 @@ from jang_app.qt_app.model_training_panel import ModelTrainingPanel, format_trai
 from jang_app.services.i18n import LANGUAGE_ENGLISH, set_language
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_model_workspace import RvcModelRecord
+from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingStateStore
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 
@@ -99,6 +100,16 @@ class ModelTrainingPanelTests(unittest.TestCase):
         self.assertEqual(format_training_elapsed(5), "00:05")
         self.assertEqual(format_training_elapsed(65), "01:05")
         self.assertEqual(format_training_elapsed(3_661), "01:01:01")
+
+    def test_directml_inference_uses_an_explicit_cpu_training_device(self) -> None:
+        panel = ModelTrainingPanel()
+
+        panel.set_compute_backends(RvcComputeBackend.DIRECTML, RvcComputeBackend.CPU)
+
+        self.assertEqual(panel.device_stack.currentWidget(), panel.cpu_device_label)
+        self.assertEqual(panel.cpu_device_label.text(), "CPU")
+        self.assertIn("DirectML / CPU Training", panel.profile_label.text())
+        panel.close()
 
 
 def _record(root: Path, layout: RvcModelPackageLayout) -> RvcModelRecord:

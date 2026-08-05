@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -21,6 +22,7 @@ from jang_app.qt_app.widgets import FeedbackButton, ScrollSafeSpinBox
 from jang_app.services.i18n import tr
 from jang_app.services.job_diagnostics import diagnostic_task
 from jang_app.services.rvc_model_workspace import RvcModelRecord
+from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingState
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 
@@ -83,6 +85,7 @@ class ModelTrainingPanel(QWidget):
         self._record: RvcModelRecord | None = None
         self._state: RvcTrainingState | None = None
         self._is_running = False
+        self._training_accelerated = True
         self._build_ui()
         self.set_model(None, None, 0, 0)
 
@@ -103,7 +106,7 @@ class ModelTrainingPanel(QWidget):
         summary_text.addWidget(self.status_label)
         summary_text.addWidget(self.stage_label)
 
-        self.profile_label = QLabel("RVC v2 / 40k / RMVPE")
+        self.profile_label = QLabel("RVC v2 / 40k / RMVPE / CUDA")
         self.profile_label.setObjectName("TrainingProfileBadge")
         self.epoch_label = QLabel("0 / 20")
         self.epoch_label.setObjectName("TrainingEpochBadge")
@@ -127,11 +130,19 @@ class ModelTrainingPanel(QWidget):
         settings_layout.addWidget(_field_label("Target Epoch"), 0, 0)
         settings_layout.addWidget(_field_label("Batch Size"), 0, 1)
         settings_layout.addWidget(_field_label("Checkpoint Interval"), 0, 2)
-        settings_layout.addWidget(_field_label("GPU"), 0, 3)
+        self.device_field_label = _field_label("GPU")
+        self.cpu_device_label = QLabel("CPU")
+        self.cpu_device_label.setObjectName("TrainingDeviceValue")
+        self.device_stack = QStackedWidget()
+        self.device_stack.setObjectName("TrainingDeviceStack")
+        self.device_stack.addWidget(self.gpu_index_spin)
+        self.device_stack.addWidget(self.cpu_device_label)
+
+        settings_layout.addWidget(self.device_field_label, 0, 3)
         settings_layout.addWidget(self.target_epoch_spin, 1, 0)
         settings_layout.addWidget(self.batch_size_spin, 1, 1)
         settings_layout.addWidget(self.save_interval_spin, 1, 2)
-        settings_layout.addWidget(self.gpu_index_spin, 1, 3)
+        settings_layout.addWidget(self.device_stack, 1, 3)
         for column in range(4):
             settings_layout.setColumnStretch(column, 1)
 
@@ -262,6 +273,37 @@ class ModelTrainingPanel(QWidget):
         self.progress_bar.style().unpolish(self.progress_bar)
         self.progress_bar.style().polish(self.progress_bar)
 
+    def set_compute_backends(
+        self,
+        inference_backend: RvcComputeBackend,
+        training_backend: RvcComputeBackend,
+    ) -> None:
+        self._training_accelerated = training_backend in {
+            RvcComputeBackend.CUDA,
+            RvcComputeBackend.ROCM,
+        }
+        backend_label = {
+            RvcComputeBackend.CUDA: "CUDA Training",
+            RvcComputeBackend.ROCM: "ROCm Training",
+            RvcComputeBackend.DIRECTML: "DirectML",
+            RvcComputeBackend.CPU: "CPU Training",
+        }[training_backend]
+        if inference_backend == RvcComputeBackend.DIRECTML:
+            backend_label = "DirectML / CPU Training"
+        set_translated_text(
+            self.profile_label,
+            "RVC v2 / 40k / RMVPE / {backend}",
+            backend=tr(backend_label),
+        )
+        if self._training_accelerated:
+            set_translated_text(self.device_field_label, "GPU")
+            self.device_stack.setCurrentWidget(self.gpu_index_spin)
+        else:
+            set_translated_text(self.device_field_label, "Training Device")
+            self.cpu_device_label.setText(tr("CPU"))
+            self.device_stack.setCurrentWidget(self.cpu_device_label)
+        self._sync_enabled_state()
+
     def set_progress(self, value: int) -> None:
         progress = max(0, min(100, int(value)))
         self.progress_bar.setValue(progress)
@@ -328,10 +370,10 @@ class ModelTrainingPanel(QWidget):
             self.target_epoch_spin,
             self.batch_size_spin,
             self.save_interval_spin,
-            self.gpu_index_spin,
             self.start_fresh_check,
         ):
             control.setEnabled(settings_enabled)
+        self.gpu_index_spin.setEnabled(settings_enabled and self._training_accelerated)
         self.start_button.setEnabled(can_train and not self._is_running)
         self.stop_button.setEnabled(self._is_running)
 

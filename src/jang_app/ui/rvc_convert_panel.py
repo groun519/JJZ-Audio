@@ -6,7 +6,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from jang_app.pipeline.rvc_convert import list_index_files, list_voice_models
-from jang_app.services.settings import AppSettings, RvcSettings
+from jang_app.services.settings import AppSettings, RVC_DEVICE_OPTIONS, RvcSettings
 from jang_app.ui.controls import CanvasButton
 from jang_app.ui.progress_status import ProgressStatus
 from jang_app.ui.theme import AppTheme, DEFAULT_THEME
@@ -212,7 +212,7 @@ class RvcConvertPanel(ttk.Frame):
 
         ttk.Entry(runtime, textvariable=self._pitch, width=8).grid(row=0, column=0, sticky="w")
         ttk.Label(runtime, text="DEVICE", style="Field.TLabel").grid(row=0, column=1, sticky="e", padx=(12, 8))
-        ttk.Combobox(runtime, textvariable=self._device, values=["cuda:0", "cpu"], width=9).grid(
+        ttk.Combobox(runtime, textvariable=self._device, values=RVC_DEVICE_OPTIONS, width=9).grid(
             row=0,
             column=2,
             sticky="e",
@@ -276,7 +276,7 @@ class RvcConvertPanel(ttk.Frame):
             voice_model=self._voice_model.get().strip(),
             index_file=self._index_file.get().strip(),
             pitch=pitch,
-            device=self._device.get().strip() or "cuda:0",
+            device=self._device.get().strip() or "auto",
             f0_method="rmvpe",
         )
 

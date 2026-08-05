@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 import uuid
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,7 +15,7 @@ from jang_app.services.command import (
     CommandResult,
     run_cancellable_command,
 )
-from jang_app.services.managed_files import copy_file_atomic, file_sha256
+from jang_app.services.managed_files import copy_file_atomic, file_sha256, write_json_atomic
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_script_launcher import (
@@ -107,8 +108,12 @@ def train_rvc_model(
     if not inspection.assets_ready:
         missing = ", ".join(path.as_posix() for path in inspection.missing_paths)
         raise RvcTrainingRunError(f"RVC training runtime is incomplete: {missing}")
-    if not inspection.ready or settings.gpu_index >= inspection.cuda_device_count:
-        raise RvcTrainingRunError("The selected CUDA device is not available for RVC training.")
+    if not inspection.ready:
+        raise RvcTrainingRunError(
+            inspection.cuda_error or "The RVC runtime cannot train a model on this PC."
+        )
+    if inspection.training_accelerated and settings.gpu_index >= inspection.cuda_device_count:
+        raise RvcTrainingRunError("The selected GPU is not available for RVC training.")
 
     load_rvc_training_filelist(model_id, layout)
     layout.create()
@@ -116,7 +121,7 @@ def train_rvc_model(
         storage = prepare_rvc_training_storage(layout)
     except RvcTrainingStorageError as exc:
         raise RvcTrainingRunError(str(exc)) from exc
-    _prepare_package_config(runtime, layout)
+    _prepare_package_config(runtime, layout, use_half=inspection.training_accelerated)
     prepare_rvc_script_workspace(layout.root, runtime)
     launcher = prepare_rvc_script_launcher(
         layout.root / ".jjzero" / "train_rvc.py",
@@ -125,6 +130,7 @@ def train_rvc_model(
         atomic_torch_saves=True,
         compact_rvc_checkpoints=True,
         conservative_data_loading=True,
+        rocm_single_process_training=True,
     )
     state_store = RvcTrainingStateStore(model_id, layout)
     _keep_latest_checkpoint_pair(layout)
@@ -151,10 +157,12 @@ def train_rvc_model(
     _report(progress, epoch_callback, state.current_epoch, settings.target_epoch)
     logger = get_logger()
     logger.info(
-        "Starting RVC training: model=%s target_epoch=%s resumed=%s free_space_gib=%.1f",
+        "Starting RVC training: model=%s target_epoch=%s resumed=%s backend=%s accelerated=%s free_space_gib=%.1f",
         model_id,
         settings.target_epoch,
         resumed,
+        inspection.backend.value,
+        inspection.training_accelerated,
         storage.available_bytes / 1024**3,
     )
 
@@ -176,7 +184,13 @@ def train_rvc_model(
 
     try:
         result = command_runner(
-            _training_command(runtime, layout, settings, launcher),
+            _training_command(
+                runtime,
+                layout,
+                settings,
+                launcher,
+                accelerated=inspection.training_accelerated,
+            ),
             cwd=layout.root,
             env=build_rvc_environment(runtime),
             output_callback=handle_output,
@@ -225,6 +239,8 @@ def _training_command(
     layout: RvcModelPackageLayout,
     settings: RvcTrainingRunSettings,
     launcher: Path,
+    *,
+    accelerated: bool = True,
 ) -> list[str]:
     return [
         str(runtime / "runtime" / "python.exe"),
@@ -250,7 +266,7 @@ def _training_command(
         "-l",
         "0",
         "-c",
-        "1" if settings.cache_in_gpu else "0",
+        "1" if settings.cache_in_gpu and accelerated else "0",
         "-sw",
         "1",
         "-v",
@@ -258,11 +274,25 @@ def _training_command(
     ]
 
 
-def _prepare_package_config(runtime: Path, layout: RvcModelPackageLayout) -> None:
+def _prepare_package_config(
+    runtime: Path,
+    layout: RvcModelPackageLayout,
+    *,
+    use_half: bool,
+) -> None:
     source = runtime / "configs" / "40k.json"
     if not source.is_file():
         raise RvcTrainingRunError(f"RVC training config is missing: {source}")
-    copy_file_atomic(source, layout.root / "configs" / "40k.json")
+    target = layout.root / "configs" / "40k.json"
+    if use_half:
+        copy_file_atomic(source, target)
+        return
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+        data["train"]["fp16_run"] = False
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RvcTrainingRunError(f"RVC training config is invalid: {source}") from exc
+    write_json_atomic(target, data)
 
 
 def _archive_checkpoints(layout: RvcModelPackageLayout) -> Path | None:

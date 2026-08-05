@@ -43,6 +43,35 @@ class AppBootstrapTests(unittest.TestCase):
             self.assertTrue(paths.cache_dir.is_dir())
             self.assertTrue(first.migration_file.is_file())
 
+    def test_frozen_legacy_install_settings_are_copied_without_moving_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            package = source / "src" / "jang_app"
+            install = root / "install"
+            data_root = root / "data"
+            package.mkdir(parents=True)
+            song = install / "workspace" / "library" / "songs" / "song-a" / "song.json"
+            song.parent.mkdir(parents=True)
+            song.write_text("{}", encoding="utf-8")
+            legacy_settings = install / "settings"
+            legacy_settings.mkdir()
+            (legacy_settings / "app_settings.json").write_text("legacy-settings", encoding="utf-8")
+
+            paths = discover_app_paths(
+                package,
+                environ={"JJZERO_DATA_ROOT": str(data_root)},
+                frozen=True,
+                executable=install / "JJZero Audio.exe",
+                source_root=source,
+            )
+            result = prepare_app_environment(paths)
+
+            copied = data_root / "settings" / "app_settings.json"
+            self.assertEqual(copied.read_text(encoding="utf-8"), "legacy-settings")
+            self.assertEqual(paths.workspace_root, (install / "workspace").resolve())
+            self.assertEqual(result.copied_settings, (copied,))
+
 
 if __name__ == "__main__":
     unittest.main()

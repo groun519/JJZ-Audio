@@ -6,7 +6,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from scripts.build_runtime_packages import build_runtime_packages
+from scripts.build_runtime_packages import build_component_packages, build_runtime_packages
 
 
 class RuntimePackagesTests(unittest.TestCase):
@@ -34,6 +34,28 @@ class RuntimePackagesTests(unittest.TestCase):
                 archived,
                 {"ffmpeg.exe", "rvc/a.bin", "rvc/b.bin"},
             )
+
+    def test_builds_named_rvc_profile_component(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile = root / "cu128"
+            release = root / "release"
+            profile.mkdir()
+            (profile / "python.exe").write_bytes(b"python")
+
+            index = build_component_packages(
+                profile,
+                release,
+                "2",
+                component="rvc-runtime-cu128",
+                package_prefix="JJZero-RVC-cu128-2",
+                index_name="rvc-runtime-cu128-packages.json",
+                part_limit=100,
+            )
+
+            data = json.loads(index.read_text(encoding="utf-8"))
+            self.assertEqual(data["component"], "rvc-runtime-cu128")
+            self.assertEqual(data["artifacts"][0]["name"], "JJZero-RVC-cu128-2-part01.zip")
 
 
 if __name__ == "__main__":

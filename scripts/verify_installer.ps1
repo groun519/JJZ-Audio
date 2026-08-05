@@ -22,6 +22,12 @@ $installDir = Join-Path $testRoot "app"
 $dataRoot = Join-Path $testRoot "data"
 $sentinel = Join-Path $dataRoot "settings\preserve.txt"
 $runtimeSentinel = Join-Path $installDir "runtime\rvc\weights\preserve-runtime-model.pth"
+$storageFile = Join-Path $dataRoot "settings\storage.json"
+$songLibraryFile = Join-Path $dataRoot "settings\song_library.json"
+$legacySettingsFile = Join-Path $installDir "settings\app_settings.json"
+$legacySongFile = Join-Path $installDir "workspace\library\songs\upgrade-song\song.json"
+$legacyModelCatalog = Join-Path $installDir "workspace\models\catalog.json"
+$externalInferenceModel = Join-Path $dataRoot "external-models\upgrade-voice.pth"
 
 function Get-InstallerVersion([string]$SetupPath) {
     $name = [System.IO.Path]::GetFileName($SetupPath)
@@ -68,6 +74,18 @@ function Invoke-DistributionVerification {
     }
 }
 
+function Assert-PreservedFiles([hashtable]$ExpectedHashes, [string]$Stage) {
+    foreach ($path in $ExpectedHashes.Keys) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "User data disappeared during ${Stage}: $path"
+        }
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        if ($actual -ne $ExpectedHashes[$path]) {
+            throw "User data changed during ${Stage}: $path"
+        }
+    }
+}
+
 New-Item -ItemType Directory -Path (Split-Path -Parent $sentinel) -Force | Out-Null
 Set-Content -LiteralPath $sentinel -Value "preserve-user-data" -Encoding UTF8
 
@@ -78,8 +96,58 @@ Invoke-Setup $baselineInstaller "install-$baselineVersion.log"
 Assert-InstalledVersion $baselineVersion
 New-Item -ItemType Directory -Path (Split-Path -Parent $runtimeSentinel) -Force | Out-Null
 Set-Content -LiteralPath $runtimeSentinel -Value "preserve-runtime-model" -Encoding UTF8
+New-Item -ItemType Directory -Path (Split-Path -Parent $legacySettingsFile) -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $legacySongFile) -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $legacyModelCatalog) -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $externalInferenceModel) -Force | Out-Null
+Set-Content -LiteralPath $legacySettingsFile -Value '{"theme_mode":"dark"}' -Encoding UTF8
+Set-Content -LiteralPath $legacySongFile -Value '{"version":1,"id":"upgrade-song","title":"Upgrade Song"}' -Encoding UTF8
+Set-Content -LiteralPath $externalInferenceModel -Value "linked-inference-model" -Encoding UTF8
+Set-Content -LiteralPath $legacyModelCatalog -Value @"
+{
+  "version": 1,
+  "models": [{
+    "id": "linked-upgrade-voice",
+    "name": "upgrade-voice",
+    "mode": "linked",
+    "runtime_root": "$($installDir.Replace('\', '\\'))",
+    "source_folder": "$((Split-Path -Parent $externalInferenceModel).Replace('\', '\\'))",
+    "inference_model": "$($externalInferenceModel.Replace('\', '\\'))",
+    "index_file": "",
+    "generator_checkpoint": "",
+    "discriminator_checkpoint": "",
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "display_name": "Upgrade Voice",
+    "tags": [],
+    "notes": "",
+    "default_pitch": 0,
+    "default_device": "cpu"
+  }]
+}
+"@ -Encoding UTF8
+Set-Content -LiteralPath $storageFile -Value @"
+{
+  "version": 1,
+  "workspace_root": "$((Join-Path $installDir 'workspace').Replace('\', '\\'))",
+  "workspace_anchor": "$($installDir.Replace('\', '\\'))"
+}
+"@ -Encoding UTF8
+Set-Content -LiteralPath $songLibraryFile -Value '{"paths":["C:\\upgrade-song.wav"]}' -Encoding UTF8
+$preservedFiles = @{}
+foreach ($path in @(
+    $sentinel,
+    $storageFile,
+    $songLibraryFile,
+    $legacySettingsFile,
+    $legacySongFile,
+    $legacyModelCatalog,
+    $externalInferenceModel
+)) {
+    $preservedFiles[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+}
 Invoke-Setup $installer "update-$targetVersion.log"
 Assert-InstalledVersion $targetVersion
+Assert-PreservedFiles $preservedFiles "application update"
 if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtime-model") {
     throw "Existing runtime data changed during the app update: $runtimeSentinel"
 }
@@ -91,6 +159,7 @@ if ($RuntimePackageIndex) {
     }
 }
 Invoke-DistributionVerification
+Assert-PreservedFiles $preservedFiles "runtime update"
 
 if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtime-model") {
     throw "Runtime model data changed during the runtime update: $runtimeSentinel"
@@ -121,6 +190,7 @@ if (Test-Path -LiteralPath (Join-Path $installDir "JJZero Audio.exe") -PathType 
 if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne "preserve-user-data") {
     throw "User data was removed during uninstall: $sentinel"
 }
+Assert-PreservedFiles $preservedFiles "uninstall"
 
 Write-Output "Verified installer upgrade $baselineVersion -> $targetVersion and uninstall: $installer"
 if ($KeepArtifacts) {

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from jang_app.services.rvc_script_launcher import (
+    _ROCM_SINGLE_PROCESS_TRAINING_BOOTSTRAP,
     RvcScriptLauncherError,
     prepare_rvc_script_launcher,
     prepare_rvc_script_workspace,
@@ -167,6 +168,25 @@ class RvcScriptLauncherTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout.strip(), "1 2 False")
 
+    def test_launcher_can_replace_ddp_only_for_rocm_training(self) -> None:
+        probe = (
+            "import torch\n"
+            "torch.version.hip = '7.2.1'\n"
+            f"{_ROCM_SINGLE_PROCESS_TRAINING_BOOTSTRAP}\n"
+            f"{_ROCM_SINGLE_PROCESS_PROBE}"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ready")
+
 
 _SPAWN_PROBE = """\
 import multiprocessing
@@ -237,6 +257,16 @@ loader = DataLoader(
     persistent_workers=True,
 )
 print(loader.num_workers, loader.prefetch_factor, loader.persistent_workers)
+"""
+
+_ROCM_SINGLE_PROCESS_PROBE = """\
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+model = DDP(torch.nn.Linear(3, 2), device_ids=[0])
+result = model(torch.ones(1, 3)).sum()
+result.backward()
+torch.distributed.init_process_group(backend="gloo")
+print("ready" if hasattr(model, "module") else "failed")
 """
 
 
