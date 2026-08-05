@@ -25,6 +25,11 @@ RVC_TRAINING_SCRIPT_FILES = (
     Path("extract_feature_print.py"),
     Path("train_nsf_sim_cache_sid_load_pretrain.py"),
 )
+RVC_TRAINING_MODULE_FILES = (
+    Path("lib/i18n/en_US.json"),
+    Path("lib/train/utils.py"),
+    Path("lib/infer_pack/models.py"),
+)
 RVC_TRAINING_ASSET_FILES = (
     Path("pretrained_v2/f0G40k.pth"),
     Path("pretrained_v2/f0D40k.pth"),
@@ -42,10 +47,11 @@ _REQUIRED_PATHS = (
     Path("rmvpe.pt"),
     Path("trainset_preprocess_pipeline_print.py"),
     *RVC_TRAINING_SCRIPT_FILES,
+    *RVC_TRAINING_MODULE_FILES,
     *RVC_TRAINING_ASSET_FILES,
 )
 
-_CUDA_PROBE = (
+_RUNTIME_PROBE = (
     "import json, torch; "
     "print(json.dumps({'available': torch.cuda.is_available(), "
     "'device_count': torch.cuda.device_count()}))"
@@ -85,7 +91,7 @@ def inspect_rvc_training_runtime(
 
         command_runner = run_command
     result = command_runner(
-        [str(resolved_root / "runtime" / "python.exe"), "-c", _CUDA_PROBE],
+        [str(resolved_root / "runtime" / "python.exe"), "-c", _RUNTIME_PROBE],
         cwd=resolved_root,
     )
     if result.returncode != 0:

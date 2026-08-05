@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import json
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
 from jang_app.services.app_paths import AppPaths
+from jang_app.services.rvc_inference_runtime import (
+    RvcInferenceCapabilities,
+    probe_rvc_inference_runtime,
+)
 from jang_app.services.rvc_training_runtime import required_rvc_training_paths
 
 
@@ -38,19 +40,7 @@ class SystemDiagnostics:
         return any(check.status == DiagnosticStatus.WARNING for check in self.checks)
 
 
-@dataclass(frozen=True)
-class DiagnosticCommandResult:
-    args: tuple[str, ...]
-    returncode: int
-    stdout: str
-    stderr: str
-
-    @property
-    def output(self) -> str:
-        return (self.stderr or self.stdout).strip()
-
-
-RuntimeProbe = Callable[[Path], DiagnosticCommandResult]
+RuntimeProbe = Callable[[Path], RvcInferenceCapabilities]
 DiagnosticReporter = Callable[[DiagnosticCheck], None]
 
 
@@ -78,8 +68,8 @@ def run_system_diagnostics(
         record(DiagnosticCheck("cuda", "NVIDIA GPU", DiagnosticStatus.WARNING, "CUDA check was skipped."))
         return SystemDiagnostics(tuple(checks))
 
-    result = (runtime_probe or _probe_rvc_runtime)(rvc_root)
-    runtime_check, cuda_check = _runtime_checks(result)
+    capabilities = (runtime_probe or probe_rvc_inference_runtime)(rvc_root)
+    runtime_check, cuda_check = _runtime_checks(capabilities)
     record(runtime_check)
     record(cuda_check)
     return SystemDiagnostics(tuple(checks))
@@ -129,81 +119,31 @@ def _rvc_assets_check(rvc_root: Path) -> DiagnosticCheck:
     return DiagnosticCheck("rvc_assets", "RVC Assets", DiagnosticStatus.PASS, "Convert and training assets ready")
 
 
-def _runtime_checks(result: DiagnosticCommandResult) -> tuple[DiagnosticCheck, DiagnosticCheck]:
-    if result.returncode != 0:
-        detail = _last_line(result.output) or f"Runtime probe failed with exit code {result.returncode}."
-        return (
-            DiagnosticCheck("ai_runtime", "AI Runtime", DiagnosticStatus.FAIL, detail),
-            DiagnosticCheck("cuda", "NVIDIA GPU", DiagnosticStatus.WARNING, "CUDA check failed."),
-        )
-    try:
-        data = json.loads(_last_line(result.stdout))
-        imports_ready = bool(data["imports_ready"])
-        cuda_available = bool(data["cuda_available"])
-        device_count = int(data["device_count"])
-        device_name = str(data.get("device_name", "")).strip()
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        return (
-            DiagnosticCheck("ai_runtime", "AI Runtime", DiagnosticStatus.FAIL, f"Invalid runtime response: {exc}"),
-            DiagnosticCheck("cuda", "NVIDIA GPU", DiagnosticStatus.WARNING, "CUDA check failed."),
-        )
-
+def _runtime_checks(capabilities: RvcInferenceCapabilities) -> tuple[DiagnosticCheck, DiagnosticCheck]:
+    version = f" (Torch {capabilities.torch_version})" if capabilities.torch_version else ""
     runtime = DiagnosticCheck(
         "ai_runtime",
         "AI Runtime",
-        DiagnosticStatus.PASS if imports_ready else DiagnosticStatus.FAIL,
-        "Torch, Fairseq, and FAISS ready" if imports_ready else "Required Python modules could not be imported.",
+        DiagnosticStatus.PASS if capabilities.runtime_ready else DiagnosticStatus.FAIL,
+        f"CPU inference and FAISS ready{version}"
+        if capabilities.runtime_ready
+        else capabilities.cpu_detail or "CPU inference or FAISS validation failed.",
     )
-    if cuda_available and device_count > 0:
+    if capabilities.cuda_ready and capabilities.device_count > 0:
         cuda = DiagnosticCheck(
             "cuda",
             "NVIDIA GPU",
             DiagnosticStatus.PASS,
-            device_name or f"CUDA devices: {device_count}",
+            capabilities.device_name or f"CUDA devices: {capabilities.device_count}",
         )
+    elif capabilities.cuda_available:
+        detail = capabilities.cuda_detail or "CUDA operation failed. CPU conversion will be used."
+        cuda = DiagnosticCheck("cuda", "NVIDIA GPU", DiagnosticStatus.WARNING, detail)
     else:
         cuda = DiagnosticCheck(
             "cuda",
             "NVIDIA GPU",
             DiagnosticStatus.WARNING,
-            "CUDA is unavailable. Update the NVIDIA graphics driver.",
+            "CUDA is unavailable. CPU conversion will be used.",
         )
     return runtime, cuda
-
-
-def _probe_rvc_runtime(rvc_root: Path) -> DiagnosticCommandResult:
-    python = rvc_root / "runtime" / "python.exe"
-    command = (
-        "import json, torch; "
-        "import fairseq, faiss; "
-        "available=torch.cuda.is_available(); "
-        "count=torch.cuda.device_count(); "
-        "name=torch.cuda.get_device_name(0) if available and count else ''; "
-        "print(json.dumps({'imports_ready': True, 'cuda_available': available, "
-        "'device_count': count, 'device_name': name}, ensure_ascii=False))"
-    )
-    try:
-        completed = subprocess.run(
-            [str(python), "-c", command],
-            cwd=rvc_root,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=90,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return DiagnosticCommandResult((str(python), "-c", command), 1, "", str(exc))
-    return DiagnosticCommandResult(
-        tuple(str(part) for part in completed.args),
-        completed.returncode,
-        completed.stdout,
-        completed.stderr,
-    )
-
-
-def _last_line(output: str) -> str:
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    return lines[-1] if lines else ""

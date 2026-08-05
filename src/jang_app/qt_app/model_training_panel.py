@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import traceback
 from collections.abc import Callable
+from time import monotonic
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
@@ -17,30 +18,60 @@ from PySide6.QtWidgets import (
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
 from jang_app.qt_app.widgets import FeedbackButton, ScrollSafeSpinBox
+from jang_app.services.i18n import tr
+from jang_app.services.job_diagnostics import diagnostic_task
 from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingState
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 
 
-TrainingTask = Callable[[Callable[[int], None], Callable[[str], None]], object]
+TrainingTask = Callable[
+    [
+        Callable[[int], None],
+        Callable[[str], None],
+        Callable[[int, int], None],
+        Callable[[], None],
+    ],
+    object,
+]
 
 
 class ModelTrainingWorker(QThread):
     progress_changed = Signal(int)
     stage_changed = Signal(str)
+    epoch_changed = Signal(int, int)
+    activity_changed = Signal()
     succeeded = Signal(object)
     failed = Signal(str)
 
     def __init__(self, task: TrainingTask) -> None:
         super().__init__()
         self._task = task
+        self._last_activity_emit = 0.0
+        self._diagnostic_task_id = ""
+
+    def set_diagnostic_task_id(self, task_id: str) -> None:
+        self._diagnostic_task_id = task_id
 
     def run(self) -> None:
-        try:
-            result = self._task(self.progress_changed.emit, self.stage_changed.emit)
-            self.succeeded.emit(result)
-        except Exception:
-            self.failed.emit(traceback.format_exc())
+        with diagnostic_task(self._diagnostic_task_id):
+            try:
+                result = self._task(
+                    self.progress_changed.emit,
+                    self.stage_changed.emit,
+                    self.epoch_changed.emit,
+                    self._emit_activity,
+                )
+                self.succeeded.emit(result)
+            except Exception:
+                self.failed.emit(traceback.format_exc())
+
+    def _emit_activity(self) -> None:
+        now = monotonic()
+        if now - self._last_activity_emit < 0.5:
+            return
+        self._last_activity_emit = now
+        self.activity_changed.emit()
 
 
 class ModelTrainingPanel(QWidget):
@@ -114,6 +145,23 @@ class ModelTrainingPanel(QWidget):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
 
+        self.activity_label = QLabel("Working")
+        self.activity_label.setObjectName("TrainingActivityText")
+        self.progress_percent_label = QLabel("0%")
+        self.progress_percent_label.setObjectName("TrainingProgressText")
+        self.runtime_label = QLabel("Elapsed 00:00")
+        self.runtime_label.setObjectName("TrainingRuntimeText")
+
+        self.runtime_row = QWidget()
+        runtime_layout = QHBoxLayout(self.runtime_row)
+        runtime_layout.setContentsMargins(0, 0, 0, 0)
+        runtime_layout.setSpacing(10)
+        runtime_layout.addWidget(self.activity_label)
+        runtime_layout.addWidget(self.progress_percent_label)
+        runtime_layout.addStretch(1)
+        runtime_layout.addWidget(self.runtime_label)
+        self.runtime_row.hide()
+
         self.start_button = FeedbackButton("Start Training")
         self.start_button.setObjectName("PrimaryButton")
         self.start_button.clicked.connect(self._request_start)
@@ -135,6 +183,7 @@ class ModelTrainingPanel(QWidget):
         layout.addWidget(summary)
         layout.addWidget(settings)
         layout.addWidget(self.progress_bar)
+        layout.addWidget(self.runtime_row)
         layout.addLayout(action_row)
         layout.addStretch(1)
 
@@ -200,18 +249,44 @@ class ModelTrainingPanel(QWidget):
 
     def set_running(self, is_running: bool) -> None:
         self._is_running = is_running
+        if is_running:
+            self.status_label.setProperty("phase", RvcTrainingPhase.TRAIN.value)
+            set_translated_text(self.status_label, "Training")
+            self.stage_label.setToolTip("")
+            self._refresh_status_style()
         self.start_button.setVisible(not is_running)
         self.stop_button.setVisible(is_running)
+        self.runtime_row.setVisible(is_running)
         self.progress_bar.setProperty("running", is_running)
         self._sync_enabled_state()
         self.progress_bar.style().unpolish(self.progress_bar)
         self.progress_bar.style().polish(self.progress_bar)
 
     def set_progress(self, value: int) -> None:
-        self.progress_bar.setValue(max(0, min(100, int(value))))
+        progress = max(0, min(100, int(value)))
+        self.progress_bar.setValue(progress)
+        self.progress_percent_label.setText(f"{progress}%")
+
+    def set_epoch_progress(self, current_epoch: int, target_epoch: int) -> None:
+        self.epoch_label.setText(f"{max(0, current_epoch)} / {max(1, target_epoch)}")
 
     def set_stage(self, text: str) -> None:
         set_translated_text(self.stage_label, text)
+
+    def set_runtime_status(self, elapsed_seconds: int, idle_seconds: int) -> None:
+        elapsed = max(0, int(elapsed_seconds))
+        idle = max(0, int(idle_seconds))
+        dots = "." * (elapsed % 3 + 1)
+        self.activity_label.setText(f"{tr('Working')}{dots}")
+        elapsed_text = tr("Elapsed {elapsed}", elapsed=format_training_elapsed(elapsed))
+        if idle < 2:
+            activity_text = tr("Active now")
+        else:
+            activity_text = tr(
+                "Last activity {idle} ago",
+                idle=format_training_elapsed(idle),
+            )
+        self.runtime_label.setText(f"{elapsed_text}  |  {activity_text}")
 
     def set_failure(self, error: str) -> None:
         set_translated_text(self.status_label, "Failed")
@@ -299,3 +374,11 @@ def _phase_label(phase: RvcTrainingPhase) -> str:
 def _last_error_line(error: str) -> str:
     lines = [line.strip() for line in error.splitlines() if line.strip()]
     return lines[-1] if lines else "Training failed"
+
+
+def format_training_elapsed(total_seconds: int) -> str:
+    hours, remainder = divmod(max(0, int(total_seconds)), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"

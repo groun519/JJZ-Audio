@@ -10,6 +10,10 @@ from jang_app.services.app_logging import get_logger
 from jang_app.services.command import run_command
 from jang_app.services.managed_files import link_or_copy_file
 from jang_app.services.rvc_environment import build_rvc_environment
+from jang_app.services.rvc_inference_runtime import (
+    RvcInferenceRuntimeError,
+    select_rvc_inference_device,
+)
 from jang_app.services.settings import RvcSettings
 
 
@@ -37,10 +41,23 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
 
     _validate_conversion_input(source, rvc_root, runtime_python, infer_script, model_path, index_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        device = select_rvc_inference_device(rvc_root, settings.device)
+    except RvcInferenceRuntimeError as exc:
+        raise RvcConversionError(str(exc)) from exc
     workspace = _prepare_rvc_workspace(rvc_root)
     wrapper_script = workspace / "run_infer_cli.py"
 
-    logger.info("Starting RVC conversion: input=%s output=%s model=%s", source, output_path, model_path)
+    logger.info(
+        "Starting RVC conversion: input=%s output=%s model=%s requested_device=%s effective_device=%s",
+        source,
+        output_path,
+        model_path,
+        device.requested_device,
+        device.effective_device,
+    )
+    if device.fallback_reason:
+        logger.warning("RVC device fallback: %s", device.fallback_reason)
     completed = run_command(
         [
             runtime_python,
@@ -51,7 +68,7 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
             output_path,
             model_path,
             str(index_path) if index_path else "",
-            settings.device,
+            device.effective_device,
             settings.f0_method,
         ],
         cwd=workspace,
@@ -59,7 +76,7 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
     )
     if completed.returncode != 0:
         logger.error("RVC conversion failed with exit code %s\n%s", completed.returncode, completed.output)
-        raise RvcConversionError(f"RVC conversion failed with exit code {completed.returncode}. See logs for details.")
+        raise RvcConversionError(_conversion_failure_message(completed.returncode, device.effective_device))
     if not output_path.exists():
         raise RvcConversionError(f"RVC conversion did not create output: {output_path}")
 
@@ -222,3 +239,13 @@ def _relative_to_root(path: Path, root: Path) -> str:
         return str(path.relative_to(root.expanduser()))
     except ValueError:
         return str(path)
+
+
+def _conversion_failure_message(returncode: int, device: str) -> str:
+    windows_code = returncode & 0xFFFFFFFF
+    if windows_code == 0xC0000094:
+        return (
+            "RVC runtime crashed with Windows status 0xC0000094 (integer divide by zero). "
+            f"Selected device: {device}. See logs for details."
+        )
+    return f"RVC conversion failed with exit code {returncode}. See logs for details."

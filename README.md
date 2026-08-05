@@ -1,26 +1,21 @@
-# Jang
+# JJZero Audio
 
-Local desktop tool for audio processing workflows.
+JJZero Audio is a local Windows desktop workspace for managing songs and RVC voice models, separating and converting vocals, mixing audio, and pairing a finished mix with video.
 
-## Current Scope
+## Features
 
-The app currently provides a minimal desktop interface for audio source separation and first-pass RVC vocal conversion:
+- Library: import local media or YouTube audio, search and sort songs, edit metadata, preview waveforms, and keep one working song available across pages.
+- Vocal: separate vocals and instrumental stems with Demucs, configure RVC conversion, and retain multiple converted vocal versions.
+- Models: create managed model packages, link or copy existing RVC folders, prepare and review training clips, reduce noise and silence, train or resume RVC models, and register finished weights and indexes.
+- Studio: play synchronized original, instrumental, and converted tracks; adjust mute and volume from 0% to 200%; mix selected tracks; and attach local or YouTube video.
+- Export: review output media and create final audio or video files.
+- System: Korean and English UI, light and dark themes, persistent playback, processing queue, log drawer, first-run storage setup, and runtime diagnostics.
 
-1. Select one local audio file.
-2. Run Demucs two-stem separation.
-3. Produce `vocals.wav` and `no_vocals.wav`.
-4. Convert `vocals.wav` through an RVC voice model with `rmvpe`.
+User media and models are stored outside the installation directory. Settings, logs, and cache are under `%LOCALAPPDATA%\JJZero Audio`; the selected media location contains `workspace` and `output`.
 
-Mixing, video replacement, packaging, and link downloading are intentionally out of scope for this step.
+## Development Setup
 
-## Setup
-
-Python 3.11 is recommended.
-
-The current Windows build targets NVIDIA GPUs and installs the CUDA 12.6
-PyTorch runtime pinned in `requirements-nvidia.txt`.
-
-Double-click `setup_jang.bat` to create or update the development environment. Setup is separate from normal app startup, so dependencies are not checked and installed on every launch.
+Python 3.11 is required. Double-click `setup_jang.bat` to create or update `.venv`, or install manually:
 
 ```powershell
 python -m venv .venv
@@ -28,117 +23,95 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Demucs requires FFmpeg tools to decode many audio formats. Put `ffmpeg.exe` and `ffprobe.exe` under `third_party\ffmpeg\bin`, install FFmpeg globally, or place them on `PATH` before running the app.
-
-## Run
-
-Double-click `run_jang_hidden.vbs` to start without showing a CMD window.
-
-For debug output, double-click `run_jang.bat`, or run manually:
-
-```powershell
-python -m jang_app
-```
-
-Or:
-
-```powershell
-jang-audio
-```
-
-## Windows Build
-
-Install the pinned build tools once:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-```
-
-Prepare a private runtime copy from an existing RVC WebUI installation. This
-copies the inference engine only; it never edits the source folder and does not
-copy personal `weights` or `logs` model data.
+Prepare the private runtime from an existing RVC WebUI installation. The source folder is read-only; personal `weights` and `logs` are not copied into the bundled runtime.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\prepare_rvc_runtime.py "C:\path\to\RVC"
 ```
 
-Build and verify the app-only `onedir` distribution:
+The expected local runtime layout is:
+
+```text
+third_party/
+  ffmpeg/bin/ffmpeg.exe
+  ffmpeg/bin/ffprobe.exe
+  demucs/
+  rvc/runtime/python.exe
+```
+
+Run without a console using `run_jang_hidden.vbs`. For debug output, use `run_jang.bat` or:
+
+```powershell
+.\.venv\Scripts\python.exe -m jang_app
+```
+
+Runtime logs are written to `%LOCALAPPDATA%\JJZero Audio\logs\jang.log`.
+
+## Runtime Behavior
+
+First launch asks for a media storage location, installs or locates the AI runtime, and verifies write access, FFmpeg, Demucs, RVC assets, CPU inference, FAISS, and CUDA. The same diagnostics are available from Settings.
+
+RVC conversion uses the selected CUDA device when its operation probe succeeds. If CUDA is missing or unusable but CPU inference is valid, conversion automatically falls back to CPU. RVC model training still requires a compatible NVIDIA CUDA device.
+
+Existing RVC WebUI model folders can be linked in place or copied into a managed JJZero package. Linked folders remain externally owned; managed copies support dataset editing, checkpoint maintenance, continued training, and artifact registration.
+
+## Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```
+
+Run one source-separation smoke test with:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_separate.py "C:\path\to\audio.m4a"
+```
+
+## Windows Release
+
+Install the pinned build tools and Inno Setup once:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+```
+
+Build and verify the app-only distribution:
 
 ```powershell
 .\build_windows.bat
 ```
 
-The verified application is created under `dist\JJZero Audio`. AI tools are
-versioned separately so normal application updates do not download Torch again.
-
-Build the versioned Windows installer after installing Inno Setup:
+Build the installer while reusing the existing versioned AI runtime packages:
 
 ```powershell
-.\build_installer.bat -SkipAppBuild
+.\build_release.bat -SkipRuntimeBuild
 ```
 
-Build a complete GitHub Release payload with the app installer, bounded AI
-runtime ZIP parts, and the SHA-256 component manifest:
+Build new runtime packages only when the runtime contents or `AI_RUNTIME_VERSION` change:
 
 ```powershell
 .\build_release.bat
 ```
 
-Every release asset is kept below GitHub Releases' 2 GiB per-file limit. The
-small app installer preserves an existing runtime. On a new PC, first-run setup
-downloads and verifies the runtime parts before installing them atomically.
-For app-only releases, reuse existing runtime parts with
-`.\build_release.bat -SkipRuntimeBuild`.
+The application installer is small and preserves an installed runtime during updates. A new PC downloads the bounded runtime ZIP parts listed in `latest.json`, verifies every SHA-256 hash, and installs them atomically. Each release asset remains below GitHub Releases' 2 GiB file limit.
 
-Public releases require an Authenticode certificate. Configure
-`JJZERO_SIGN_CERT_THUMBPRINT` or `JJZERO_SIGN_CERT_PATH`, set
-`JJZERO_SIGNING_PUBLISHER` to the expected certificate subject, then build with:
+Installed builds check the public GitHub Release channel at startup. When a newer `latest.json` is published, the app offers a direct download, verifies file size, SHA-256, and any required Authenticode publisher, then launches the installer without a console window. Per-job support data is stored under `logs\jobs`; the Activity drawer can copy a redacted diagnostic report or open the selected job folder.
+
+Verify an unsigned local release and an in-place upgrade from 0.2.0:
 
 ```powershell
-.\build_release.bat -RequireCodeSigning
+powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1 -AllowUnsigned
+powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 `
+  -PreviousInstallerPath release\JJZero-Audio-0.2.0-Setup.exe `
+  -InstallerPath release\JJZero-Audio-0.2.1-Setup.exe
+```
+
+Public releases should be Authenticode-signed. Configure `JJZERO_SIGN_CERT_THUMBPRINT` or `JJZERO_SIGN_CERT_PATH`, set `JJZERO_SIGNING_PUBLISHER`, and build with `-RequireCodeSigning`. Publishing uses GitHub Releases and requires GitHub CLI authentication:
+
+```powershell
+.\build_release.bat -SkipRuntimeBuild -RequireCodeSigning
 powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1
 powershell -ExecutionPolicy Bypass -File scripts\publish_github_release.ps1
 ```
 
-Publishing uses GitHub CLI and uploads `latest.json`, the offline runtime index,
-the app installer, and all runtime parts to one GitHub Release. Unsigned output
-is accepted only when `-AllowUnsigned` is explicitly supplied for local testing.
-
-Verify clean install, in-place update, and uninstall data preservation:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 `
-  -PreviousInstallerPath release\JJZero-Audio-0.1.0-Setup.exe `
-  -InstallerPath release\JJZero-Audio-0.2.0-Setup.exe
-```
-
-The release version is defined once in `src\jang_app\version.py`. Windows
-executable metadata, installer names, and manifests are generated from it.
-
-Outputs are written under `output\separations` by default.
-
-Runtime logs are written to `%LOCALAPPDATA%\JJZero Audio\logs\jang.log`.
-Each launch writes cumulative startup timing marks to the runtime log.
-Local settings are written under `%LOCALAPPDATA%\JJZero Audio\settings`.
-Existing development workspaces are linked in place during the first migration and are not moved or deleted.
-
-Installed builds use the bundled RVC runtime by default. An existing WebUI root
-can still be selected or imported when its own runtime and models should be used:
-
-- `RVC root`: local RVC folder that contains `runtime\python.exe` and `infer_cli.py`.
-- `Voice model`: `.pth` file under the RVC `weights` folder.
-- `Index file`: optional `.index` file under the RVC `logs` folder.
-
-On the first launch, JJZero Audio asks for one media storage location and creates
-`workspace` and `output` below it. App preferences, logs, and cache remain under
-`%LOCALAPPDATA%\JJZero Audio`. The next step checks storage access, FFmpeg,
-Demucs, RVC conversion/training assets, Torch/Fairseq/FAISS, and the NVIDIA CUDA
-device before opening the workspace. The same setup and diagnostics screen is
-available from the settings button in the title bar.
-- `F0 method`: fixed to `rmvpe`.
-
-## Smoke Test
-
-```powershell
-python scripts\smoke_separate.py "C:\path\to\audio.m4a"
-```
+The single application version source is `src\jang_app\version.py`. Windows metadata, installer names, update manifests, and release verification all read that value.

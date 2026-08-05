@@ -76,12 +76,32 @@ class VideoPreviewPanelTests(unittest.TestCase):
         )
 
         self.assertEqual(panel.url_field.original_slot.objectName(), "VideoOriginalUrlSlot")
+        self.assertFalse(panel.url_field.original_slot.isHidden())
         self.assertTrue(panel.url_field.original_button.isHidden())
         self.assertIn(
             "QWidget#VideoOriginalUrlSlot",
             panel.styleSheet(),
         )
         panel.close()
+
+    def test_url_action_is_explicit_and_only_enabled_for_non_empty_input(self) -> None:
+        for theme_mode in ("dark", "white"):
+            panel = VideoPreviewPanel()
+            panel.setStyleSheet(build_stylesheet(theme_mode))
+            panel.set_theme_mode(theme_mode)
+            panel.set_source(VideoSource(), enabled=True)
+            requested = QSignalSpy(panel.url_requested)
+
+            with self.subTest(theme_mode=theme_mode):
+                self.assertEqual(panel.url_field.submit_button.icon_name(), "link")
+                self.assertFalse(panel.url_field.submit_button.isEnabled())
+                self.assertTrue(panel.url_field.original_slot.isHidden())
+
+                panel.url_field.edit.setText("https://example.com/video.mp4")
+                self.assertTrue(panel.url_field.submit_button.isEnabled())
+                panel.url_field.submit_button.click()
+                self.assertEqual(requested.count(), 1)
+            panel.close()
 
     def test_youtube_download_uses_a_compact_icon_action(self) -> None:
         for theme_mode in ("dark", "white"):

@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
@@ -26,7 +27,11 @@ from jang_app.qt_app.model_badge import set_model_badge
 from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
 from jang_app.qt_app.model_detail_panel import ModelDetailPanel, ModelProfileValues
 from jang_app.qt_app.model_row import ModelListRow
-from jang_app.qt_app.model_training_panel import ModelTrainingPanel, ModelTrainingWorker
+from jang_app.qt_app.model_training_panel import (
+    ModelTrainingPanel,
+    ModelTrainingWorker,
+    format_training_elapsed,
+)
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
 from jang_app.qt_app.text_input_dialog import TextInputDialog
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
@@ -83,7 +88,14 @@ class ModelWorkspacePage(QWidget):
         self._training_task_id = ""
         self._training_progress = 0
         self._training_stage = ""
+        self._training_started_at = 0.0
+        self._training_last_activity_at = 0.0
+        self._training_queue_runtime_bucket = -1
         self._theme_mode = "white"
+
+        self._training_runtime_timer = QTimer(self)
+        self._training_runtime_timer.setInterval(1000)
+        self._training_runtime_timer.timeout.connect(self._refresh_training_runtime)
 
         self._build_ui()
         self.refresh_models()
@@ -596,6 +608,7 @@ class ModelWorkspacePage(QWidget):
         if is_running:
             self.training_panel.set_progress(self._training_progress)
             self.training_panel.set_stage(self._training_stage)
+            self._refresh_training_runtime()
 
     def _start_training(self, settings: object) -> None:
         record = self._selected_record()
@@ -617,6 +630,10 @@ class ModelWorkspacePage(QWidget):
         self._training_model_id = record.model_id
         self._training_progress = 0
         self._training_stage = "Preparing Training"
+        now = monotonic()
+        self._training_started_at = now
+        self._training_last_activity_at = now
+        self._training_queue_runtime_bucket = -1
         self._training_task_id = (
             self._processing_queue.start("Train RVC Model", record.title)
             if self._processing_queue is not None
@@ -624,11 +641,14 @@ class ModelWorkspacePage(QWidget):
         )
         self.training_panel.set_running(True)
         self.training_panel.set_progress(0)
+        state = RvcTrainingStateStore(record.model_id, layout).refresh_checkpoint_pair()
+        initial_epoch = state.current_epoch if settings.resume and state.can_resume else 0
+        self.training_panel.set_epoch_progress(initial_epoch, settings.target_epoch)
         self.training_panel.set_stage(self._training_stage)
         self.dataset_panel.set_training_locked(True)
 
         worker = ModelTrainingWorker(
-            lambda progress, stage: self._run_training_job(
+            lambda progress, stage, epoch, activity: self._run_training_job(
                 record,
                 layout,
                 dataset,
@@ -636,15 +656,22 @@ class ModelWorkspacePage(QWidget):
                 cancellation,
                 progress,
                 stage,
+                epoch,
+                activity,
             )
         )
+        worker.set_diagnostic_task_id(self._training_task_id)
         worker.setParent(self)
         worker.progress_changed.connect(self._on_training_progress)
         worker.stage_changed.connect(self._on_training_stage)
+        worker.epoch_changed.connect(self._on_training_epoch)
+        worker.activity_changed.connect(self._on_training_activity)
         worker.succeeded.connect(self._on_training_succeeded)
         worker.failed.connect(self._on_training_failed)
         worker.finished.connect(self._on_training_finished)
         self._training_worker = worker
+        self._training_runtime_timer.start()
+        self._refresh_training_runtime()
         worker.start()
 
     def _run_training_job(
@@ -656,6 +683,8 @@ class ModelWorkspacePage(QWidget):
         cancellation: CommandCancellation,
         progress: Callable[[int], None],
         stage: Callable[[str], None],
+        epoch: Callable[[int, int], None],
+        activity: Callable[[], None],
     ) -> _ModelTrainingJobResult:
         pipeline = run_rvc_training_pipeline(
             record.model_id,
@@ -665,7 +694,9 @@ class ModelWorkspacePage(QWidget):
             settings,
             cancellation=cancellation,
             progress=progress,
+            epoch_callback=epoch,
             stage_callback=lambda current: stage(_training_stage_label(current)),
+            output_callback=lambda _line: activity(),
         )
         if pipeline.stopped:
             return _ModelTrainingJobResult(pipeline, None)
@@ -681,13 +712,14 @@ class ModelWorkspacePage(QWidget):
     def _stop_training(self) -> None:
         if self._training_cancellation is None:
             return
+        self._mark_training_activity()
         self._training_stage = "Stopping Training"
         self.training_panel.set_stage(self._training_stage)
-        if self._processing_queue is not None and self._training_task_id:
-            self._processing_queue.update_detail(self._training_task_id, self._training_stage)
+        self._update_training_queue_detail()
         self._training_cancellation.request_cancel()
 
     def _on_training_progress(self, value: int) -> None:
+        self._mark_training_activity()
         self._training_progress = max(0, min(100, int(value)))
         if self._selected_model_id == self._training_model_id:
             self.training_panel.set_progress(self._training_progress)
@@ -695,11 +727,55 @@ class ModelWorkspacePage(QWidget):
             self._processing_queue.update_progress(self._training_task_id, self._training_progress)
 
     def _on_training_stage(self, stage: str) -> None:
+        self._mark_training_activity()
         self._training_stage = stage
         if self._selected_model_id == self._training_model_id:
             self.training_panel.set_stage(stage)
+        self._update_training_queue_detail()
+
+    def _on_training_epoch(self, current_epoch: int, target_epoch: int) -> None:
+        self._mark_training_activity()
         if self._processing_queue is not None and self._training_task_id:
-            self._processing_queue.update_detail(self._training_task_id, stage)
+            diagnostics = self._processing_queue.diagnostics
+            if diagnostics is not None:
+                diagnostics.event(
+                    self._training_task_id,
+                    "training_epoch",
+                    current_epoch=current_epoch,
+                    target_epoch=target_epoch,
+                )
+        if self._selected_model_id == self._training_model_id:
+            self.training_panel.set_epoch_progress(current_epoch, target_epoch)
+
+    def _on_training_activity(self) -> None:
+        self._mark_training_activity()
+
+    def _mark_training_activity(self) -> None:
+        if self._training_worker is not None:
+            self._training_last_activity_at = monotonic()
+
+    def _refresh_training_runtime(self) -> None:
+        if self._training_worker is None or self._training_started_at <= 0:
+            self._training_runtime_timer.stop()
+            return
+        now = monotonic()
+        elapsed = max(0, int(now - self._training_started_at))
+        idle = max(0, int(now - self._training_last_activity_at))
+        if self._selected_model_id == self._training_model_id:
+            self.training_panel.set_runtime_status(elapsed, idle)
+        bucket = elapsed // 5
+        if bucket != self._training_queue_runtime_bucket:
+            self._training_queue_runtime_bucket = bucket
+            self._update_training_queue_detail(elapsed)
+
+    def _update_training_queue_detail(self, elapsed_seconds: int | None = None) -> None:
+        if self._processing_queue is None or not self._training_task_id:
+            return
+        if elapsed_seconds is None:
+            elapsed_seconds = max(0, int(monotonic() - self._training_started_at))
+        stage = tr(self._training_stage) if self._training_stage else tr("Training")
+        elapsed = tr("Elapsed {elapsed}", elapsed=format_training_elapsed(elapsed_seconds))
+        self._processing_queue.update_detail(self._training_task_id, f"{stage}  |  {elapsed}")
 
     def _on_training_succeeded(self, result: object) -> None:
         if not isinstance(result, _ModelTrainingJobResult):
@@ -734,6 +810,10 @@ class ModelWorkspacePage(QWidget):
         self._training_task_id = ""
         self._training_progress = 0
         self._training_stage = ""
+        self._training_started_at = 0.0
+        self._training_last_activity_at = 0.0
+        self._training_queue_runtime_bucket = -1
+        self._training_runtime_timer.stop()
         if worker is not None:
             worker.deleteLater()
         if self._selected_model_id == trained_model_id:
@@ -935,6 +1015,7 @@ def _training_stage_label(stage: RvcTrainingStage) -> str:
         RvcTrainingStage.PREPROCESS: "Preparing Audio",
         RvcTrainingStage.EXTRACT: "Extracting Features",
         RvcTrainingStage.FILELIST: "Building File List",
+        RvcTrainingStage.SPECTROGRAM: "Preparing Spectrograms",
         RvcTrainingStage.TRAIN: "Training",
         RvcTrainingStage.INDEX: "Building Index",
     }[stage]

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QFrame,
     QHBoxLayout,
@@ -121,9 +122,28 @@ class LogDrawer(QFrame):
         self.activity_detail.setReadOnly(True)
         self.activity_detail.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
 
+        self.copy_diagnostics_button = FeedbackButton("Copy diagnostics")
+        self.copy_diagnostics_button.setObjectName("LogDrawerActionButton")
+        self.copy_diagnostics_button.clicked.connect(self._copy_selected_diagnostics)
+        self.open_task_log_button = SvgIconButton("folder", size=32)
+        self.open_task_log_button.setObjectName("LogDrawerTaskFolderButton")
+        self.open_task_log_button.setToolTip("Open task log folder")
+        self.open_task_log_button.clicked.connect(self._open_selected_task_log)
+        self.diagnostic_status_label = QLabel("")
+        self.diagnostic_status_label.setObjectName("LogDrawerDiagnosticStatus")
+
+        diagnostic_actions = QHBoxLayout()
+        diagnostic_actions.setContentsMargins(0, 0, 0, 0)
+        diagnostic_actions.setSpacing(8)
+        diagnostic_actions.addWidget(self.diagnostic_status_label, 1)
+        diagnostic_actions.addWidget(self.open_task_log_button)
+        diagnostic_actions.addWidget(self.copy_diagnostics_button)
+
         layout.addWidget(self.activity_list)
         layout.addWidget(detail_title)
         layout.addWidget(self.activity_detail, 1)
+        layout.addLayout(diagnostic_actions)
+        self._set_diagnostic_actions(None)
         return page
 
     def _build_application_log_page(self) -> QWidget:
@@ -147,7 +167,12 @@ class LogDrawer(QFrame):
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
-        for button in (self.open_button, self.refresh_button, self.close_button):
+        for button in (
+            self.open_button,
+            self.refresh_button,
+            self.close_button,
+            self.open_task_log_button,
+        ):
             button.set_theme_mode(theme_mode)
 
     def apply_language(self) -> None:
@@ -228,6 +253,31 @@ class LogDrawer(QFrame):
 
     def _show_task_detail(self, task: ProcessingTask | None) -> None:
         self.activity_detail.setPlainText(_format_task_detail(task) if task is not None else tr("No task selected."))
+        self._set_diagnostic_actions(task)
+
+    def _set_diagnostic_actions(self, task: ProcessingTask | None) -> None:
+        available = (
+            task is not None
+            and task.diagnostic_path is not None
+            and self._queue.diagnostics is not None
+        )
+        self.copy_diagnostics_button.setEnabled(available)
+        self.open_task_log_button.setEnabled(available)
+        self.diagnostic_status_label.clear()
+
+    def _copy_selected_diagnostics(self) -> None:
+        task_id = self._selected_task_id()
+        diagnostics = self._queue.diagnostics
+        if not task_id or diagnostics is None:
+            return
+        QApplication.clipboard().setText(diagnostics.build_report(task_id))
+        self.diagnostic_status_label.setText(tr("Copied"))
+        QTimer.singleShot(1600, self.diagnostic_status_label.clear)
+
+    def _open_selected_task_log(self) -> None:
+        task = self._tasks_by_id.get(self._selected_task_id() or "")
+        if task is not None and task.diagnostic_path is not None:
+            self.open_location_requested.emit(task.diagnostic_path)
 
     def _show_tab(self, index: int) -> None:
         self.page_stack.setCurrentIndex(index)
@@ -300,6 +350,9 @@ def _format_task_detail(task: ProcessingTask) -> str:
     ]
     if task.finished_at is not None:
         lines.append(f"{tr('Finished')}: {task.finished_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"{tr('Task ID')}: {task.task_id}")
+    if task.diagnostic_code:
+        lines.append(f"{tr('Diagnostic ID')}: {task.diagnostic_code}")
     if task.detail:
         lines.extend(("", tr(task.detail)))
     if task.error:

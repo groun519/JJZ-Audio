@@ -17,6 +17,10 @@ from jang_app.services.command import (
 from jang_app.services.managed_files import copy_file_atomic, file_sha256
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
+from jang_app.services.rvc_script_launcher import (
+    prepare_rvc_script_launcher,
+    prepare_rvc_script_workspace,
+)
 from jang_app.services.rvc_training_filelist import load_rvc_training_filelist
 from jang_app.services.rvc_training_runtime import (
     RVC_TRAINING_SAMPLE_RATE,
@@ -29,9 +33,18 @@ from jang_app.services.rvc_training_state import (
     RvcTrainingState,
     RvcTrainingStateStore,
 )
+from jang_app.services.rvc_training_storage import (
+    RvcTrainingStorageError,
+    prepare_rvc_training_storage,
+)
 
 
 _EPOCH_PATTERN = re.compile(r"====>\s*Epoch:\s*(?P<epoch>\d+)", re.IGNORECASE)
+_WEIGHT_SAVE_PATTERN = re.compile(
+    r"saving ckpt\s+.+_e(?P<epoch>\d+)_s(?P<step>\d+)",
+    re.IGNORECASE,
+)
+_CHECKPOINT_PATTERN = re.compile(r"^(?P<kind>[GD])_(?P<step>\d+)\.pth$", re.IGNORECASE)
 _COMPLETE_MARKER = "training is done"
 
 
@@ -83,6 +96,7 @@ def train_rvc_model(
     *,
     cancellation: CommandCancellation | None = None,
     progress: Callable[[int], None] | None = None,
+    epoch_callback: Callable[[int, int], None] | None = None,
     output_callback: Callable[[str], None] | None = None,
     command_runner: TrainingCommandRunner = run_cancellable_command,
     runtime_inspector: Callable[..., RvcTrainingRuntimeInspection] = inspect_rvc_training_runtime,
@@ -98,9 +112,25 @@ def train_rvc_model(
 
     load_rvc_training_filelist(model_id, layout)
     layout.create()
+    try:
+        storage = prepare_rvc_training_storage(layout)
+    except RvcTrainingStorageError as exc:
+        raise RvcTrainingRunError(str(exc)) from exc
     _prepare_package_config(runtime, layout)
+    prepare_rvc_script_workspace(layout.root, runtime)
+    launcher = prepare_rvc_script_launcher(
+        layout.root / ".jjzero" / "train_rvc.py",
+        runtime,
+        runtime / "train_nsf_sim_cache_sid_load_pretrain.py",
+        atomic_torch_saves=True,
+        compact_rvc_checkpoints=True,
+        conservative_data_loading=True,
+    )
     state_store = RvcTrainingStateStore(model_id, layout)
+    _keep_latest_checkpoint_pair(layout)
     state = state_store.refresh_checkpoint_pair()
+    if settings.resume and state.current_epoch > 0 and not state.can_resume:
+        state = state_store.reset_for_new_training()
     resumed = settings.resume and state.can_resume
     if not settings.resume:
         _archive_checkpoints(layout)
@@ -118,13 +148,14 @@ def train_rvc_model(
     except Exception:
         _discard_backup(backup, layout)
         raise
-    _report(progress, state.current_epoch, settings.target_epoch)
+    _report(progress, epoch_callback, state.current_epoch, settings.target_epoch)
     logger = get_logger()
     logger.info(
-        "Starting RVC training: model=%s target_epoch=%s resumed=%s",
+        "Starting RVC training: model=%s target_epoch=%s resumed=%s free_space_gib=%.1f",
         model_id,
         settings.target_epoch,
         resumed,
+        storage.available_bytes / 1024**3,
     )
 
     def handle_output(line: str) -> None:
@@ -132,13 +163,20 @@ def train_rvc_model(
         if match is not None:
             epoch = min(settings.target_epoch, int(match.group("epoch")))
             state_store.record_epoch(epoch)
-            _report(progress, epoch, settings.target_epoch)
+            _report(progress, epoch_callback, epoch, settings.target_epoch)
+        save_match = _WEIGHT_SAVE_PATTERN.search(line)
+        if save_match is not None:
+            epoch = min(settings.target_epoch, int(save_match.group("epoch")))
+            state_store.record_epoch(epoch)
+            _keep_latest_checkpoint_pair(layout, int(save_match.group("step")))
+            state_store.refresh_checkpoint_pair()
+            _report(progress, epoch_callback, epoch, settings.target_epoch)
         if output_callback is not None:
             output_callback(line)
 
     try:
         result = command_runner(
-            _training_command(runtime, layout, settings),
+            _training_command(runtime, layout, settings, launcher),
             cwd=layout.root,
             env=build_rvc_environment(runtime),
             output_callback=handle_output,
@@ -164,7 +202,12 @@ def train_rvc_model(
         state_store.record_epoch(settings.target_epoch)
         completed = state_store.update_phase(RvcTrainingPhase.COMPLETE)
         _discard_backup(backup, layout)
-        _report(progress, settings.target_epoch, settings.target_epoch)
+        _report(
+            progress,
+            epoch_callback,
+            settings.target_epoch,
+            settings.target_epoch,
+        )
         logger.info("RVC training complete: model=%s output=%s", model_id, final_model)
         return RvcTrainingRunResult(completed, final_model, log_path, resumed, False)
     except Exception as exc:
@@ -181,10 +224,11 @@ def _training_command(
     runtime: Path,
     layout: RvcModelPackageLayout,
     settings: RvcTrainingRunSettings,
+    launcher: Path,
 ) -> list[str]:
     return [
         str(runtime / "runtime" / "python.exe"),
-        str(runtime / "train_nsf_sim_cache_sid_load_pretrain.py"),
+        str(launcher),
         "-e",
         layout.rvc_name,
         "-sr",
@@ -248,6 +292,29 @@ def _archive_checkpoints(layout: RvcModelPackageLayout) -> Path | None:
     return archive
 
 
+def _keep_latest_checkpoint_pair(
+    layout: RvcModelPackageLayout,
+    preferred_step: int | None = None,
+) -> None:
+    generators: dict[int, Path] = {}
+    discriminators: dict[int, Path] = {}
+    for path in layout.experiment_dir.glob("*.pth"):
+        match = _CHECKPOINT_PATTERN.fullmatch(path.name) if path.is_file() else None
+        if match is None:
+            continue
+        target = generators if match.group("kind").casefold() == "g" else discriminators
+        target[int(match.group("step"))] = path
+    shared_steps = generators.keys() & discriminators.keys()
+    keep_step = (
+        preferred_step
+        if preferred_step is not None and preferred_step in shared_steps
+        else max(shared_steps) if shared_steps else None
+    )
+    for step, path in (*generators.items(), *discriminators.items()):
+        if step != keep_step:
+            path.unlink(missing_ok=True)
+
+
 def _backup_final_model(final_model: Path, layout: RvcModelPackageLayout) -> Path | None:
     if not final_model.is_file():
         return None
@@ -296,9 +363,16 @@ def _log_delta(path: Path, offset: int) -> str:
         return source.read().decode("utf-8", errors="replace")
 
 
-def _report(progress: Callable[[int], None] | None, epoch: int, target: int) -> None:
+def _report(
+    progress: Callable[[int], None] | None,
+    epoch_callback: Callable[[int, int], None] | None,
+    epoch: int,
+    target: int,
+) -> None:
     if progress is not None:
         progress(max(0, min(100, round(epoch * 100 / target))))
+    if epoch_callback is not None:
+        epoch_callback(epoch, target)
 
 
 def _existing(path: Path) -> Path | None:

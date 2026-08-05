@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InstallerPath,
     [string]$PreviousInstallerPath = "",
-    [string]$RuntimePackageIndex = ""
+    [string]$RuntimePackageIndex = "",
+    [switch]$KeepArtifacts
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,7 +58,11 @@ function Assert-InstalledVersion([string]$ExpectedVersion) {
 }
 
 function Invoke-DistributionVerification {
-    & $python scripts\verify_distribution.py $installDir
+    $arguments = @("scripts\verify_distribution.py", $installDir)
+    if (-not $RuntimePackageIndex) {
+        $arguments += "--app-only"
+    }
+    & $python @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "Installed distribution verification failed with exit code $LASTEXITCODE"
     }
@@ -118,4 +123,10 @@ if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne "preserve-user-data") {
 }
 
 Write-Output "Verified installer upgrade $baselineVersion -> $targetVersion and uninstall: $installer"
-Write-Output "Verification logs: $testRoot"
+if ($KeepArtifacts) {
+    Write-Output "Verification logs: $testRoot"
+}
+else {
+    Remove-Item -LiteralPath $testRoot -Recurse -Force
+    Write-Output "Removed installer verification files: $testRoot"
+}

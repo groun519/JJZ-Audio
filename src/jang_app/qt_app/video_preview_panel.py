@@ -335,6 +335,7 @@ class _VideoUrlField(QFrame):
         self.edit.setFrame(False)
         set_translated_placeholder(self.edit, "Video URL")
         self.edit.returnPressed.connect(self._submit)
+        self.edit.textChanged.connect(self._sync_submit_button)
         self.edit.installEventFilter(self)
 
         self.original_button = SvgIconButton("globe", size=28)
@@ -343,8 +344,8 @@ class _VideoUrlField(QFrame):
         self.original_button.clicked.connect(self.original_requested.emit)
         self.original_button.hide()
 
-        self.submit_button = SvgIconButton("arrow_right", size=28)
-        self.submit_button.setObjectName("EmbeddedIconButton")
+        self.submit_button = SvgIconButton("link", size=30)
+        self.submit_button.setObjectName("EmbeddedActionButton")
         set_translated_tooltip(self.submit_button, "Use URL")
         self.submit_button.clicked.connect(self._submit)
 
@@ -361,6 +362,8 @@ class _VideoUrlField(QFrame):
         layout.addWidget(self.edit, 1)
         layout.addWidget(self.original_slot, 0)
         layout.addWidget(self.submit_button, 0)
+        self._sync_original_button()
+        self._sync_submit_button()
 
     def set_original_url_available(self, available: bool) -> None:
         self._original_url_available = bool(available)
@@ -400,8 +403,12 @@ class _VideoUrlField(QFrame):
             self.submitted.emit(value)
 
     def _sync_original_button(self) -> None:
+        self.original_slot.setVisible(self._original_url_available)
         hovered = self.underMouse() or self.edit.underMouse() or self.edit.hasFocus()
         self.original_button.setVisible(self._original_url_available and hovered)
+
+    def _sync_submit_button(self) -> None:
+        self.submit_button.setEnabled(bool(self.edit.text().strip()))
 
 
 def _source_badge(source: VideoSource) -> str:

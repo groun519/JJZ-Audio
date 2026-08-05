@@ -29,6 +29,50 @@ class _VisibilityTarget:
         self.visible = is_visible
 
 
+class _FloatingPlaybackTarget(_VisibilityTarget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.queue: tuple[str, int] | None = None
+        self.position: tuple[int, int] | None = None
+        self.is_playing = False
+
+    def set_queue(self, title: str, duration_ms: int) -> None:
+        self.queue = (title, duration_ms)
+
+    def set_position(self, position_ms: int, duration_ms: int) -> None:
+        self.position = (position_ms, duration_ms)
+
+    def set_playing(self, is_playing: bool) -> None:
+        self.is_playing = is_playing
+
+    def clear(self) -> None:
+        self.queue = None
+        self.position = None
+        self.is_playing = False
+
+
+class _WorkspacePlaybackTarget(_VisibilityTarget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.duration_ms = 0
+        self.position: tuple[int, int] | None = None
+        self.is_playing = False
+
+    def set_queue(self, duration_ms: int) -> None:
+        self.duration_ms = duration_ms
+
+    def set_position(self, position_ms: int, duration_ms: int) -> None:
+        self.position = (position_ms, duration_ms)
+
+    def set_playing(self, is_playing: bool) -> None:
+        self.is_playing = is_playing
+
+    def clear(self) -> None:
+        self.duration_ms = 0
+        self.position = None
+        self.is_playing = False
+
+
 class MainWindowPlaybackNavigationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -113,6 +157,34 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
 
         self.assertTrue(workspace.visible)
         self.assertFalse(floating.visible)
+
+    def test_library_queue_state_is_mirrored_to_workspace_transport(self) -> None:
+        workspace = _WorkspacePlaybackTarget()
+        floating = _FloatingPlaybackTarget()
+        queue = PlaybackQueue(
+            context="library",
+            source_id="song-1",
+            title="Song",
+            paths=(Path("song.wav"),),
+            volumes=(1.0,),
+            duration_ms=90_000,
+        )
+        window = SimpleNamespace(
+            current_playback_queue=queue,
+            workspace_dock=workspace,
+            floating_playback_panel=floating,
+            _playback_position_ms=15_000,
+            _sync_playback_surfaces=lambda: None,
+            _sync_video_playback=lambda _is_playing: None,
+        )
+
+        MainWindow._refresh_playback_ui(window, is_playing=True)
+
+        self.assertEqual(floating.position, (15_000, 90_000))
+        self.assertEqual(workspace.position, floating.position)
+        self.assertEqual(workspace.duration_ms, 90_000)
+        self.assertTrue(floating.is_playing)
+        self.assertTrue(workspace.is_playing)
 
 
 if __name__ == "__main__":

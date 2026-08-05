@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
+from jang_app.services.job_diagnostics import JobDiagnostics
 from jang_app.services.processing_queue import (
     ProcessingQueue,
     TASK_CANCELLED,
@@ -76,6 +79,19 @@ class ProcessingQueueTests(unittest.TestCase):
         queue.complete(task_id)
 
         self.assertEqual(snapshots, [(0, 0), (1, 1), (1, 1), (1, 0)])
+
+    def test_connects_failure_to_job_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics = JobDiagnostics(Path(temporary), session_id="queue-test")
+            queue = ProcessingQueue(diagnostics=diagnostics)
+            task_id = queue.start("Convert Vocal", "song.wav")
+
+            queue.fail(task_id, "CUDA out of memory")
+
+            task = queue.tasks()[0]
+            self.assertEqual(task.diagnostic_code, "CUDA_OUT_OF_MEMORY")
+            self.assertEqual(task.diagnostic_path, Path(temporary) / task_id)
+            self.assertTrue((task.diagnostic_path / "summary.json").is_file())
 
 
 if __name__ == "__main__":

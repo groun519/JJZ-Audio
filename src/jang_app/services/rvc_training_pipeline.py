@@ -41,6 +41,11 @@ from jang_app.services.rvc_training_state import (
     RvcTrainingState,
     RvcTrainingStateStore,
 )
+from jang_app.services.rvc_training_spectrogram import (
+    RvcTrainingSpectrogramError,
+    load_rvc_training_spectrogram_cache,
+    prepare_rvc_training_spectrogram_cache,
+)
 from jang_app.services.rvc_training_train import (
     RvcTrainingRunResult,
     RvcTrainingRunSettings,
@@ -53,6 +58,7 @@ class RvcTrainingStage(StrEnum):
     PREPROCESS = "preprocess"
     EXTRACT = "extract"
     FILELIST = "filelist"
+    SPECTROGRAM = "spectrogram"
     TRAIN = "train"
     INDEX = "index"
 
@@ -86,6 +92,7 @@ def run_rvc_training_pipeline(
     *,
     cancellation: CommandCancellation | None = None,
     progress: Callable[[int], None] | None = None,
+    epoch_callback: Callable[[int, int], None] | None = None,
     stage_callback: Callable[[RvcTrainingStage], None] | None = None,
     output_callback: Callable[[str], None] | None = None,
 ) -> RvcTrainingPipelineResult:
@@ -154,6 +161,24 @@ def run_rvc_training_pipeline(
         )
         _set_progress(progress, 60)
 
+        _stage(stage_callback, RvcTrainingStage.SPECTROGRAM)
+        _resolve_stage(
+            lambda: load_rvc_training_spectrogram_cache(model_id, layout),
+            lambda: prepare_rvc_training_spectrogram_cache(
+                model_id,
+                layout,
+                runtime_root,
+                cancellation=token,
+                progress=_scaled_progress(progress, 60, 70),
+                output_callback=output_callback,
+            ),
+            RvcTrainingSpectrogramError,
+            RvcTrainingStage.SPECTROGRAM,
+            executed,
+            token,
+        )
+        _set_progress(progress, 70)
+
         _stage(stage_callback, RvcTrainingStage.TRAIN)
         raise_if_training_cancelled(token)
         executed.append(RvcTrainingStage.TRAIN)
@@ -163,7 +188,8 @@ def run_rvc_training_pipeline(
             runtime_root,
             settings,
             cancellation=token,
-            progress=_scaled_progress(progress, 60, 90),
+            progress=_scaled_progress(progress, 70, 92),
+            epoch_callback=epoch_callback,
             output_callback=output_callback,
         )
         if training.stopped:
@@ -174,7 +200,7 @@ def run_rvc_training_pipeline(
                 training,
                 None,
             )
-        _set_progress(progress, 90)
+        _set_progress(progress, 92)
 
         _stage(stage_callback, RvcTrainingStage.INDEX)
         index = _resolve_stage(
@@ -184,7 +210,7 @@ def run_rvc_training_pipeline(
                 layout,
                 runtime_root,
                 cancellation=token,
-                progress=_scaled_progress(progress, 90, 100),
+                progress=_scaled_progress(progress, 92, 100),
                 output_callback=output_callback,
             ),
             RvcTrainingIndexError,

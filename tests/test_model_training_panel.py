@@ -6,11 +6,11 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from jang_app.qt_app.model_training_panel import ModelTrainingPanel
+from jang_app.qt_app.model_training_panel import ModelTrainingPanel, format_training_elapsed
 from jang_app.services.i18n import LANGUAGE_ENGLISH, set_language
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_model_workspace import RvcModelRecord
-from jang_app.services.rvc_training_state import RvcTrainingStateStore
+from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingStateStore
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 
 
@@ -68,14 +68,37 @@ class ModelTrainingPanelTests(unittest.TestCase):
 
             stopped: list[bool] = []
             panel.stop_requested.connect(lambda: stopped.append(True))
+            panel.set_failure("previous failure")
             panel.set_running(True)
+            panel.set_progress(70)
+            panel.set_epoch_progress(3, 20)
+            panel.set_runtime_status(65, 4)
             panel.stop_button.click()
 
+            self.assertEqual(panel.status_label.text(), "Training")
+            self.assertEqual(
+                panel.status_label.property("phase"),
+                RvcTrainingPhase.TRAIN.value,
+            )
+            self.assertEqual(panel.stage_label.toolTip(), "")
+            self.assertEqual(panel.epoch_label.text(), "3 / 20")
+            self.assertEqual(panel.progress_percent_label.text(), "70%")
+            self.assertTrue(panel.activity_label.text().startswith("Working"))
+            self.assertEqual(
+                panel.runtime_label.text(),
+                "Elapsed 01:05  |  Last activity 00:04 ago",
+            )
+            self.assertFalse(panel.runtime_row.isHidden())
             self.assertTrue(panel.start_button.isHidden())
             self.assertFalse(panel.stop_button.isHidden())
             self.assertFalse(panel.target_epoch_spin.isEnabled())
             self.assertEqual(stopped, [True])
             panel.close()
+
+    def test_elapsed_time_formatter_supports_long_training_runs(self) -> None:
+        self.assertEqual(format_training_elapsed(5), "00:05")
+        self.assertEqual(format_training_elapsed(65), "01:05")
+        self.assertEqual(format_training_elapsed(3_661), "01:01:01")
 
 
 def _record(root: Path, layout: RvcModelPackageLayout) -> RvcModelRecord:

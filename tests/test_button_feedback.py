@@ -3,13 +3,19 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QByteArray, QEvent, Qt
 from PySide6.QtGui import QFocusEvent
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.theme import build_stylesheet
-from jang_app.qt_app.widgets import FeedbackButton, WindowTitleBar, _track_button_palette
+from jang_app.qt_app.widgets import (
+    FeedbackButton,
+    WindowTitleBar,
+    _TRACK_ICON_SVGS,
+    _track_button_palette,
+)
 
 
 class ButtonFeedbackTests(unittest.TestCase):
@@ -65,6 +71,14 @@ class ButtonFeedbackTests(unittest.TestCase):
                 self.assertNotEqual(normal["background"], hovered["background"])
                 self.assertNotEqual(hovered["background"], pressed["background"])
                 self.assertNotEqual(checked["background"], checked_pressed["background"])
+
+    def test_every_registered_icon_is_valid_svg(self) -> None:
+        for name, template in _TRACK_ICON_SVGS.items():
+            renderer = QSvgRenderer(
+                QByteArray(template.replace("{color}", "#ffffff").encode("utf-8"))
+            )
+            with self.subTest(name=name):
+                self.assertTrue(renderer.isValid())
 
     def test_title_bar_language_button_keeps_compact_outer_size(self) -> None:
         for theme_mode in ("dark", "white"):

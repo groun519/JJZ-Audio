@@ -46,7 +46,7 @@ def main(started_at: float | None = None) -> None:
                 return
 
     from jang_app.config import APP_ICON_PATH, APP_NAME
-    from jang_app.services.app_logging import get_logger
+    from jang_app.services.app_logging import get_logger, install_exception_logging
 
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
@@ -55,6 +55,7 @@ def main(started_at: float | None = None) -> None:
     from jang_app.qt_app.startup_coordinator import StartupCoordinator
 
     logger = get_logger()
+    install_exception_logging()
     coordinator = StartupCoordinator(app, startup, logger)
     if smoke_test:
         from PySide6.QtCore import QTimer

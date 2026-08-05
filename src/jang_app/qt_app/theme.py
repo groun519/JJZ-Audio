@@ -379,6 +379,18 @@ def _stylesheet(
             font-weight: 800;
         }}
 
+        QLabel#TrainingActivityText {{
+            color: {accent};
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingProgressText, QLabel#TrainingRuntimeText {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
         QLabel#TrainingProfileBadge, QLabel#TrainingEpochBadge {{
             color: {muted};
             background: {surface};
@@ -1279,6 +1291,54 @@ def _stylesheet(
             background: transparent;
         }}
 
+        QPushButton#LogDrawerTaskFolderButton {{
+            min-width: 32px;
+            max-width: 32px;
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0;
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 9px;
+        }}
+
+        QPushButton#LogDrawerTaskFolderButton:hover {{
+            background: {hover};
+        }}
+
+        QPushButton#LogDrawerActionButton {{
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0 14px;
+            color: {text};
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 9px;
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QPushButton#LogDrawerActionButton:hover {{
+            background: {hover};
+        }}
+
+        QPushButton#LogDrawerActionButton:pressed {{
+            background: {pressed};
+        }}
+
+        QPushButton#LogDrawerActionButton:disabled,
+        QPushButton#LogDrawerTaskFolderButton:disabled {{
+            color: {faint};
+            background: transparent;
+            border-color: {border};
+        }}
+
+        QLabel#LogDrawerDiagnosticStatus {{
+            color: {muted};
+            font-size: 9px;
+            font-weight: 700;
+        }}
+
         QListWidget#LogActivityList {{
             background: transparent;
             border: 0;
@@ -1680,6 +1740,16 @@ def _stylesheet(
         }}
 
         QPushButton#VideoSourceActionButton {{
+            min-width: 30px;
+            max-width: 30px;
+            min-height: 30px;
+            max-height: 30px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+        }}
+
+        QPushButton#EmbeddedActionButton {{
             min-width: 30px;
             max-width: 30px;
             min-height: 30px;

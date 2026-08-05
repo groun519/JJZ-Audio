@@ -90,6 +90,7 @@ from jang_app.services.audio_player import AudioPlaybackError, AudioPlayer
 from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.file_browser import open_in_file_browser
 from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language, tr
+from jang_app.services.job_diagnostics import get_job_diagnostics
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set, scan_output_sound_sets
 from jang_app.services.playback_queue import PlaybackQueue
 from jang_app.services.processing_queue import ProcessingQueue
@@ -125,7 +126,7 @@ class MainWindow(QMainWindow):
         self.work_song_store = work_song_store or WorkSongStore()
         self._work_song_ready = False
         self.player = AudioPlayer()
-        self.processing_queue = ProcessingQueue()
+        self.processing_queue = ProcessingQueue(diagnostics=get_job_diagnostics())
         self._workers: list[TaskWorker] = []
         self._logger = get_logger()
         self._update_check_worker: TaskWorker | None = None
@@ -2233,10 +2234,9 @@ class MainWindow(QMainWindow):
         self.floating_playback_panel.set_queue(queue.title, queue.duration_ms)
         self.floating_playback_panel.set_position(self._playback_position_ms, queue.duration_ms)
         self.floating_playback_panel.set_playing(is_playing)
-        if queue.context == "output":
-            self.workspace_dock.set_queue(queue.duration_ms)
-            self.workspace_dock.set_position(self._playback_position_ms, queue.duration_ms)
-            self.workspace_dock.set_playing(is_playing)
+        self.workspace_dock.set_queue(queue.duration_ms)
+        self.workspace_dock.set_position(self._playback_position_ms, queue.duration_ms)
+        self.workspace_dock.set_playing(is_playing)
         self._sync_playback_surfaces()
         self._sync_video_playback(is_playing)
 
@@ -2482,6 +2482,7 @@ class MainWindow(QMainWindow):
         action_scope: Callable[[], bool] | None = None,
     ) -> None:
         task_id = self.processing_queue.start(task_title, task_detail)
+        worker.set_diagnostic_task_id(task_id)
         self._workers.append(worker)
         action_key = id(action_widget) if action_widget is not None else None
         if action_key is not None:

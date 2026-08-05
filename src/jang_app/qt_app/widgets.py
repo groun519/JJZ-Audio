@@ -1050,6 +1050,8 @@ def _track_button_palette(
         return _window_control_palette(theme_mode, object_name, is_enabled, is_hovered, is_pressed)
     if object_name == "DropFileButton":
         return _drop_file_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
+    if object_name == "EmbeddedActionButton":
+        return _embedded_action_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
     if object_name in {"TrackActionButton", "TrackMuteButton"}:
         return _track_icon_button_palette(theme_mode, is_checked, is_enabled, is_hovered, is_pressed)
 
@@ -1130,6 +1132,42 @@ def _window_control_palette(
     if is_hovered:
         return {"background": colors["hover"], "border": colors["hover"], "icon": colors["hover_icon"]}
     return {"background": colors["background"], "border": colors["background"], "icon": colors["icon"]}
+
+
+def _embedded_action_button_palette(
+    theme_mode: str,
+    is_enabled: bool,
+    is_hovered: bool,
+    is_pressed: bool,
+) -> dict[str, QColor]:
+    if theme_mode == "dark":
+        colors = {
+            "background": QColor("#ecebe7"),
+            "hover": QColor("#fffdf7"),
+            "pressed": QColor("#aaa8a1"),
+            "icon": QColor("#10100e"),
+            "disabled_background": QColor(0, 0, 0, 0),
+            "disabled_border": QColor("#484843"),
+            "disabled_icon": QColor("#6c6b66"),
+        }
+    else:
+        colors = {
+            "background": QColor("#10100e"),
+            "hover": QColor("#292824"),
+            "pressed": QColor("#46443e"),
+            "icon": QColor("#fffdf7"),
+            "disabled_background": QColor(0, 0, 0, 0),
+            "disabled_border": QColor("#d8d0c2"),
+            "disabled_icon": QColor("#aaa397"),
+        }
+    if not is_enabled:
+        return {
+            "background": colors["disabled_background"],
+            "border": colors["disabled_border"],
+            "icon": colors["disabled_icon"],
+        }
+    background = colors["pressed"] if is_pressed else colors["hover"] if is_hovered else colors["background"]
+    return {"background": background, "border": background, "icon": colors["icon"]}
 
 
 def _track_icon_button_palette(
@@ -1424,6 +1462,14 @@ _TRACK_ICON_SVGS = {
         '<path d="M3 12h18"/>'
         '<path d="M12 3a14 14 0 0 1 0 18"/>'
         '<path d="M12 3a14 14 0 0 0 0 18"/>'
+        "</svg>"
+    ),
+    "link": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/>'
+        '<path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/>'
         "</svg>"
     ),
     "split": (

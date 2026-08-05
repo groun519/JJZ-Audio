@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from jang_app.services.command import CommandCancellation, CommandResult
 from jang_app.services.rvc_training_filelist import build_rvc_training_filelist
@@ -17,6 +19,14 @@ from tests.test_rvc_training_filelist import _ready_extraction
 
 
 class RvcTrainingRunTests(unittest.TestCase):
+    def setUp(self) -> None:
+        storage = patch(
+            "jang_app.services.rvc_training_train.prepare_rvc_training_storage",
+            return_value=SimpleNamespace(available_bytes=20 * 1024**3),
+        )
+        storage.start()
+        self.addCleanup(storage.stop)
+
     def test_runs_managed_v2_training_and_accepts_rvc_completion_code(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             model_id, layout, runtime = _training_setup(Path(temporary))
@@ -40,10 +50,19 @@ class RvcTrainingRunTests(unittest.TestCase):
 
             args, cwd, environment = calls[0]
             self.assertEqual(cwd, layout.root)
-            self.assertEqual(Path(args[1]).name, "train_nsf_sim_cache_sid_load_pretrain.py")
+            self.assertEqual(Path(args[1]), layout.root / ".jjzero" / "train_rvc.py")
+            self.assertIn(
+                "train_nsf_sim_cache_sid_load_pretrain.py",
+                Path(args[1]).read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                '"optimizer": None',
+                Path(args[1]).read_text(encoding="utf-8"),
+            )
             self.assertEqual(_argument(args, "-e"), layout.rvc_name)
             self.assertEqual(_argument(args, "-sr"), "40k")
             self.assertEqual(_argument(args, "-f0"), "1")
+            self.assertEqual(_argument(args, "-l"), "0")
             self.assertEqual(_argument(args, "-sw"), "1")
             self.assertIn(str(runtime.resolve()), environment["PATH"])
             self.assertTrue((layout.root / "configs" / "40k.json").is_file())
@@ -76,6 +95,32 @@ class RvcTrainingRunTests(unittest.TestCase):
 
             self.assertTrue(result.resumed)
             self.assertEqual(result.state.checkpoint_step, 200)
+            self.assertFalse((layout.experiment_dir / "G_100.pth").exists())
+
+    def test_incomplete_checkpoint_is_removed_before_training(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            _checkpoint_pair(layout, 100)
+            incomplete = layout.experiment_dir / "G_200.pth"
+            incomplete.write_bytes(b"partial")
+            RvcTrainingStateStore(model_id, layout).refresh_checkpoint_pair()
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                self.assertFalse(incomplete.exists())
+                self.assertTrue((layout.experiment_dir / "G_100.pth").is_file())
+                _write_training_success(layout, output_callback, target_epoch=30, step=300)
+                return CommandResult(args, 2333333, "", "Training is done.")
+
+            result = train_rvc_model(
+                model_id,
+                layout,
+                runtime,
+                RvcTrainingRunSettings(target_epoch=30),
+                command_runner=runner,
+                runtime_inspector=_ready_runtime,
+            )
+
+            self.assertTrue(result.resumed)
 
     def test_new_training_archives_existing_checkpoints_without_deleting_them(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -218,6 +263,9 @@ def _write_training_success(
     with (layout.experiment_dir / "train.log").open("a", encoding="utf-8") as log:
         log.write(f"====> Epoch: {target_epoch}\nTraining is done. The program is closed.\n")
     if output_callback is not None:
+        output_callback(
+            f"saving ckpt {layout.rvc_name}_e{target_epoch}_s{step}:Success."
+        )
         output_callback(f"====> Epoch: {target_epoch}")
         output_callback("Training is done. The program is closed.")
 

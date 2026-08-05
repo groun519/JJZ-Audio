@@ -16,4 +16,5 @@ def build_rvc_environment(rvc_root: Path) -> dict[str, str]:
         environment.get("PATH", ""),
     )
     environment["PATH"] = os.pathsep.join(part for part in path_parts if part)
+    environment["PYTHONFAULTHANDLER"] = "1"
     return environment

@@ -17,6 +17,7 @@ from jang_app.services.rvc_training_pipeline import (
 )
 from jang_app.services.rvc_training_preprocess import RvcTrainingPreprocessError
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingStateStore
+from jang_app.services.rvc_training_spectrogram import RvcTrainingSpectrogramError
 from jang_app.services.rvc_training_train import RvcTrainingRunResult, RvcTrainingRunSettings
 from tests.test_rvc_training_train import _training_setup
 
@@ -34,6 +35,13 @@ class RvcTrainingPipelineTests(unittest.TestCase):
                 patch("jang_app.services.rvc_training_pipeline.preprocess_rvc_training_dataset") as preprocess,
                 patch("jang_app.services.rvc_training_pipeline.extract_rvc_training_features") as extract,
                 patch("jang_app.services.rvc_training_pipeline.build_rvc_training_filelist") as filelist,
+                patch(
+                    "jang_app.services.rvc_training_pipeline.load_rvc_training_spectrogram_cache",
+                    return_value=object(),
+                ),
+                patch(
+                    "jang_app.services.rvc_training_pipeline.prepare_rvc_training_spectrogram_cache"
+                ) as spectrogram,
                 patch("jang_app.services.rvc_training_pipeline.load_rvc_training_index", return_value=object()),
                 patch("jang_app.services.rvc_training_pipeline.build_rvc_training_index") as build_index,
                 patch(
@@ -54,11 +62,14 @@ class RvcTrainingPipelineTests(unittest.TestCase):
             preprocess.assert_not_called()
             extract.assert_not_called()
             filelist.assert_not_called()
+            spectrogram.assert_not_called()
             build_index.assert_not_called()
             self.assertEqual(result.executed_stages, (RvcTrainingStage.TRAIN,))
             self.assertEqual(stages, list(RvcTrainingStage))
             self.assertEqual(progress, sorted(progress))
-            self.assertTrue(all(boundary in progress for boundary in (10, 30, 55, 60, 100)))
+            self.assertTrue(
+                all(boundary in progress for boundary in (10, 30, 55, 60, 70, 92, 100))
+            )
             self.assertTrue(result.completed)
 
     def test_changed_dataset_rebuilds_each_dependent_stage(self) -> None:
@@ -86,6 +97,14 @@ class RvcTrainingPipelineTests(unittest.TestCase):
                 ),
                 patch("jang_app.services.rvc_training_pipeline.build_rvc_training_filelist", return_value=object()) as filelist,
                 patch(
+                    "jang_app.services.rvc_training_pipeline.load_rvc_training_spectrogram_cache",
+                    side_effect=RvcTrainingSpectrogramError("stale"),
+                ),
+                patch(
+                    "jang_app.services.rvc_training_pipeline.prepare_rvc_training_spectrogram_cache",
+                    return_value=object(),
+                ) as spectrogram,
+                patch(
                     "jang_app.services.rvc_training_pipeline.load_rvc_training_index",
                     side_effect=RvcTrainingIndexError("stale"),
                 ),
@@ -106,6 +125,7 @@ class RvcTrainingPipelineTests(unittest.TestCase):
             preprocess.assert_called_once()
             extract.assert_called_once()
             filelist.assert_called_once()
+            spectrogram.assert_called_once()
             index.assert_called_once()
             self.assertEqual(result.executed_stages, tuple(RvcTrainingStage))
 

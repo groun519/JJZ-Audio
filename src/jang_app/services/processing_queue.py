@@ -3,8 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from threading import RLock
 from uuid import uuid4
+
+from jang_app.services.job_diagnostics import JobDiagnostics, classify_error
 
 
 TASK_RUNNING = "running"
@@ -24,6 +27,8 @@ class ProcessingTask:
     created_at: datetime
     finished_at: datetime | None = None
     error: str = ""
+    diagnostic_path: Path | None = None
+    diagnostic_code: str = ""
 
     @property
     def is_active(self) -> bool:
@@ -38,11 +43,16 @@ QueueListener = Callable[[tuple[ProcessingTask, ...]], None]
 
 
 class ProcessingQueue:
-    def __init__(self, history_limit: int = 24) -> None:
+    def __init__(self, history_limit: int = 24, diagnostics: JobDiagnostics | None = None) -> None:
         self._history_limit = max(1, history_limit)
+        self._diagnostics = diagnostics
         self._tasks: list[ProcessingTask] = []
         self._listeners: list[QueueListener] = []
         self._lock = RLock()
+
+    @property
+    def diagnostics(self) -> JobDiagnostics | None:
+        return self._diagnostics
 
     def tasks(self) -> tuple[ProcessingTask, ...]:
         with self._lock:
@@ -63,28 +73,40 @@ class ProcessingQueue:
                 self._listeners.remove(listener)
 
     def start(self, title: str, detail: str = "", progress: int = 0) -> str:
+        task_id = uuid4().hex
+        diagnostic_path = (
+            self._diagnostics.start_job(task_id, title, detail) if self._diagnostics is not None else None
+        )
         task = ProcessingTask(
-            task_id=uuid4().hex,
+            task_id=task_id,
             title=title.strip() or "Processing",
             detail=detail.strip(),
             status=TASK_RUNNING,
             progress=_clamp_progress(progress),
             created_at=datetime.now(UTC),
+            diagnostic_path=diagnostic_path,
         )
         with self._lock:
             self._tasks.insert(0, task)
             self._prune_history()
+        if self._diagnostics is not None and task.progress:
+            self._diagnostics.update_progress(task_id, task.progress)
         self._notify()
         return task.task_id
 
     def update_progress(self, task_id: str, progress: int) -> None:
-        self._update_task(task_id, lambda task: replace(task, progress=_clamp_progress(progress)))
+        value = _clamp_progress(progress)
+        did_update = self._update_task(task_id, lambda task: replace(task, progress=value))
+        if did_update and self._diagnostics is not None:
+            self._diagnostics.update_progress(task_id, value)
 
     def update_detail(self, task_id: str, detail: str) -> None:
-        self._update_task(task_id, lambda task: replace(task, detail=detail.strip()))
+        did_update = self._update_task(task_id, lambda task: replace(task, detail=detail.strip()))
+        if did_update and self._diagnostics is not None:
+            self._diagnostics.update_detail(task_id, detail)
 
     def complete(self, task_id: str) -> None:
-        self._update_task(
+        did_update = self._update_task(
             task_id,
             lambda task: replace(
                 task,
@@ -94,20 +116,26 @@ class ProcessingQueue:
                 error="",
             ),
         )
+        if did_update and self._diagnostics is not None:
+            self._diagnostics.complete_job(task_id)
 
     def fail(self, task_id: str, error: str) -> None:
-        self._update_task(
+        classification = classify_error(error)
+        did_update = self._update_task(
             task_id,
             lambda task: replace(
                 task,
                 status=TASK_FAILED,
                 finished_at=datetime.now(UTC),
                 error=error.strip(),
+                diagnostic_code=classification.code,
             ),
         )
+        if did_update and self._diagnostics is not None:
+            self._diagnostics.fail_job(task_id, error)
 
     def cancel(self, task_id: str, detail: str = "Stopped") -> None:
-        self._update_task(
+        did_update = self._update_task(
             task_id,
             lambda task: replace(
                 task,
@@ -117,13 +145,15 @@ class ProcessingQueue:
                 error="",
             ),
         )
+        if did_update and self._diagnostics is not None:
+            self._diagnostics.cancel_job(task_id)
 
     def clear_finished(self) -> None:
         with self._lock:
             self._tasks = [task for task in self._tasks if not task.is_finished]
         self._notify()
 
-    def _update_task(self, task_id: str, update: Callable[[ProcessingTask], ProcessingTask]) -> None:
+    def _update_task(self, task_id: str, update: Callable[[ProcessingTask], ProcessingTask]) -> bool:
         did_update = False
         with self._lock:
             for index, task in enumerate(self._tasks):
@@ -134,6 +164,7 @@ class ProcessingQueue:
                 break
         if did_update:
             self._notify()
+        return did_update
 
     def _prune_history(self) -> None:
         finished_indexes = [index for index, task in enumerate(self._tasks) if task.is_finished]
