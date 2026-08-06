@@ -14,6 +14,7 @@ from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 
 from jang_app.runtime_version import AI_RUNTIME_VERSION
+from jang_app.services.command import hidden_subprocess_kwargs
 from jang_app.services.rvc_runtime_profile import (
     RVC_BASE_RUNTIME_PROFILES,
     RVC_PROFILE_CPU,
@@ -451,7 +452,7 @@ def verify_authenticode_signature(path: Path, publisher: str = "") -> bool:
             encoding="utf-8",
             errors="replace",
             timeout=30,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **hidden_subprocess_kwargs(),
         )
         data = json.loads(completed.stdout.strip())
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):

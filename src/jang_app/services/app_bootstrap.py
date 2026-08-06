@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from jang_app.services.app_paths import AppPaths, STORAGE_LAYOUT_VERSION
+from jang_app.services.app_paths import AppPaths
+from jang_app.services.data_migrations import run_data_migrations
+from jang_app.services.initial_setup import persist_storage_layout
 from jang_app.services.managed_files import copy_file_atomic, write_json_atomic
 from jang_app.services.rvc_runtime_repair import repair_rvc_runtime_adapter
 
@@ -40,14 +42,31 @@ def prepare_app_environment(paths: AppPaths | None = None) -> AppBootstrapResult
 
     repair_rvc_runtime_adapter(paths.runtime_root / "rvc")
     copied = _copy_legacy_settings(paths)
-    write_json_atomic(
-        paths.storage_file,
-        {
-            "version": STORAGE_LAYOUT_VERSION,
-            "workspace_root": str(paths.workspace_root),
-            "workspace_anchor": str(paths.workspace_anchor),
-        },
-    )
+    if not paths.storage_file.is_file():
+        if paths.storage_version >= 2:
+            persist_storage_layout(paths)
+        else:
+            write_json_atomic(
+                paths.storage_file,
+                {
+                    "version": paths.storage_version,
+                    "workspace_root": str(paths.workspace_root),
+                    "workspace_anchor": str(paths.workspace_anchor),
+                },
+            )
+    try:
+        migrations = run_data_migrations(paths)
+        song_count, model_count = migrations.catalog.counts()
+        _LOGGER.info(
+            "Data schema ready | schema=%s | applied=%s | catalog=%s | songs=%s | models=%s",
+            migrations.current_schema,
+            ",".join(migrations.applied) or "none",
+            migrations.catalog.path,
+            song_count,
+            model_count,
+        )
+    except Exception:
+        _LOGGER.exception("Library catalog rebuild deferred")
 
     migration_dir = paths.data_root / "migrations"
     migration_file = migration_dir / _MIGRATION_FILE_NAME

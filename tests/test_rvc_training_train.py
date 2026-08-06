@@ -61,6 +61,10 @@ class RvcTrainingRunTests(unittest.TestCase):
                 '"optimizer": None',
                 Path(args[1]).read_text(encoding="utf-8"),
             )
+            self.assertIn(
+                'types.ModuleType("i18n")',
+                Path(args[1]).read_text(encoding="utf-8"),
+            )
             self.assertEqual(_argument(args, "-e"), layout.rvc_name)
             self.assertEqual(_argument(args, "-sr"), "40k")
             self.assertEqual(_argument(args, "-f0"), "1")

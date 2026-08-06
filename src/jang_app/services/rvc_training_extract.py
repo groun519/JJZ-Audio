@@ -18,6 +18,7 @@ from jang_app.services.command import (
 from jang_app.services.managed_files import link_or_copy_file, write_json_atomic
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
+from jang_app.services.rvc_script_launcher import prepare_rvc_script_launcher
 from jang_app.services.rvc_training_artifacts import (
     publish_training_outputs,
     remove_training_staging,
@@ -125,8 +126,19 @@ def extract_rvc_training_features(
         _require_command_success("RMVPE F0 extraction", f0_result)
         _report(progress, 45)
         raise_if_training_cancelled(cancellation)
+        feature_launcher = prepare_rvc_script_launcher(
+            staging / ".jjzero-launchers" / "extract_feature_print.py",
+            runtime,
+            runtime / "extract_feature_print.py",
+        )
         feature_result = runner(
-            _feature_command(runtime, staging, extraction_device, gpu_index),
+            _feature_command(
+                runtime,
+                staging,
+                extraction_device,
+                gpu_index,
+                feature_launcher,
+            ),
             **runner_kwargs,
         )
         if feature_result.cancelled:
@@ -260,10 +272,11 @@ def _feature_command(
     staging: Path,
     device: str,
     gpu_index: int,
+    launcher: Path,
 ) -> list[str]:
     command = [
         str(runtime / "runtime" / "python.exe"),
-        str(runtime / "extract_feature_print.py"),
+        str(launcher),
         device,
         "1",
         "0",

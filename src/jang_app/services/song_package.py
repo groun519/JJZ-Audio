@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.config import PROJECT_ROOT, SONG_WORKSPACE_DIR
 from jang_app.services.file_names import safe_filename_stem
+from jang_app.services.library_catalog import LibraryCatalog, inferred_catalog_file
 from jang_app.services.managed_files import copy_file_atomic, file_sha256, write_json_atomic
 
 
@@ -17,6 +20,7 @@ SOURCE_STAGE = "01_source"
 VOCAL_STAGE = "02_vocal"
 STUDIO_STAGE = "03_studio"
 EXPORT_STAGE = "04_exports"
+_LOGGER = logging.getLogger("jang_app")
 
 
 @dataclass(frozen=True)
@@ -54,9 +58,18 @@ class SongPackage:
 
 
 class SongPackageStore:
-    def __init__(self, root: Path = SONG_WORKSPACE_DIR, project_root: Path = PROJECT_ROOT) -> None:
+    def __init__(
+        self,
+        root: Path = SONG_WORKSPACE_DIR,
+        project_root: Path = PROJECT_ROOT,
+        *,
+        catalog_file: Path | None = None,
+    ) -> None:
         self.root = root.expanduser().resolve()
         self.project_root = project_root.expanduser().resolve()
+        self._catalog = LibraryCatalog(
+            catalog_file or inferred_catalog_file(self.root, "songs")
+        )
 
     def packages(self, *, include_removed: bool = False) -> list[SongPackage]:
         if not self.root.is_dir():
@@ -323,6 +336,10 @@ class SongPackageStore:
             },
         }
         write_json_atomic(package.folder / SONG_MANIFEST_NAME, data)
+        try:
+            self._catalog.upsert_song(package)
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            _LOGGER.warning("Song catalog update deferred: %s", exc)
 
     def _load_manifest(self, manifest_path: Path) -> SongPackage:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))

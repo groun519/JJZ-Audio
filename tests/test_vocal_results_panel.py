@@ -87,19 +87,6 @@ class VocalResultsPanelTests(unittest.TestCase):
         self.assertEqual(reconverted.at(0)[0], path)
         panel.close()
 
-    def test_comparison_buttons_emit_monitor_mode_without_changing_take(self) -> None:
-        panel = VocalResultsPanel()
-        changed = QSignalSpy(panel.comparison_changed)
-        panel.set_result(_version("compare", (Path("compare.wav"),)))
-
-        panel.original_compare_button.click()
-        panel.converted_compare_button.click()
-
-        self.assertEqual(changed.count(), 2)
-        self.assertEqual(changed.at(0)[0], "original")
-        self.assertEqual(changed.at(1)[0], "converted")
-        panel.close()
-
     def test_studio_track_can_restore_a_converted_version_without_user_signal(self) -> None:
         row = TrackRow("Converted Vocal", allow_selection=True)
         changed = QSignalSpy(row.source_changed)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -61,6 +62,20 @@ class CommandCancellation:
                 self._process = None
 
 
+def hidden_subprocess_kwargs(*, new_process_group: bool = False) -> dict[str, object]:
+    """Return subprocess options that suppress console windows on Windows."""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if new_process_group:
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    options: dict[str, object] = {"creationflags": creationflags}
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        options["startupinfo"] = startupinfo
+    return options
+
+
 def run_command(
     args: Sequence[str],
     cwd: Path | None = None,
@@ -86,7 +101,7 @@ def run_command(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                **hidden_subprocess_kwargs(),
             )
             result = CommandResult(
                 args=args,
@@ -121,8 +136,6 @@ def run_cancellable_command(
     logger.info("Running cancellable command: %s", " ".join(redact_command(args)))
     task_id, recorder, command_id, started = _start_diagnostic_command(args, cwd, diagnostics)
     callback = _diagnostic_output_callback(task_id, recorder, output_callback)
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
         process = subprocess.Popen(
             [str(arg) for arg in args],
@@ -134,7 +147,7 @@ def run_cancellable_command(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            creationflags=creationflags,
+            **hidden_subprocess_kwargs(new_process_group=True),
         )
     except Exception as exc:
         _finish_diagnostic_command(task_id, recorder, command_id, started, None, error=str(exc))
@@ -186,7 +199,7 @@ def _run_streaming_command(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        **hidden_subprocess_kwargs(),
     )
 
     output = _read_streaming_output(process, output_callback)
@@ -236,7 +249,7 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
             check=False,
             capture_output=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **hidden_subprocess_kwargs(),
         )
     if process.poll() is None:
         process.terminate()

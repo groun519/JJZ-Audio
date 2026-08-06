@@ -11,8 +11,8 @@ JJZero Audio is a local Windows desktop workspace for managing songs and RVC voi
 - Export: review output media and create final audio or video files.
 - System: Korean and English UI, light and dark themes, persistent playback, processing queue, log drawer, first-run storage setup, and runtime diagnostics.
 
-User media and models are stored outside the installation directory. Settings, logs, and cache are under `%LOCALAPPDATA%\JJZero Audio`; the selected media location contains `workspace` and `output`.
-If an older build stored data beside the executable or an update loses the active storage pointer, startup recovers the populated workspace without moving or overwriting its files.
+New installations keep large mutable content under one user-selected storage root: `Data`, `Output`, `Runtime`, and `Cache`. Small bootstrap settings and logs remain under `%LOCALAPPDATA%\JJZero Audio` so the app can locate that root.
+Existing 0.2.x layouts remain readable in place. Choosing a storage location in Settings copies and verifies the old data before switching paths, keeps the source files as a recovery copy, and rebuilds the SQLite search catalog from package manifests.
 
 ## Development Setup
 
@@ -50,7 +50,7 @@ Runtime logs are written to `%LOCALAPPDATA%\JJZero Audio\logs\jang.log`.
 
 ## Runtime Behavior
 
-First launch asks for a media storage location, installs or locates the AI runtime, and verifies write access, FFmpeg, Demucs, RVC assets, CPU inference, FAISS, and the selected GPU backend. The same diagnostics are available from Settings. Existing installations rerun only the system-check page when the diagnostics schema, GPU fingerprint, or installed runtime profile changes.
+First launch asks for a storage location, installs the audio engine there, and verifies write access, FFmpeg, Demucs, RVC assets, CPU inference, FAISS, and the selected GPU backend. The same diagnostics are available from Settings. Existing installations rerun only the system-check page when the diagnostics schema, GPU fingerprint, or installed runtime profile changes.
 
 JJZero detects installed display adapters before runtime setup and updates. RTX 50-series Blackwell systems receive the Torch 2.7.1+cu128 profile, older NVIDIA systems use cu118, AMD cards in the pinned Windows ROCm compatibility matrix try `rocm-win`, and other AMD cards use DirectML for RVC inference. CPU remains available on every profile. DirectML systems train on CPU; ROCm candidates use the HIP-backed `torch.cuda` path after a target-PC GPU operation probe succeeds. Experimental ROCm training then runs normally so a backward-pass limitation is captured in the task diagnostics. A failed profile activation falls back atomically instead of replacing the working runtime. New preferences use `auto`, `gpu`, and `cpu` rather than storing a vendor-specific CUDA device.
 
@@ -131,7 +131,7 @@ Verify an unsigned local release and an in-place upgrade from 0.2.1:
 powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1 -AllowUnsigned
 powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 `
   -PreviousInstallerPath release\JJZero-Audio-0.2.2-Setup.exe `
-  -InstallerPath release\JJZero-Audio-0.2.3-Setup.exe `
+  -InstallerPath release\JJZero-Audio-0.2.4-Setup.exe `
   -RuntimePackageIndex release\runtime-packages.json
 ```
 

@@ -105,6 +105,43 @@ class RvcScriptLauncherTests(unittest.TestCase):
             self.assertTrue((workspace / "checkpoint.pth").is_file())
             self.assertFalse(tuple(workspace.glob(".*.tmp")))
 
+    def test_launcher_can_supply_missing_legacy_i18n_module(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            script = runtime / "i18n_probe.py"
+            script.write_text(
+                "from i18n import I18nAuto\nprint(I18nAuto('en_US')('ready'))\n",
+                encoding="utf-8",
+            )
+            workspace = root / "workspace"
+            resources = workspace / "lib" / "i18n"
+            resources.mkdir(parents=True)
+            (resources / "en_US.json").write_text(
+                '{"ready": "translated"}',
+                encoding="utf-8",
+            )
+            launcher = prepare_rvc_script_launcher(
+                workspace / "launcher.py",
+                runtime,
+                script,
+                legacy_i18n=True,
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(launcher)],
+                cwd=workspace,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "translated")
+
     def test_launcher_can_omit_unused_optimizer_checkpoint_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

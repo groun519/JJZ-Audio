@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
 from jang_app.services.app_paths import discover_app_paths
 from jang_app.services.initial_setup import is_initial_setup_complete
+from jang_app.services.storage_migration import migrate_storage, plan_storage_migration
 from jang_app.services.system_diagnostics import (
     DiagnosticCheck,
     DiagnosticStatus,
@@ -31,6 +32,7 @@ class InitialSetupDialogTests(unittest.TestCase):
                 paths,
                 root / "logo.svg",
                 diagnostics_worker_type=_ReadyWorker,
+                storage_worker_type=_ReadyStorageWorker,
             )
             self.assertTrue(dialog.windowFlags() & Qt.WindowType.FramelessWindowHint)
             self.assertEqual(dialog.title_bar.objectName(), "WindowTitleBar")
@@ -44,11 +46,12 @@ class InitialSetupDialogTests(unittest.TestCase):
             self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
             self.assertTrue(dialog.restart_required)
             self.assertTrue(is_initial_setup_complete(dialog.configured_paths))
-            self.assertTrue((media / "workspace").is_dir())
-            self.assertTrue((media / "output").is_dir())
+            self.assertTrue((media / "Data").is_dir())
+            self.assertTrue((media / "Output").is_dir())
+            self.assertTrue((media / "Runtime").is_dir())
             dialog.close()
 
-    def test_existing_setup_without_path_change_closes_without_restart(self) -> None:
+    def test_existing_v1_setup_upgrades_layout_and_requests_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = _paths(root)
@@ -57,13 +60,15 @@ class InitialSetupDialogTests(unittest.TestCase):
                 root / "logo.svg",
                 first_run=False,
                 diagnostics_worker_type=_ReadyWorker,
+                storage_worker_type=_ReadyStorageWorker,
             )
 
             dialog.primary_button.click()
             dialog.primary_button.click()
 
             self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
-            self.assertFalse(dialog.restart_required)
+            self.assertTrue(dialog.restart_required)
+            self.assertEqual(dialog.configured_paths.storage_version, 2)
             dialog.close()
 
 
@@ -101,6 +106,38 @@ class _ReadyWorker(QObject):
             self.stage_started.emit(check.key, position, len(checks))
             self.check_ready.emit(check)
         self.completed.emit(SystemDiagnostics(checks))
+        self._running = False
+        self.finished.emit()
+
+    def isRunning(self) -> bool:  # noqa: N802
+        return self._running
+
+
+class _ReadyStorageWorker(QObject):
+    plan_ready = Signal(object)
+    progress_changed = Signal(str, int)
+    completed = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, paths, storage_root: Path) -> None:
+        super().__init__()
+        self._paths = paths
+        self._storage_root = storage_root
+        self._running = False
+
+    def start(self) -> None:
+        self._running = True
+        try:
+            plan = plan_storage_migration(self._paths, self._storage_root)
+            self.plan_ready.emit(plan)
+            configured = migrate_storage(
+                plan,
+                lambda stage, value: self.progress_changed.emit(stage, value),
+            )
+            self.completed.emit(configured)
+        except Exception as exc:
+            self.failed.emit(str(exc))
         self._running = False
         self.finished.emit()
 

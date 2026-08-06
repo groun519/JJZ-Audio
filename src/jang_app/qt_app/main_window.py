@@ -187,7 +187,6 @@ class MainWindow(QMainWindow):
         self._export_song_id = ""
         self._is_loading_rvc_settings = False
         self._is_loading_studio_session = False
-        self._vocal_comparison_mode = "converted"
         self.vocal_project_store = VocalProjectStore()
         self.studio_session_autosave = StudioSessionAutosave(self.library.save_studio_session, parent=self)
         self.studio_session_autosave.save_failed.connect(self._on_studio_session_save_failed)
@@ -495,7 +494,6 @@ class MainWindow(QMainWindow):
         self.vocal_results_panel.rename_take_requested.connect(self._rename_vocal_take)
         self.vocal_results_panel.remove_take_requested.connect(self._remove_vocal_take)
         self.vocal_results_panel.reconvert_take_requested.connect(self._reconvert_vocal_take)
-        self.vocal_results_panel.comparison_changed.connect(self._set_vocal_comparison_mode)
         self.vocal_results_panel.seek_requested.connect(self._seek_output_playback)
 
         layout.addWidget(left_panel, 0)
@@ -2105,11 +2103,6 @@ class MainWindow(QMainWindow):
         self.vocal_steps.set_current_index(1)
         self._start_rvc_conversion()
 
-    def _set_vocal_comparison_mode(self, mode: str) -> None:
-        self._vocal_comparison_mode = "original" if mode == "original" else "converted"
-        self.vocal_results_panel.set_comparison_mode(self._vocal_comparison_mode)
-        self._refresh_output_playback_queue()
-
     def _apply_output_set(self, sound_set: OutputSoundSet | None) -> None:
         self.studio_session_autosave.flush()
         self.current_output_set = sound_set
@@ -2134,8 +2127,6 @@ class MainWindow(QMainWindow):
         self.converted_track.set_options(list(sound_set.converted_vocal_paths), selected_converted)
         self._restore_current_studio_session()
         project = self._load_vocal_project(selected_version)
-        self._vocal_comparison_mode = "converted" if selected_converted is not None else "original"
-        self.vocal_results_panel.set_comparison_mode(self._vocal_comparison_mode)
         self.vocal_results_panel.set_result(selected_version, project)
         self.rvc_action.set_progress(0)
         self.rvc_action.set_status("")
@@ -2642,11 +2633,6 @@ class MainWindow(QMainWindow):
             path = track.current_path()
             if path is not None:
                 volume = 0.0 if track.is_muted() else track.volume()
-                if self.page_stack.currentIndex() == PAGE_VOCAL:
-                    if track is self.vocal_track:
-                        volume = 1.0 if self._vocal_comparison_mode == "original" else 0.0
-                    elif track is self.converted_track:
-                        volume = 1.0 if self._vocal_comparison_mode == "converted" else 0.0
                 tracks.append((path, volume))
         return tracks
 

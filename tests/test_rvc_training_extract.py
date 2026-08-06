@@ -52,10 +52,13 @@ class RvcTrainingExtractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             model_id, layout, runtime = _extraction_setup(Path(temporary), input_count=2)
             calls: list[list[str]] = []
+            launcher_sources: list[str] = []
             progress: list[int] = []
 
             def runner(args, cwd=None, env=None, output_callback=None):
                 calls.append(args)
+                if Path(args[1]).name == "extract_feature_print.py":
+                    launcher_sources.append(Path(args[1]).read_text(encoding="utf-8"))
                 _write_extraction_outputs(args)
                 return CommandResult(args, 0, "", "")
 
@@ -72,6 +75,9 @@ class RvcTrainingExtractTests(unittest.TestCase):
                 "extract_f0_rmvpe.py",
                 "extract_feature_print.py",
             ])
+            self.assertEqual(Path(calls[1][1]).parent.name, ".jjzero-launchers")
+            self.assertIn("sys.path.insert(0, str(RVC_ROOT))", launcher_sources[0])
+            self.assertIn("extract_feature_print.py", launcher_sources[0])
             self.assertEqual(len(result.f0_files), 2)
             self.assertEqual(len(result.f0_nsf_files), 2)
             self.assertEqual(len(result.feature_files), 2)

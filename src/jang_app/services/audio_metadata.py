@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import soundfile as sf
@@ -19,12 +20,27 @@ class AudioMetadata:
 
 def read_audio_metadata(path: Path) -> AudioMetadata:
     source = path.expanduser().resolve()
+    stat = source.stat()
+    return _read_audio_metadata_cached(str(source), stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=512)
+def _read_audio_metadata_cached(
+    source_key: str,
+    _modified_ns: int,
+    _size: int,
+) -> AudioMetadata:
+    source = Path(source_key)
     try:
         info = sf.info(source)
         duration_ms = int(info.duration * 1000) if info.duration else 0
         return AudioMetadata(duration_ms=duration_ms, sample_rate=info.samplerate, channels=info.channels)
     except Exception:
         return _read_audio_metadata_with_ffprobe(source)
+
+
+def clear_audio_metadata_cache() -> None:
+    _read_audio_metadata_cached.cache_clear()
 
 
 def format_duration(duration_ms: int) -> str:

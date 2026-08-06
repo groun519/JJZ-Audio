@@ -50,9 +50,9 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual([record.name for record in records], ["Voice One"])
             self.assertEqual(page.view_stack.currentIndex(), 1)
             self.assertEqual(page.workspace_content_stack.currentIndex(), 1)
-            self.assertEqual(page.workspace_content_stack.count(), 3)
+            self.assertEqual(page.workspace_content_stack.count(), 4)
             page.training_section_button.click()
-            self.assertEqual(page.workspace_content_stack.currentIndex(), 2)
+            self.assertEqual(page.workspace_content_stack.currentIndex(), 3)
             page.close()
 
     def test_add_model_dialog_routes_linked_inference_file(self) -> None:

@@ -7,6 +7,7 @@ from uuid import uuid4
 from jang_app.services.app_paths import (
     INITIAL_SETUP_FILE_NAME,
     INITIAL_SETUP_VERSION,
+    LEGACY_INITIAL_SETUP_VERSION,
     AppPaths,
     STORAGE_LAYOUT_VERSION,
 )
@@ -31,10 +32,13 @@ def is_initial_setup_complete(paths: AppPaths) -> bool:
         data = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return isinstance(data, dict) and data.get("version") == INITIAL_SETUP_VERSION
+    return isinstance(data, dict) and data.get("version") in {
+        LEGACY_INITIAL_SETUP_VERSION,
+        INITIAL_SETUP_VERSION,
+    }
 
 
-def prepare_storage_layout(paths: AppPaths, media_root: Path) -> AppPaths:
+def build_storage_layout(paths: AppPaths, media_root: Path) -> AppPaths:
     media = media_root.expanduser()
     if not media.is_absolute():
         raise InitialSetupError("Media storage location must be an absolute path.")
@@ -43,17 +47,28 @@ def prepare_storage_layout(paths: AppPaths, media_root: Path) -> AppPaths:
     if paths.is_frozen and (media == install or install in media.parents):
         raise InitialSetupError("Media storage cannot be placed inside the application folder.")
 
-    configured = replace(
+    return replace(
         paths,
-        workspace_root=media / "workspace",
+        storage_root=media,
+        workspace_root=media / "Data",
         workspace_anchor=media,
-        output_root=media / "output",
+        output_root=media / "Output",
+        runtime_root=media / "Runtime",
+        cache_dir=media / "Cache",
+        catalog_file=media / "Data" / "catalog.db",
+        workspace_source="storage",
+        storage_version=STORAGE_LAYOUT_VERSION,
     )
+
+
+def prepare_storage_layout(paths: AppPaths, media_root: Path) -> AppPaths:
+    configured = build_storage_layout(paths, media_root)
     directories = (
         configured.data_root,
         configured.settings_dir,
         configured.log_dir,
         configured.cache_dir,
+        configured.runtime_root,
         configured.workspace_root,
         configured.output_root / "downloads",
         configured.output_root / "separations",
@@ -68,8 +83,12 @@ def persist_storage_layout(paths: AppPaths) -> Path:
         paths.storage_file,
         {
             "version": STORAGE_LAYOUT_VERSION,
+            "storage_root": str(paths.storage_root),
             "workspace_root": str(paths.workspace_root),
             "workspace_anchor": str(paths.workspace_anchor),
+            "output_root": str(paths.output_root),
+            "runtime_root": str(paths.runtime_root),
+            "cache_root": str(paths.cache_dir),
         },
     )
     return paths.storage_file
@@ -82,6 +101,7 @@ def complete_initial_setup(paths: AppPaths, *, diagnostics_ready: bool) -> Path:
         marker,
         {
             "version": INITIAL_SETUP_VERSION,
+            "storage_root": str(paths.storage_root),
             "media_root": str(paths.workspace_anchor),
             "diagnostics_ready": bool(diagnostics_ready),
         },

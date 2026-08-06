@@ -68,6 +68,10 @@ class JobDiagnosticsTests(unittest.TestCase):
             "RVC_RUNTIME_INCOMPLETE",
         )
         self.assertEqual(
+            classify_error("ModuleNotFoundError: No module named 'i18n'").code,
+            "RVC_RUNTIME_INCOMPLETE",
+        )
+        self.assertEqual(
             classify_error("Could not run operator on privateuseone:0").code,
             "DIRECTML_RUNTIME_FAILED",
         )

@@ -23,10 +23,8 @@ from jang_app.services.app_paths import AppPaths
 from jang_app.services.app_update import DEFAULT_MANIFEST_URL
 from jang_app.services.i18n import tr
 from jang_app.services.initial_setup import (
-    InitialSetupError,
     complete_initial_setup,
     persist_storage_layout,
-    prepare_storage_layout,
 )
 from jang_app.services.hardware_diagnostics_state import record_hardware_diagnostics
 from jang_app.services.rvc_inference_runtime import clear_rvc_inference_probe_cache
@@ -42,6 +40,11 @@ from jang_app.services.runtime_bootstrap import (
     RuntimeProvisionStage,
     provision_ai_runtime,
     provision_ai_runtime_offline,
+)
+from jang_app.services.storage_migration import (
+    StorageMigrationPlan,
+    migrate_storage,
+    plan_storage_migration,
 )
 
 
@@ -142,6 +145,30 @@ class RuntimeProvisionWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class StorageMigrationWorker(QThread):
+    plan_ready = Signal(object)
+    progress_changed = Signal(str, int)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, paths: AppPaths, storage_root: Path) -> None:
+        super().__init__()
+        self._paths = paths
+        self._storage_root = storage_root
+
+    def run(self) -> None:
+        try:
+            plan = plan_storage_migration(self._paths, self._storage_root)
+            self.plan_ready.emit(plan)
+            configured = migrate_storage(
+                plan,
+                lambda stage, value: self.progress_changed.emit(stage, value),
+            )
+            self.completed.emit(configured)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class InitialSetupDialog(AppDialog):
     def __init__(
         self,
@@ -153,6 +180,7 @@ class InitialSetupDialog(AppDialog):
         theme_mode: str = "dark",
         diagnostics_worker_type: type[DiagnosticsWorker] = DiagnosticsWorker,
         runtime_worker_type: type[RuntimeProvisionWorker] = RuntimeProvisionWorker,
+        storage_worker_type: type[StorageMigrationWorker] = StorageMigrationWorker,
     ) -> None:
         dialog_title = tr("First Run Setup" if first_run else "System Setup")
         super().__init__(
@@ -169,8 +197,11 @@ class InitialSetupDialog(AppDialog):
         self._theme_mode = theme_mode
         self._diagnostics_worker_type = diagnostics_worker_type
         self._runtime_worker_type = runtime_worker_type
+        self._storage_worker_type = storage_worker_type
         self._worker: QThread | None = None
         self._diagnostics: SystemDiagnostics | None = None
+        self._storage_migration_succeeded = False
+        self._storage_migration_error = ""
         self.restart_required = False
 
         self.setMinimumSize(780, 560)
@@ -254,17 +285,38 @@ class InitialSetupDialog(AppDialog):
 
     def _build_storage_page(self) -> QWidget:
         page = QWidget()
-        title = QLabel(tr("Choose Media Storage"))
+        title = QLabel(tr("Choose Storage Location"))
         title.setObjectName("SetupTitle")
-        description = QLabel(tr("Songs, models, and rendered files are kept together in this location."))
+        description = QLabel(
+            tr(
+                "Songs, models, the audio engine, rendered files, and cache "
+                "are kept together in this location."
+            )
+        )
         description.setObjectName("SetupDescription")
+        self.storage_layout_status = QLabel("")
+        self.storage_layout_status.setObjectName("SetupDescription")
+        self.storage_layout_status.setWordWrap(True)
+        if self._first_run:
+            self.storage_layout_status.hide()
+        elif self._paths.storage_version < 2:
+            self.storage_layout_status.setText(
+                tr(
+                    "Legacy storage is active. Continue to copy it into the "
+                    "managed storage layout."
+                )
+            )
+        else:
+            self.storage_layout_status.setText(
+                f"{tr('Managed storage')} | {self._paths.storage_root}"
+            )
 
         media_card = QFrame()
         media_card.setObjectName("SetupCard")
         media_layout = QVBoxLayout(media_card)
         media_layout.setContentsMargins(18, 16, 18, 16)
         media_layout.setSpacing(9)
-        media_label = QLabel(tr("Media Storage"))
+        media_label = QLabel(tr("Storage Location"))
         media_label.setObjectName("SetupFieldLabel")
         self.media_edit = QLineEdit(str(self._paths.workspace_anchor))
         self.media_edit.setObjectName("SetupPathEdit")
@@ -278,6 +330,16 @@ class InitialSetupDialog(AppDialog):
         input_row.addWidget(browse)
         media_layout.addWidget(media_label)
         media_layout.addLayout(input_row)
+        self.storage_progress_label = QLabel("")
+        self.storage_progress_label.setObjectName("SetupProgressDetail")
+        self.storage_progress_label.hide()
+        self.storage_progress = QProgressBar()
+        self.storage_progress.setRange(0, 100)
+        self.storage_progress.setTextVisible(False)
+        self.storage_progress.setObjectName("SetupProgress")
+        self.storage_progress.hide()
+        media_layout.addWidget(self.storage_progress_label)
+        media_layout.addWidget(self.storage_progress)
 
         preview = QFrame()
         preview.setObjectName("SetupPreview")
@@ -297,6 +359,7 @@ class InitialSetupDialog(AppDialog):
         layout.setSpacing(14)
         layout.addWidget(title)
         layout.addWidget(description)
+        layout.addWidget(self.storage_layout_status)
         layout.addWidget(media_card)
         layout.addWidget(preview)
         layout.addStretch(1)
@@ -378,15 +441,21 @@ class InitialSetupDialog(AppDialog):
         return page
 
     def _browse_media_root(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, tr("Choose Media Storage"), self.media_edit.text())
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            tr("Choose Storage Location"),
+            self.media_edit.text(),
+        )
         if selected:
             self.media_edit.setText(selected)
 
     def _update_storage_preview(self) -> None:
         media = Path(self.media_edit.text().strip()).expanduser()
-        self.workspace_preview.setText(f"{tr('Workspace')}  ·  {media / 'workspace'}")
-        self.output_preview.setText(f"{tr('Output')}  ·  {media / 'output'}")
-        self.data_preview.setText(f"{tr('App Data')}  ·  {self._paths.data_root}")
+        self.workspace_preview.setText(f"{tr('Workspace')}  |  {media / 'Data'}")
+        self.output_preview.setText(f"{tr('Output')}  |  {media / 'Output'}")
+        self.data_preview.setText(
+            f"{tr('Audio Engine')} / Cache  |  {media / 'Runtime'} / {media / 'Cache'}"
+        )
 
     def _advance(self) -> None:
         if self.stack.currentIndex() == 0:
@@ -402,18 +471,75 @@ class InitialSetupDialog(AppDialog):
         else:
             persist_storage_layout(self._configured_paths)
         record_hardware_diagnostics(self._configured_paths, self._diagnostics)
-        self.restart_required = self._configured_paths.workspace_anchor != self._paths.workspace_anchor
+        self.restart_required = _paths_require_restart(self._paths, self._configured_paths)
         self.accept()
 
     def _prepare_storage(self) -> None:
-        try:
-            self._configured_paths = prepare_storage_layout(
-                self._paths,
-                Path(self.media_edit.text().strip()),
-            )
-        except (InitialSetupError, OSError) as exc:
-            self._show_error(str(exc))
+        self._start_storage_migration(Path(self.media_edit.text().strip()))
+
+    def _start_storage_migration(self, storage_root: Path) -> None:
+        self._show_error("")
+        self._storage_migration_succeeded = False
+        self._storage_migration_error = ""
+        self.storage_progress_label.setText(tr("Inspecting current storage..."))
+        self.storage_progress.setRange(0, 0)
+        self.storage_progress_label.show()
+        self.storage_progress.show()
+        self.media_edit.setEnabled(False)
+        self.primary_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        worker = self._storage_worker_type(self._paths, storage_root)
+        worker.setParent(self)
+        worker.plan_ready.connect(self._on_storage_plan_ready)
+        worker.progress_changed.connect(self._on_storage_migration_progress)
+        worker.completed.connect(self._on_storage_migrated)
+        worker.failed.connect(self._on_storage_migration_failed)
+        worker.finished.connect(self._on_storage_worker_finished)
+        self._worker = worker
+        worker.start()
+
+    def _on_storage_plan_ready(self, plan: object) -> None:
+        if not isinstance(plan, StorageMigrationPlan):
             return
+        self.storage_progress.setRange(0, 100)
+        self.storage_progress.setValue(0)
+        if plan.required:
+            self.storage_progress_label.setText(
+                f"{tr('Moving storage')} | {_format_bytes(plan.total_bytes)} data | "
+                f"{_format_bytes(plan.required_free_bytes)} free space | "
+                f"{plan.total_files} files"
+            )
+        else:
+            self.storage_progress_label.setText(tr("Preparing storage..."))
+
+    def _on_storage_migration_progress(self, stage: str, value: int) -> None:
+        self.storage_progress.setRange(0, 100)
+        self.storage_progress.setValue(value)
+        self.storage_progress_label.setText(f"{tr(stage)} | {value}%")
+
+    def _on_storage_migrated(self, configured: object) -> None:
+        if isinstance(configured, AppPaths):
+            self._configured_paths = configured
+            self._storage_migration_succeeded = True
+        else:
+            self._storage_migration_error = "Storage migration returned invalid paths."
+
+    def _on_storage_migration_failed(self, error: str) -> None:
+        self._storage_migration_error = error
+
+    def _on_storage_worker_finished(self) -> None:
+        self._on_worker_finished()
+        self.media_edit.setEnabled(True)
+        self.cancel_button.setEnabled(True)
+        self.storage_progress.hide()
+        self.storage_progress_label.hide()
+        if self._storage_migration_succeeded:
+            self._show_diagnostics_page()
+            return
+        self.primary_button.setEnabled(True)
+        self._show_error(self._storage_migration_error or "Storage migration failed.")
+
+    def _show_diagnostics_page(self) -> None:
         self._show_error("")
         self.stack.setCurrentIndex(1)
         self.step_label.setText(tr("SYSTEM CHECK"))
@@ -521,7 +647,10 @@ class InitialSetupDialog(AppDialog):
         self.primary_button.setEnabled(True)
         self.back_button.setEnabled(True)
         self.cancel_button.setEnabled(True)
-        if not self._first_run and self._configured_paths.workspace_anchor == self._paths.workspace_anchor:
+        if not self._first_run and not _paths_require_restart(
+            self._paths,
+            self._configured_paths,
+        ):
             self.primary_button.setText(tr("Close"))
 
     def _on_diagnostics_failed(self, error: str) -> None:
@@ -538,7 +667,7 @@ class InitialSetupDialog(AppDialog):
         self.offline_runtime_button.show()
         if self._first_run:
             action = "Start JJZero Audio"
-        elif self._configured_paths.workspace_anchor != self._paths.workspace_anchor:
+        elif _paths_require_restart(self._paths, self._configured_paths):
             action = "Apply and Restart"
         else:
             action = "Close"
@@ -815,6 +944,18 @@ def _format_bytes(value: int) -> str:
             return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
         amount /= 1024
     return f"{size} B"
+
+
+def _paths_require_restart(current: AppPaths, configured: AppPaths) -> bool:
+    return any(
+        previous.resolve() != updated.resolve()
+        for previous, updated in (
+            (current.workspace_root, configured.workspace_root),
+            (current.output_root, configured.output_root),
+            (current.runtime_root, configured.runtime_root),
+            (current.cache_dir, configured.cache_dir),
+        )
+    )
 
 
 def _path_preview(label: str) -> QLabel:

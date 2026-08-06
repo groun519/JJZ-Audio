@@ -14,7 +14,8 @@ class WindowsAppMutexTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "packaging" / "JJZeroAudio.iss"
         ).read_text(encoding="utf-8")
 
-        self.assertIn(f"AppMutex={APP_MUTEX_NAME}", installer_script)
+        self.assertIn(f'#define AppMutexName "{APP_MUTEX_NAME}"', installer_script)
+        self.assertIn("AppMutex={#AppMutexName}", installer_script)
 
     @unittest.skipUnless(os.name == "nt", "Windows mutex is only available on Windows")
     def test_creates_named_windows_mutex(self) -> None:

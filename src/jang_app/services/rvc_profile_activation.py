@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from jang_app.services.app_logging import get_logger
+from jang_app.services.command import hidden_subprocess_kwargs
 from jang_app.services.rvc_runtime_profile import (
     RVC_PROFILE_CU118,
     RVC_PROFILE_CU128,
@@ -167,7 +168,7 @@ def _run_command(args: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[
             encoding="utf-8",
             errors="replace",
             timeout=180,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **hidden_subprocess_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return subprocess.CompletedProcess(list(args), 1, "", str(exc))

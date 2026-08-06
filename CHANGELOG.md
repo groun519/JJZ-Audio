@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.4 - 2026-08-06
+
+### Added
+
+- Added one user-selected managed storage root containing `Data`, `Output`, `Runtime`, and `Cache`.
+- Added verified storage migration with free-space checks, staged copies, path rebasing, and restart-safe activation.
+- Added schema-based data migrations and a rebuildable shared catalog for song and model metadata.
+- Added training-material analysis with pitch distribution, reference vocal ranges, usable range estimates, and conversion-pitch guidance.
+
+### Fixed
+
+- Preserved song packages, linked models, rendered output, downloaded runtimes, and cache when changing storage locations.
+- Rebased legacy `@project/workspace` and `@project/output` references to the managed `Data` and `Output` layout.
+- Prevented helper subprocesses from flashing console windows during metadata and model analysis.
+- Reduced repeated audio metadata probing and simplified redundant Vocal result controls.
+
+### Quality
+
+- Added C-to-D managed-storage regression coverage including restart discovery and source-data preservation.
+- Extended installer verification from `0.2.1` through managed-storage migration, packaged startup, and uninstall.
+
 ## 0.2.3 - 2026-08-06
 
 ### Added

@@ -928,43 +928,6 @@ def _stylesheet(
             border-radius: 14px;
         }}
 
-        QFrame#VocalCompareControl {{
-            background: {background};
-            border: 1px solid {border};
-            border-radius: 11px;
-        }}
-
-        QPushButton#VocalCompareButton {{
-            color: {muted};
-            background: transparent;
-            border: 0;
-            border-radius: 8px;
-            padding: 0 12px;
-            font-size: 10px;
-            font-weight: 900;
-        }}
-
-        QPushButton#VocalCompareButton:hover,
-        QPushButton#VocalCompareButton[pointerState="hover"] {{
-            color: {text};
-            background: {hover};
-        }}
-
-        QPushButton#VocalCompareButton:checked {{
-            color: {tab_active_text};
-            background: {tab_active};
-        }}
-
-        QPushButton#VocalCompareButton:checked:pressed,
-        QPushButton#VocalCompareButton[pointerState="pressed"]:checked {{
-            background: {tab_active_pressed};
-        }}
-
-        QPushButton#VocalCompareButton:disabled {{
-            color: {faint};
-            background: transparent;
-        }}
-
         QLabel#VocalTakeMetadata {{
             color: {muted};
             font-size: 10px;
@@ -1044,6 +1007,124 @@ def _stylesheet(
             background: {surface};
             border: 1px solid {border};
             border-radius: 10px;
+        }}
+
+        QScrollArea#DatasetAnalysisScroll,
+        QScrollArea#DatasetAnalysisScroll > QWidget > QWidget,
+        QWidget#DatasetAnalysisContent {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QFrame#DatasetAnalysisMetric,
+        QFrame#DatasetAnalysisSection {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QLabel#DatasetAnalysisMetricLabel,
+        QLabel#DatasetAnalysisMeta,
+        QLabel#DatasetAnalysisStatus {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QLabel#DatasetAnalysisMetricValue {{
+            color: {text};
+            font-size: 18px;
+            font-weight: 900;
+        }}
+
+        QLabel#DatasetAnalysisSectionTitle {{
+            color: {text};
+            font-size: 12px;
+            font-weight: 900;
+        }}
+
+        QProgressBar#DatasetAnalysisProgress {{
+            min-height: 5px;
+            max-height: 5px;
+            border: 0;
+            border-radius: 2px;
+            background: {border};
+            text-align: center;
+            color: transparent;
+        }}
+
+        QProgressBar#DatasetAnalysisProgress::chunk {{
+            border-radius: 2px;
+            background: {accent};
+        }}
+
+        QWidget#PitchHistogram {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QFrame#DatasetQualityRow {{
+            background: transparent;
+            border: 0;
+            border-bottom: 1px solid {border};
+        }}
+
+        QLabel#DatasetQualityValue {{
+            color: {text};
+            font-size: 11px;
+            font-weight: 900;
+        }}
+
+        QListWidget#DatasetIssueList {{
+            min-height: 210px;
+            background: transparent;
+            border: 0;
+            outline: 0;
+        }}
+
+        QListWidget#DatasetIssueList::item {{
+            background: transparent;
+            border: 0;
+            padding: 0;
+        }}
+
+        QListWidget#DatasetIssueList::item:selected {{
+            background: transparent;
+        }}
+
+        QWidget#DatasetIssueRow {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QWidget#DatasetIssueRow:hover {{
+            background: {hover};
+            border-color: {button_border};
+        }}
+
+        QLabel#DatasetIssueTitle {{
+            color: {text};
+            font-size: 11px;
+            font-weight: 800;
+        }}
+
+        QLabel#DatasetIssueBadge {{
+            min-width: 64px;
+            min-height: 22px;
+            color: {muted};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 8px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#DatasetIssueBadge[severity="attention"] {{
+            color: {warning_text};
+            background: {warning_background};
+            border-color: {warning_border};
         }}
 
         QLabel#DatasetAnalysisLabel {{

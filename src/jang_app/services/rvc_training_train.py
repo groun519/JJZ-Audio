@@ -131,6 +131,7 @@ def train_rvc_model(
         compact_rvc_checkpoints=True,
         conservative_data_loading=True,
         rocm_single_process_training=True,
+        legacy_i18n=True,
     )
     state_store = RvcTrainingStateStore(model_id, layout)
     _keep_latest_checkpoint_pair(layout)

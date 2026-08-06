@@ -206,7 +206,7 @@ class SystemDiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = prepare_storage_layout(_paths(root), root / "media")
-            paths.runtime_root.mkdir(parents=True)
+            paths.runtime_root.mkdir(parents=True, exist_ok=True)
             (paths.runtime_root / "runtime-state.json").write_text(
                 '{"schema_version": 1, "version": "1"}',
                 encoding="utf-8",

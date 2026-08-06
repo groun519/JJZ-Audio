@@ -25,9 +25,13 @@ class InitialSetupTests(unittest.TestCase):
             marker = complete_initial_setup(configured, diagnostics_ready=True)
             storage = json.loads(configured.storage_file.read_text(encoding="utf-8"))
 
-            self.assertEqual(configured.workspace_root, media / "workspace")
-            self.assertEqual(configured.output_root, media / "output")
-            self.assertEqual(Path(storage["workspace_root"]), media / "workspace")
+            self.assertEqual(configured.storage_root, media)
+            self.assertEqual(configured.workspace_root, media / "Data")
+            self.assertEqual(configured.output_root, media / "Output")
+            self.assertEqual(configured.runtime_root, media / "Runtime")
+            self.assertEqual(configured.cache_dir, media / "Cache")
+            self.assertEqual(Path(storage["workspace_root"]), media / "Data")
+            self.assertEqual(Path(storage["storage_root"]), media)
             self.assertTrue(marker.is_file())
             self.assertTrue(is_initial_setup_complete(configured))
 

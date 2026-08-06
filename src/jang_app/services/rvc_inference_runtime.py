@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from jang_app.services.command import hidden_subprocess_kwargs
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_cuda_compatibility import (
     cuda_architecture_error,
@@ -253,7 +254,7 @@ def _run_probe(python: Path, rvc_root: Path, script: str) -> _ProbeResult:
             encoding="utf-8",
             errors="replace",
             timeout=90,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **hidden_subprocess_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return _ProbeResult(1, "", str(exc))

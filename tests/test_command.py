@@ -1,16 +1,32 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
-from jang_app.services.command import CommandCancellation, run_cancellable_command, run_command
+from jang_app.services.command import (
+    CommandCancellation,
+    hidden_subprocess_kwargs,
+    run_cancellable_command,
+    run_command,
+)
 from jang_app.services.job_diagnostics import JobDiagnostics, diagnostic_task
 
 
 class CancellableCommandTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows-only process visibility behavior")
+    def test_hidden_process_options_suppress_console_windows(self) -> None:
+        options = hidden_subprocess_kwargs()
+
+        self.assertTrue(int(options["creationflags"]) & subprocess.CREATE_NO_WINDOW)
+        startupinfo = options["startupinfo"]
+        self.assertTrue(startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW)
+        self.assertEqual(startupinfo.wShowWindow, subprocess.SW_HIDE)
+
     def test_cancellation_terminates_a_running_process(self) -> None:
         cancellation = CommandCancellation()
         started = time.monotonic()

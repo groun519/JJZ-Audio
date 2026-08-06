@@ -30,6 +30,7 @@ from jang_app.qt_app.model_add_dialog import (
     ModelImportSource,
 )
 from jang_app.qt_app.model_badge import set_model_badge
+from jang_app.qt_app.model_dataset_analysis_panel import ModelDatasetAnalysisPanel
 from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
 from jang_app.qt_app.model_detail_panel import ModelDetailPanel, ModelProfileValues
 from jang_app.qt_app.model_row import ModelListRow
@@ -94,6 +95,7 @@ class ModelWorkspacePage(QWidget):
             execution_runtime_root or initial_folder
         ).expanduser().resolve()
         self._workspace = workspace or RvcModelWorkspace()
+        self._dataset_store = ModelDatasetStore(self._workspace.root)
         self._runtime_profile = runtime_profile
         self._records_by_id: dict[str, RvcModelRecord] = {}
         self._rows_by_id: dict[str, ModelListRow] = {}
@@ -290,7 +292,7 @@ class ModelWorkspacePage(QWidget):
 
         section_control = QFrame()
         section_control.setObjectName("SegmentedControl")
-        section_control.setMaximumWidth(450)
+        section_control.setMaximumWidth(600)
         section_layout = QHBoxLayout(section_control)
         section_layout.setContentsMargins(3, 3, 3, 3)
         section_layout.setSpacing(0)
@@ -301,6 +303,9 @@ class ModelWorkspacePage(QWidget):
         self.dataset_section_button = FeedbackButton("Dataset")
         self.dataset_section_button.setObjectName("SegmentButton")
         self.dataset_section_button.setCheckable(True)
+        self.analysis_section_button = FeedbackButton("Analysis")
+        self.analysis_section_button.setObjectName("SegmentButton")
+        self.analysis_section_button.setCheckable(True)
         self.training_section_button = FeedbackButton("Training")
         self.training_section_button.setObjectName("SegmentButton")
         self.training_section_button.setCheckable(True)
@@ -308,10 +313,12 @@ class ModelWorkspacePage(QWidget):
         self.section_button_group.setExclusive(True)
         self.section_button_group.addButton(self.overview_section_button, 0)
         self.section_button_group.addButton(self.dataset_section_button, 1)
-        self.section_button_group.addButton(self.training_section_button, 2)
+        self.section_button_group.addButton(self.analysis_section_button, 2)
+        self.section_button_group.addButton(self.training_section_button, 3)
         self.section_button_group.idClicked.connect(self._navigate_model_section)
         section_layout.addWidget(self.overview_section_button, 1)
         section_layout.addWidget(self.dataset_section_button, 1)
+        section_layout.addWidget(self.analysis_section_button, 1)
         section_layout.addWidget(self.training_section_button, 1)
 
         section_row = QHBoxLayout()
@@ -345,10 +352,23 @@ class ModelWorkspacePage(QWidget):
         dataset_layout.setSpacing(14)
         dataset_title = QLabel("Training Materials")
         dataset_title.setObjectName("SectionTitle")
-        self.dataset_panel = ModelDatasetPanel(ModelDatasetStore(self._workspace.root))
+        self.dataset_panel = ModelDatasetPanel(self._dataset_store)
         self.dataset_panel.preview_started.connect(self.preview_started.emit)
+        self.dataset_panel.dataset_changed.connect(self._on_dataset_changed)
         dataset_layout.addWidget(dataset_title)
         dataset_layout.addWidget(self.dataset_panel, 1)
+
+        analysis = QFrame()
+        analysis.setObjectName("Panel")
+        analysis_layout = QVBoxLayout(analysis)
+        analysis_layout.setContentsMargins(20, 20, 20, 20)
+        analysis_layout.setSpacing(14)
+        analysis_title = QLabel("Training Material Analysis")
+        analysis_title.setObjectName("SectionTitle")
+        self.analysis_panel = ModelDatasetAnalysisPanel(self._dataset_store)
+        self.analysis_panel.edit_requested.connect(self._open_dataset_item)
+        analysis_layout.addWidget(analysis_title)
+        analysis_layout.addWidget(self.analysis_panel, 1)
 
         training = QFrame()
         training.setObjectName("Panel")
@@ -366,6 +386,7 @@ class ModelWorkspacePage(QWidget):
         self.workspace_content_stack = QStackedWidget()
         self.workspace_content_stack.addWidget(overview)
         self.workspace_content_stack.addWidget(dataset)
+        self.workspace_content_stack.addWidget(analysis)
         self.workspace_content_stack.addWidget(training)
 
         layout.addWidget(header)
@@ -406,6 +427,7 @@ class ModelWorkspacePage(QWidget):
             self._selected_model_id = None
             self.detail_panel.set_record(None)
             self.dataset_panel.set_model(None)
+            self.analysis_panel.set_model(None)
             self.training_panel.set_model(None, None, 0, 0)
             self._update_workspace_header(None)
             self.view_stack.setCurrentIndex(0)
@@ -417,11 +439,13 @@ class ModelWorkspacePage(QWidget):
         self.workspace_open_button.set_theme_mode(theme_mode)
         self.detail_panel.set_theme_mode(theme_mode)
         self.dataset_panel.set_theme_mode(theme_mode)
+        self.analysis_panel.set_theme_mode(theme_mode)
 
     def apply_language(self) -> None:
         apply_widget_language(self)
         self.detail_panel.apply_language()
         self.dataset_panel.apply_language()
+        self.analysis_panel.apply_language()
         self.training_panel.apply_language()
         self._navigate_model_section(self.workspace_content_stack.currentIndex())
         self._update_workspace_header(self._selected_record())
@@ -596,6 +620,7 @@ class ModelWorkspacePage(QWidget):
         selected = self._selected_record()
         self.detail_panel.set_record(selected)
         self.dataset_panel.set_model(selected.model_id if selected is not None else None)
+        self.analysis_panel.set_model(selected.model_id if selected is not None else None)
         self._refresh_training_panel(selected)
         self._update_workspace_header(selected)
 
@@ -611,6 +636,7 @@ class ModelWorkspacePage(QWidget):
         self._select_model_item(model_id)
         self.detail_panel.set_record(record)
         self.dataset_panel.set_model(record.model_id)
+        self.analysis_panel.set_model(record.model_id)
         self._refresh_training_panel(record)
         self._update_workspace_header(record)
         self._navigate_model_section(0)
@@ -621,15 +647,26 @@ class ModelWorkspacePage(QWidget):
         self.view_stack.setCurrentIndex(0)
 
     def _navigate_model_section(self, index: int) -> None:
-        selected_index = max(0, min(2, index))
+        selected_index = max(0, min(3, index))
         self.workspace_content_stack.setCurrentIndex(selected_index)
         self.overview_section_button.setChecked(selected_index == 0)
         self.dataset_section_button.setChecked(selected_index == 1)
-        self.training_section_button.setChecked(selected_index == 2)
-        section_name = ("Overview", "Dataset", "Training")[selected_index]
+        self.analysis_section_button.setChecked(selected_index == 2)
+        self.training_section_button.setChecked(selected_index == 3)
+        section_name = ("Overview", "Dataset", "Analysis", "Training")[selected_index]
         set_translated_text(self.workspace_section_label, section_name)
         if selected_index != 1:
             self.stop_preview()
+        if selected_index == 2:
+            self.analysis_panel.ensure_analysis()
+
+    def _on_dataset_changed(self, _dataset: object) -> None:
+        self.analysis_panel.mark_stale()
+        self._refresh_training_panel(self._selected_record())
+
+    def _open_dataset_item(self, item_id: str) -> None:
+        self._navigate_model_section(1)
+        self.dataset_panel.open_training_item(item_id)
 
     def stop_preview(self) -> None:
         self.dataset_panel.stop_preview()

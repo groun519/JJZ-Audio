@@ -5,13 +5,16 @@
 #define AppName "JJZero Audio"
 #define AppExecutable "JJZero Audio.exe"
 #define DistributionDir SourcePath + "..\dist\JJZero Audio"
+#ifndef AppMutexName
+  #define AppMutexName "JJZeroAudio.E5ED303D5BB24B1E8AA8434C16C4D3AE"
+#endif
 
 [Setup]
 AppId={{E5ED303D-5BB2-4B1E-8AA8-434C16C4D3AE}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=JJZero
-AppMutex=JJZeroAudio.E5ED303D5BB24B1E8AA8434C16C4D3AE
+AppMutex={#AppMutexName}
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 UninstallDisplayName={#AppName}
@@ -21,7 +24,11 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 PrivilegesRequired=lowest
 OutputDir={#SourcePath}..\release
+#ifdef VerificationBuild
+OutputBaseFilename=JJZero-Audio-{#AppVersion}-Verification-Setup
+#else
 OutputBaseFilename=JJZero-Audio-{#AppVersion}-Setup
+#endif
 SetupIconFile={#SourcePath}jjzero.ico
 Compression=lzma2/max
 SolidCompression=yes

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import sqlite3
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -11,6 +13,7 @@ from pathlib import Path
 
 from jang_app.config import MODEL_WORKSPACE_DIR
 from jang_app.services.managed_files import write_json_atomic
+from jang_app.services.library_catalog import LibraryCatalog, inferred_catalog_file
 from jang_app.services.rvc_model_package import (
     RvcModelPackageLayout,
     build_rvc_package_plan,
@@ -27,6 +30,7 @@ CATALOG_FILE_NAME = "catalog.json"
 MANAGED_LIBRARY_DIR_NAME = "library"
 _EPOCH_WEIGHT_PATTERN = re.compile(r"^(?P<name>.+)_e(?P<epoch>\d+)_s(?P<step>\d+)$", re.IGNORECASE)
 _CHECKPOINT_PATTERN = re.compile(r"^[GD]_(?P<step>\d+)\.pth$", re.IGNORECASE)
+_LOGGER = logging.getLogger("jang_app")
 
 
 class RvcModelWorkspaceError(RuntimeError):
@@ -176,10 +180,18 @@ class RvcModelRecord:
 
 
 class RvcModelWorkspace:
-    def __init__(self, root: Path = MODEL_WORKSPACE_DIR) -> None:
+    def __init__(
+        self,
+        root: Path = MODEL_WORKSPACE_DIR,
+        *,
+        catalog_file: Path | None = None,
+    ) -> None:
         self.root = root.expanduser().resolve()
         self.catalog_path = self.root / CATALOG_FILE_NAME
         self.library_dir = self.root / MANAGED_LIBRARY_DIR_NAME
+        self._library_catalog = LibraryCatalog(
+            catalog_file or inferred_catalog_file(self.root, "models")
+        )
 
     def records(self) -> list[RvcModelRecord]:
         if not self.catalog_path.is_file():
@@ -469,6 +481,10 @@ class RvcModelWorkspace:
             "models": [self._record_to_data(record) for record in sorted_records],
         }
         write_json_atomic(self.catalog_path, data)
+        try:
+            self._library_catalog.replace_models(sorted_records)
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            _LOGGER.warning("Model catalog update deferred: %s", exc)
 
     def _ensure_managed_package(self, record: RvcModelRecord) -> tuple[RvcModelRecord, bool]:
         model_dir = self.library_dir / record.model_id

@@ -4,10 +4,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
 
-from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
-from jang_app.qt_app.widgets import FeedbackButton, ScrollSafeComboBox, SvgIconButton, WaveformView
+from jang_app.qt_app.localization import apply_widget_language, set_translated_tooltip
+from jang_app.qt_app.widgets import ScrollSafeComboBox, SvgIconButton, WaveformView
 from jang_app.services.i18n import tr
 from jang_app.services.song_library import SongVocalVersion
 from jang_app.services.vocal_project import VocalProject, VocalTake
@@ -20,7 +20,6 @@ class VocalResultsPanel(QFrame):
     rename_take_requested = Signal(object)
     remove_take_requested = Signal(object)
     reconvert_take_requested = Signal(object)
-    comparison_changed = Signal(str)
     seek_requested = Signal(float)
 
     def __init__(self) -> None:
@@ -33,23 +32,6 @@ class VocalResultsPanel(QFrame):
         self.title_label = QLabel("Vocal Results")
         self.title_label.setObjectName("SectionTitle")
 
-        self.compare_frame = QFrame()
-        self.compare_frame.setObjectName("VocalCompareControl")
-        compare_layout = QHBoxLayout(self.compare_frame)
-        compare_layout.setContentsMargins(3, 3, 3, 3)
-        compare_layout.setSpacing(0)
-        self.original_compare_button = _compare_button("A  Original")
-        self.converted_compare_button = _compare_button("B  Converted")
-        self.converted_compare_button.setChecked(True)
-        compare_group = QButtonGroup(self)
-        compare_group.setExclusive(True)
-        compare_group.addButton(self.original_compare_button)
-        compare_group.addButton(self.converted_compare_button)
-        self.original_compare_button.clicked.connect(lambda: self.comparison_changed.emit("original"))
-        self.converted_compare_button.clicked.connect(lambda: self.comparison_changed.emit("converted"))
-        compare_layout.addWidget(self.original_compare_button)
-        compare_layout.addWidget(self.converted_compare_button)
-
         self.open_location_button = SvgIconButton("folder", size=32)
         self.open_location_button.setObjectName("ControlIconButton")
         set_translated_tooltip(self.open_location_button, "Open file location")
@@ -60,7 +42,6 @@ class VocalResultsPanel(QFrame):
         header.setSpacing(8)
         header.addWidget(self.title_label, 0)
         header.addStretch(1)
-        header.addWidget(self.compare_frame, 0)
         header.addWidget(self.open_location_button, 0)
 
         self.original_waveform = _ResultWaveform("Original Vocal")
@@ -108,10 +89,6 @@ class VocalResultsPanel(QFrame):
     def current_take(self) -> VocalTake | None:
         return self.converted_waveform.current_take()
 
-    def set_comparison_mode(self, mode: str) -> None:
-        self.original_compare_button.setChecked(mode == "original")
-        self.converted_compare_button.setChecked(mode != "original")
-
     def select_converted(self, path: Path | None) -> bool:
         return self.converted_waveform.select_path(path)
 
@@ -141,10 +118,6 @@ class VocalResultsPanel(QFrame):
         takes = self._project.takes if self._project is not None else ()
         self.converted_waveform.set_takes(converted_paths, takes, selected_path)
         self.open_location_button.setEnabled(result is not None)
-        has_converted = bool(converted_paths)
-        self.original_compare_button.setEnabled(has_converted)
-        self.converted_compare_button.setEnabled(has_converted)
-
     def _request_open_location(self) -> None:
         if self._result is not None:
             self.open_location_requested.emit(self._result.job_dir)
@@ -329,15 +302,6 @@ class _ResultWaveform(QFrame):
             if data and Path(data).expanduser().resolve() == resolved:
                 return index
         return -1
-
-
-def _compare_button(text: str) -> FeedbackButton:
-    button = FeedbackButton()
-    button.setObjectName("VocalCompareButton")
-    button.setCheckable(True)
-    button.setFixedHeight(28)
-    set_translated_text(button, text)
-    return button
 
 
 def _take_action_button(icon: str, tooltip: str) -> SvgIconButton:

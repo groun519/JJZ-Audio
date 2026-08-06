@@ -34,6 +34,7 @@ class AppPathsTests(unittest.TestCase):
             )
             self.assertEqual(paths.runtime_root, (root / "install" / "runtime").resolve())
             self.assertEqual(paths.workspace_source, "default")
+            self.assertEqual(paths.storage_version, 1)
 
     def test_development_layout_reuses_existing_workspace_without_moving_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -88,6 +89,48 @@ class AppPathsTests(unittest.TestCase):
             self.assertEqual(paths.workspace_root, workspace.resolve())
             self.assertEqual(paths.workspace_anchor, anchor.resolve())
             self.assertEqual(paths.workspace_source, "storage")
+            self.assertEqual(paths.storage_version, 1)
+
+    def test_v2_storage_layout_routes_large_mutable_data_to_selected_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            package = source / "src" / "jang_app"
+            data_root = root / "local"
+            storage_root = root / "selected-storage"
+            package.mkdir(parents=True)
+            settings = data_root / "settings"
+            settings.mkdir(parents=True)
+            (settings / "storage.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "storage_root": str(storage_root),
+                        "workspace_root": str(storage_root / "Data"),
+                        "workspace_anchor": str(storage_root),
+                        "output_root": str(storage_root / "Output"),
+                        "runtime_root": str(storage_root / "Runtime"),
+                        "cache_root": str(storage_root / "Cache"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            paths = discover_app_paths(
+                package,
+                environ={"JJZERO_DATA_ROOT": str(data_root)},
+                frozen=True,
+                executable=root / "install" / "JJZero Audio.exe",
+                source_root=source,
+            )
+
+            self.assertEqual(paths.storage_version, 2)
+            self.assertEqual(paths.storage_root, storage_root.resolve())
+            self.assertEqual(paths.workspace_root, (storage_root / "Data").resolve())
+            self.assertEqual(paths.output_root, (storage_root / "Output").resolve())
+            self.assertEqual(paths.runtime_root, (storage_root / "Runtime").resolve())
+            self.assertEqual(paths.cache_dir, (storage_root / "Cache").resolve())
+            self.assertEqual(paths.catalog_file, (storage_root / "Data" / "catalog.db").resolve())
 
     def test_frozen_app_recovers_workspace_from_initial_setup_when_storage_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -117,6 +160,38 @@ class AppPathsTests(unittest.TestCase):
 
             self.assertEqual(paths.workspace_root, (media_root / "workspace").resolve())
             self.assertEqual(paths.workspace_source, "initial_setup")
+
+    def test_v2_initial_setup_marker_recovers_data_folder_when_storage_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            package = source / "src" / "jang_app"
+            data_root = root / "data"
+            storage_root = root / "storage"
+            package.mkdir(parents=True)
+            song = storage_root / "Data" / "library" / "songs" / "song-a" / "song.json"
+            song.parent.mkdir(parents=True)
+            song.write_text("{}", encoding="utf-8")
+            setup = data_root / "settings" / "initial_setup.json"
+            setup.parent.mkdir(parents=True)
+            setup.write_text(
+                json.dumps({"version": 2, "storage_root": str(storage_root)}),
+                encoding="utf-8",
+            )
+
+            paths = discover_app_paths(
+                package,
+                environ={"JJZERO_DATA_ROOT": str(data_root)},
+                frozen=True,
+                executable=root / "install" / "JJZero Audio.exe",
+                source_root=source,
+            )
+
+            self.assertEqual(paths.workspace_root, (storage_root / "Data").resolve())
+            self.assertEqual(paths.workspace_source, "initial_setup")
+            self.assertEqual(paths.storage_version, 2)
+            self.assertEqual(paths.output_root, (storage_root / "Output").resolve())
+            self.assertEqual(paths.runtime_root, (storage_root / "Runtime").resolve())
 
     def test_populated_initial_setup_workspace_recovers_from_empty_stored_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -35,6 +35,7 @@ def prepare_rvc_script_launcher(
     compact_rvc_checkpoints: bool = False,
     conservative_data_loading: bool = False,
     rocm_single_process_training: bool = False,
+    legacy_i18n: bool = False,
 ) -> Path:
     root = rvc_root.expanduser().resolve()
     source = script.expanduser().resolve()
@@ -54,6 +55,8 @@ def prepare_rvc_script_launcher(
         f"RVC_SCRIPT = Path({str(source)!r})",
         "sys.path.insert(0, str(RVC_ROOT))",
     ]
+    if legacy_i18n:
+        lines.extend(("", _LEGACY_I18N_BOOTSTRAP.rstrip(), ""))
     if atomic_torch_saves:
         lines.extend(("", _ATOMIC_TORCH_SAVE_BOOTSTRAP.rstrip(), ""))
     if compact_rvc_checkpoints:
@@ -137,6 +140,40 @@ def _jjzero_atomic_torch_save(value, destination, *args, **kwargs):
 
 
 torch.save = _jjzero_atomic_torch_save
+'''
+
+
+_LEGACY_I18N_BOOTSTRAP = '''import json
+import locale
+import types
+
+
+if "i18n" not in sys.modules:
+    _jjzero_i18n_module = types.ModuleType("i18n")
+
+    class _JjzeroI18nAuto:
+        def __init__(self, language=None):
+            if language in {"Auto", None}:
+                language = locale.getlocale()[0] or "en_US"
+            resources = Path.cwd() / "lib" / "i18n"
+            language_path = resources / f"{language}.json"
+            if not language_path.is_file():
+                language = "en_US"
+                language_path = resources / "en_US.json"
+            self.language = language
+            try:
+                self.language_map = json.loads(language_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                self.language_map = {}
+
+        def __call__(self, key):
+            return self.language_map.get(key, key)
+
+        def print(self):
+            print("Use Language:", self.language)
+
+    _jjzero_i18n_module.I18nAuto = _JjzeroI18nAuto
+    sys.modules["i18n"] = _jjzero_i18n_module
 '''
 
 

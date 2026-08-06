@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Protocol, Sequence
 
+from jang_app.services.command import hidden_subprocess_kwargs
 from jang_app.services.rvc_hardware import (
     RvcHardwareSelection,
     clear_graphics_adapter_cache,
@@ -151,7 +152,7 @@ def _run_nvidia_smi(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
             encoding="utf-8",
             errors="replace",
             timeout=15,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **hidden_subprocess_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return subprocess.CompletedProcess(list(args), 1, "", str(exc))

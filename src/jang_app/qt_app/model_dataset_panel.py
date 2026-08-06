@@ -33,6 +33,7 @@ from jang_app.services.silence_detection import detect_speech_regions
 
 class ModelDatasetPanel(QWidget):
     preview_started = Signal()
+    dataset_changed = Signal(object)
 
     def __init__(self, store: ModelDatasetStore) -> None:
         super().__init__()
@@ -315,6 +316,7 @@ class ModelDatasetPanel(QWidget):
             self._set_status(f"Reorder failed: {_last_error_line(exc)}")
             return
         self._render(selected_training_id=item_ids[0])
+        self.dataset_changed.emit(self._dataset)
 
     def _add_clip(self, start_ms: int, end_ms: int) -> None:
         item = self._current_training_item()
@@ -558,6 +560,7 @@ class ModelDatasetPanel(QWidget):
         self._dataset = result
         self._render(selected_training_id=selected_training_id)
         self._set_status(status)
+        self.dataset_changed.emit(self._dataset)
 
     def _run_editor_change(self, action: Callable[[], ModelDataset], selected_training_id: str) -> None:
         try:
@@ -566,6 +569,7 @@ class ModelDatasetPanel(QWidget):
             self._set_status(f"Edit failed: {_last_error_line(exc)}")
             return
         self._render(selected_training_id=selected_training_id)
+        self.dataset_changed.emit(self._dataset)
 
     def _current_training_item(self) -> ModelDatasetItem | None:
         selected_ids = _selected_item_ids(self.training_list)
@@ -582,6 +586,7 @@ class ModelDatasetPanel(QWidget):
             self._set_status(f"Dataset failed: {_last_error_line(exc)}")
             return
         self._render()
+        self.dataset_changed.emit(self._dataset)
 
     def _render(self, *, selected_training_id: str = "") -> None:
         self._populate_list(self.source_list, self._dataset.source_items, "SOURCE")
@@ -660,6 +665,19 @@ class ModelDatasetPanel(QWidget):
 
     def stop_preview(self) -> None:
         self.clip_editor.stop_preview()
+
+    def open_training_item(self, item_id: str) -> bool:
+        if not item_id or not any(item.item_id == item_id for item in self._dataset.training_items):
+            return False
+        _select_item(self.training_list, item_id)
+        selected = self.training_list.currentItem()
+        if selected is not None:
+            self.training_list.scrollToItem(
+                selected,
+                QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
+        self._on_training_selection_changed()
+        return True
 
     def _close_editor(self) -> None:
         self.clip_editor.stop_preview()

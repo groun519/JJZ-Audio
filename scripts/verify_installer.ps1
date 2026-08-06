@@ -3,6 +3,7 @@ param(
     [string]$InstallerPath,
     [string]$PreviousInstallerPath = "",
     [string]$RuntimePackageIndex = "",
+    [string]$AppMutexName = "JJZeroAudio.E5ED303D5BB24B1E8AA8434C16C4D3AE",
     [switch]$KeepArtifacts
 )
 
@@ -24,20 +25,37 @@ $sentinel = Join-Path $dataRoot "settings\preserve.txt"
 $runtimeSentinel = Join-Path $installDir "runtime\rvc\weights\preserve-runtime-model.pth"
 $runtimeLogSentinel = Join-Path $installDir "runtime\rvc\logs\preserve-runtime-log.txt"
 $managedRuntimeSentinel = Join-Path $installDir "runtime\managed-component.bin"
-$appMutexName = "JJZeroAudio.E5ED303D5BB24B1E8AA8434C16C4D3AE"
 $storageFile = Join-Path $dataRoot "settings\storage.json"
+$initialSetupFile = Join-Path $dataRoot "settings\initial_setup.json"
 $songLibraryFile = Join-Path $dataRoot "settings\song_library.json"
 $legacySettingsFile = Join-Path $installDir "settings\app_settings.json"
 $legacySongFile = Join-Path $installDir "workspace\library\songs\upgrade-song\song.json"
+$legacySongAudio = Join-Path $installDir "workspace\library\songs\upgrade-song\01_source\audio\upgrade-song.wav"
+$legacyVocalRoot = Join-Path $installDir "workspace\library\songs\upgrade-song\02_vocal\separations\run-upgrade\htdemucs\upgrade-song"
+$legacyVocalFile = Join-Path $legacyVocalRoot "vocals.wav"
+$legacyInstrumentalFile = Join-Path $legacyVocalRoot "no_vocals.wav"
+$legacyExportFile = Join-Path $installDir "output\exports\upgrade-mix.wav"
+$legacyCacheFile = Join-Path $dataRoot "cache\upgrade-cache.bin"
 $legacyModelCatalog = Join-Path $installDir "workspace\models\catalog.json"
 $externalInferenceModel = Join-Path $dataRoot "external-models\upgrade-voice.pth"
+$managedStorageRoot = Join-Path $testRoot "managed-storage"
+$uninstallRegistryKey = "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{E5ED303D-5BB2-4B1E-8AA8-434C16C4D3AE}_is1"
+$uninstallRegistryPsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{E5ED303D-5BB2-4B1E-8AA8-434C16C4D3AE}_is1"
+$registryBackup = Join-Path $env:TEMP "jjzero-uninstall-$testId.reg"
 
 function Get-InstallerVersion([string]$SetupPath) {
-    $name = [System.IO.Path]::GetFileName($SetupPath)
-    if ($name -notmatch '^JJZero-Audio-(\d+\.\d+\.\d+)-Setup\.exe$') {
-        throw "Installer name does not contain a release version: $name"
+    $version = [string](Get-Item -LiteralPath $SetupPath).VersionInfo.ProductVersion
+    $version = $version.Trim()
+    if ($version -notmatch '^\d+\.\d+\.\d+$') {
+        $name = [System.IO.Path]::GetFileName($SetupPath)
+        if ($name -match '^JJZero-Audio-(\d+\.\d+\.\d+)') {
+            $version = $Matches[1]
+        }
     }
-    return $Matches[1]
+    if ($version -notmatch '^\d+\.\d+\.\d+$') {
+        throw "Installer metadata does not contain a release version: $SetupPath"
+    }
+    return $version
 }
 
 function Invoke-Setup([string]$SetupPath, [string]$LogName) {
@@ -89,15 +107,30 @@ function Assert-PreservedFiles([hashtable]$ExpectedHashes, [string]$Stage) {
     }
 }
 
-New-Item -ItemType Directory -Path (Split-Path -Parent $sentinel) -Force | Out-Null
-Set-Content -LiteralPath $sentinel -Value "preserve-user-data" -Encoding UTF8
-$env:JJZERO_DATA_ROOT = $dataRoot
+function Write-Utf8NoBom([string]$Path, [string]$Content) {
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
 
-$baselineVersion = Get-InstallerVersion $baselineInstaller
-$targetVersion = Get-InstallerVersion $installer
+$registrationExisted = $false
+if (Test-Path -LiteralPath $uninstallRegistryPsPath) {
+    & reg.exe export $uninstallRegistryKey $registryBackup /y *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not back up the existing JJZero Audio uninstall registration."
+    }
+    $registrationExisted = $true
+}
 
-Invoke-Setup $baselineInstaller "install-$baselineVersion.log"
-Assert-InstalledVersion $baselineVersion
+try {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $sentinel) -Force | Out-Null
+    Set-Content -LiteralPath $sentinel -Value "preserve-user-data" -Encoding UTF8
+    $env:JJZERO_DATA_ROOT = $dataRoot
+
+    $baselineVersion = Get-InstallerVersion $baselineInstaller
+    $targetVersion = Get-InstallerVersion $installer
+
+    Invoke-Setup $baselineInstaller "install-$baselineVersion.log"
+    Assert-InstalledVersion $baselineVersion
 New-Item -ItemType Directory -Path (Split-Path -Parent $runtimeSentinel) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $runtimeLogSentinel) -Force | Out-Null
 Set-Content -LiteralPath $runtimeSentinel -Value "preserve-runtime-model" -Encoding UTF8
@@ -105,19 +138,54 @@ Set-Content -LiteralPath $runtimeLogSentinel -Value "preserve-runtime-log" -Enco
 Set-Content -LiteralPath $managedRuntimeSentinel -Value "remove-managed-runtime" -Encoding UTF8
 New-Item -ItemType Directory -Path (Split-Path -Parent $legacySettingsFile) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $legacySongFile) -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $legacySongAudio) -Force | Out-Null
+New-Item -ItemType Directory -Path $legacyVocalRoot -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $legacyExportFile) -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $legacyCacheFile) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $legacyModelCatalog) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $externalInferenceModel) -Force | Out-Null
-Set-Content -LiteralPath $legacySettingsFile -Value '{"theme_mode":"dark"}' -Encoding UTF8
-Set-Content -LiteralPath $legacySongFile -Value '{"version":1,"id":"upgrade-song","title":"Upgrade Song"}' -Encoding UTF8
+Write-Utf8NoBom $legacySettingsFile '{"theme_mode":"dark"}'
+Set-Content -LiteralPath $legacySongAudio -Value "upgrade-song-audio" -Encoding UTF8
+Set-Content -LiteralPath $legacyVocalFile -Value "upgrade-vocal" -Encoding UTF8
+Set-Content -LiteralPath $legacyInstrumentalFile -Value "upgrade-instrumental" -Encoding UTF8
+Set-Content -LiteralPath $legacyExportFile -Value "upgrade-export" -Encoding UTF8
+Set-Content -LiteralPath $legacyCacheFile -Value "upgrade-cache" -Encoding UTF8
+Write-Utf8NoBom $legacySongFile @"
+{
+  "version": 1,
+  "id": "upgrade-song",
+  "title": "Upgrade Song",
+  "created_at": "2026-01-01T00:00:00+00:00",
+  "removed": false,
+  "source": {
+    "audio": "01_source/audio/upgrade-song.wav",
+    "type": "local",
+    "url": "",
+    "sha256": "",
+    "original_name": "upgrade-song.wav"
+  },
+  "vocal": {
+    "active_output_id": "upgrade-output",
+    "detached_outputs": [],
+    "outputs": [{
+      "id": "upgrade-output",
+      "label": "Upgrade Separation",
+      "job_dir": "@project/workspace/library/songs/upgrade-song/02_vocal/separations/run-upgrade/htdemucs/upgrade-song",
+      "added_at": "2026-01-01T00:00:00+00:00",
+      "active_converted": ""
+    }]
+  }
+}
+"@
 Set-Content -LiteralPath $externalInferenceModel -Value "linked-inference-model" -Encoding UTF8
-Set-Content -LiteralPath $legacyModelCatalog -Value @"
+Write-Utf8NoBom $legacyModelCatalog @"
 {
   "version": 1,
   "models": [{
     "id": "linked-upgrade-voice",
     "name": "upgrade-voice",
     "mode": "linked",
-    "runtime_root": "$($installDir.Replace('\', '\\'))",
+    "runtime_root": "$((Join-Path $installDir 'runtime\rvc').Replace('\', '\\'))",
     "source_folder": "$((Split-Path -Parent $externalInferenceModel).Replace('\', '\\'))",
     "inference_model": "$($externalInferenceModel.Replace('\', '\\'))",
     "index_file": "",
@@ -131,27 +199,42 @@ Set-Content -LiteralPath $legacyModelCatalog -Value @"
     "default_device": "cpu"
   }]
 }
-"@ -Encoding UTF8
-Set-Content -LiteralPath $storageFile -Value @"
+"@
+Write-Utf8NoBom $initialSetupFile @"
+{
+  "version": 1,
+  "media_root": "$($installDir.Replace('\', '\\'))",
+  "diagnostics_ready": true
+}
+"@
+Write-Utf8NoBom $storageFile @"
 {
   "version": 1,
   "workspace_root": "$((Join-Path $installDir 'workspace').Replace('\', '\\'))",
   "workspace_anchor": "$($installDir.Replace('\', '\\'))"
 }
-"@ -Encoding UTF8
-Set-Content -LiteralPath $songLibraryFile -Value '{"paths":["C:\\upgrade-song.wav"]}' -Encoding UTF8
+"@
+Write-Utf8NoBom $songLibraryFile '{"paths":["C:\\upgrade-song.wav"]}'
 $preservedFiles = @{}
 foreach ($path in @(
     $sentinel,
     $storageFile,
+    $initialSetupFile,
     $songLibraryFile,
     $legacySettingsFile,
     $legacySongFile,
+    $legacySongAudio,
+    $legacyVocalFile,
+    $legacyInstrumentalFile,
+    $legacyExportFile,
+    $legacyCacheFile,
     $legacyModelCatalog,
     $externalInferenceModel
 )) {
     $preservedFiles[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 }
+$immutableSourceFiles = $preservedFiles.Clone()
+$immutableSourceFiles.Remove($storageFile)
 Invoke-Setup $installer "update-$targetVersion.log"
 Assert-InstalledVersion $targetVersion
 Assert-PreservedFiles $preservedFiles "application update"
@@ -161,6 +244,53 @@ if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtim
 if ((Get-Content -LiteralPath $runtimeLogSentinel -Raw).Trim() -ne "preserve-runtime-log") {
     throw "Existing runtime logs changed during the app update: $runtimeLogSentinel"
 }
+
+$previousPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = Join-Path $projectRoot "src"
+try {
+    & $python scripts\verify_storage_upgrade.py $installDir $dataRoot $managedStorageRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Managed storage migration verification failed with exit code $LASTEXITCODE"
+    }
+}
+finally {
+    $env:PYTHONPATH = $previousPythonPath
+}
+Assert-PreservedFiles $immutableSourceFiles "managed storage migration"
+
+$managedFiles = @(
+    (Join-Path $managedStorageRoot "Data\library\songs\upgrade-song\song.json"),
+    (Join-Path $managedStorageRoot "Data\library\songs\upgrade-song\01_source\audio\upgrade-song.wav"),
+    (Join-Path $managedStorageRoot "Data\library\songs\upgrade-song\02_vocal\separations\run-upgrade\htdemucs\upgrade-song\vocals.wav"),
+    (Join-Path $managedStorageRoot "Data\models\catalog.json"),
+    (Join-Path $managedStorageRoot "Output\exports\upgrade-mix.wav"),
+    (Join-Path $managedStorageRoot "Runtime\rvc\weights\preserve-runtime-model.pth"),
+    (Join-Path $managedStorageRoot "Cache\upgrade-cache.bin")
+)
+$managedHashes = @{}
+foreach ($path in $managedFiles) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Managed storage file was not created: $path"
+    }
+    $managedHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+}
+
+$env:QT_QPA_PLATFORM = "offscreen"
+$installedExecutable = Join-Path $installDir "JJZero Audio.exe"
+$smokeProcess = Start-Process `
+    -FilePath $installedExecutable `
+    -ArgumentList @("--startup-smoke-test") `
+    -PassThru `
+    -WindowStyle Hidden
+if (-not $smokeProcess.WaitForExit(90000)) {
+    $smokeProcess.Kill()
+    throw "Updated application startup timed out after managed storage migration."
+}
+if ($smokeProcess.ExitCode -ne 0) {
+    throw "Updated application failed after managed storage migration with exit code $($smokeProcess.ExitCode)."
+}
+Assert-PreservedFiles $managedHashes "updated application startup"
+
 if ($RuntimePackageIndex) {
     $packageIndex = (Resolve-Path -LiteralPath $RuntimePackageIndex).Path
     & $python scripts\install_runtime_packages.py $packageIndex (Join-Path $installDir "runtime")
@@ -169,7 +299,7 @@ if ($RuntimePackageIndex) {
     }
 }
 Invoke-DistributionVerification
-Assert-PreservedFiles $preservedFiles "runtime update"
+Assert-PreservedFiles $immutableSourceFiles "runtime update"
 
 if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtime-model") {
     throw "Runtime model data changed during the runtime update: $runtimeSentinel"
@@ -186,7 +316,7 @@ $uninstaller = Join-Path $installDir "unins000.exe"
 if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
     throw "Uninstaller was not created: $uninstaller"
 }
-$appMutex = [System.Threading.Mutex]::new($false, $appMutexName)
+$appMutex = [System.Threading.Mutex]::new($false, $AppMutexName)
 try {
     $blockedUninstall = Start-Process `
         -FilePath $uninstaller `
@@ -239,13 +369,25 @@ if ($preservedLog.Count -ne 1 -or
 if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne "preserve-user-data") {
     throw "User data was removed during uninstall: $sentinel"
 }
-Assert-PreservedFiles $preservedFiles "uninstall"
+Assert-PreservedFiles $immutableSourceFiles "uninstall"
+Assert-PreservedFiles $managedHashes "uninstall"
 
-Write-Output "Verified installer upgrade $baselineVersion -> $targetVersion and uninstall: $installer"
-if ($KeepArtifacts) {
-    Write-Output "Verification logs: $testRoot"
+    Write-Output "Verified installer upgrade $baselineVersion -> $targetVersion and uninstall: $installer"
+    if ($KeepArtifacts) {
+        Write-Output "Verification logs: $testRoot"
+    }
+    else {
+        Remove-Item -LiteralPath $testRoot -Recurse -Force
+        Write-Output "Removed installer verification files: $testRoot"
+    }
 }
-else {
-    Remove-Item -LiteralPath $testRoot -Recurse -Force
-    Write-Output "Removed installer verification files: $testRoot"
+finally {
+    Remove-Item -LiteralPath $uninstallRegistryPsPath -Recurse -Force -ErrorAction SilentlyContinue
+    if ($registrationExisted) {
+        & reg.exe import $registryBackup *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Could not restore the previous JJZero Audio uninstall registration: $registryBackup"
+        }
+    }
+    Remove-Item -LiteralPath $registryBackup -Force -ErrorAction SilentlyContinue
 }

@@ -39,6 +39,29 @@ class ModelDatasetPanelTests(unittest.TestCase):
                 self.assertEqual(len(store.load("model").training_items), 1)
                 panel.close()
 
+    def test_open_training_item_selects_the_requested_material(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ModelDatasetStore(root / "workspace")
+            items = store.add_sources(
+                "model",
+                (_wave_file(root / "first.wav"), _wave_file(root / "second.wav")),
+            ).items
+            store.select_items("model", (item.item_id for item in items))
+            panel = ModelDatasetPanel(store)
+            with patch(
+                "jang_app.qt_app.clip_waveform_view.waveform_cache_key",
+                side_effect=OSError,
+            ):
+                panel.set_model("model")
+
+                opened = panel.open_training_item(items[1].item_id)
+
+                self.assertTrue(opened)
+                self.assertEqual(panel.training_list.currentRow(), 1)
+                self.assertFalse(panel.clip_editor.isHidden())
+                panel.close()
+
 
 def _wave_file(path: Path) -> Path:
     with wave.open(str(path), "wb") as output:
