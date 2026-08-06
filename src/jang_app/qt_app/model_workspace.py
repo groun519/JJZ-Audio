@@ -660,8 +660,15 @@ class ModelWorkspacePage(QWidget):
             return
         training_items = dataset.training_items
         ready_items = sum(item.review_state == REVIEW_READY for item in training_items)
+        total_duration_ms = sum(item.training_duration_ms for item in training_items)
         is_running = self._training_worker is not None and self._training_model_id == record.model_id
-        self.training_panel.set_model(record, state, ready_items, len(training_items))
+        self.training_panel.set_model(
+            record,
+            state,
+            ready_items,
+            len(training_items),
+            total_duration_ms,
+        )
         self.training_panel.set_running(is_running)
         self.dataset_panel.set_training_locked(is_running)
         if is_running:
@@ -1075,6 +1082,6 @@ def _training_stage_label(stage: RvcTrainingStage) -> str:
         RvcTrainingStage.EXTRACT: "Extracting Features",
         RvcTrainingStage.FILELIST: "Building File List",
         RvcTrainingStage.SPECTROGRAM: "Preparing Spectrograms",
-        RvcTrainingStage.TRAIN: "Training",
+        RvcTrainingStage.TRAIN: "Training Model",
         RvcTrainingStage.INDEX: "Building Index",
     }[stage]

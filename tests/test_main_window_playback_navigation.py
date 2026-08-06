@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from PySide6.QtWidgets import QApplication
 
-from jang_app.qt_app.main_window import MainWindow, PAGE_LIBRARY, PAGE_MODELS, PAGE_STUDIO
+from jang_app.qt_app.main_window import MainWindow, PAGE_LIBRARY, PAGE_MODELS, PAGE_STUDIO, PAGE_VOCAL
 from jang_app.services.playback_queue import PlaybackQueue
 
 
@@ -185,6 +185,37 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         self.assertEqual(workspace.duration_ms, 90_000)
         self.assertTrue(floating.is_playing)
         self.assertTrue(workspace.is_playing)
+
+    def test_vocal_ab_monitor_keeps_three_sources_and_only_switches_vocal_volumes(self) -> None:
+        def track(path: str, volume: float):
+            return SimpleNamespace(
+                current_path=lambda: Path(path),
+                is_muted=lambda: False,
+                volume=lambda: volume,
+            )
+
+        original = track("original.wav", 0.8)
+        instrumental = track("instrumental.wav", 0.4)
+        converted = track("converted.wav", 1.2)
+        window = SimpleNamespace(
+            page_stack=_PageStack(PAGE_VOCAL),
+            output_tracks=(original, instrumental, converted),
+            vocal_track=original,
+            instrumental_track=instrumental,
+            converted_track=converted,
+            _vocal_comparison_mode="original",
+        )
+
+        original_monitor = MainWindow._playback_track_paths(window)
+        window._vocal_comparison_mode = "converted"
+        converted_monitor = MainWindow._playback_track_paths(window)
+
+        self.assertEqual(
+            [path for path, _volume in original_monitor],
+            [Path("original.wav"), Path("instrumental.wav"), Path("converted.wav")],
+        )
+        self.assertEqual([volume for _path, volume in original_monitor], [1.0, 0.4, 0.0])
+        self.assertEqual([volume for _path, volume in converted_monitor], [0.0, 0.4, 1.0])
 
 
 if __name__ == "__main__":

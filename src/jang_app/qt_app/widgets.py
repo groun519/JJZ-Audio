@@ -1059,6 +1059,8 @@ def _track_button_palette(
         return _embedded_action_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
     if object_name in {"TrackActionButton", "TrackMuteButton"}:
         return _track_icon_button_palette(theme_mode, is_checked, is_enabled, is_hovered, is_pressed)
+    if object_name == "DangerIconButton":
+        return _danger_icon_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
 
     if theme_mode == "dark":
         colors = {
@@ -1098,6 +1100,58 @@ def _track_button_palette(
     if is_hovered:
         return {"background": colors["hover"], "border": colors["hover_border"], "icon": colors["icon"]}
     return {"background": colors["background"], "border": colors["border"], "icon": colors["icon"]}
+
+
+def _danger_icon_button_palette(
+    theme_mode: str,
+    is_enabled: bool,
+    is_hovered: bool,
+    is_pressed: bool,
+) -> dict[str, QColor]:
+    transparent = QColor(0, 0, 0, 0)
+    if theme_mode == "dark":
+        colors = {
+            "background": transparent,
+            "hover": QColor("#3a2022"),
+            "pressed": QColor("#52272a"),
+            "border": QColor("#7a3a3f"),
+            "icon": QColor("#d9d8d3"),
+            "active_icon": QColor("#f0b4b4"),
+            "disabled": QColor("#6c6b66"),
+        }
+    else:
+        colors = {
+            "background": transparent,
+            "hover": QColor("#f6e4e4"),
+            "pressed": QColor("#eccfd0"),
+            "border": QColor("#d7a2a5"),
+            "icon": QColor("#4e4b45"),
+            "active_icon": QColor("#8a2930"),
+            "disabled": QColor("#aaa397"),
+        }
+    if not is_enabled:
+        return {
+            "background": colors["background"],
+            "border": colors["background"],
+            "icon": colors["disabled"],
+        }
+    if is_pressed:
+        return {
+            "background": colors["pressed"],
+            "border": colors["border"],
+            "icon": colors["active_icon"],
+        }
+    if is_hovered:
+        return {
+            "background": colors["hover"],
+            "border": colors["border"],
+            "icon": colors["active_icon"],
+        }
+    return {
+        "background": colors["background"],
+        "border": colors["background"],
+        "icon": colors["icon"],
+    }
 
 
 def _window_control_palette(

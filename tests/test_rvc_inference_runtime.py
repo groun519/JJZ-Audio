@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
+from jang_app.services import rvc_inference_runtime as runtime_module
 from jang_app.services.rvc_cuda_compatibility import cuda_architecture_error
 from jang_app.services.rvc_inference_runtime import (
     RvcInferenceCapabilities,
@@ -13,6 +17,34 @@ from jang_app.services.rvc_inference_runtime import (
 
 
 class RvcInferenceRuntimeTests(unittest.TestCase):
+    def test_skips_accelerator_probe_when_cpu_runtime_is_broken(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            python = root / "runtime" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            result = runtime_module._ProbeResult(
+                0,
+                json.dumps(
+                    {
+                        "imports_ready": False,
+                        "cpu_ready": False,
+                        "faiss_ready": False,
+                        "torch_version": "",
+                        "detail": "ImportError: fairseq",
+                    }
+                ),
+                "",
+            )
+            runtime_module.clear_rvc_inference_probe_cache()
+            with patch.object(runtime_module, "_run_probe", return_value=result) as probe:
+                capabilities = runtime_module.probe_rvc_inference_runtime(root)
+
+            self.assertFalse(capabilities.runtime_ready)
+            self.assertEqual(probe.call_count, 1)
+            self.assertIn("skipped", capabilities.cuda_detail.lower())
+            runtime_module.clear_rvc_inference_probe_cache()
+
     def test_selects_requested_cuda_device_when_probe_passes(self) -> None:
         capabilities = _capabilities(cuda_available=True, cuda_ready=True, device_count=1)
 

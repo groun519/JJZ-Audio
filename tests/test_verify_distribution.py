@@ -28,6 +28,15 @@ class VerifyDistributionTests(unittest.TestCase):
                 / "rvc_artifact_worker.py",
                 required,
             )
+            self.assertIn(
+                distribution
+                / "_internal"
+                / "jang_app"
+                / "rvc_tools"
+                / "jjzero_device.py",
+                required,
+            )
+            self.assertIn(rvc_root / "lib" / "jjzero_device.py", required)
 
 
 if __name__ == "__main__":

@@ -107,12 +107,12 @@ def run_rvc_training_pipeline(
         previous_fingerprint = state_store.load().dataset_fingerprint
         snapshot = RvcTrainingSnapshotStore(model_id, layout).build(
             dataset,
-            _scaled_progress(progress, 0, 10),
+            _scaled_progress(progress, 0, 5),
         )
         fingerprint = snapshot.fingerprint
         if snapshot.fingerprint != previous_fingerprint:
             executed.append(RvcTrainingStage.SNAPSHOT)
-        _set_progress(progress, 10)
+        _set_progress(progress, 5)
 
         _stage(stage_callback, RvcTrainingStage.PREPROCESS)
         _resolve_stage(
@@ -121,7 +121,7 @@ def run_rvc_training_pipeline(
                 model_id,
                 layout,
                 runtime_root,
-                progress=_scaled_progress(progress, 10, 30),
+                progress=_scaled_progress(progress, 5, 15),
                 output_callback=output_callback,
                 cancellation=token,
             ),
@@ -130,7 +130,7 @@ def run_rvc_training_pipeline(
             executed,
             token,
         )
-        _set_progress(progress, 30)
+        _set_progress(progress, 15)
 
         _stage(stage_callback, RvcTrainingStage.EXTRACT)
         _resolve_stage(
@@ -139,7 +139,7 @@ def run_rvc_training_pipeline(
                 model_id,
                 layout,
                 runtime_root,
-                progress=_scaled_progress(progress, 30, 55),
+                progress=_scaled_progress(progress, 15, 25),
                 output_callback=output_callback,
                 cancellation=token,
             ),
@@ -148,7 +148,7 @@ def run_rvc_training_pipeline(
             executed,
             token,
         )
-        _set_progress(progress, 55)
+        _set_progress(progress, 25)
 
         _stage(stage_callback, RvcTrainingStage.FILELIST)
         _resolve_stage(
@@ -159,7 +159,7 @@ def run_rvc_training_pipeline(
             executed,
             token,
         )
-        _set_progress(progress, 60)
+        _set_progress(progress, 28)
 
         _stage(stage_callback, RvcTrainingStage.SPECTROGRAM)
         _resolve_stage(
@@ -169,7 +169,7 @@ def run_rvc_training_pipeline(
                 layout,
                 runtime_root,
                 cancellation=token,
-                progress=_scaled_progress(progress, 60, 70),
+                progress=_scaled_progress(progress, 28, 32),
                 output_callback=output_callback,
             ),
             RvcTrainingSpectrogramError,
@@ -177,7 +177,7 @@ def run_rvc_training_pipeline(
             executed,
             token,
         )
-        _set_progress(progress, 70)
+        _set_progress(progress, 32)
 
         _stage(stage_callback, RvcTrainingStage.TRAIN)
         raise_if_training_cancelled(token)
@@ -188,7 +188,7 @@ def run_rvc_training_pipeline(
             runtime_root,
             settings,
             cancellation=token,
-            progress=_scaled_progress(progress, 70, 92),
+            progress=_scaled_progress(progress, 32, 95),
             epoch_callback=epoch_callback,
             output_callback=output_callback,
         )
@@ -200,7 +200,7 @@ def run_rvc_training_pipeline(
                 training,
                 None,
             )
-        _set_progress(progress, 92)
+        _set_progress(progress, 95)
 
         _stage(stage_callback, RvcTrainingStage.INDEX)
         index = _resolve_stage(
@@ -210,7 +210,7 @@ def run_rvc_training_pipeline(
                 layout,
                 runtime_root,
                 cancellation=token,
-                progress=_scaled_progress(progress, 92, 100),
+                progress=_scaled_progress(progress, 95, 100),
                 output_callback=output_callback,
             ),
             RvcTrainingIndexError,

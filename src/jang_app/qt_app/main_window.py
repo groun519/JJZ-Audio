@@ -38,8 +38,14 @@ from jang_app.config import (
     SUPPORTED_AUDIO_EXTENSIONS,
     SUPPORTED_VIDEO_EXTENSIONS,
 )
-from jang_app.pipeline.rvc_convert import convert_vocal_with_rvc, list_index_files, list_voice_models
+from jang_app.pipeline.rvc_convert import (
+    RvcConversionResult,
+    convert_vocal_with_rvc,
+    list_index_files,
+    list_voice_models,
+)
 from jang_app.pipeline.separate import SeparationResult, separate_audio
+from jang_app.qt_app.confirmation_dialog import ConfirmationDialog
 from jang_app.qt_app.export_page import ExportPage
 from jang_app.qt_app.floating_playback_panel import FloatingPlaybackPanel, floating_player_position
 from jang_app.qt_app.library_details_panel import LibraryDetailsPanel
@@ -58,6 +64,7 @@ from jang_app.qt_app.primary_navigation import PrimaryNavigationBar
 from jang_app.qt_app.segmented_stack import SegmentedStack
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
+from jang_app.qt_app.text_input_dialog import TextInputDialog
 from jang_app.qt_app.toast_stack import ToastStack
 from jang_app.qt_app.update_dialog import UpdateDialog
 from jang_app.qt_app.update_status_button import (
@@ -118,13 +125,20 @@ from jang_app.services.settings import (
     normalize_rvc_device,
     save_app_settings,
 )
-from jang_app.services.song_metadata import build_song_display_metadata
-from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
-from jang_app.services.work_song import WorkSongStore
-from jang_app.services.video_source import VideoSource
+from jang_app.services.song_assets import (
+    REMOVAL_VOCAL_OUTPUT,
+    REMOVAL_VOCAL_TAKE,
+    SongAsset,
+)
 from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion, sort_song_items
+from jang_app.services.song_metadata import build_song_display_metadata
 from jang_app.services.studio_session import StudioSession, StudioTrackState
 from jang_app.services.update_polling import UpdateCheckOutcome, UpdatePollingPolicy
+from jang_app.services.video_source import VideoSource
+from jang_app.services.vocal_project import VocalConversionSettings, VocalProject
+from jang_app.services.vocal_project_store import VocalProjectStore
+from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
+from jang_app.services.work_song import WorkSongStore
 from jang_app.services.youtube_download import YouTubeDownloadResult, download_youtube_audio
 from jang_app.version import __version__
 
@@ -173,6 +187,8 @@ class MainWindow(QMainWindow):
         self._export_song_id = ""
         self._is_loading_rvc_settings = False
         self._is_loading_studio_session = False
+        self._vocal_comparison_mode = "converted"
+        self.vocal_project_store = VocalProjectStore()
         self.studio_session_autosave = StudioSessionAutosave(self.library.save_studio_session, parent=self)
         self.studio_session_autosave.save_failed.connect(self._on_studio_session_save_failed)
 
@@ -437,6 +453,7 @@ class MainWindow(QMainWindow):
         self.library_details_panel.back_requested.connect(self._close_library_details)
         self.library_details_panel.open_location_requested.connect(self._open_library_asset_location)
         self.library_details_panel.open_vocal_requested.connect(self._use_library_item)
+        self.library_details_panel.remove_asset_requested.connect(self._remove_library_asset)
 
         self.library_content_stack = QStackedWidget()
         self.library_content_stack.addWidget(list_panel)
@@ -474,6 +491,11 @@ class MainWindow(QMainWindow):
         self.vocal_results_panel = VocalResultsPanel()
         self.vocal_results_panel.converted_selected.connect(self._activate_vocal_converted_version)
         self.vocal_results_panel.open_location_requested.connect(self._open_vocal_output_location)
+        self.vocal_results_panel.open_take_requested.connect(self._open_vocal_take_location)
+        self.vocal_results_panel.rename_take_requested.connect(self._rename_vocal_take)
+        self.vocal_results_panel.remove_take_requested.connect(self._remove_vocal_take)
+        self.vocal_results_panel.reconvert_take_requested.connect(self._reconvert_vocal_take)
+        self.vocal_results_panel.comparison_changed.connect(self._set_vocal_comparison_mode)
         self.vocal_results_panel.seek_requested.connect(self._seek_output_playback)
 
         layout.addWidget(left_panel, 0)
@@ -1133,7 +1155,11 @@ class MainWindow(QMainWindow):
         self.primary_navigation.set_current_page(index)
         if index == PAGE_EXPORT:
             self._refresh_export_page()
-        self._sync_playback_queue_for_page(index)
+        workspace_pages = {PAGE_VOCAL, PAGE_STUDIO}
+        if previous_index in workspace_pages and index in workspace_pages:
+            self._sync_playback_queue_for_page(index, force=True)
+        else:
+            self._sync_playback_queue_for_page(index)
         self._sync_playback_surfaces()
         self._sync_video_workspace()
         QTimer.singleShot(0, self._sync_playback_surfaces)
@@ -1507,6 +1533,77 @@ class MainWindow(QMainWindow):
             open_in_file_browser(path)
         except Exception as exc:
             _set_optional_label(self.library_status_label, f"Open failed: {_last_error_line(str(exc))}")
+
+    def _remove_library_asset(self, song_id: str, asset: SongAsset) -> None:
+        song = self._song_items_by_id.get(song_id)
+        if song is None or not asset.can_remove:
+            return
+
+        if asset.removal_scope == REMOVAL_VOCAL_OUTPUT:
+            message = (
+                tr("Remove this linked vocal result from the song? The external files will not be deleted.")
+                if not asset.is_managed
+                else tr(
+                    "Delete this separation result and all converted vocals inside it? "
+                    "This cannot be undone."
+                )
+            )
+        else:
+            message = tr(
+                "Delete '{name}' from this song? This cannot be undone.",
+                name=asset.path.name,
+            )
+        if not ConfirmationDialog.confirm(
+            self,
+            tr("Remove Library Data"),
+            message,
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Remove"),
+            cancel_label=tr("Cancel"),
+        ):
+            return
+
+        queue = self.current_playback_queue
+        affects_playback = queue is not None and (
+            any(_same_path(path, asset.path) for path in queue.paths)
+            or (
+                asset.removal_scope == REMOVAL_VOCAL_OUTPUT
+                and any(_is_path_within(path, asset.path.parent) for path in queue.paths)
+            )
+        )
+        if affects_playback:
+            self._stop_playback(clear_queue=True)
+
+        try:
+            result = self.library.remove_asset(song_id, asset.path)
+        except Exception as exc:
+            _set_optional_label(self.library_status_label, f"Remove failed: {_last_error_line(str(exc))}")
+            return
+
+        preferred_output = None
+        if self.current_work_item is not None and self.current_work_item.id == song_id:
+            try:
+                refreshed_song = next(item for item in self.library.items() if item.id == song_id)
+            except StopIteration:
+                refreshed_song = None
+            self._assign_work_item(refreshed_song, persist=False)
+            preferred_output = refreshed_song.output_job_dir if refreshed_song is not None else None
+
+        if asset.removal_scope in {REMOVAL_VOCAL_OUTPUT, REMOVAL_VOCAL_TAKE}:
+            self._refresh_output_sets(
+                preferred_job_dir=preferred_output,
+                select_fallback=preferred_output is not None,
+            )
+        else:
+            self._refresh_song_list()
+            if self.current_work_item is not None and self.current_work_item.id == song_id:
+                self._refresh_video_source()
+                self._refresh_output_playback_queue()
+        _set_optional_label(
+            self.library_status_label,
+            "Link removed" if result.detached_only else "Removed",
+        )
 
     def _sync_song_row_selection(self) -> None:
         selected_id = self._browsed_song_id()
@@ -1910,6 +2007,10 @@ class MainWindow(QMainWindow):
     def _activate_vocal_converted_version(self, path: Path | None) -> None:
         if self.current_output_set is None:
             return
+        try:
+            self.vocal_project_store.set_active_take(self.current_output_set.job_dir, path)
+        except Exception as exc:
+            self._logger.warning("Could not persist active vocal take: %s", exc)
         song = self.library.activate_converted_output(self.current_output_set.job_dir, path)
         if song is not None:
             self._song_items_by_id[song.id] = song
@@ -1923,6 +2024,91 @@ class MainWindow(QMainWindow):
             open_in_file_browser(job_dir)
         except Exception as exc:
             _set_optional_label(self.output_status_label, f"Open failed: {_last_error_line(str(exc))}")
+
+    def _open_vocal_take_location(self, path: Path) -> None:
+        try:
+            open_in_file_browser(path)
+        except Exception as exc:
+            self.rvc_action.set_status(f"Open failed: {_last_error_line(str(exc))}")
+
+    def _rename_vocal_take(self, path: Path) -> None:
+        if self.current_output_set is None:
+            return
+        take = self.vocal_results_panel.current_take()
+        if take is None or take.output_path.expanduser().resolve() != path.expanduser().resolve():
+            return
+        label, accepted = TextInputDialog.get_text(
+            self,
+            tr("Rename Vocal Result"),
+            tr("Result name"),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Rename"),
+            cancel_label=tr("Cancel"),
+            initial_value=take.label,
+        )
+        if not accepted or label == take.label:
+            return
+        try:
+            self.vocal_project_store.rename_take(self.current_output_set.job_dir, path, label)
+            self._refresh_vocal_project_panel()
+        except Exception as exc:
+            self.rvc_action.set_status(f"Rename failed: {_last_error_line(str(exc))}")
+
+    def _remove_vocal_take(self, path: Path) -> None:
+        if self.current_output_set is None:
+            return
+        take = self.vocal_results_panel.current_take()
+        label = take.label if take is not None else path.stem
+        confirmed = ConfirmationDialog.confirm(
+            self,
+            tr("Remove Vocal Result"),
+            tr("Delete '{name}' from this vocal project? This cannot be undone.", name=label),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Remove"),
+            cancel_label=tr("Cancel"),
+        )
+        if not confirmed:
+            return
+        job_dir = self.current_output_set.job_dir
+        try:
+            project = self.vocal_project_store.remove_take(job_dir, path)
+            active = _active_vocal_take_path(project)
+            song = self.library.activate_converted_output(job_dir, active)
+            if song is not None:
+                self._song_items_by_id[song.id] = song
+            refreshed = load_output_sound_set(job_dir, self.settings.output_root)
+            self._apply_output_set(refreshed)
+        except Exception as exc:
+            self.rvc_action.set_status(f"Remove failed: {_last_error_line(str(exc))}")
+
+    def _reconvert_vocal_take(self, path: Path) -> None:
+        take = self.vocal_results_panel.current_take()
+        if take is None or take.conversion is None:
+            self.rvc_action.set_status("Conversion settings unavailable.")
+            return
+        conversion = take.conversion
+        rvc_settings = replace(
+            self.settings.rvc,
+            voice_model=conversion.voice_model,
+            index_file=conversion.index_file,
+            pitch=conversion.pitch,
+            device=conversion.requested_device,
+            f0_method=conversion.f0_method,
+        )
+        self.settings = replace(self.settings, rvc=rvc_settings)
+        save_app_settings(self.settings)
+        self._refresh_rvc_choices()
+        self.pitch_spin.setValue(rvc_settings.pitch)
+        self.device_combo.setCurrentText(normalize_rvc_device(rvc_settings.device))
+        self.vocal_steps.set_current_index(1)
+        self._start_rvc_conversion()
+
+    def _set_vocal_comparison_mode(self, mode: str) -> None:
+        self._vocal_comparison_mode = "original" if mode == "original" else "converted"
+        self.vocal_results_panel.set_comparison_mode(self._vocal_comparison_mode)
+        self._refresh_output_playback_queue()
 
     def _apply_output_set(self, sound_set: OutputSoundSet | None) -> None:
         self.studio_session_autosave.flush()
@@ -1947,7 +2133,10 @@ class MainWindow(QMainWindow):
         selected_converted = selected_version.active_converted_path if selected_version is not None else None
         self.converted_track.set_options(list(sound_set.converted_vocal_paths), selected_converted)
         self._restore_current_studio_session()
-        self.vocal_results_panel.set_result(selected_version)
+        project = self._load_vocal_project(selected_version)
+        self._vocal_comparison_mode = "converted" if selected_converted is not None else "original"
+        self.vocal_results_panel.set_comparison_mode(self._vocal_comparison_mode)
+        self.vocal_results_panel.set_result(selected_version, project)
         self.rvc_action.set_progress(0)
         self.rvc_action.set_status("")
         _set_optional_label(self.output_status_label, "")
@@ -1971,6 +2160,25 @@ class MainWindow(QMainWindow):
             )
         except KeyError:
             return None
+
+    def _load_vocal_project(self, result: SongVocalVersion | None) -> VocalProject | None:
+        if result is None:
+            return None
+        try:
+            return self.vocal_project_store.open_or_create(
+                result.job_dir,
+                active_converted_path=result.active_converted_path,
+            )
+        except Exception as exc:
+            self._logger.warning("Could not load vocal project %s: %s", result.job_dir, exc)
+            return None
+
+    def _refresh_vocal_project_panel(self) -> None:
+        if self.current_output_set is None:
+            self.vocal_results_panel.set_result(None)
+            return
+        result = self._current_vocal_result(self.current_output_set)
+        self.vocal_results_panel.set_result(result, self._load_vocal_project(result))
 
     def _sync_current_work_output_item(self, sound_set: OutputSoundSet | None) -> None:
         if self.current_song is not None:
@@ -2069,6 +2277,22 @@ class MainWindow(QMainWindow):
     def _on_rvc_succeeded(self, scope: WorkTaskScope, job_dir: Path, result: object) -> None:
         output_path = getattr(result, "output_path", None)
         if isinstance(output_path, Path):
+            if isinstance(result, RvcConversionResult):
+                try:
+                    self.vocal_project_store.register_take(
+                        job_dir,
+                        output_path,
+                        conversion=VocalConversionSettings(
+                            voice_model=result.voice_model,
+                            index_file=result.index_file,
+                            pitch=result.pitch,
+                            requested_device=result.requested_device,
+                            effective_device=result.effective_device,
+                            f0_method=result.f0_method,
+                        ),
+                    )
+                except Exception as exc:
+                    self._logger.warning("Could not register vocal take metadata: %s", exc)
             updated = self.library.activate_converted_output(job_dir, output_path)
             if updated is not None:
                 self._song_items_by_id[updated.id] = updated
@@ -2182,6 +2406,10 @@ class MainWindow(QMainWindow):
     def _on_output_track_source_changed(self) -> None:
         if self.current_output_set is not None:
             path = self.converted_track.current_path()
+            try:
+                self.vocal_project_store.set_active_take(self.current_output_set.job_dir, path)
+            except Exception as exc:
+                self._logger.warning("Could not persist active vocal take: %s", exc)
             song = self.library.activate_converted_output(self.current_output_set.job_dir, path)
             if song is not None:
                 self._song_items_by_id[song.id] = song
@@ -2413,7 +2641,13 @@ class MainWindow(QMainWindow):
         for track in self.output_tracks:
             path = track.current_path()
             if path is not None:
-                tracks.append((path, 0.0 if track.is_muted() else track.volume()))
+                volume = 0.0 if track.is_muted() else track.volume()
+                if self.page_stack.currentIndex() == PAGE_VOCAL:
+                    if track is self.vocal_track:
+                        volume = 1.0 if self._vocal_comparison_mode == "original" else 0.0
+                    elif track is self.converted_track:
+                        volume = 1.0 if self._vocal_comparison_mode == "converted" else 0.0
+                tracks.append((path, volume))
         return tracks
 
     def _loaded_track_paths(self) -> list[Path]:
@@ -2793,6 +3027,29 @@ def _studio_track_state(track: TrackRow) -> StudioTrackState:
         muted=track.is_muted(),
         volume_percent=track.volume_percent(),
     )
+
+
+def _active_vocal_take_path(project: VocalProject) -> Path | None:
+    return next(
+        (
+            take.output_path
+            for take in project.takes
+            if take.take_id == project.active_take_id
+        ),
+        None,
+    )
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    return first.expanduser().resolve() == second.expanduser().resolve()
+
+
+def _is_path_within(path: Path, root: Path) -> bool:
+    try:
+        path.expanduser().resolve().relative_to(root.expanduser().resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _last_error_line(error: str) -> str:

@@ -14,6 +14,13 @@ STAGE_STUDIO = "studio"
 STAGE_EXPORT = "export"
 SONG_ASSET_STAGES = (STAGE_SOURCE, STAGE_VOCAL, STAGE_STUDIO, STAGE_EXPORT)
 
+REMOVAL_FILE = "file"
+REMOVAL_VIDEO = "video"
+REMOVAL_VOCAL_OUTPUT = "vocal_output"
+REMOVAL_VOCAL_TAKE = "vocal_take"
+
+_INTERNAL_STATE_FILES = {"session.json", "video.json", "vocal_project.json"}
+
 
 @dataclass(frozen=True)
 class SongAsset:
@@ -24,6 +31,11 @@ class SongAsset:
     is_active: bool = False
     is_managed: bool = True
     size_bytes: int = 0
+    removal_scope: str = ""
+
+    @property
+    def can_remove(self) -> bool:
+        return bool(self.removal_scope)
 
 
 @dataclass(frozen=True)
@@ -51,7 +63,16 @@ def build_song_asset_details(package: SongPackage) -> SongAssetDetails:
 
     video_source = VideoSourceStore().load(package)
     if video_source.path is not None and video_source.path.is_file():
-        assets.append(_asset(package, STAGE_SOURCE, "Source Video", video_source.path, is_active=True))
+        assets.append(
+            _asset(
+                package,
+                STAGE_SOURCE,
+                "Source Video",
+                video_source.path,
+                is_active=True,
+                removal_scope=REMOVAL_VIDEO,
+            )
+        )
         known_paths.add(video_source.path.resolve())
 
     for output in package.outputs:
@@ -71,6 +92,7 @@ def build_song_asset_details(package: SongPackage) -> SongAssetDetails:
                     path,
                     version_label=output.label or sound_set.label,
                     is_active=output_active,
+                    removal_scope=REMOVAL_VOCAL_OUTPUT,
                 )
             )
             known_paths.add(path.resolve())
@@ -86,6 +108,11 @@ def build_song_asset_details(package: SongPackage) -> SongAssetDetails:
                     path,
                     version_label=output.label or sound_set.label,
                     is_active=output_active and path == active_converted,
+                    removal_scope=(
+                        REMOVAL_VOCAL_TAKE
+                        if _is_within(path.expanduser().resolve(), package.folder)
+                        else ""
+                    ),
                 )
             )
             known_paths.add(path.resolve())
@@ -122,10 +149,10 @@ def _untracked_assets(
     assets = []
     for path in sorted((item for item in folder.rglob("*") if item.is_file()), key=lambda item: str(item).casefold()):
         resolved = path.resolve()
-        if resolved in known_paths:
+        if resolved in known_paths or path.name.casefold() in _INTERNAL_STATE_FILES:
             continue
         known_paths.add(resolved)
-        assets.append(_asset(package, stage, role, resolved))
+        assets.append(_asset(package, stage, role, resolved, removal_scope=REMOVAL_FILE))
     return assets
 
 
@@ -137,6 +164,7 @@ def _asset(
     *,
     version_label: str = "",
     is_active: bool = False,
+    removal_scope: str = "",
 ) -> SongAsset:
     resolved = path.expanduser().resolve()
     return SongAsset(
@@ -147,6 +175,7 @@ def _asset(
         is_active=is_active,
         is_managed=_is_within(resolved, package.folder),
         size_bytes=_file_size(resolved),
+        removal_scope=removal_scope,
     )
 
 

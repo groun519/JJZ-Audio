@@ -22,6 +22,9 @@ $installDir = Join-Path $testRoot "app"
 $dataRoot = Join-Path $testRoot "data"
 $sentinel = Join-Path $dataRoot "settings\preserve.txt"
 $runtimeSentinel = Join-Path $installDir "runtime\rvc\weights\preserve-runtime-model.pth"
+$runtimeLogSentinel = Join-Path $installDir "runtime\rvc\logs\preserve-runtime-log.txt"
+$managedRuntimeSentinel = Join-Path $installDir "runtime\managed-component.bin"
+$appMutexName = "JJZeroAudio.E5ED303D5BB24B1E8AA8434C16C4D3AE"
 $storageFile = Join-Path $dataRoot "settings\storage.json"
 $songLibraryFile = Join-Path $dataRoot "settings\song_library.json"
 $legacySettingsFile = Join-Path $installDir "settings\app_settings.json"
@@ -88,6 +91,7 @@ function Assert-PreservedFiles([hashtable]$ExpectedHashes, [string]$Stage) {
 
 New-Item -ItemType Directory -Path (Split-Path -Parent $sentinel) -Force | Out-Null
 Set-Content -LiteralPath $sentinel -Value "preserve-user-data" -Encoding UTF8
+$env:JJZERO_DATA_ROOT = $dataRoot
 
 $baselineVersion = Get-InstallerVersion $baselineInstaller
 $targetVersion = Get-InstallerVersion $installer
@@ -95,7 +99,10 @@ $targetVersion = Get-InstallerVersion $installer
 Invoke-Setup $baselineInstaller "install-$baselineVersion.log"
 Assert-InstalledVersion $baselineVersion
 New-Item -ItemType Directory -Path (Split-Path -Parent $runtimeSentinel) -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $runtimeLogSentinel) -Force | Out-Null
 Set-Content -LiteralPath $runtimeSentinel -Value "preserve-runtime-model" -Encoding UTF8
+Set-Content -LiteralPath $runtimeLogSentinel -Value "preserve-runtime-log" -Encoding UTF8
+Set-Content -LiteralPath $managedRuntimeSentinel -Value "remove-managed-runtime" -Encoding UTF8
 New-Item -ItemType Directory -Path (Split-Path -Parent $legacySettingsFile) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $legacySongFile) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $legacyModelCatalog) -Force | Out-Null
@@ -151,6 +158,9 @@ Assert-PreservedFiles $preservedFiles "application update"
 if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtime-model") {
     throw "Existing runtime data changed during the app update: $runtimeSentinel"
 }
+if ((Get-Content -LiteralPath $runtimeLogSentinel -Raw).Trim() -ne "preserve-runtime-log") {
+    throw "Existing runtime logs changed during the app update: $runtimeLogSentinel"
+}
 if ($RuntimePackageIndex) {
     $packageIndex = (Resolve-Path -LiteralPath $RuntimePackageIndex).Path
     & $python scripts\install_runtime_packages.py $packageIndex (Join-Path $installDir "runtime")
@@ -164,6 +174,9 @@ Assert-PreservedFiles $preservedFiles "runtime update"
 if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtime-model") {
     throw "Runtime model data changed during the runtime update: $runtimeSentinel"
 }
+if ((Get-Content -LiteralPath $runtimeLogSentinel -Raw).Trim() -ne "preserve-runtime-log") {
+    throw "Runtime log data changed during the runtime update: $runtimeLogSentinel"
+}
 
 if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne "preserve-user-data") {
     throw "User data changed during the update test: $sentinel"
@@ -172,6 +185,24 @@ if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne "preserve-user-data") {
 $uninstaller = Join-Path $installDir "unins000.exe"
 if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
     throw "Uninstaller was not created: $uninstaller"
+}
+$appMutex = [System.Threading.Mutex]::new($false, $appMutexName)
+try {
+    $blockedUninstall = Start-Process `
+        -FilePath $uninstaller `
+        -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") `
+        -Wait `
+        -PassThru `
+        -WindowStyle Hidden
+    if ($blockedUninstall.ExitCode -eq 0) {
+        throw "Uninstaller did not report the running application mutex."
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $installDir "JJZero Audio.exe") -PathType Leaf)) {
+        throw "Uninstaller removed application files while the application mutex was active."
+    }
+}
+finally {
+    $appMutex.Dispose()
 }
 $uninstallLog = Join-Path $testRoot "uninstall.log"
 $uninstallArguments = @(
@@ -186,6 +217,24 @@ if ($uninstallProcess.ExitCode -ne 0) {
 }
 if (Test-Path -LiteralPath (Join-Path $installDir "JJZero Audio.exe") -PathType Leaf) {
     throw "Application executable remained after uninstall: $installDir"
+}
+if (Test-Path -LiteralPath (Join-Path $installDir "runtime")) {
+    throw "Downloaded runtime remained after uninstall: $installDir"
+}
+$preservedRuntimeRoot = Join-Path $dataRoot "preserved-runtime"
+$preservedModel = @(
+    Get-ChildItem -LiteralPath $preservedRuntimeRoot -Recurse -Filter "preserve-runtime-model.pth" -File
+)
+$preservedLog = @(
+    Get-ChildItem -LiteralPath $preservedRuntimeRoot -Recurse -Filter "preserve-runtime-log.txt" -File
+)
+if ($preservedModel.Count -ne 1 -or
+    (Get-Content -LiteralPath $preservedModel[0].FullName -Raw).Trim() -ne "preserve-runtime-model") {
+    throw "Runtime model was not preserved during uninstall: $preservedRuntimeRoot"
+}
+if ($preservedLog.Count -ne 1 -or
+    (Get-Content -LiteralPath $preservedLog[0].FullName -Raw).Trim() -ne "preserve-runtime-log") {
+    throw "Runtime logs were not preserved during uninstall: $preservedRuntimeRoot"
 }
 if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne "preserve-user-data") {
     throw "User data was removed during uninstall: $sentinel"

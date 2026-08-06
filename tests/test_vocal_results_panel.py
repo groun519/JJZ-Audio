@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
 from jang_app.qt_app.widgets import TrackRow
 from jang_app.services.song_library import SongVocalVersion
+from jang_app.services.vocal_project import VocalConversionSettings, VocalTake
 
 
 class VocalResultsPanelTests(unittest.TestCase):
@@ -53,6 +54,50 @@ class VocalResultsPanelTests(unittest.TestCase):
 
         panel.set_result(_version("multiple", (Path("first.wav"), Path("second.wav"))))
         self.assertFalse(panel.converted_waveform.path_combo.isHidden())
+        panel.close()
+
+    def test_converted_take_exposes_metadata_and_management_actions(self) -> None:
+        panel = VocalResultsPanel()
+        path = Path("voice.wav")
+        take = VocalTake(
+            "take-voice",
+            "Warm take",
+            path,
+            "2026-08-06T01:20:00+00:00",
+            VocalConversionSettings(
+                "weights/voice.pth",
+                "logs/voice/added.index",
+                -12,
+                "gpu",
+                "cuda:0",
+                "rmvpe",
+            ),
+        )
+        renamed = QSignalSpy(panel.rename_take_requested)
+        reconverted = QSignalSpy(panel.reconvert_take_requested)
+
+        panel.converted_waveform.set_takes([path], (take,), path)
+        panel.converted_waveform.rename_button.click()
+        panel.converted_waveform.reconvert_button.click()
+
+        self.assertEqual(panel.converted_waveform.path_combo.currentText(), "Warm take")
+        self.assertIn("voice", panel.converted_waveform.metadata_label.text())
+        self.assertIn("-12", panel.converted_waveform.metadata_label.text())
+        self.assertEqual(renamed.at(0)[0], path)
+        self.assertEqual(reconverted.at(0)[0], path)
+        panel.close()
+
+    def test_comparison_buttons_emit_monitor_mode_without_changing_take(self) -> None:
+        panel = VocalResultsPanel()
+        changed = QSignalSpy(panel.comparison_changed)
+        panel.set_result(_version("compare", (Path("compare.wav"),)))
+
+        panel.original_compare_button.click()
+        panel.converted_compare_button.click()
+
+        self.assertEqual(changed.count(), 2)
+        self.assertEqual(changed.at(0)[0], "original")
+        self.assertEqual(changed.at(1)[0], "converted")
         panel.close()
 
     def test_studio_track_can_restore_a_converted_version_without_user_signal(self) -> None:

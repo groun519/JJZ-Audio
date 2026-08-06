@@ -49,6 +49,36 @@ class LibraryDetailsPanelTests(unittest.TestCase):
         self.assertEqual(opened.at(1)[0], Path("song-package"))
         self.assertEqual(vocal_requested.at(0)[0], "song-1")
         self.assertEqual(back_requested.count(), 1)
+        self.assertTrue(panel.source_page.asset_rows[0].remove_button.isHidden())
+        panel.close()
+
+    def test_emits_remove_request_for_removable_asset(self) -> None:
+        panel = LibraryDetailsPanel()
+        exported = SongAsset(
+            "export",
+            "Exported Asset",
+            Path("mix.wav"),
+            removal_scope="file",
+        )
+        panel.set_details(
+            SongAssetDetails(
+                song_id="song-1",
+                title="Song One",
+                source_type="local",
+                source_url="",
+                original_name="source.wav",
+                package_dir=Path("song-package"),
+                created_at="",
+                assets=(exported,),
+            )
+        )
+        removed = QSignalSpy(panel.remove_asset_requested)
+
+        panel.export_page.asset_rows[0].remove_button.click()
+
+        self.assertEqual(removed.count(), 1)
+        self.assertEqual(removed.at(0)[0], "song-1")
+        self.assertEqual(removed.at(0)[1], exported)
         panel.close()
 
     def test_output_recovery_cannot_open_vocal_processing(self) -> None:

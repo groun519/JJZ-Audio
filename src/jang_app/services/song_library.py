@@ -10,6 +10,7 @@ from pathlib import Path
 
 from jang_app.config import DOWNLOAD_OUTPUT_DIR, SONG_LIBRARY_FILE, SUPPORTED_AUDIO_EXTENSIONS
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set
+from jang_app.services.song_asset_removal import SongAssetRemovalResult, SongAssetRemovalService
 from jang_app.services.song_assets import SongAssetDetails, build_song_asset_details
 from jang_app.services.song_package import SongOutputReference, SongPackage, SongPackageStore, VOCAL_STAGE
 from jang_app.services.song_video_export import (
@@ -102,6 +103,7 @@ class SongLibrary:
         self._library_file = library_file
         self._store = package_store or SongPackageStore()
         self._video_sources = VideoSourceStore()
+        self._asset_removal = SongAssetRemovalService(self._store, self._video_sources)
         self._legacy_titles: dict[str, str] = {}
         self._legacy_hidden_outputs: set[Path] = set()
         self._legacy_paths: tuple[Path, ...] = ()
@@ -189,6 +191,9 @@ class SongLibrary:
 
     def asset_details(self, item_id: str) -> SongAssetDetails:
         return build_song_asset_details(self._store.require(item_id))
+
+    def remove_asset(self, item_id: str, path: Path) -> SongAssetRemovalResult:
+        return self._asset_removal.remove(item_id, path)
 
     def studio_session(self, item_id: str) -> StudioSession:
         return load_package_studio_session(self._store.require(item_id))

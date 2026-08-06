@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-VOCAL_PROJECT_SCHEMA_VERSION = 1
+VOCAL_PROJECT_SCHEMA_VERSION = 2
 UNASSIGNED_SPEAKER_ID = "speaker-unassigned"
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -38,6 +38,17 @@ class VocalTake:
     label: str
     output_path: Path
     created_at: str
+    conversion: VocalConversionSettings | None = None
+
+
+@dataclass(frozen=True)
+class VocalConversionSettings:
+    voice_model: str
+    index_file: str
+    pitch: int
+    requested_device: str
+    effective_device: str
+    f0_method: str
 
 
 @dataclass(frozen=True)
@@ -118,6 +129,8 @@ def validate_vocal_project(project: VocalProject) -> None:
         if not take.label.strip():
             raise VocalProjectValidationError(f"Take label is required: {take.take_id}")
         _validate_timestamp(take.created_at, "take timestamp")
+        if take.conversion is not None:
+            _validate_conversion(take.take_id, take.conversion)
         resolved_path = take.output_path.expanduser().resolve()
         if resolved_path in take_paths:
             raise VocalProjectValidationError(f"Duplicate take path: {resolved_path}")
@@ -137,3 +150,17 @@ def _validate_timestamp(value: str, label: str) -> None:
         datetime.fromisoformat(value)
     except (TypeError, ValueError) as exc:
         raise VocalProjectValidationError(f"Invalid {label}: {value}") from exc
+
+
+def _validate_conversion(take_id: str, conversion: VocalConversionSettings) -> None:
+    if not conversion.voice_model.strip():
+        raise VocalProjectValidationError(f"Conversion model is required: {take_id}")
+    if isinstance(conversion.pitch, bool) or not isinstance(conversion.pitch, int):
+        raise VocalProjectValidationError(f"Conversion pitch must be an integer: {take_id}")
+    for label, value in (
+        ("requested device", conversion.requested_device),
+        ("effective device", conversion.effective_device),
+        ("F0 method", conversion.f0_method),
+    ):
+        if not value.strip():
+            raise VocalProjectValidationError(f"Conversion {label} is required: {take_id}")

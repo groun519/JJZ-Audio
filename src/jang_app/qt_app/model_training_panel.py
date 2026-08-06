@@ -6,7 +6,7 @@ from time import monotonic
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
+    QButtonGroup,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
 from jang_app.qt_app.widgets import FeedbackButton, ScrollSafeSpinBox
+from jang_app.qt_app.workflow_progress import WorkflowProgress, WorkflowStage
+from jang_app.services.audio_metadata import format_duration
 from jang_app.services.i18n import tr
 from jang_app.services.job_diagnostics import diagnostic_task
 from jang_app.services.rvc_model_workspace import RvcModelRecord
@@ -86,23 +88,34 @@ class ModelTrainingPanel(QWidget):
         self._state: RvcTrainingState | None = None
         self._is_running = False
         self._training_accelerated = True
+        self._ready_items = 0
+        self._total_items = 0
+        self._active_stage_key = ""
+        self._current_epoch = 0
+        self._target_epoch = 20
+        self._last_epoch_at = 0.0
+        self._seconds_per_epoch = 0.0
         self._build_ui()
         self.set_model(None, None, 0, 0)
 
     def _build_ui(self) -> None:
         summary = QFrame()
         summary.setObjectName("TrainingStatusCard")
-        summary_layout = QHBoxLayout(summary)
-        summary_layout.setContentsMargins(16, 14, 16, 14)
-        summary_layout.setSpacing(12)
+        summary_layout = QVBoxLayout(summary)
+        summary_layout.setContentsMargins(18, 16, 18, 16)
+        summary_layout.setSpacing(16)
 
+        summary_header = QHBoxLayout()
+        summary_header.setContentsMargins(0, 0, 0, 0)
+        summary_header.setSpacing(12)
         summary_text = QVBoxLayout()
         summary_text.setContentsMargins(0, 0, 0, 0)
-        summary_text.setSpacing(3)
+        summary_text.setSpacing(4)
         self.status_label = QLabel("Not Started")
         self.status_label.setObjectName("TrainingStatusTitle")
         self.stage_label = QLabel("Prepare training materials first")
         self.stage_label.setObjectName("TrainingStageText")
+        self.stage_label.setWordWrap(True)
         summary_text.addWidget(self.status_label)
         summary_text.addWidget(self.stage_label)
 
@@ -110,26 +123,131 @@ class ModelTrainingPanel(QWidget):
         self.profile_label.setObjectName("TrainingProfileBadge")
         self.epoch_label = QLabel("0 / 20")
         self.epoch_label.setObjectName("TrainingEpochBadge")
-        summary_layout.addLayout(summary_text, 1)
-        summary_layout.addWidget(self.profile_label)
-        summary_layout.addWidget(self.epoch_label)
+        summary_header.addLayout(summary_text, 1)
+        summary_header.addWidget(self.profile_label)
+        summary_header.addWidget(self.epoch_label)
+        summary_layout.addLayout(summary_header)
+
+        self.workflow_progress = WorkflowProgress(
+            (
+                WorkflowStage("data", "Data"),
+                WorkflowStage("prepare", "Prepare"),
+                WorkflowStage("features", "Features"),
+                WorkflowStage("train", "Train"),
+                WorkflowStage("index", "Index"),
+            )
+        )
+        self.workflow_progress.setObjectName("TrainingWorkflow")
+        summary_layout.addWidget(self.workflow_progress)
+
+        progress_row = QHBoxLayout()
+        progress_row.setContentsMargins(0, 0, 0, 0)
+        progress_row.setSpacing(10)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("TrainingProgress")
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_percent_label = QLabel("0%")
+        self.progress_percent_label.setObjectName("TrainingProgressText")
+        progress_row.addWidget(self.progress_bar, 1)
+        progress_row.addWidget(self.progress_percent_label)
+        summary_layout.addLayout(progress_row)
+
+        self.activity_label = QLabel("Working")
+        self.activity_label.setObjectName("TrainingActivityText")
+        self.runtime_label = QLabel("Elapsed 00:00")
+        self.runtime_label.setObjectName("TrainingRuntimeText")
+        self.remaining_label = QLabel("Estimating remaining time")
+        self.remaining_label.setObjectName("TrainingRuntimeText")
+
+        self.runtime_row = QWidget()
+        runtime_layout = QHBoxLayout(self.runtime_row)
+        runtime_layout.setContentsMargins(0, 0, 0, 0)
+        runtime_layout.setSpacing(10)
+        runtime_layout.addWidget(self.activity_label)
+        runtime_layout.addStretch(1)
+        runtime_layout.addWidget(self.remaining_label)
+        runtime_layout.addWidget(self.runtime_label)
+        self.runtime_row.hide()
+        summary_layout.addWidget(self.runtime_row)
+
+        readiness = QFrame()
+        readiness.setObjectName("TrainingReadinessCard")
+        readiness_layout = QVBoxLayout(readiness)
+        readiness_layout.setContentsMargins(16, 14, 16, 14)
+        readiness_layout.setSpacing(12)
+
+        readiness_header = QHBoxLayout()
+        readiness_header.setContentsMargins(0, 0, 0, 0)
+        readiness_title = QLabel("Training Data")
+        readiness_title.setObjectName("TrainingCardTitle")
+        self.readiness_badge = QLabel("Not Ready")
+        self.readiness_badge.setObjectName("TrainingReadinessBadge")
+        readiness_header.addWidget(readiness_title)
+        readiness_header.addStretch(1)
+        readiness_header.addWidget(self.readiness_badge)
+        readiness_layout.addLayout(readiness_header)
+
+        metrics = QHBoxLayout()
+        metrics.setContentsMargins(0, 0, 0, 0)
+        metrics.setSpacing(10)
+        material_metric, self.material_value = _training_metric("Materials")
+        duration_metric, self.duration_value = _training_metric("Duration")
+        checkpoint_metric, self.checkpoint_value = _training_metric("Checkpoint")
+        metrics.addWidget(material_metric, 1)
+        metrics.addWidget(duration_metric, 1)
+        metrics.addWidget(checkpoint_metric, 1)
+        readiness_layout.addLayout(metrics)
 
         settings = QFrame()
         settings.setObjectName("TrainingSettingsCard")
-        settings_layout = QGridLayout(settings)
+        settings_layout = QVBoxLayout(settings)
         settings_layout.setContentsMargins(16, 16, 16, 16)
-        settings_layout.setHorizontalSpacing(14)
-        settings_layout.setVerticalSpacing(10)
+        settings_layout.setSpacing(14)
+
+        settings_header = QHBoxLayout()
+        settings_header.setContentsMargins(0, 0, 0, 0)
+        settings_title = QLabel("Training Settings")
+        settings_title.setObjectName("TrainingCardTitle")
+        settings_header.addWidget(settings_title)
+        settings_header.addStretch(1)
+
+        self.mode_control = QFrame()
+        self.mode_control.setObjectName("TrainingModeControl")
+        mode_layout = QHBoxLayout(self.mode_control)
+        mode_layout.setContentsMargins(3, 3, 3, 3)
+        mode_layout.setSpacing(3)
+        self.resume_mode_button = FeedbackButton("Resume")
+        self.fresh_mode_button = FeedbackButton("Start Over")
+        for button in (self.resume_mode_button, self.fresh_mode_button):
+            button.setObjectName("TrainingModeButton")
+            button.setCheckable(True)
+            mode_layout.addWidget(button)
+        self.resume_mode_button.setChecked(True)
+        self.mode_button_group = QButtonGroup(self)
+        self.mode_button_group.setExclusive(True)
+        self.mode_button_group.addButton(self.resume_mode_button)
+        self.mode_button_group.addButton(self.fresh_mode_button)
+        self.mode_control.hide()
+        settings_header.addWidget(self.mode_control)
+        settings_layout.addLayout(settings_header)
+
+        fields = QGridLayout()
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.setHorizontalSpacing(14)
+        fields.setVerticalSpacing(10)
 
         self.target_epoch_spin = _training_spin(1, 20000, 20)
         self.batch_size_spin = _training_spin(1, 64, 4)
         self.save_interval_spin = _training_spin(1, 20000, 5)
         self.gpu_index_spin = _training_spin(0, 15, 0)
         self.target_epoch_spin.valueChanged.connect(self._sync_interval_limit)
+        self.resume_mode_button.toggled.connect(self._sync_training_mode)
+        self.fresh_mode_button.toggled.connect(self._sync_training_mode)
 
-        settings_layout.addWidget(_field_label("Target Epoch"), 0, 0)
-        settings_layout.addWidget(_field_label("Batch Size"), 0, 1)
-        settings_layout.addWidget(_field_label("Checkpoint Interval"), 0, 2)
+        fields.addWidget(_field_label("Target Epoch"), 0, 0)
+        fields.addWidget(_field_label("Batch Size"), 0, 1)
+        fields.addWidget(_field_label("Checkpoint Interval"), 0, 2)
         self.device_field_label = _field_label("GPU")
         self.cpu_device_label = QLabel("CPU")
         self.cpu_device_label.setObjectName("TrainingDeviceValue")
@@ -138,40 +256,14 @@ class ModelTrainingPanel(QWidget):
         self.device_stack.addWidget(self.gpu_index_spin)
         self.device_stack.addWidget(self.cpu_device_label)
 
-        settings_layout.addWidget(self.device_field_label, 0, 3)
-        settings_layout.addWidget(self.target_epoch_spin, 1, 0)
-        settings_layout.addWidget(self.batch_size_spin, 1, 1)
-        settings_layout.addWidget(self.save_interval_spin, 1, 2)
-        settings_layout.addWidget(self.device_stack, 1, 3)
+        fields.addWidget(self.device_field_label, 0, 3)
+        fields.addWidget(self.target_epoch_spin, 1, 0)
+        fields.addWidget(self.batch_size_spin, 1, 1)
+        fields.addWidget(self.save_interval_spin, 1, 2)
+        fields.addWidget(self.device_stack, 1, 3)
         for column in range(4):
-            settings_layout.setColumnStretch(column, 1)
-
-        self.start_fresh_check = QCheckBox("Start Fresh")
-        self.start_fresh_check.setObjectName("TrainingFreshCheck")
-        self.start_fresh_check.toggled.connect(self._sync_action_text)
-        settings_layout.addWidget(self.start_fresh_check, 2, 0, 1, 4)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setObjectName("TrainingProgress")
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-
-        self.activity_label = QLabel("Working")
-        self.activity_label.setObjectName("TrainingActivityText")
-        self.progress_percent_label = QLabel("0%")
-        self.progress_percent_label.setObjectName("TrainingProgressText")
-        self.runtime_label = QLabel("Elapsed 00:00")
-        self.runtime_label.setObjectName("TrainingRuntimeText")
-
-        self.runtime_row = QWidget()
-        runtime_layout = QHBoxLayout(self.runtime_row)
-        runtime_layout.setContentsMargins(0, 0, 0, 0)
-        runtime_layout.setSpacing(10)
-        runtime_layout.addWidget(self.activity_label)
-        runtime_layout.addWidget(self.progress_percent_label)
-        runtime_layout.addStretch(1)
-        runtime_layout.addWidget(self.runtime_label)
-        self.runtime_row.hide()
+            fields.setColumnStretch(column, 1)
+        settings_layout.addLayout(fields)
 
         self.start_button = FeedbackButton("Start Training")
         self.start_button.setObjectName("PrimaryButton")
@@ -181,21 +273,24 @@ class ModelTrainingPanel(QWidget):
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.stop_button.hide()
 
+        self.start_hint_label = QLabel("Prepare training materials first")
+        self.start_hint_label.setObjectName("TrainingStartHint")
+        self.start_hint_label.setWordWrap(True)
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(8)
+        action_row.addWidget(self.start_hint_label, 1)
         action_row.addStretch(1)
         action_row.addWidget(self.stop_button)
         action_row.addWidget(self.start_button)
+        settings_layout.addLayout(action_row)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(14)
         layout.addWidget(summary)
+        layout.addWidget(readiness)
         layout.addWidget(settings)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.runtime_row)
-        layout.addLayout(action_row)
         layout.addStretch(1)
 
     def set_model(
@@ -204,16 +299,19 @@ class ModelTrainingPanel(QWidget):
         state: RvcTrainingState | None,
         ready_items: int,
         total_items: int,
+        total_duration_ms: int = 0,
     ) -> None:
+        previous_model_id = self._record.model_id if self._record is not None else ""
         self._record = record
         self._state = state
+        self._ready_items = max(0, int(ready_items))
+        self._total_items = max(0, int(total_items))
         can_train = record is not None and record.is_managed
         for control in (
             self.target_epoch_spin,
             self.batch_size_spin,
             self.save_interval_spin,
             self.gpu_index_spin,
-            self.start_fresh_check,
         ):
             control.setEnabled(can_train and not self._is_running)
 
@@ -228,32 +326,72 @@ class ModelTrainingPanel(QWidget):
             phase = state.phase
             can_resume = state.can_resume
 
-        minimum_target = max(1, current_epoch + 1)
+        self._current_epoch = current_epoch
+        self._target_epoch = target_epoch
+        self.mode_control.setVisible(can_resume)
+        if not can_resume or (
+            record is not None and record.model_id != previous_model_id
+        ):
+            self.resume_mode_button.setChecked(True)
+        minimum_target = current_epoch + 1 if can_resume and self.resume_mode_button.isChecked() else 1
         suggested_target = max(target_epoch, minimum_target)
-        if current_epoch and suggested_target <= current_epoch:
+        if can_resume and self.resume_mode_button.isChecked() and target_epoch <= current_epoch:
             suggested_target = current_epoch + 20
         self.target_epoch_spin.setMinimum(minimum_target)
         self.target_epoch_spin.setValue(suggested_target)
-        self.start_fresh_check.setVisible(can_resume)
-        if not can_resume:
-            self.start_fresh_check.setChecked(False)
+        self._sync_epoch_label()
 
-        self.epoch_label.setText(f"{current_epoch} / {self.target_epoch_spin.value()}")
+        self.material_value.setText(f"{self._ready_items} / {self._total_items}")
+        self.duration_value.setText(
+            format_duration(max(0, int(total_duration_ms))) if total_duration_ms else "--:--"
+        )
+        if can_resume:
+            if current_epoch > 0:
+                set_translated_text(
+                    self.checkpoint_value,
+                    "Epoch {epoch}",
+                    epoch=current_epoch,
+                )
+            else:
+                set_translated_text(
+                    self.checkpoint_value,
+                    "Step {step}",
+                    step=state.checkpoint_step if state is not None else 0,
+                )
+        else:
+            set_translated_text(self.checkpoint_value, "None")
+        self._sync_readiness_badge()
+
         self.status_label.setProperty("phase", phase.value)
         set_translated_text(self.status_label, _phase_label(phase))
+        self.stage_label.setToolTip("")
         if record is None:
             set_translated_text(self.stage_label, "Select a model")
         elif not record.is_managed:
             set_translated_text(self.stage_label, "Import a managed copy to train")
-        elif total_items == 0:
+        elif self._total_items == 0:
             set_translated_text(self.stage_label, "Prepare training materials first")
-        else:
+        elif self._ready_items < self._total_items:
             set_translated_text(
                 self.stage_label,
                 "{ready} of {total} materials ready",
-                ready=ready_items,
-                total=total_items,
+                ready=self._ready_items,
+                total=self._total_items,
             )
+        elif phase == RvcTrainingPhase.COMPLETE:
+            set_translated_text(self.stage_label, "Model and index are ready")
+        elif phase == RvcTrainingPhase.STOPPED and can_resume:
+            set_translated_text(
+                self.stage_label,
+                "Checkpoint available at epoch {epoch}",
+                epoch=current_epoch,
+            )
+        elif phase == RvcTrainingPhase.FAILED and state is not None and state.last_error:
+            self.stage_label.setText(_last_error_line(state.last_error))
+            self.stage_label.setToolTip(state.last_error)
+        else:
+            set_translated_text(self.stage_label, "Ready to train")
+        self._sync_workflow_for_phase(phase)
         self._refresh_status_style()
         self._sync_action_text()
         self._sync_enabled_state()
@@ -261,12 +399,17 @@ class ModelTrainingPanel(QWidget):
     def set_running(self, is_running: bool) -> None:
         self._is_running = is_running
         if is_running:
+            self._last_epoch_at = 0.0
+            self._seconds_per_epoch = 0.0
             self.status_label.setProperty("phase", RvcTrainingPhase.TRAIN.value)
             set_translated_text(self.status_label, "Training")
             self.stage_label.setToolTip("")
+            self._active_stage_key = "data"
+            self.workflow_progress.set_status("data")
             self._refresh_status_style()
         self.start_button.setVisible(not is_running)
         self.stop_button.setVisible(is_running)
+        self.start_hint_label.setVisible(not is_running)
         self.runtime_row.setVisible(is_running)
         self.progress_bar.setProperty("running", is_running)
         self._sync_enabled_state()
@@ -310,10 +453,33 @@ class ModelTrainingPanel(QWidget):
         self.progress_percent_label.setText(f"{progress}%")
 
     def set_epoch_progress(self, current_epoch: int, target_epoch: int) -> None:
-        self.epoch_label.setText(f"{max(0, current_epoch)} / {max(1, target_epoch)}")
+        current = max(0, int(current_epoch))
+        target = max(1, int(target_epoch))
+        now = monotonic()
+        if self._is_running:
+            if self._last_epoch_at > 0 and current > self._current_epoch:
+                sample = (now - self._last_epoch_at) / (current - self._current_epoch)
+                if sample > 0:
+                    self._seconds_per_epoch = (
+                        sample
+                        if self._seconds_per_epoch <= 0
+                        else self._seconds_per_epoch * 0.7 + sample * 0.3
+                    )
+            if current != self._current_epoch or self._last_epoch_at <= 0:
+                self._last_epoch_at = now
+        self._current_epoch = current
+        self._target_epoch = target
+        self.epoch_label.setText(f"{current} / {target}")
 
     def set_stage(self, text: str) -> None:
         set_translated_text(self.stage_label, text)
+        stage_key = _workflow_key_for_stage(text)
+        if stage_key:
+            self._active_stage_key = stage_key
+            self.workflow_progress.set_status(
+                stage_key,
+                completed_keys=_completed_workflow_stages(stage_key),
+            )
 
     def set_runtime_status(self, elapsed_seconds: int, idle_seconds: int) -> None:
         elapsed = max(0, int(elapsed_seconds))
@@ -329,12 +495,32 @@ class ModelTrainingPanel(QWidget):
                 idle=format_training_elapsed(idle),
             )
         self.runtime_label.setText(f"{elapsed_text}  |  {activity_text}")
+        remaining_epochs = max(0, self._target_epoch - self._current_epoch)
+        if self._seconds_per_epoch > 0 and remaining_epochs > 0:
+            remaining = format_training_elapsed(
+                round(self._seconds_per_epoch * remaining_epochs)
+            )
+            set_translated_text(
+                self.remaining_label,
+                "About {remaining} remaining",
+                remaining=remaining,
+            )
+        elif remaining_epochs == 0 and self._active_stage_key in {"train", "index"}:
+            set_translated_text(self.remaining_label, "Finishing")
+        else:
+            set_translated_text(self.remaining_label, "Estimating remaining time")
 
     def set_failure(self, error: str) -> None:
         set_translated_text(self.status_label, "Failed")
         self.status_label.setProperty("phase", RvcTrainingPhase.FAILED.value)
         self.stage_label.setText(_last_error_line(error))
         self.stage_label.setToolTip(error)
+        failed_stage = self._active_stage_key or "data"
+        self.workflow_progress.set_status(
+            failed_stage,
+            completed_keys=_completed_workflow_stages(failed_stage),
+            failed=True,
+        )
         self._refresh_status_style()
 
     def apply_language(self) -> None:
@@ -348,20 +534,38 @@ class ModelTrainingPanel(QWidget):
                 batch_size=self.batch_size_spin.value(),
                 save_every_epoch=self.save_interval_spin.value(),
                 gpu_index=self.gpu_index_spin.value(),
-                resume=not self.start_fresh_check.isChecked(),
+                resume=(
+                    self._state is not None
+                    and self._state.can_resume
+                    and self.resume_mode_button.isChecked()
+                ),
             )
         )
 
     def _sync_interval_limit(self, target_epoch: int) -> None:
         self.save_interval_spin.setMaximum(max(1, target_epoch))
-        self.epoch_label.setText(
-            f"{self._state.current_epoch if self._state is not None else 0} / {target_epoch}"
-        )
+        self._target_epoch = max(1, int(target_epoch))
+        self._sync_epoch_label()
 
     def _sync_action_text(self) -> None:
         can_resume = self._state is not None and self._state.can_resume
-        action = "Resume Training" if can_resume and not self.start_fresh_check.isChecked() else "Start Training"
+        action = (
+            "Resume Training"
+            if can_resume and self.resume_mode_button.isChecked()
+            else "Start Training"
+        )
         set_translated_text(self.start_button, action)
+        self._sync_start_hint()
+
+    def _sync_training_mode(self, _checked: bool = False) -> None:
+        can_resume = self._state is not None and self._state.can_resume
+        resume = can_resume and self.resume_mode_button.isChecked()
+        minimum = self._state.current_epoch + 1 if resume and self._state is not None else 1
+        self.target_epoch_spin.setMinimum(minimum)
+        if resume and self.target_epoch_spin.value() < minimum:
+            self.target_epoch_spin.setValue(minimum)
+        self._sync_epoch_label()
+        self._sync_action_text()
 
     def _sync_enabled_state(self) -> None:
         can_train = self._record is not None and self._record.is_managed
@@ -370,12 +574,118 @@ class ModelTrainingPanel(QWidget):
             self.target_epoch_spin,
             self.batch_size_spin,
             self.save_interval_spin,
-            self.start_fresh_check,
         ):
             control.setEnabled(settings_enabled)
         self.gpu_index_spin.setEnabled(settings_enabled and self._training_accelerated)
-        self.start_button.setEnabled(can_train and not self._is_running)
+        self.mode_control.setEnabled(settings_enabled)
+        materials_ready = self._total_items > 0 and self._ready_items == self._total_items
+        self.start_button.setEnabled(
+            can_train and materials_ready and not self._is_running
+        )
         self.stop_button.setEnabled(self._is_running)
+        self._sync_start_hint()
+
+    def _sync_epoch_label(self) -> None:
+        can_resume = self._state is not None and self._state.can_resume
+        starting_epoch = (
+            self._state.current_epoch
+            if can_resume and self.resume_mode_button.isChecked() and self._state is not None
+            else 0
+        )
+        self._current_epoch = starting_epoch
+        self.epoch_label.setText(f"{starting_epoch} / {self.target_epoch_spin.value()}")
+
+    def _sync_readiness_badge(self) -> None:
+        if self._total_items == 0:
+            status = "empty"
+            text = "No Materials"
+        elif self._ready_items < self._total_items:
+            status = "review"
+            text = "Review Required"
+        else:
+            status = "ready"
+            text = "Ready"
+        set_translated_text(self.readiness_badge, text)
+        self.readiness_badge.setProperty("readiness", status)
+        self.readiness_badge.style().unpolish(self.readiness_badge)
+        self.readiness_badge.style().polish(self.readiness_badge)
+
+    def _sync_start_hint(self) -> None:
+        show_hint = True
+        if self._record is None:
+            text = "Select a model"
+            values: dict[str, object] = {}
+        elif not self._record.is_managed:
+            text = "Import a managed copy to train"
+            values = {}
+        elif self._total_items == 0:
+            text = "Add training materials before starting"
+            values = {}
+        elif self._ready_items < self._total_items:
+            text = "Review every training material before starting"
+            values = {}
+        elif (
+            self._state is not None
+            and self._state.can_resume
+            and self.resume_mode_button.isChecked()
+        ):
+            text = "Continue from epoch {epoch}"
+            values = {"epoch": self._state.current_epoch}
+        else:
+            text = "Ready to train"
+            values = {}
+            show_hint = False
+        set_translated_text(self.start_hint_label, text, **values)
+        self.start_hint_label.setVisible(not self._is_running and show_hint)
+
+    def _sync_workflow_for_phase(self, phase: RvcTrainingPhase) -> None:
+        if phase in {RvcTrainingPhase.COMPLETE, RvcTrainingPhase.INDEX_READY}:
+            self._active_stage_key = ""
+            self.workflow_progress.set_status(
+                completed_keys=("data", "prepare", "features", "train", "index")
+            )
+            self.set_progress(100)
+            return
+        active_key = {
+            RvcTrainingPhase.PREPROCESS: "prepare",
+            RvcTrainingPhase.PREPROCESSED: "features",
+            RvcTrainingPhase.EXTRACT: "features",
+            RvcTrainingPhase.FEATURES_READY: "features",
+            RvcTrainingPhase.FILELIST_READY: "features",
+            RvcTrainingPhase.TRAIN: "train",
+            RvcTrainingPhase.STOPPED: "train" if self._current_epoch else "",
+            RvcTrainingPhase.INDEX: "index",
+            RvcTrainingPhase.FAILED: "train" if self._current_epoch else "data",
+        }.get(phase, "")
+        self._active_stage_key = active_key
+        self.workflow_progress.set_status(
+            active_key,
+            completed_keys=_completed_workflow_stages(active_key),
+            failed=phase == RvcTrainingPhase.FAILED,
+        )
+        if not self._is_running:
+            if phase in {
+                RvcTrainingPhase.TRAIN,
+                RvcTrainingPhase.STOPPED,
+                RvcTrainingPhase.FAILED,
+            } and self._state is not None:
+                epoch_fraction = self._state.current_epoch / max(
+                    1,
+                    self._state.target_epoch,
+                )
+                self.set_progress(32 + round(63 * min(1.0, epoch_fraction)))
+            else:
+                self.set_progress(
+                    {
+                        RvcTrainingPhase.IDLE: 0,
+                        RvcTrainingPhase.PREPROCESS: 5,
+                        RvcTrainingPhase.PREPROCESSED: 15,
+                        RvcTrainingPhase.EXTRACT: 15,
+                        RvcTrainingPhase.FEATURES_READY: 25,
+                        RvcTrainingPhase.FILELIST_READY: 28,
+                        RvcTrainingPhase.INDEX: 95,
+                    }.get(phase, 0)
+                )
 
     def _refresh_status_style(self) -> None:
         self.status_label.style().unpolish(self.status_label)
@@ -394,6 +704,44 @@ def _field_label(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("TrainingFieldLabel")
     return label
+
+
+def _training_metric(caption: str) -> tuple[QFrame, QLabel]:
+    metric = QFrame()
+    metric.setObjectName("TrainingMetric")
+    layout = QVBoxLayout(metric)
+    layout.setContentsMargins(12, 9, 12, 9)
+    layout.setSpacing(3)
+    caption_label = QLabel(caption)
+    caption_label.setObjectName("TrainingMetricLabel")
+    value_label = QLabel("--")
+    value_label.setObjectName("TrainingMetricValue")
+    layout.addWidget(caption_label)
+    layout.addWidget(value_label)
+    return metric, value_label
+
+
+def _workflow_key_for_stage(stage: str) -> str:
+    return {
+        "Preparing Training": "data",
+        "Preparing Audio": "prepare",
+        "Extracting Features": "features",
+        "Building File List": "features",
+        "Preparing Spectrograms": "features",
+        "Training": "train",
+        "Training Model": "train",
+        "Building Index": "index",
+        "Registering Model": "index",
+    }.get(stage, "")
+
+
+def _completed_workflow_stages(active_key: str) -> tuple[str, ...]:
+    order = ("data", "prepare", "features", "train", "index")
+    try:
+        active_index = order.index(active_key)
+    except ValueError:
+        return ()
+    return order[:active_index]
 
 
 def _phase_label(phase: RvcTrainingPhase) -> str:

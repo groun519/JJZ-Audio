@@ -55,6 +55,22 @@ class TextInputDialogTests(unittest.TestCase):
         self.assertNotEqual(dialog.result(), QDialog.DialogCode.Accepted)
         dialog.close()
 
+    def test_initial_value_is_selected_and_can_be_accepted(self) -> None:
+        dialog = TextInputDialog(
+            "Rename",
+            "Result name",
+            Path(),
+            theme_mode="dark",
+            accept_label="Rename",
+            cancel_label="Cancel",
+            initial_value="Warm take",
+        )
+
+        self.assertEqual(dialog.text_value(), "Warm take")
+        self.assertTrue(dialog.accept_button.isEnabled())
+        self.assertTrue(dialog.input_edit.hasSelectedText())
+        dialog.close()
+
 
 if __name__ == "__main__":
     unittest.main()

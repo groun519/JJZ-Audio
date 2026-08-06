@@ -2,7 +2,8 @@ param(
     [switch]$SkipTests,
     [switch]$SkipRuntimeBuild,
     [switch]$SkipAppBuild,
-    [switch]$RequireCodeSigning
+    [switch]$RequireCodeSigning,
+    [string]$RuntimeReleaseTag = $env:JJZERO_RUNTIME_RELEASE_TAG
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,7 +21,7 @@ try {
         }
     }
     & $installerBuild -SkipTests:$SkipTests -SkipAppBuild:$SkipAppBuild `
-        -RequireCodeSigning:$RequireCodeSigning
+        -RequireCodeSigning:$RequireCodeSigning -RuntimeReleaseTag $RuntimeReleaseTag
     if ($LASTEXITCODE -ne 0) {
         throw "Application installer build failed with exit code $LASTEXITCODE"
     }

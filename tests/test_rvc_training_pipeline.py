@@ -68,7 +68,7 @@ class RvcTrainingPipelineTests(unittest.TestCase):
             self.assertEqual(stages, list(RvcTrainingStage))
             self.assertEqual(progress, sorted(progress))
             self.assertTrue(
-                all(boundary in progress for boundary in (10, 30, 55, 60, 70, 92, 100))
+                all(boundary in progress for boundary in (5, 15, 25, 28, 32, 95, 100))
             )
             self.assertTrue(result.completed)
 

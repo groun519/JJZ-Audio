@@ -7,6 +7,7 @@ from pathlib import Path
 
 from jang_app.services.app_paths import AppPaths, STORAGE_LAYOUT_VERSION
 from jang_app.services.managed_files import copy_file_atomic, write_json_atomic
+from jang_app.services.rvc_runtime_repair import repair_rvc_runtime_adapter
 
 
 _LEGACY_SETTINGS_FILES = ("app_settings.json", "song_library.json", "work_song.json")
@@ -37,6 +38,7 @@ def prepare_app_environment(paths: AppPaths | None = None) -> AppBootstrapResult
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
+    repair_rvc_runtime_adapter(paths.runtime_root / "rvc")
     copied = _copy_legacy_settings(paths)
     write_json_atomic(
         paths.storage_file,

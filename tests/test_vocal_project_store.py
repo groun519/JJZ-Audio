@@ -10,6 +10,8 @@ from pathlib import Path
 
 from jang_app.services.vocal_project import (
     UNASSIGNED_SPEAKER_ID,
+    VOCAL_PROJECT_SCHEMA_VERSION,
+    VocalConversionSettings,
     VocalProjectValidationError,
     VocalSegment,
     VocalTake,
@@ -59,6 +61,79 @@ class VocalProjectStoreTests(unittest.TestCase):
             self.assertEqual(synchronized.segments, edited.segments)
             self.assertEqual(len(synchronized.takes), 1)
             self.assertEqual(synchronized.active_take_id, synchronized.takes[0].take_id)
+
+    def test_conversion_settings_are_registered_with_a_readable_default_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = _job_dir(Path(temporary) / "run")
+            converted = _write_wave(job_dir / "vocals_rvc_voice.wav")
+            settings = VocalConversionSettings(
+                voice_model="weights/voice.pth",
+                index_file="logs/voice/added.index",
+                pitch=-12,
+                requested_device="gpu",
+                effective_device="cuda:0",
+                f0_method="rmvpe",
+            )
+            store = VocalProjectStore()
+
+            project = store.register_take(job_dir, converted, conversion=settings)
+            manifest = json.loads((job_dir / VOCAL_PROJECT_MANIFEST).read_text(encoding="utf-8"))
+
+            self.assertEqual(project.active_take_id, project.takes[0].take_id)
+            self.assertEqual(project.takes[0].label, "voice / Pitch -12")
+            self.assertEqual(project.takes[0].conversion, settings)
+            self.assertEqual(manifest["schema_version"], VOCAL_PROJECT_SCHEMA_VERSION)
+            self.assertEqual(manifest["takes"][0]["conversion"]["effective_device"], "cuda:0")
+
+    def test_take_can_be_renamed_and_removed_without_touching_other_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = _job_dir(Path(temporary) / "run")
+            first = _write_wave(job_dir / "vocals_rvc_first.wav")
+            second = _write_wave(job_dir / "vocals_rvc_second.wav")
+            store = VocalProjectStore()
+            store.open_or_create(job_dir, active_converted_path=first)
+
+            renamed = store.rename_take(job_dir, first, "Warm take")
+            removed = store.remove_take(job_dir, first)
+
+            self.assertEqual(next(take for take in renamed.takes if take.output_path == first).label, "Warm take")
+            self.assertFalse(first.exists())
+            self.assertTrue(second.exists())
+            self.assertEqual(tuple(take.output_path for take in removed.takes), (second,))
+            self.assertEqual(removed.active_take_id, removed.takes[0].take_id)
+
+    def test_schema_one_manifest_is_migrated_without_losing_legacy_takes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = _job_dir(Path(temporary) / "run")
+            converted = _write_wave(job_dir / "vocals_rvc_legacy.wav")
+            store = VocalProjectStore()
+            store.open_or_create(job_dir, active_converted_path=converted)
+            manifest_path = job_dir / VOCAL_PROJECT_MANIFEST
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = 1
+            manifest["takes"][0].pop("conversion", None)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            migrated = store.open_or_create(job_dir, active_converted_path=converted)
+            saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(migrated.schema_version, VOCAL_PROJECT_SCHEMA_VERSION)
+            self.assertEqual(migrated.takes[0].output_path, converted)
+            self.assertIsNone(migrated.takes[0].conversion)
+            self.assertEqual(saved["schema_version"], VOCAL_PROJECT_SCHEMA_VERSION)
+
+    def test_missing_take_file_is_removed_from_project_on_synchronization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = _job_dir(Path(temporary) / "run")
+            converted = _write_wave(job_dir / "vocals_rvc_missing.wav")
+            store = VocalProjectStore()
+            store.open_or_create(job_dir, active_converted_path=converted)
+            converted.unlink()
+
+            synchronized = store.open_or_create(job_dir)
+
+            self.assertEqual(synchronized.takes, ())
+            self.assertEqual(synchronized.active_take_id, "")
 
     def test_invalid_project_is_rejected_without_overwriting_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

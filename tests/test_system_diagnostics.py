@@ -189,7 +189,7 @@ class SystemDiagnosticsTests(unittest.TestCase):
             self.assertEqual(checks["ai_runtime"].status, DiagnosticStatus.FAIL)
             self.assertIn("sm_120", checks["ai_runtime"].detail)
 
-    def test_missing_runtime_is_blocking_but_cuda_is_only_warning(self) -> None:
+    def test_missing_runtime_requires_install_without_reporting_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = prepare_storage_layout(_paths(root), root / "media")
@@ -198,9 +198,70 @@ class SystemDiagnosticsTests(unittest.TestCase):
             statuses = {check.key: check.status for check in diagnostics.checks}
 
             self.assertFalse(diagnostics.ready)
-            self.assertEqual(statuses["ffmpeg"], DiagnosticStatus.FAIL)
-            self.assertEqual(statuses["rvc_assets"], DiagnosticStatus.FAIL)
-            self.assertEqual(statuses["cuda"], DiagnosticStatus.WARNING)
+            self.assertEqual(statuses["ffmpeg"], DiagnosticStatus.REQUIRED)
+            self.assertEqual(statuses["rvc_assets"], DiagnosticStatus.REQUIRED)
+            self.assertEqual(statuses["cuda"], DiagnosticStatus.SKIPPED)
+
+    def test_incomplete_managed_runtime_is_reported_as_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = prepare_storage_layout(_paths(root), root / "media")
+            paths.runtime_root.mkdir(parents=True)
+            (paths.runtime_root / "runtime-state.json").write_text(
+                '{"schema_version": 1, "version": "1"}',
+                encoding="utf-8",
+            )
+
+            diagnostics = run_system_diagnostics(paths)
+            checks = {check.key: check for check in diagnostics.checks}
+
+            self.assertEqual(checks["ffmpeg"].status, DiagnosticStatus.FAIL)
+            self.assertEqual(checks["ai_runtime"].status, DiagnosticStatus.FAIL)
+            self.assertEqual(checks["cuda"].status, DiagnosticStatus.SKIPPED)
+
+    def test_reports_each_diagnostic_stage_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = prepare_storage_layout(_paths(root), root / "media")
+            stages: list[tuple[str, int, int]] = []
+
+            run_system_diagnostics(paths, stage_reporter=lambda *stage: stages.append(stage))
+
+            self.assertEqual(
+                stages,
+                [
+                    ("storage", 1, 6),
+                    ("ffmpeg", 2, 6),
+                    ("demucs", 3, 6),
+                    ("rvc_assets", 4, 6),
+                    ("ai_runtime", 5, 6),
+                    ("cuda", 6, 6),
+                ],
+            )
+
+    def test_broken_cpu_runtime_skips_hardware_profile_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = prepare_storage_layout(_paths(root), root / "media")
+            _create_runtime(paths.runtime_root)
+            capabilities = RvcInferenceCapabilities(
+                imports_ready=False,
+                cpu_ready=False,
+                faiss_ready=False,
+                cuda_available=False,
+                cuda_ready=False,
+                cpu_detail="Torch import failed.",
+            )
+
+            diagnostics = run_system_diagnostics(
+                paths,
+                runtime_probe=lambda _root: capabilities,
+                profile_detector=lambda: self.fail("hardware profile should not be detected"),
+            )
+            checks = {check.key: check for check in diagnostics.checks}
+
+            self.assertEqual(checks["ai_runtime"].status, DiagnosticStatus.FAIL)
+            self.assertEqual(checks["cuda"].status, DiagnosticStatus.SKIPPED)
 
     def test_cpu_ready_without_cuda_is_supported(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from jang_app.services.app_paths import AppPaths
@@ -20,10 +22,12 @@ from jang_app.services.app_update import (
 )
 from jang_app.services.runtime_installation import (
     RuntimeInstallation,
+    RuntimeInstallationError,
     install_rvc_runtime_profile_packages,
     install_runtime_packages,
     installed_rvc_runtime_profile,
     mark_rvc_runtime_fallback,
+    runtime_packages_unpacked_size,
 )
 from jang_app.services.rvc_runtime_profile import (
     RVC_PROFILE_CPU,
@@ -36,6 +40,25 @@ from jang_app.version import __version__
 
 
 ProgressReporter = Callable[[int], None]
+
+
+class RuntimeProvisionStage(StrEnum):
+    PREPARING = "preparing"
+    DOWNLOADING = "downloading"
+    INSTALLING = "installing"
+    CONFIGURING = "configuring"
+    VERIFYING = "verifying"
+
+
+@dataclass(frozen=True)
+class RuntimeProvisionActivity:
+    stage: RuntimeProvisionStage
+    completed_bytes: int = 0
+    total_bytes: int = 0
+    detail: str = ""
+
+
+ActivityReporter = Callable[[RuntimeProvisionActivity], None]
 _LOGGER = logging.getLogger("jang_app")
 
 
@@ -44,12 +67,14 @@ def provision_ai_runtime(
     *,
     manifest_url: str = DEFAULT_MANIFEST_URL,
     progress: ProgressReporter | None = None,
+    activity: ActivityReporter | None = None,
 ) -> RuntimeInstallation:
     _report(progress, 2)
+    _report_activity(activity, RuntimeProvisionStage.PREPARING, detail="Checking available components")
     release = fetch_release_manifest(manifest_url)
     runtime = release.ai_runtime
     if runtime is None or runtime.install_mode != "extract":
-        raise UpdateError("The release does not contain an installable AI runtime.")
+        raise UpdateError("The release does not contain an installable audio engine.")
     preferred_profile = detect_rvc_runtime_profile()
     plan = create_update_plan(
         release,
@@ -60,13 +85,15 @@ def provision_ai_runtime(
     )
     artifacts = plan.artifacts
     cache = paths.cache_dir / "runtime" / release.version
-    packages = _download_runtime_artifacts(artifacts, cache, progress)
+    packages = _download_runtime_artifacts(artifacts, cache, progress, activity)
     installations = install_update_runtime_components(
         plan,
         packages,
         paths.runtime_root,
         progress=lambda value: _report(progress, 70 + int(value * 0.3)),
+        activity=activity,
     )
+    _report_activity(activity, RuntimeProvisionStage.VERIFYING, detail="Verifying installed components")
     return next(
         item for item in installations if isinstance(item, RuntimeInstallation)
     )
@@ -77,11 +104,13 @@ def provision_ai_runtime_offline(
     package_index: Path,
     *,
     progress: ProgressReporter | None = None,
+    activity: ActivityReporter | None = None,
 ) -> RuntimeInstallation:
     return install_ai_runtime_offline(
         paths.runtime_root,
         package_index,
         progress=progress,
+        activity=activity,
     )
 
 
@@ -90,7 +119,9 @@ def install_ai_runtime_offline(
     package_index: Path,
     *,
     progress: ProgressReporter | None = None,
+    activity: ActivityReporter | None = None,
 ) -> RuntimeInstallation:
+    _report_activity(activity, RuntimeProvisionStage.PREPARING, detail="Checking local packages")
     index = package_index.expanduser().resolve()
     version, packages = _offline_component_packages(index, "ai-runtime", progress)
     preferred_profile = detect_rvc_runtime_profile()
@@ -126,7 +157,9 @@ def install_ai_runtime_offline(
         tuple(downloaded),
         runtime_root,
         progress=progress,
+        activity=activity,
     )
+    _report_activity(activity, RuntimeProvisionStage.VERIFYING, detail="Verifying installed components")
     return next(item for item in installations if isinstance(item, RuntimeInstallation))
 
 
@@ -136,6 +169,7 @@ def install_update_runtime_components(
     runtime_root: Path,
     *,
     progress: ProgressReporter | None = None,
+    activity: ActivityReporter | None = None,
 ) -> tuple[object, ...]:
     operations = int(plan.runtime_required) + int(plan.rvc_profile_required)
     if operations == 0:
@@ -150,14 +184,27 @@ def install_update_runtime_components(
     if plan.runtime_required:
         runtime = plan.release.ai_runtime
         if runtime is None:
-            raise UpdateError("AI runtime component is unavailable.")
+            raise UpdateError("The audio engine component is unavailable.")
         packages = _component_packages(runtime, downloaded)
+        unpacked_size = _runtime_unpacked_size(packages)
+        detail = "Installing audio tools and model components"
+
+        def runtime_progress(value: int) -> None:
+            operation_progress(value)
+            _report_activity(
+                activity,
+                RuntimeProvisionStage.INSTALLING,
+                int(unpacked_size * value / 100),
+                unpacked_size,
+                detail,
+            )
+
         installed.append(
             install_runtime_packages(
                 packages,
                 runtime_root,
                 runtime.version,
-                progress=operation_progress,
+                progress=runtime_progress,
             )
         )
         completed += 1
@@ -169,6 +216,7 @@ def install_update_runtime_components(
                 downloaded,
                 runtime_root,
                 progress=operation_progress,
+                activity=activity,
             )
         )
     _report(progress, 100)
@@ -181,6 +229,7 @@ def _install_profile_chain(
     runtime_root: Path,
     *,
     progress: ProgressReporter | None,
+    activity: ActivityReporter | None = None,
 ) -> object:
     preferred = plan.rvc_preferred_profile or plan.rvc_profile
     preferred_version = plan.rvc_preferred_version
@@ -197,12 +246,27 @@ def _install_profile_chain(
             failures.append(f"RVC {profile} runtime component is unavailable.")
             continue
         try:
+            packages = _component_packages(component, downloaded)
+            unpacked_size = _runtime_unpacked_size(packages)
+            detail = f"Configuring the {profile} accelerator"
+
+            def profile_progress(value: int) -> None:
+                if progress is not None:
+                    progress(value)
+                _report_activity(
+                    activity,
+                    RuntimeProvisionStage.CONFIGURING,
+                    int(unpacked_size * value / 100),
+                    unpacked_size,
+                    detail,
+                )
+
             return install_rvc_runtime_profile_packages(
-                _component_packages(component, downloaded),
+                packages,
                 runtime_root / "rvc",
                 profile,
                 component.version,
-                progress=progress,
+                progress=profile_progress,
                 preferred_profile=preferred,
                 preferred_version=preferred_version,
                 activation_status="active" if profile == preferred else "fallback",
@@ -267,24 +331,24 @@ def _offline_component_packages(
     try:
         data = json.loads(index.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise UpdateError(f"Could not read the AI runtime package index: {exc}") from exc
+        raise UpdateError(f"Could not read the audio engine package index: {exc}") from exc
     if not isinstance(data, dict) or data.get("schema_version") != 1:
-        raise UpdateError("Unsupported AI runtime package index.")
+        raise UpdateError("Unsupported audio engine package index.")
     if data.get("component") != expected_component:
         raise UpdateError(f"The selected package index is not {expected_component}.")
     version = data.get("version")
     raw_artifacts = data.get("artifacts")
     if not isinstance(version, str) or not version.strip():
-        raise UpdateError("The AI runtime package index has no version.")
+        raise UpdateError("The audio engine package index has no version.")
     if not isinstance(raw_artifacts, list) or not raw_artifacts:
-        raise UpdateError("The AI runtime package index has no packages.")
+        raise UpdateError("The audio engine package index has no packages.")
 
     packages: list[Path] = []
     for position, raw in enumerate(raw_artifacts, start=1):
         artifact = _offline_artifact(raw)
         package = index.parent / artifact.name
         if not verify_artifact(package, artifact):
-            raise UpdateError(f"AI runtime package verification failed: {artifact.name}")
+            raise UpdateError(f"Audio engine package verification failed: {artifact.name}")
         packages.append(package)
         _report(progress, int(position * 20 / len(raw_artifacts)))
     return version.strip(), tuple(packages)
@@ -307,19 +371,34 @@ def _download_runtime_artifacts(
     artifacts: tuple[ReleaseArtifact, ...],
     cache: Path,
     progress: ProgressReporter | None,
+    activity: ActivityReporter | None = None,
 ) -> tuple[Path, ...]:
     total_size = sum(artifact.size for artifact in artifacts)
     completed = 0
     packages: list[Path] = []
     for artifact in artifacts:
         base = completed
+
+        def download_progress(
+            value: int,
+            *,
+            item: ReleaseArtifact = artifact,
+            offset: int = base,
+        ) -> None:
+            current = offset + int(item.size * value / 100)
+            _report(progress, 5 + int(current * 65 / total_size))
+            _report_activity(
+                activity,
+                RuntimeProvisionStage.DOWNLOADING,
+                current,
+                total_size,
+                item.name,
+            )
+
         package = download_artifact(
             artifact,
             cache,
-            progress=lambda value, item=artifact, offset=base: _report(
-                progress,
-                5 + int((offset + item.size * value / 100) * 65 / total_size),
-            ),
+            progress=download_progress,
         )
         packages.append(package)
         completed += artifact.size
@@ -328,19 +407,45 @@ def _download_runtime_artifacts(
 
 def _offline_artifact(data: object) -> ReleaseArtifact:
     if not isinstance(data, dict):
-        raise UpdateError("An AI runtime package entry must be an object.")
+        raise UpdateError("An audio engine package entry must be an object.")
     name = data.get("name")
     size = data.get("size")
     sha256 = data.get("sha256")
     if not isinstance(name, str) or Path(name).name != name:
-        raise UpdateError(f"Unsafe AI runtime package name: {name!r}")
+        raise UpdateError(f"Unsafe audio engine package name: {name!r}")
     if not isinstance(size, int) or size <= 0:
-        raise UpdateError(f"Invalid AI runtime package size: {name}")
+        raise UpdateError(f"Invalid audio engine package size: {name}")
     if not isinstance(sha256, str) or len(sha256) != 64:
-        raise UpdateError(f"Invalid AI runtime package checksum: {name}")
+        raise UpdateError(f"Invalid audio engine package checksum: {name}")
     return ReleaseArtifact(name, size, sha256.lower(), f"https://offline.invalid/{name}")
 
 
 def _report(progress: ProgressReporter | None, value: int) -> None:
     if progress is not None:
         progress(max(0, min(value, 100)))
+
+
+def _report_activity(
+    reporter: ActivityReporter | None,
+    stage: RuntimeProvisionStage,
+    completed_bytes: int = 0,
+    total_bytes: int = 0,
+    detail: str = "",
+) -> None:
+    if reporter is not None:
+        reporter(
+            RuntimeProvisionActivity(
+                stage,
+                max(0, completed_bytes),
+                max(0, total_bytes),
+                detail,
+            )
+        )
+
+
+def _runtime_unpacked_size(packages: tuple[Path, ...]) -> int:
+    try:
+        return runtime_packages_unpacked_size(packages)
+    except (OSError, RuntimeInstallationError):
+        # Size reporting is telemetry; package validation still happens in the installer.
+        return 0

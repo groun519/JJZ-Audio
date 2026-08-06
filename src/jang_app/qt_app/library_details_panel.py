@@ -31,6 +31,7 @@ class LibraryDetailsPanel(QFrame):
     back_requested = Signal()
     open_location_requested = Signal(object)
     open_vocal_requested = Signal(str)
+    remove_asset_requested = Signal(str, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -88,6 +89,7 @@ class LibraryDetailsPanel(QFrame):
         }
         for page in self.stage_pages.values():
             page.open_location_requested.connect(self.open_location_requested.emit)
+            page.remove_asset_requested.connect(self._request_asset_removal)
 
         self.stage_stack = SegmentedStack(
             (
@@ -162,9 +164,14 @@ class LibraryDetailsPanel(QFrame):
         if self._details is not None and self._details.source_type != "output":
             self.open_vocal_requested.emit(self._details.song_id)
 
+    def _request_asset_removal(self, asset: SongAsset) -> None:
+        if self._details is not None:
+            self.remove_asset_requested.emit(self._details.song_id, asset)
+
 
 class _AssetStagePage(QWidget):
     open_location_requested = Signal(object)
+    remove_asset_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -208,6 +215,7 @@ class _AssetStagePage(QWidget):
             row = _SongAssetRow(asset)
             row.set_theme_mode(theme_mode)
             row.open_location_requested.connect(self.open_location_requested.emit)
+            row.remove_requested.connect(self.remove_asset_requested.emit)
             self.asset_rows.append(row)
             self.asset_layout.addWidget(row, 0)
         self.asset_layout.addStretch(1)
@@ -229,6 +237,7 @@ class _AssetStagePage(QWidget):
 
 class _SongAssetRow(QFrame):
     open_location_requested = Signal(object)
+    remove_requested = Signal(object)
 
     def __init__(self, asset: SongAsset) -> None:
         super().__init__()
@@ -273,6 +282,12 @@ class _SongAssetRow(QFrame):
         set_translated_tooltip(self.open_button, "Open file location")
         self.open_button.clicked.connect(lambda: self.open_location_requested.emit(asset.path))
 
+        self.remove_button = SvgIconButton("trash", size=30)
+        self.remove_button.setObjectName("DangerIconButton")
+        set_translated_tooltip(self.remove_button, "Remove")
+        self.remove_button.setVisible(asset.can_remove)
+        self.remove_button.clicked.connect(lambda: self.remove_requested.emit(asset))
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(10)
@@ -281,9 +296,11 @@ class _SongAssetRow(QFrame):
         layout.addWidget(ownership_label, 0)
         layout.addWidget(active_label, 0)
         layout.addWidget(self.open_button, 0)
+        layout.addWidget(self.remove_button, 0)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self.open_button.set_theme_mode(theme_mode)
+        self.remove_button.set_theme_mode(theme_mode)
 
 
 def _source_label(source_type: str) -> str:

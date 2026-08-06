@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.3 - 2026-08-06
+
+### Added
+
+- Added persistent conversion-take metadata for model, index, pitch, requested and effective device, F0 method, and creation time.
+- Added synchronized original-versus-converted monitoring that changes live playback volumes without restarting the three-track queue or modifying the Studio mix.
+- Added readable result names with rename, remove, reconvert, and file-location actions in the Vocal workspace.
+- Added staged first-run diagnostics with explicit pending, running, install-required, skipped, warning, and failure states.
+- Added byte-accurate download and expanded-install progress for audio engine provisioning.
+- Added a five-stage model-training workflow, material readiness summary, resume/start-over controls, and epoch-based remaining-time feedback.
+
+### Fixed
+
+- Migrated existing vocal-project manifests without losing legacy results or user edits.
+- Removed stale take records when converted files are deleted outside the application.
+- Renamed first-run AI runtime language to audio engine terminology and skipped redundant GPU checks when the base runtime is unavailable.
+- Reweighted model-training progress so the long-running epoch stage represents most of the visible completion range.
+- Removed downloaded audio-engine files during uninstall while preserving legacy RVC weights and logs in the application data recovery folder.
+- Blocked install or uninstall while JJZero Audio is running to prevent partially removed application files.
+- Repaired missing JJZero RVC device adapters from the application bundle before diagnostics or training, without redownloading the multi-gigabyte audio engine.
+
+### Quality
+
+- Extended installer verification through a real uninstall with managed-runtime removal and model, log, settings, and library preservation checks.
+- Reused unchanged runtime assets from the prior GitHub release so application-only updates do not republish multi-gigabyte packages.
+
 ## 0.2.2 - 2026-08-06
 
 ### Added

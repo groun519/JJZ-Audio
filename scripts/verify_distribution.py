@@ -104,6 +104,7 @@ def required_application_files(distribution: Path) -> tuple[Path, ...]:
         root / EXECUTABLE_NAME,
         root / "_internal" / "jang_app" / "assets" / "jjzero_logo.svg",
         root / "_internal" / "jang_app" / "rvc_tools" / "rvc_artifact_worker.py",
+        root / "_internal" / "jang_app" / "rvc_tools" / "jjzero_device.py",
     )
 
 
@@ -204,6 +205,7 @@ def _verify_rvc_runtime(distribution: Path) -> bool:
         "import torch; "
         "import fairseq; "
         "import faiss; "
+        "import lib.jjzero_device; "
         "import lib.infer_pack.models; "
         "import vc_infer_pipeline; "
         "assert torch.cuda.is_available(); "

@@ -60,6 +60,60 @@ class ReleaseManifestTests(unittest.TestCase):
             self.assertEqual(runtime["version"], "7")
             self.assertEqual(runtime["artifacts"][0]["name"], package.name)
 
+    def test_manifest_can_reuse_runtime_assets_from_an_existing_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.2.3-Setup.exe").write_bytes(b"installer")
+            package = release / "JJZero-Runtime-2-part01.zip"
+            package.write_bytes(b"runtime")
+            (release / "runtime-packages.json").write_text(
+                json.dumps(
+                    {
+                        "version": "2",
+                        "artifacts": [
+                            {
+                                "name": package.name,
+                                "size": package.stat().st_size,
+                                "sha256": hashlib.sha256(b"runtime").hexdigest(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = create_release_manifest(
+                release,
+                "0.2.3",
+                "2",
+                runtime_release_tag="v0.2.2",
+            )
+
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            runtime = next(
+                component
+                for component in data["components"]
+                if component["id"] == "ai-runtime"
+            )
+            self.assertEqual(
+                runtime["artifacts"][0]["url"],
+                "https://github.com/groun519/JJZ-Audio/releases/download/"
+                "v0.2.2/JJZero-Runtime-2-part01.zip",
+            )
+            self.assertNotIn("url", data["components"][0]["artifacts"][0])
+
+    def test_rejects_invalid_runtime_release_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.2.3-Setup.exe").write_bytes(b"installer")
+
+            with self.assertRaisesRegex(ValueError, "Invalid runtime release tag"):
+                create_release_manifest(
+                    release,
+                    "0.2.3",
+                    runtime_release_tag="../../latest",
+                )
+
     def test_requires_an_installer_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(FileNotFoundError):

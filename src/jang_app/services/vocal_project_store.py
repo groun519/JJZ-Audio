@@ -13,6 +13,7 @@ from jang_app.services.managed_files import write_json_atomic
 from jang_app.services.vocal_project import (
     UNASSIGNED_SPEAKER_ID,
     VOCAL_PROJECT_SCHEMA_VERSION,
+    VocalConversionSettings,
     VocalProject,
     VocalProjectValidationError,
     VocalSegment,
@@ -29,20 +30,26 @@ _INSTRUMENTAL_FILE = "no_vocals.wav"
 
 class VocalProjectStore:
     def load(self, job_dir: Path) -> VocalProject | None:
+        project, _migrated = self._load(job_dir)
+        return project
+
+    def _load(self, job_dir: Path) -> tuple[VocalProject | None, bool]:
         root = job_dir.expanduser().resolve()
         manifest_path = root / VOCAL_PROJECT_MANIFEST
         if not manifest_path.is_file():
-            return None
+            return None, False
         try:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise VocalProjectValidationError(
                 f"Could not read vocal project: {manifest_path}"
             ) from exc
-        project = _project_from_data(root, _mapping(data, "vocal project"))
+        project_data = _mapping(data, "vocal project")
+        source_schema = _integer(project_data.get("schema_version"), "schema version")
+        project = _project_from_data(root, project_data)
         self._validate_paths(root, project)
         validate_vocal_project(project)
-        return project
+        return project, source_schema != VOCAL_PROJECT_SCHEMA_VERSION
 
     def open_or_create(
         self,
@@ -51,19 +58,86 @@ class VocalProjectStore:
         active_converted_path: Path | None = None,
     ) -> VocalProject:
         root = job_dir.expanduser().resolve()
-        project = self.load(root)
+        project, migrated = self._load(root)
         if project is None:
             return self.save(root, self._new_project(root, active_converted_path))
 
         synchronized = self._synchronize_takes(root, project, active_converted_path)
-        return self.save(root, synchronized) if synchronized != project else project
+        return self.save(root, synchronized) if migrated or synchronized != project else project
 
     def save(self, job_dir: Path, project: VocalProject) -> VocalProject:
         root = job_dir.expanduser().resolve()
+        project = replace(project, schema_version=VOCAL_PROJECT_SCHEMA_VERSION)
         self._validate_paths(root, project)
         validate_vocal_project(project)
         updated = replace(project, updated_at=_now())
         write_json_atomic(root / VOCAL_PROJECT_MANIFEST, _project_to_data(root, updated))
+        return updated
+
+    def register_take(
+        self,
+        job_dir: Path,
+        output_path: Path,
+        *,
+        conversion: VocalConversionSettings,
+        label: str = "",
+    ) -> VocalProject:
+        root = job_dir.expanduser().resolve()
+        output = _require_managed_path(root, output_path, "take output")
+        if not output.is_file():
+            raise VocalProjectValidationError(f"Missing take output: {output}")
+        project = self.open_or_create(root, active_converted_path=output)
+        existing = _take_for_path(project.takes, output)
+        take = VocalTake(
+            take_id=existing.take_id if existing is not None else _take_id(root, output),
+            label=label.strip() or _default_take_label(conversion),
+            output_path=output,
+            created_at=existing.created_at if existing is not None else _file_timestamp(output),
+            conversion=conversion,
+        )
+        takes = (take, *(item for item in project.takes if item.take_id != take.take_id))
+        return self.save(root, replace(project, takes=takes, active_take_id=take.take_id))
+
+    def set_active_take(self, job_dir: Path, output_path: Path | None) -> VocalProject:
+        root = job_dir.expanduser().resolve()
+        project = self.open_or_create(root, active_converted_path=output_path)
+        active_take_id = _active_take_id(project.takes, output_path)
+        if active_take_id == project.active_take_id:
+            return project
+        return self.save(root, replace(project, active_take_id=active_take_id))
+
+    def rename_take(self, job_dir: Path, output_path: Path, label: str) -> VocalProject:
+        root = job_dir.expanduser().resolve()
+        project = self.open_or_create(root, active_converted_path=output_path)
+        target = _take_for_path(project.takes, output_path)
+        if target is None:
+            raise VocalProjectValidationError(f"Unknown vocal take: {output_path}")
+        renamed = replace(target, label=label.strip())
+        return self.save(
+            root,
+            replace(
+                project,
+                takes=tuple(renamed if take.take_id == target.take_id else take for take in project.takes),
+            ),
+        )
+
+    def remove_take(self, job_dir: Path, output_path: Path) -> VocalProject:
+        root = job_dir.expanduser().resolve()
+        project = self.open_or_create(root, active_converted_path=output_path)
+        target = _take_for_path(project.takes, output_path)
+        if target is None:
+            raise VocalProjectValidationError(f"Unknown vocal take: {output_path}")
+        remaining = tuple(take for take in project.takes if take.take_id != target.take_id)
+        active_take_id = remaining[0].take_id if remaining else ""
+        updated = self.save(
+            root,
+            replace(project, takes=remaining, active_take_id=active_take_id),
+        )
+        try:
+            target.output_path.unlink()
+        except OSError:
+            self.save(root, project)
+            raise
         return updated
 
     def _new_project(
@@ -104,17 +178,22 @@ class VocalProjectStore:
         project: VocalProject,
         active_converted_path: Path | None,
     ) -> VocalProject:
-        known_paths = {take.output_path.expanduser().resolve() for take in project.takes}
+        existing_takes = tuple(take for take in project.takes if take.output_path.is_file())
+        known_paths = {take.output_path.expanduser().resolve() for take in existing_takes}
         imported = tuple(
             take
             for take in _imported_takes(root, active_converted_path)
             if take.output_path.expanduser().resolve() not in known_paths
         )
-        takes = (*imported, *project.takes)
+        takes = (*imported, *existing_takes)
         active_take_id = (
             _active_take_id(takes, active_converted_path)
             if active_converted_path is not None
-            else project.active_take_id
+            else (
+                project.active_take_id
+                if any(take.take_id == project.active_take_id for take in takes)
+                else (takes[0].take_id if takes else "")
+            )
         )
         return replace(project, takes=takes, active_take_id=active_take_id)
 
@@ -165,6 +244,11 @@ def _project_to_data(root: Path, project: VocalProject) -> dict[str, object]:
                 "label": take.label,
                 "output": _relative_path(root, take.output_path, f"take {take.take_id}"),
                 "created_at": take.created_at,
+                **(
+                    {"conversion": _conversion_to_data(take.conversion)}
+                    if take.conversion is not None
+                    else {}
+                ),
             }
             for take in project.takes
         ],
@@ -173,6 +257,9 @@ def _project_to_data(root: Path, project: VocalProject) -> dict[str, object]:
 
 
 def _project_from_data(root: Path, data: Mapping[str, object]) -> VocalProject:
+    source_schema = _integer(data.get("schema_version"), "schema version")
+    if source_schema not in {1, VOCAL_PROJECT_SCHEMA_VERSION}:
+        raise VocalProjectValidationError(f"Unsupported vocal project schema: {source_schema}")
     assets = _mapping(data.get("assets"), "assets")
     speakers = tuple(
         VocalSpeaker(
@@ -198,11 +285,12 @@ def _project_from_data(root: Path, data: Mapping[str, object]) -> VocalProject:
             _text(item.get("label"), "take label"),
             _managed_path(root, _text(item.get("output"), "take output"), "take output"),
             _text(item.get("created_at"), "take timestamp"),
+            _conversion_from_data(item.get("conversion")),
         )
         for item in _mapping_list(data.get("takes"), "takes")
     )
     return VocalProject(
-        schema_version=_integer(data.get("schema_version"), "schema version"),
+        schema_version=VOCAL_PROJECT_SCHEMA_VERSION,
         project_id=_text(data.get("project_id"), "project ID"),
         created_at=_text(data.get("created_at"), "created timestamp"),
         updated_at=_text(data.get("updated_at"), "updated timestamp"),
@@ -235,10 +323,7 @@ def _imported_takes(root: Path, active_converted_path: Path | None) -> tuple[Voc
 
 
 def _imported_take(root: Path, path: Path) -> VocalTake:
-    relative = path.relative_to(root).as_posix()
-    digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:12]
-    created_at = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
-    return VocalTake(f"take-{digest}", path.stem, path, created_at)
+    return VocalTake(_take_id(root, path), path.stem, path, _file_timestamp(path))
 
 
 def _active_take_id(takes: tuple[VocalTake, ...], path: Path | None) -> str:
@@ -248,6 +333,54 @@ def _active_take_id(takes: tuple[VocalTake, ...], path: Path | None) -> str:
     return next(
         (take.take_id for take in takes if take.output_path.expanduser().resolve() == resolved),
         "",
+    )
+
+
+def _take_for_path(takes: tuple[VocalTake, ...], path: Path) -> VocalTake | None:
+    resolved = path.expanduser().resolve()
+    return next(
+        (take for take in takes if take.output_path.expanduser().resolve() == resolved),
+        None,
+    )
+
+
+def _take_id(root: Path, path: Path) -> str:
+    relative = path.expanduser().resolve().relative_to(root).as_posix()
+    digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:12]
+    return f"take-{digest}"
+
+
+def _file_timestamp(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+
+
+def _default_take_label(conversion: VocalConversionSettings) -> str:
+    model = Path(conversion.voice_model).stem or "RVC"
+    return f"{model} / Pitch {conversion.pitch:+d}"
+
+
+def _conversion_to_data(conversion: VocalConversionSettings) -> dict[str, object]:
+    return {
+        "voice_model": conversion.voice_model,
+        "index_file": conversion.index_file,
+        "pitch": conversion.pitch,
+        "requested_device": conversion.requested_device,
+        "effective_device": conversion.effective_device,
+        "f0_method": conversion.f0_method,
+    }
+
+
+def _conversion_from_data(value: object) -> VocalConversionSettings | None:
+    if value is None:
+        return None
+    data = _mapping(value, "take conversion")
+    return VocalConversionSettings(
+        voice_model=_text(data.get("voice_model"), "conversion model"),
+        index_file=_optional_text(data.get("index_file"), "conversion index"),
+        pitch=_integer(data.get("pitch"), "conversion pitch"),
+        requested_device=_text(data.get("requested_device"), "conversion requested device"),
+        effective_device=_text(data.get("effective_device"), "conversion effective device"),
+        f0_method=_text(data.get("f0_method"), "conversion F0 method"),
     )
 
 

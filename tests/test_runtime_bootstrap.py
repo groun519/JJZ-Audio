@@ -14,6 +14,8 @@ from jang_app.services.app_update import (
     create_update_plan,
 )
 from jang_app.services.runtime_bootstrap import (
+    RuntimeProvisionActivity,
+    RuntimeProvisionStage,
     install_update_runtime_components,
     provision_ai_runtime,
     provision_ai_runtime_offline,
@@ -52,16 +54,28 @@ class RuntimeBootstrapTests(unittest.TestCase):
 
             expected = RuntimeInstallation("4", paths.runtime_root, 2)
             progress: list[int] = []
+            activity: list[RuntimeProvisionActivity] = []
             with (
                 patch("jang_app.services.runtime_bootstrap.fetch_release_manifest", return_value=release),
                 patch("jang_app.services.runtime_bootstrap.download_artifact", side_effect=download),
                 patch("jang_app.services.runtime_bootstrap.install_runtime_packages", return_value=expected),
             ):
-                result = provision_ai_runtime(paths, progress=progress.append)
+                result = provision_ai_runtime(
+                    paths,
+                    progress=progress.append,
+                    activity=activity.append,
+                )
 
             self.assertEqual(result, expected)
             self.assertEqual(downloaded, ["part1.zip", "part2.zip"])
             self.assertEqual(progress[-1], 100)
+            download_activity = [
+                item for item in activity if item.stage == RuntimeProvisionStage.DOWNLOADING
+            ]
+            self.assertEqual(download_activity[-1].completed_bytes, 30)
+            self.assertEqual(download_activity[-1].total_bytes, 30)
+            self.assertEqual(activity[0].stage, RuntimeProvisionStage.PREPARING)
+            self.assertEqual(activity[-1].stage, RuntimeProvisionStage.VERIFYING)
 
     def test_blackwell_install_adds_cu128_profile_after_base_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

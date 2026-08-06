@@ -17,6 +17,7 @@ from jang_app.services.rvc_runtime_profile import (
 )
 from jang_app.services.rvc_training_runtime import required_rvc_training_paths
 from jang_app.services.rvc_profile_activation import validate_rvc_profile_activation
+from jang_app.services.rvc_runtime_repair import repair_rvc_runtime_adapter
 
 
 RUNTIME_STATE_NAME = "runtime-state.json"
@@ -108,6 +109,11 @@ def installed_rvc_runtime_profile(rvc_root: Path) -> RvcRuntimeProfileInstallati
     )
 
 
+def runtime_packages_unpacked_size(packages: Iterable[Path]) -> int:
+    """Return the validated expanded size of one runtime package set."""
+    return _validated_unpacked_size(_validated_archives(packages, "runtime"))
+
+
 def install_runtime_packages(
     packages: Iterable[Path],
     runtime_root: Path,
@@ -115,11 +121,12 @@ def install_runtime_packages(
     *,
     progress: Callable[[int], None] | None = None,
 ) -> RuntimeInstallation:
-    archives = _validated_archives(packages, "AI runtime")
+    archives = _validated_archives(packages, "audio engine")
     root = runtime_root.expanduser().resolve()
 
     def prepare(staging: Path) -> None:
         _preserve_mutable_runtime_data(root, staging)
+        repair_rvc_runtime_adapter(staging / "rvc")
         write_json_atomic(
             staging / RUNTIME_STATE_NAME,
             {
@@ -141,7 +148,7 @@ def install_runtime_packages(
         root,
         prepare=prepare,
         ready=_runtime_ready,
-        incomplete_message="The extracted AI runtime is incomplete.",
+        incomplete_message="The extracted audio engine is incomplete.",
         progress=progress,
     )
     return RuntimeInstallation(version, root, len(archives))
@@ -296,16 +303,16 @@ def _validated_unpacked_size(archives: tuple[Path, ...]) -> int:
                     normalized = _normalized_member_name(member)
                     if normalized in seen and not member.is_dir():
                         raise RuntimeInstallationError(
-                            f"Duplicate AI runtime file: {normalized}"
+                            f"Duplicate audio engine file: {normalized}"
                         )
                     seen.add(normalized)
                     total += member.file_size
         except zipfile.BadZipFile as exc:
             raise RuntimeInstallationError(
-                f"AI runtime package is not a valid ZIP file: {archive.name}"
+                f"Audio engine package is not a valid ZIP file: {archive.name}"
             ) from exc
     if total <= 0:
-        raise RuntimeInstallationError("AI runtime packages contain no files.")
+        raise RuntimeInstallationError("Audio engine packages contain no files.")
     return total
 
 
@@ -313,10 +320,10 @@ def _safe_member_target(staging: Path, member: zipfile.ZipInfo) -> Path:
     name = _normalized_member_name(member)
     mode = member.external_attr >> 16
     if stat.S_ISLNK(mode):
-        raise RuntimeInstallationError(f"AI runtime package contains a link: {name}")
+        raise RuntimeInstallationError(f"Audio engine package contains a link: {name}")
     target = (staging / Path(*PurePosixPath(name).parts)).resolve()
     if target != staging and staging not in target.parents:
-        raise RuntimeInstallationError(f"Unsafe AI runtime package path: {name}")
+        raise RuntimeInstallationError(f"Unsafe audio engine package path: {name}")
     return target
 
 
@@ -324,7 +331,7 @@ def _normalized_member_name(member: zipfile.ZipInfo) -> str:
     name = member.filename.replace("\\", "/")
     path = PurePosixPath(name)
     if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
-        raise RuntimeInstallationError(f"Unsafe AI runtime package path: {name}")
+        raise RuntimeInstallationError(f"Unsafe audio engine package path: {name}")
     return path.as_posix()
 
 

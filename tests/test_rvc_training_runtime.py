@@ -44,6 +44,7 @@ class RvcTrainingRuntimeTests(unittest.TestCase):
             self.assertFalse(inspection.assets_ready)
             self.assertIn(Path("pretrained_v2/f0G40k.pth"), inspection.missing_paths)
             self.assertIn(Path("extract_feature_print.py"), inspection.missing_paths)
+            self.assertIn(Path("lib/jjzero_device.py"), inspection.missing_paths)
             self.assertIn(Path("lib/train/utils.py"), inspection.missing_paths)
 
     def test_complete_runtime_can_probe_cuda(self) -> None:

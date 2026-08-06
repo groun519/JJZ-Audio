@@ -9,14 +9,13 @@ class RvcRuntimePatchError(RuntimeError):
     pass
 
 
-def apply_rvc_runtime_patches(rvc_root: Path, overlay_root: Path) -> tuple[Path, ...]:
+def apply_rvc_runtime_patches(rvc_root: Path, adapter_source: Path) -> tuple[Path, ...]:
     root = rvc_root.expanduser().resolve()
-    overlay = overlay_root.expanduser().resolve()
+    adapter = adapter_source.expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"RVC runtime root was not found: {root}")
-    adapter = overlay / "lib" / "jjzero_device.py"
     if not adapter.is_file():
-        raise FileNotFoundError(f"RVC overlay adapter was not found: {adapter}")
+        raise FileNotFoundError(f"RVC device adapter was not found: {adapter}")
 
     changed: list[Path] = []
     target_adapter = root / "lib" / "jjzero_device.py"
@@ -165,12 +164,12 @@ def main() -> int:
         default=project_root / "third_party" / "rvc",
     )
     parser.add_argument(
-        "--overlay-root",
+        "--adapter-source",
         type=Path,
-        default=project_root / "packaging" / "rvc_overlay",
+        default=project_root / "src" / "jang_app" / "rvc_tools" / "jjzero_device.py",
     )
     arguments = parser.parse_args()
-    changed = apply_rvc_runtime_patches(arguments.rvc_root, arguments.overlay_root)
+    changed = apply_rvc_runtime_patches(arguments.rvc_root, arguments.adapter_source)
     print(f"RVC runtime patch complete: {len(changed)} file(s) updated")
     return 0
 

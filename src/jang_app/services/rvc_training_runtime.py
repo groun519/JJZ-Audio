@@ -40,6 +40,7 @@ RVC_TRAINING_SCRIPT_FILES = (
     Path("train_nsf_sim_cache_sid_load_pretrain.py"),
 )
 RVC_TRAINING_MODULE_FILES = (
+    Path("lib/jjzero_device.py"),
     Path("lib/i18n/en_US.json"),
     Path("lib/train/utils.py"),
     Path("lib/infer_pack/models.py"),

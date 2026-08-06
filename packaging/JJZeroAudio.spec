@@ -13,6 +13,10 @@ datas = [
         str(PACKAGE_ROOT / "rvc_tools" / "rvc_artifact_worker.py"),
         "jang_app/rvc_tools",
     ),
+    (
+        str(PACKAGE_ROOT / "rvc_tools" / "jjzero_device.py"),
+        "jang_app/rvc_tools",
+    ),
 ]
 
 analysis = Analysis(

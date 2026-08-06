@@ -19,6 +19,7 @@ class TextInputDialog(AppDialog):
         theme_mode: str,
         accept_label: str,
         cancel_label: str,
+        initial_value: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(title, logo_path, theme_mode=theme_mode, parent=parent)
@@ -37,6 +38,8 @@ class TextInputDialog(AppDialog):
         label.setObjectName("MutedText")
         self.input_edit = QLineEdit()
         self.input_edit.setObjectName("AppDialogInput")
+        self.input_edit.setText(initial_value)
+        self.input_edit.selectAll()
         self.input_edit.textChanged.connect(self._update_accept_state)
         self.input_edit.returnPressed.connect(self._accept_if_valid)
 
@@ -46,7 +49,7 @@ class TextInputDialog(AppDialog):
         self.accept_button.setObjectName("PrimaryButton")
         self.accept_button.setDefault(True)
         self.accept_button.clicked.connect(self._accept_if_valid)
-        self.accept_button.setEnabled(False)
+        self.accept_button.setEnabled(bool(initial_value.strip()))
 
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 4, 0, 0)
@@ -73,6 +76,7 @@ class TextInputDialog(AppDialog):
         theme_mode: str,
         accept_label: str,
         cancel_label: str,
+        initial_value: str = "",
     ) -> tuple[str, bool]:
         dialog = cls(
             title,
@@ -81,6 +85,7 @@ class TextInputDialog(AppDialog):
             theme_mode=theme_mode,
             accept_label=accept_label,
             cancel_label=cancel_label,
+            initial_value=initial_value,
             parent=parent,
         )
         accepted = dialog.exec() == QDialog.DialogCode.Accepted

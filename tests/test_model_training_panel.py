@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
@@ -44,6 +46,9 @@ class ModelTrainingPanelTests(unittest.TestCase):
             panel.start_button.click()
 
             self.assertEqual(panel.start_button.text(), "Resume Training")
+            self.assertFalse(panel.mode_control.isHidden())
+            self.assertTrue(panel.resume_mode_button.isChecked())
+            self.assertEqual(panel.checkpoint_value.text(), "Step 120")
             self.assertEqual(
                 emitted,
                 [
@@ -56,6 +61,49 @@ class ModelTrainingPanelTests(unittest.TestCase):
                     )
                 ],
             )
+            panel.close()
+
+    def test_start_over_mode_resets_epoch_and_disables_resume_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layout = RvcModelPackageLayout(root / "model", "Voice")
+            layout.create()
+            (layout.experiment_dir / "G_120.pth").write_bytes(b"generator")
+            (layout.experiment_dir / "D_120.pth").write_bytes(b"discriminator")
+            state = RvcTrainingStateStore("voice", layout).refresh_checkpoint_pair()
+            panel = ModelTrainingPanel()
+            panel.set_model(_record(root, layout), state, 2, 2, 65_000)
+
+            emitted: list[RvcTrainingRunSettings] = []
+            panel.start_requested.connect(emitted.append)
+            panel.fresh_mode_button.click()
+            panel.target_epoch_spin.setValue(20)
+            panel.start_button.click()
+
+            self.assertEqual(panel.epoch_label.text(), "0 / 20")
+            self.assertEqual(panel.start_button.text(), "Start Training")
+            self.assertFalse(emitted[0].resume)
+            self.assertEqual(panel.duration_value.text(), "01:05")
+            panel.close()
+
+    def test_training_requires_every_selected_material_to_be_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layout = RvcModelPackageLayout(root / "model", "Voice")
+            layout.create()
+            state = RvcTrainingStateStore("voice", layout).initialize()
+            panel = ModelTrainingPanel()
+            record = _record(root, layout)
+
+            panel.set_model(record, state, 1, 2)
+            self.assertFalse(panel.start_button.isEnabled())
+            self.assertEqual(panel.readiness_badge.property("readiness"), "review")
+            self.assertFalse(panel.start_hint_label.isHidden())
+
+            panel.set_model(record, state, 2, 2)
+            self.assertTrue(panel.start_button.isEnabled())
+            self.assertEqual(panel.readiness_badge.property("readiness"), "ready")
+            self.assertTrue(panel.start_hint_label.isHidden())
             panel.close()
 
     def test_running_state_swaps_start_for_stop_and_locks_settings(self) -> None:
@@ -72,6 +120,7 @@ class ModelTrainingPanelTests(unittest.TestCase):
             panel.set_failure("previous failure")
             panel.set_running(True)
             panel.set_progress(70)
+            panel.set_stage("Training Model")
             panel.set_epoch_progress(3, 20)
             panel.set_runtime_status(65, 4)
             panel.stop_button.click()
@@ -84,11 +133,17 @@ class ModelTrainingPanelTests(unittest.TestCase):
             self.assertEqual(panel.stage_label.toolTip(), "")
             self.assertEqual(panel.epoch_label.text(), "3 / 20")
             self.assertEqual(panel.progress_percent_label.text(), "70%")
+            self.assertEqual(panel.workflow_progress.stage_state("train"), "active")
+            self.assertEqual(
+                panel.workflow_progress.stage_state("features"),
+                "complete",
+            )
             self.assertTrue(panel.activity_label.text().startswith("Working"))
             self.assertEqual(
                 panel.runtime_label.text(),
                 "Elapsed 01:05  |  Last activity 00:04 ago",
             )
+            self.assertEqual(panel.remaining_label.text(), "Estimating remaining time")
             self.assertFalse(panel.runtime_row.isHidden())
             self.assertTrue(panel.start_button.isHidden())
             self.assertFalse(panel.stop_button.isHidden())
@@ -101,6 +156,21 @@ class ModelTrainingPanelTests(unittest.TestCase):
         self.assertEqual(format_training_elapsed(65), "01:05")
         self.assertEqual(format_training_elapsed(3_661), "01:01:01")
 
+    def test_estimates_remaining_time_after_epoch_timing_is_available(self) -> None:
+        panel = ModelTrainingPanel()
+        panel.set_running(True)
+
+        with patch(
+            "jang_app.qt_app.model_training_panel.monotonic",
+            side_effect=(100.0, 110.0),
+        ):
+            panel.set_epoch_progress(1, 20)
+            panel.set_epoch_progress(2, 20)
+        panel.set_runtime_status(30, 0)
+
+        self.assertEqual(panel.remaining_label.text(), "About 03:00 remaining")
+        panel.close()
+
     def test_directml_inference_uses_an_explicit_cpu_training_device(self) -> None:
         panel = ModelTrainingPanel()
 
@@ -110,6 +180,33 @@ class ModelTrainingPanelTests(unittest.TestCase):
         self.assertEqual(panel.cpu_device_label.text(), "CPU")
         self.assertIn("DirectML / CPU Training", panel.profile_label.text())
         panel.close()
+
+    def test_complete_state_marks_every_workflow_stage_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layout = RvcModelPackageLayout(root / "model", "Voice")
+            layout.create()
+            store = RvcTrainingStateStore("voice", layout)
+            state = store.save(
+                replace(
+                    store.load(),
+                    phase=RvcTrainingPhase.COMPLETE,
+                    current_epoch=20,
+                    target_epoch=20,
+                )
+            )
+            panel = ModelTrainingPanel()
+
+            panel.set_model(_record(root, layout), state, 1, 1)
+
+            self.assertEqual(panel.progress_bar.value(), 100)
+            self.assertTrue(
+                all(
+                    panel.workflow_progress.stage_state(key) == "complete"
+                    for key in ("data", "prepare", "features", "train", "index")
+                )
+            )
+            panel.close()
 
 
 def _record(root: Path, layout: RvcModelPackageLayout) -> RvcModelRecord:

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from jang_app.services.startup_timing import StartupTimeline
+from jang_app.services.windows_app_mutex import create_app_mutex
 
 
 STARTUP_SMOKE_TEST_ARGUMENT = "--startup-smoke-test"
@@ -12,6 +13,7 @@ STARTUP_SMOKE_TEST_ARGUMENT = "--startup-smoke-test"
 def main(started_at: float | None = None) -> None:
     startup = StartupTimeline(started_at)
     startup.mark("entry_ready")
+    mutex_handle = create_app_mutex()
 
     smoke_test = STARTUP_SMOKE_TEST_ARGUMENT in sys.argv
     application_arguments = [
@@ -24,6 +26,7 @@ def main(started_at: float | None = None) -> None:
     startup.mark("qt_imported")
 
     app = QApplication(application_arguments)
+    app._jjzero_mutex_handle = mutex_handle
     app.setApplicationName("JJZero Audio")
     app.setOrganizationName("JJZero")
     package_root = Path(__file__).resolve().parents[1]
@@ -33,8 +36,11 @@ def main(started_at: float | None = None) -> None:
         configure_default_storage,
         is_initial_setup_complete,
     )
+    from jang_app.services.rvc_runtime_repair import repair_rvc_runtime_adapter
 
     setup_paths = discover_app_paths(package_root)
+    # Repair small app-owned runtime overlays before diagnostics inspect the installation.
+    repair_rvc_runtime_adapter(setup_paths.runtime_root / "rvc")
     setup_complete = is_initial_setup_complete(setup_paths)
     if not setup_complete:
         if smoke_test:

@@ -10,7 +10,10 @@ from jang_app.services.rvc_inference_runtime import (
     RvcInferenceCapabilities,
     probe_rvc_inference_runtime,
 )
-from jang_app.services.runtime_installation import installed_rvc_runtime_profile
+from jang_app.services.runtime_installation import (
+    RUNTIME_STATE_NAME,
+    installed_rvc_runtime_profile,
+)
 from jang_app.services.rvc_runtime_profile import (
     RVC_PROFILE_CU128,
     RVC_PROFILE_DIRECTML,
@@ -23,6 +26,8 @@ from jang_app.services.rvc_training_runtime import required_rvc_training_paths
 class DiagnosticStatus(StrEnum):
     PASS = "pass"
     WARNING = "warning"
+    REQUIRED = "required"
+    SKIPPED = "skipped"
     FAIL = "fail"
 
 
@@ -40,7 +45,8 @@ class SystemDiagnostics:
 
     @property
     def ready(self) -> bool:
-        return all(check.status != DiagnosticStatus.FAIL for check in self.checks)
+        blocking = {DiagnosticStatus.FAIL, DiagnosticStatus.REQUIRED}
+        return all(check.status not in blocking for check in self.checks)
 
     @property
     def has_warnings(self) -> bool:
@@ -50,6 +56,7 @@ class SystemDiagnostics:
 RuntimeProbe = Callable[[Path], RvcInferenceCapabilities]
 ProfileDetector = Callable[[], str]
 DiagnosticReporter = Callable[[DiagnosticCheck], None]
+DiagnosticStageReporter = Callable[[str, int, int], None]
 
 
 def run_system_diagnostics(
@@ -58,26 +65,81 @@ def run_system_diagnostics(
     runtime_probe: RuntimeProbe | None = None,
     profile_detector: ProfileDetector | None = None,
     reporter: DiagnosticReporter | None = None,
+    stage_reporter: DiagnosticStageReporter | None = None,
 ) -> SystemDiagnostics:
     checks: list[DiagnosticCheck] = []
+    total_stages = 6
 
     def record(check: DiagnosticCheck) -> None:
         checks.append(check)
         if reporter is not None:
             reporter(check)
 
+    def start(key: str, position: int) -> None:
+        if stage_reporter is not None:
+            stage_reporter(key, position, total_stages)
+
+    runtime_missing_status = (
+        DiagnosticStatus.FAIL
+        if (paths.runtime_root / RUNTIME_STATE_NAME).is_file()
+        else DiagnosticStatus.REQUIRED
+    )
+    start("storage", 1)
     record(_storage_check(paths))
-    record(_file_pair_check("ffmpeg", "FFmpeg", paths.runtime_root / "ffmpeg" / "bin"))
-    record(_demucs_check(paths.runtime_root))
+    start("ffmpeg", 2)
+    record(
+        _file_pair_check(
+            "ffmpeg",
+            "FFmpeg",
+            paths.runtime_root / "ffmpeg" / "bin",
+            missing_status=runtime_missing_status,
+        )
+    )
+    start("demucs", 3)
+    record(_demucs_check(paths.runtime_root, missing_status=runtime_missing_status))
     rvc_root = paths.runtime_root / "rvc"
-    assets = _rvc_assets_check(rvc_root)
+    start("rvc_assets", 4)
+    assets = _rvc_assets_check(rvc_root, missing_status=runtime_missing_status)
     record(assets)
-    if assets.status == DiagnosticStatus.FAIL:
-        record(DiagnosticCheck("ai_runtime", "AI Runtime", DiagnosticStatus.FAIL, "RVC runtime is incomplete."))
-        record(DiagnosticCheck("cuda", "GPU Acceleration", DiagnosticStatus.WARNING, "GPU check was skipped."))
+    if assets.status in {DiagnosticStatus.FAIL, DiagnosticStatus.REQUIRED}:
+        start("ai_runtime", 5)
+        record(
+            DiagnosticCheck(
+                "ai_runtime",
+                "Audio Engine",
+                assets.status,
+                "Install the audio processing components."
+                if assets.status == DiagnosticStatus.REQUIRED
+                else "The voice conversion runtime is incomplete.",
+            )
+        )
+        start("cuda", 6)
+        record(
+            DiagnosticCheck(
+                "cuda",
+                "GPU Acceleration",
+                DiagnosticStatus.SKIPPED,
+                "Not checked until the audio engine is ready.",
+            )
+        )
         return SystemDiagnostics(tuple(checks))
 
+    start("ai_runtime", 5)
     capabilities = (runtime_probe or probe_rvc_inference_runtime)(rvc_root)
+    if not capabilities.runtime_ready:
+        runtime_check, _cuda_check = _runtime_checks(capabilities)
+        record(runtime_check)
+        start("cuda", 6)
+        record(
+            DiagnosticCheck(
+                "cuda",
+                "GPU Acceleration",
+                DiagnosticStatus.SKIPPED,
+                "Not checked because the audio engine needs repair.",
+            )
+        )
+        return SystemDiagnostics(tuple(checks))
+
     desired_profile = (profile_detector or detect_rvc_runtime_profile)()
     installed_profile = installed_rvc_runtime_profile(rvc_root)
     profile_error = _profile_error(desired_profile, installed_profile, capabilities)
@@ -94,6 +156,7 @@ def run_system_diagnostics(
         fallback_detail=fallback_detail,
     )
     record(runtime_check)
+    start("cuda", 6)
     record(cuda_check)
     return SystemDiagnostics(tuple(checks))
 
@@ -111,21 +174,45 @@ def _storage_check(paths: AppPaths) -> DiagnosticCheck:
     return DiagnosticCheck("storage", "Storage", DiagnosticStatus.PASS, str(paths.workspace_anchor))
 
 
-def _file_pair_check(key: str, title: str, root: Path) -> DiagnosticCheck:
+def _file_pair_check(
+    key: str,
+    title: str,
+    root: Path,
+    *,
+    missing_status: DiagnosticStatus = DiagnosticStatus.FAIL,
+) -> DiagnosticCheck:
     missing = tuple(name for name in ("ffmpeg.exe", "ffprobe.exe") if not (root / name).is_file())
     if missing:
-        return DiagnosticCheck(key, title, DiagnosticStatus.FAIL, f"Missing: {', '.join(missing)}")
+        return DiagnosticCheck(key, title, missing_status, f"Missing: {', '.join(missing)}")
     return DiagnosticCheck(key, title, DiagnosticStatus.PASS, "Bundled tools ready")
 
 
-def _demucs_check(runtime_root: Path) -> DiagnosticCheck:
+def _demucs_check(
+    runtime_root: Path,
+    *,
+    missing_status: DiagnosticStatus = DiagnosticStatus.FAIL,
+) -> DiagnosticCheck:
     model = runtime_root / "demucs" / "torch" / "hub" / "checkpoints" / "955717e8-8726e21a.th"
     if not model.is_file():
-        return DiagnosticCheck("demucs", "Demucs", DiagnosticStatus.FAIL, "Separation model is missing.")
-    return DiagnosticCheck("demucs", "Demucs", DiagnosticStatus.PASS, "Separation model ready")
+        return DiagnosticCheck(
+            "demucs",
+            "Vocal Separation Model",
+            missing_status,
+            "Separation model is missing.",
+        )
+    return DiagnosticCheck(
+        "demucs",
+        "Vocal Separation Model",
+        DiagnosticStatus.PASS,
+        "Separation model ready",
+    )
 
 
-def _rvc_assets_check(rvc_root: Path) -> DiagnosticCheck:
+def _rvc_assets_check(
+    rvc_root: Path,
+    *,
+    missing_status: DiagnosticStatus = DiagnosticStatus.FAIL,
+) -> DiagnosticCheck:
     required = (
         Path("infer_cli.py"),
         Path("vc_infer_pipeline.py"),
@@ -135,11 +222,16 @@ def _rvc_assets_check(rvc_root: Path) -> DiagnosticCheck:
     if missing:
         return DiagnosticCheck(
             "rvc_assets",
-            "RVC Assets",
-            DiagnosticStatus.FAIL,
+            "Voice Conversion Tools",
+            missing_status,
             f"Missing: {missing[0].as_posix()}",
         )
-    return DiagnosticCheck("rvc_assets", "RVC Assets", DiagnosticStatus.PASS, "Convert and training assets ready")
+    return DiagnosticCheck(
+        "rvc_assets",
+        "Voice Conversion Tools",
+        DiagnosticStatus.PASS,
+        "Convert and training assets ready",
+    )
 
 
 def _runtime_checks(
@@ -151,7 +243,7 @@ def _runtime_checks(
     version = f" (Torch {capabilities.torch_version})" if capabilities.torch_version else ""
     runtime = DiagnosticCheck(
         "ai_runtime",
-        "AI Runtime",
+        "Audio Engine",
         DiagnosticStatus.PASS
         if capabilities.runtime_ready and not profile_error
         else DiagnosticStatus.FAIL,
@@ -215,7 +307,10 @@ def _profile_error(desired_profile, installed_profile, capabilities) -> str:
         RVC_PROFILE_DIRECTML,
         RVC_PROFILE_ROCM_WINDOWS,
     } and installed != desired_profile and not accepted_fallback:
-        return f"This GPU requires the RVC {desired_profile} runtime profile. Install or repair the AI runtime."
+        return (
+            f"This GPU requires the RVC {desired_profile} runtime profile. "
+            "Install or repair the audio engine."
+        )
     if accepted_fallback:
         return ""
     if desired_profile == RVC_PROFILE_CU128 and not capabilities.cuda_ready:

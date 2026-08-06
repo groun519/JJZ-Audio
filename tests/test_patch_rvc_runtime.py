@@ -12,14 +12,13 @@ class PatchRvcRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime = root / "rvc"
-            overlay = root / "overlay"
+            adapter = root / "jjzero_device.py"
             (runtime / "lib").mkdir(parents=True)
-            (overlay / "lib").mkdir(parents=True)
-            (overlay / "lib" / "jjzero_device.py").write_text("ADAPTER = True\n", encoding="utf-8")
+            adapter.write_text("ADAPTER = True\n", encoding="utf-8")
             _write_legacy_runtime(runtime)
 
-            changed = apply_rvc_runtime_patches(runtime, overlay)
-            repeated = apply_rvc_runtime_patches(runtime, overlay)
+            changed = apply_rvc_runtime_patches(runtime, adapter)
+            repeated = apply_rvc_runtime_patches(runtime, adapter)
 
             self.assertEqual(len(changed), 5)
             self.assertEqual(repeated, ())
@@ -48,10 +47,9 @@ class PatchRvcRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime = root / "rvc"
-            overlay = root / "overlay"
+            adapter = root / "jjzero_device.py"
             (runtime / "lib").mkdir(parents=True)
-            (overlay / "lib").mkdir(parents=True)
-            (overlay / "lib" / "jjzero_device.py").write_text("adapter\n", encoding="utf-8")
+            adapter.write_text("adapter\n", encoding="utf-8")
             for name in (
                 "infer_cli.py",
                 "extract_feature_print.py",
@@ -61,7 +59,7 @@ class PatchRvcRuntimeTests(unittest.TestCase):
                 (runtime / name).write_text("unsupported upstream\n", encoding="utf-8")
 
             with self.assertRaises(RvcRuntimePatchError):
-                apply_rvc_runtime_patches(runtime, overlay)
+                apply_rvc_runtime_patches(runtime, adapter)
 
 
 def _write_legacy_runtime(runtime: Path) -> None:

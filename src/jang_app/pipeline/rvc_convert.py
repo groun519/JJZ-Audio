@@ -28,6 +28,12 @@ class RvcConversionResult:
     output_path: Path
     voice_model_path: Path
     index_path: Path | None
+    voice_model: str = ""
+    index_file: str = ""
+    pitch: int = 0
+    requested_device: str = "auto"
+    effective_device: str = "cpu"
+    f0_method: str = "rmvpe"
 
 
 def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSettings) -> RvcConversionResult:
@@ -100,7 +106,18 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
         raise RvcConversionError(f"RVC conversion did not create output: {output_path}")
 
     logger.info("RVC conversion complete: output=%s", output_path)
-    return RvcConversionResult(source, output_path, model_path, index_path)
+    return RvcConversionResult(
+        source,
+        output_path,
+        model_path,
+        index_path,
+        voice_model=settings.voice_model,
+        index_file=settings.index_file,
+        pitch=settings.pitch,
+        requested_device=settings.device,
+        effective_device=device.effective_device,
+        f0_method=settings.f0_method,
+    )
 
 
 def list_voice_models(rvc_root: Path) -> list[str]:

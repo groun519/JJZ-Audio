@@ -13,6 +13,7 @@ from jang_app.services.runtime_installation import (
     installed_rvc_runtime_profile,
     installed_runtime_version,
 )
+from jang_app.services.rvc_runtime_repair import bundled_device_adapter
 from jang_app.services.rvc_training_runtime import required_rvc_training_paths
 
 
@@ -69,6 +70,19 @@ class RuntimeInstallationTests(unittest.TestCase):
             self.assertEqual(result.profile, "cu128")
             self.assertEqual(installed_rvc_runtime_profile(rvc).version, "3")
 
+    def test_repairs_adapter_omitted_from_base_runtime_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            package = root / "runtime.zip"
+            _write_runtime_package(package, include_adapter=False)
+
+            install_runtime_packages((package,), runtime, "9")
+
+            adapter = runtime / "rvc" / "lib" / "jjzero_device.py"
+            self.assertEqual(adapter.read_bytes(), bundled_device_adapter().read_bytes())
+            self.assertEqual(installed_runtime_version(runtime), "9")
+
     def test_failed_profile_activation_preserves_the_current_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -104,7 +118,7 @@ class RuntimeInstallationTests(unittest.TestCase):
             self.assertFalse((root / "outside.txt").exists())
 
 
-def _write_runtime_package(path: Path) -> None:
+def _write_runtime_package(path: Path, *, include_adapter: bool = True) -> None:
     files = {
         "ffmpeg/bin/ffmpeg.exe": b"ffmpeg",
         "ffmpeg/bin/ffprobe.exe": b"ffprobe",
@@ -114,9 +128,12 @@ def _write_runtime_package(path: Path) -> None:
         "rvc/hubert_base.pt": b"hubert",
         "rvc/rmvpe.pt": b"rmvpe",
     }
-    files.update(
-        {f"rvc/{required.as_posix()}": b"training" for required in required_rvc_training_paths()}
-    )
+    training_paths = required_rvc_training_paths()
+    if not include_adapter:
+        training_paths = tuple(
+            required for required in training_paths if required != Path("lib/jjzero_device.py")
+        )
+    files.update({f"rvc/{required.as_posix()}": b"training" for required in training_paths})
     with zipfile.ZipFile(path, "w") as archive:
         for name, data in files.items():
             archive.writestr(name, data)

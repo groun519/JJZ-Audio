@@ -32,12 +32,12 @@ try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $version = [string]$manifest.version
     $tag = "v$version"
-    $assets = @($manifestPath, (Join-Path $releaseDir "runtime-packages.json"))
-    $assets += Get-ChildItem -LiteralPath $releaseDir -Filter "rvc-runtime-*-packages.json" -File |
-        Select-Object -ExpandProperty FullName
+    $assets = @($manifestPath)
     foreach ($component in $manifest.components) {
         foreach ($artifact in $component.artifacts) {
-            $assets += Join-Path $releaseDir $artifact.name
+            if (-not $artifact.url) {
+                $assets += Join-Path $releaseDir $artifact.name
+            }
         }
     }
     $assets = $assets | Select-Object -Unique

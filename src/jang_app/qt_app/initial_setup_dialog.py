@@ -29,27 +29,76 @@ from jang_app.services.initial_setup import (
     prepare_storage_layout,
 )
 from jang_app.services.hardware_diagnostics_state import record_hardware_diagnostics
+from jang_app.services.rvc_inference_runtime import clear_rvc_inference_probe_cache
+from jang_app.services.rvc_runtime_profile import clear_nvidia_gpu_cache
 from jang_app.services.system_diagnostics import (
     DiagnosticCheck,
     DiagnosticStatus,
     SystemDiagnostics,
     run_system_diagnostics,
 )
-from jang_app.services.runtime_bootstrap import provision_ai_runtime, provision_ai_runtime_offline
+from jang_app.services.runtime_bootstrap import (
+    RuntimeProvisionActivity,
+    RuntimeProvisionStage,
+    provision_ai_runtime,
+    provision_ai_runtime_offline,
+)
+
+
+_DIAGNOSTIC_KEYS = (
+    "storage",
+    "ffmpeg",
+    "demucs",
+    "rvc_assets",
+    "ai_runtime",
+    "cuda",
+)
+_DIAGNOSTIC_STAGE_LABELS = (
+    "Storage",
+    "Media Tools",
+    "Separation",
+    "Voice Tools",
+    "Audio Engine",
+    "GPU",
+)
+_INSTALL_STAGE_LABELS = (
+    "Prepare",
+    "Download",
+    "Install",
+    "Configure",
+    "Verify",
+)
 
 
 class DiagnosticsWorker(QThread):
     check_ready = Signal(object)
+    stage_started = Signal(str, int, int)
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, paths: AppPaths) -> None:
+    def __init__(
+        self,
+        paths: AppPaths,
+        *,
+        refresh_runtime: bool = False,
+        refresh_hardware: bool = False,
+    ) -> None:
         super().__init__()
         self._paths = paths
+        self._refresh_runtime = refresh_runtime
+        self._refresh_hardware = refresh_hardware
 
     def run(self) -> None:
         try:
-            result = run_system_diagnostics(self._paths, reporter=self.check_ready.emit)
+            if self._refresh_runtime:
+                clear_rvc_inference_probe_cache()
+            if self._refresh_hardware:
+                clear_nvidia_gpu_cache()
+            result = run_system_diagnostics(
+                self._paths,
+                reporter=self.check_ready.emit,
+                stage_reporter=self.stage_started.emit,
+            )
             self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -57,6 +106,7 @@ class DiagnosticsWorker(QThread):
 
 class RuntimeProvisionWorker(QThread):
     progress_changed = Signal(int)
+    activity_changed = Signal(object)
     completed = Signal(object)
     failed = Signal(str)
 
@@ -78,12 +128,14 @@ class RuntimeProvisionWorker(QThread):
                     self._paths,
                     manifest_url=self._manifest_url,
                     progress=self.progress_changed.emit,
+                    activity=self.activity_changed.emit,
                 )
             else:
                 result = provision_ai_runtime_offline(
                     self._paths,
                     self._package_index,
                     progress=self.progress_changed.emit,
+                    activity=self.activity_changed.emit,
                 )
             self.completed.emit(result)
         except Exception as exc:
@@ -256,17 +308,29 @@ class InitialSetupDialog(AppDialog):
         title.setObjectName("SetupTitle")
         self.diagnostic_summary = QLabel(tr("Checking bundled tools and GPU acceleration..."))
         self.diagnostic_summary.setObjectName("SetupDescription")
+        self.diagnostic_progress_detail = QLabel("")
+        self.diagnostic_progress_detail.setObjectName("SetupProgressDetail")
+        self.diagnostic_progress_detail.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        progress_header = QHBoxLayout()
+        progress_header.setContentsMargins(0, 0, 0, 0)
+        progress_header.addWidget(self.diagnostic_summary, 1)
+        progress_header.addWidget(self.diagnostic_progress_detail)
         self.diagnostic_progress = QProgressBar()
         self.diagnostic_progress.setRange(0, 0)
+        self.diagnostic_progress.setTextVisible(False)
         self.diagnostic_progress.setObjectName("SetupProgress")
         self.diagnostic_progress.hide()
+        self.diagnostic_stages = SetupStageStrip()
+        self.diagnostic_stages.hide()
 
         checks = (
             ("storage", "Storage"),
             ("ffmpeg", "FFmpeg"),
-            ("demucs", "Demucs"),
-            ("rvc_assets", "RVC Assets"),
-            ("ai_runtime", "AI Runtime"),
+            ("demucs", "Vocal Separation Model"),
+            ("rvc_assets", "Voice Conversion Tools"),
+            ("ai_runtime", "Audio Engine"),
             ("cuda", "GPU Acceleration"),
         )
         self.diagnostic_rows: dict[str, DiagnosticRow] = {}
@@ -280,9 +344,14 @@ class InitialSetupDialog(AppDialog):
 
         self.rerun_button = QPushButton(tr("Run Diagnostics Again"))
         self.rerun_button.setObjectName("SetupSecondaryButton")
-        self.rerun_button.clicked.connect(self._start_diagnostics)
+        self.rerun_button.clicked.connect(
+            lambda _checked=False: self._start_diagnostics(
+                refresh_runtime=True,
+                refresh_hardware=True,
+            )
+        )
         self.rerun_button.hide()
-        self.install_runtime_button = QPushButton(tr("Install AI Runtime"))
+        self.install_runtime_button = QPushButton(tr("Install Audio Engine"))
         self.install_runtime_button.setObjectName("SetupPrimaryButton")
         self.install_runtime_button.clicked.connect(lambda: self._start_runtime_install())
         self.install_runtime_button.hide()
@@ -300,8 +369,9 @@ class InitialSetupDialog(AppDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(13)
         layout.addWidget(title)
-        layout.addWidget(self.diagnostic_summary)
+        layout.addLayout(progress_header)
         layout.addWidget(self.diagnostic_progress)
+        layout.addWidget(self.diagnostic_stages)
         layout.addLayout(checks_layout)
         layout.addLayout(rerun_row)
         layout.addStretch(1)
@@ -363,33 +433,62 @@ class InitialSetupDialog(AppDialog):
         self.primary_button.setText(tr("Continue"))
         self.cancel_button.show()
 
-    def _start_diagnostics(self) -> None:
+    def _start_diagnostics(
+        self,
+        *,
+        refresh_runtime: bool = False,
+        refresh_hardware: bool = False,
+    ) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
         self._diagnostics = None
         for row in self.diagnostic_rows.values():
-            row.set_waiting()
+            row.set_pending()
         self.diagnostic_summary.setText(tr("Checking bundled tools and GPU acceleration..."))
+        self.diagnostic_progress_detail.setText(f"0 / {len(_DIAGNOSTIC_KEYS)}")
+        self.diagnostic_progress_detail.show()
         self.diagnostic_progress.show()
-        self.diagnostic_progress.setRange(0, 0)
+        self.diagnostic_progress.setRange(0, len(_DIAGNOSTIC_KEYS))
+        self.diagnostic_progress.setValue(0)
+        self.diagnostic_stages.set_stages(tuple(tr(label) for label in _DIAGNOSTIC_STAGE_LABELS))
+        self.diagnostic_stages.show()
         self.rerun_button.hide()
         self.install_runtime_button.hide()
         self.offline_runtime_button.hide()
         self.primary_button.setEnabled(False)
         self.back_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
-        worker = self._diagnostics_worker_type(self._configured_paths)
+        worker = self._diagnostics_worker_type(
+            self._configured_paths,
+            refresh_runtime=refresh_runtime,
+            refresh_hardware=refresh_hardware,
+        )
         worker.setParent(self)
         worker.check_ready.connect(self._on_check_ready)
+        worker.stage_started.connect(self._on_diagnostic_stage_started)
         worker.completed.connect(self._on_diagnostics_complete)
         worker.failed.connect(self._on_diagnostics_failed)
         worker.finished.connect(self._on_worker_finished)
         self._worker = worker
         worker.start()
 
+    def _on_diagnostic_stage_started(self, key: str, position: int, total: int) -> None:
+        row = self.diagnostic_rows.get(key)
+        if row is not None:
+            row.set_running(tr("Checking"))
+        self.diagnostic_stages.set_active(position - 1)
+        self.diagnostic_progress.setValue(max(0, position - 1))
+        self.diagnostic_progress_detail.setText(f"{position} / {total}")
+
     def _on_check_ready(self, check: object) -> None:
         if isinstance(check, DiagnosticCheck) and check.key in self.diagnostic_rows:
             self.diagnostic_rows[check.key].set_check(check)
+            position = _DIAGNOSTIC_KEYS.index(check.key) + 1
+            self.diagnostic_progress.setValue(position)
+            self.diagnostic_progress_detail.setText(
+                f"{position} / {len(_DIAGNOSTIC_KEYS)}"
+            )
+            self.diagnostic_stages.set_completed(position - 1)
 
     def _on_diagnostics_complete(self, diagnostics: object) -> None:
         if not isinstance(diagnostics, SystemDiagnostics):
@@ -404,10 +503,16 @@ class InitialSetupDialog(AppDialog):
             summary = "Setup is usable, but GPU acceleration needs attention."
         elif diagnostics.ready:
             summary = "This PC is ready for JJZero Audio."
+        elif any(
+            check.status == DiagnosticStatus.REQUIRED for check in diagnostics.checks
+        ):
+            summary = "Required audio processing components are not installed yet."
         else:
             summary = "Some bundled components are unavailable. Rebuild or repair the installation."
         self.diagnostic_summary.setText(tr(summary))
         self.diagnostic_progress.hide()
+        self.diagnostic_progress_detail.hide()
+        self.diagnostic_stages.hide()
         self.rerun_button.show()
         needs_runtime = _needs_runtime_install(diagnostics)
         self.install_runtime_button.setVisible(needs_runtime)
@@ -421,11 +526,13 @@ class InitialSetupDialog(AppDialog):
 
     def _on_diagnostics_failed(self, error: str) -> None:
         self._diagnostics = SystemDiagnostics(
-            (DiagnosticCheck("ai_runtime", "AI Runtime", DiagnosticStatus.FAIL, error),)
+            (DiagnosticCheck("ai_runtime", "Audio Engine", DiagnosticStatus.FAIL, error),)
         )
         self._on_check_ready(self._diagnostics.checks[0])
         self.diagnostic_summary.setText(tr("System diagnostics failed."))
         self.diagnostic_progress.hide()
+        self.diagnostic_progress_detail.hide()
+        self.diagnostic_stages.hide()
         self.rerun_button.show()
         self.install_runtime_button.show()
         self.offline_runtime_button.show()
@@ -443,7 +550,7 @@ class InitialSetupDialog(AppDialog):
     def _choose_runtime_packages(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
             self,
-            tr("Select AI Runtime Package Index"),
+            tr("Select Audio Engine Package Index"),
             str(Path.home()),
             f"{tr('JSON Files')} (*.json)",
         )
@@ -454,10 +561,24 @@ class InitialSetupDialog(AppDialog):
         if self._worker is not None and self._worker.isRunning():
             return
         self.setProperty("runtimeInstallFailed", False)
-        self.diagnostic_summary.setText(tr("Downloading and installing the AI runtime..."))
+        self.diagnostic_summary.setText(tr("Preparing audio processing components..."))
+        self.diagnostic_progress_detail.setText("0%")
+        self.diagnostic_progress_detail.show()
         self.diagnostic_progress.setRange(0, 100)
         self.diagnostic_progress.setValue(0)
         self.diagnostic_progress.show()
+        self.diagnostic_stages.set_stages(tuple(tr(label) for label in _INSTALL_STAGE_LABELS))
+        self.diagnostic_stages.set_active(0)
+        self.diagnostic_stages.show()
+        for key in ("ffmpeg", "demucs", "rvc_assets", "ai_runtime"):
+            self.diagnostic_rows[key].set_pending(
+                tr("Queued for installation"),
+                status=tr("Waiting"),
+            )
+        self.diagnostic_rows["cuda"].set_pending(
+            tr("Checked after installation"),
+            status=tr("Waiting"),
+        )
         self.install_runtime_button.hide()
         self.offline_runtime_button.hide()
         self.rerun_button.hide()
@@ -471,19 +592,68 @@ class InitialSetupDialog(AppDialog):
             package_index,
         )
         worker.setParent(self)
-        worker.progress_changed.connect(self.diagnostic_progress.setValue)
-        worker.completed.connect(
-            lambda _result: self.diagnostic_summary.setText(tr("AI runtime installed. Verifying..."))
-        )
+        worker.progress_changed.connect(self._on_runtime_progress)
+        worker.activity_changed.connect(self._on_runtime_activity)
+        worker.completed.connect(self._on_runtime_installed)
         worker.failed.connect(self._on_runtime_install_failed)
         worker.finished.connect(self._on_worker_finished)
         worker.finished.connect(self._restart_diagnostics_after_runtime_install)
         self._worker = worker
         worker.start()
 
+    def _on_runtime_progress(self, value: int) -> None:
+        self.diagnostic_progress.setValue(value)
+        if "/" not in self.diagnostic_progress_detail.text():
+            self.diagnostic_progress_detail.setText(f"{value}%")
+
+    def _on_runtime_activity(self, activity: object) -> None:
+        if not isinstance(activity, RuntimeProvisionActivity):
+            return
+        stages = tuple(RuntimeProvisionStage)
+        position = stages.index(activity.stage)
+        self.diagnostic_stages.set_active(position)
+        summaries = {
+            RuntimeProvisionStage.PREPARING: "Preparing audio processing components...",
+            RuntimeProvisionStage.DOWNLOADING: "Downloading audio processing components...",
+            RuntimeProvisionStage.INSTALLING: "Installing audio tools and model components...",
+            RuntimeProvisionStage.CONFIGURING: "Configuring hardware acceleration...",
+            RuntimeProvisionStage.VERIFYING: "Verifying audio processing components...",
+        }
+        self.diagnostic_summary.setText(tr(summaries[activity.stage]))
+        if activity.total_bytes > 0:
+            percent = min(100, int(activity.completed_bytes * 100 / activity.total_bytes))
+            self.diagnostic_progress.setRange(0, 100)
+            self.diagnostic_progress.setValue(percent)
+            self.diagnostic_progress_detail.setText(
+                f"{_format_bytes(activity.completed_bytes)} / "
+                f"{_format_bytes(activity.total_bytes)} · {percent}%"
+            )
+        else:
+            self.diagnostic_progress_detail.setText(tr(activity.detail))
+            if activity.stage == RuntimeProvisionStage.VERIFYING:
+                self.diagnostic_progress.setRange(0, 0)
+        if activity.stage == RuntimeProvisionStage.DOWNLOADING:
+            for key in ("ffmpeg", "demucs", "rvc_assets", "ai_runtime"):
+                self.diagnostic_rows[key].set_running(tr("Downloading"))
+        elif activity.stage == RuntimeProvisionStage.INSTALLING:
+            for key in ("ffmpeg", "demucs", "rvc_assets", "ai_runtime"):
+                self.diagnostic_rows[key].set_running(tr("Installing"))
+        elif activity.stage == RuntimeProvisionStage.CONFIGURING:
+            self.diagnostic_rows["rvc_assets"].set_running(tr("Configuring"))
+            self.diagnostic_rows["ai_runtime"].set_running(tr("Configuring"))
+        elif activity.stage == RuntimeProvisionStage.VERIFYING:
+            self.diagnostic_rows["ai_runtime"].set_running(tr("Verifying"))
+            self.diagnostic_rows["cuda"].set_running(tr("Verifying"))
+
+    def _on_runtime_installed(self, _result: object) -> None:
+        self.diagnostic_summary.setText(tr("Audio engine installed. Verifying..."))
+        self.diagnostic_stages.set_active(len(_INSTALL_STAGE_LABELS) - 1)
+
     def _on_runtime_install_failed(self, error: str) -> None:
-        self.diagnostic_summary.setText(f"{tr('Runtime failed')}: {error}")
+        self.diagnostic_summary.setText(f"{tr('Audio engine installation failed')}: {error}")
         self.diagnostic_progress.hide()
+        self.diagnostic_progress_detail.hide()
+        self.diagnostic_stages.hide()
         self.install_runtime_button.show()
         self.offline_runtime_button.show()
         self.rerun_button.show()
@@ -496,7 +666,7 @@ class InitialSetupDialog(AppDialog):
         failed = bool(self.property("runtimeInstallFailed"))
         self.setProperty("runtimeInstallFailed", False)
         if not failed:
-            self._start_diagnostics()
+            self._start_diagnostics(refresh_runtime=True)
 
     def _on_worker_finished(self) -> None:
         worker = self._worker
@@ -526,7 +696,7 @@ class DiagnosticRow(QFrame):
         self.setObjectName("DiagnosticRow")
         self.title_label = QLabel(title)
         self.title_label.setObjectName("DiagnosticTitle")
-        self.detail_label = QLabel(tr("Waiting"))
+        self.detail_label = QLabel(tr("Not checked"))
         self.detail_label.setObjectName("DiagnosticDetail")
         self.detail_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.status_label = QLabel("—")
@@ -541,10 +711,19 @@ class DiagnosticRow(QFrame):
         layout.addLayout(text, 1)
         layout.addWidget(self.status_label)
 
-    def set_waiting(self) -> None:
-        self.detail_label.setText(tr("Waiting"))
-        self.status_label.setText("—")
-        self._set_status("")
+    def set_pending(self, detail: str = "", *, status: str = "") -> None:
+        text = detail or tr("Not checked")
+        self.detail_label.setText(text)
+        self.detail_label.setToolTip(text)
+        self.status_label.setText(status or tr("Not Checked"))
+        self._set_status("pending")
+
+    def set_running(self, detail: str = "") -> None:
+        text = detail or tr("Checking")
+        self.detail_label.setText(text)
+        self.detail_label.setToolTip(text)
+        self.status_label.setText(tr("In Progress"))
+        self._set_status("running")
 
     def set_check(self, check: DiagnosticCheck) -> None:
         self.detail_label.setText(tr(check.detail))
@@ -552,6 +731,8 @@ class DiagnosticRow(QFrame):
         label = {
             DiagnosticStatus.PASS: "Ready",
             DiagnosticStatus.WARNING: "Attention",
+            DiagnosticStatus.REQUIRED: "Install Required",
+            DiagnosticStatus.SKIPPED: "Not Checked",
             DiagnosticStatus.FAIL: "Failed",
         }[check.status]
         self.status_label.setText(tr(label))
@@ -565,12 +746,75 @@ class DiagnosticRow(QFrame):
             widget.style().polish(widget)
 
 
+class SetupStageStrip(QFrame):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("SetupStageStrip")
+        self._labels: list[QLabel] = []
+        self._active = -1
+        self._completed = -1
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(5, 4, 5, 4)
+        self._layout.setSpacing(4)
+
+    def set_stages(self, stages: tuple[str, ...]) -> None:
+        while self._labels:
+            label = self._labels.pop()
+            self._layout.removeWidget(label)
+            label.deleteLater()
+        self._active = -1
+        self._completed = -1
+        for position, text in enumerate(stages, start=1):
+            label = QLabel(f"{position:02d}  {text}")
+            label.setObjectName("SetupStageBadge")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._layout.addWidget(label, 1)
+            self._labels.append(label)
+        self._refresh()
+
+    def set_active(self, position: int) -> None:
+        if not self._labels:
+            return
+        self._active = min(max(0, position), len(self._labels) - 1)
+        self._completed = max(self._completed, self._active - 1)
+        self._refresh()
+
+    def set_completed(self, position: int) -> None:
+        self._completed = min(max(self._completed, position), len(self._labels) - 1)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        for index, label in enumerate(self._labels):
+            state = (
+                "complete"
+                if index <= self._completed
+                else "active"
+                if index == self._active
+                else "pending"
+            )
+            label.setProperty("state", state)
+            label.style().unpolish(label)
+            label.style().polish(label)
+
+
 def _needs_runtime_install(diagnostics: SystemDiagnostics) -> bool:
     runtime_keys = {"ffmpeg", "demucs", "rvc_assets", "ai_runtime"}
     return any(
-        check.key in runtime_keys and check.status == DiagnosticStatus.FAIL
+        check.key in runtime_keys
+        and check.status in {DiagnosticStatus.FAIL, DiagnosticStatus.REQUIRED}
         for check in diagnostics.checks
     )
+
+
+def _format_bytes(value: int) -> str:
+    size = max(0, value)
+    units = ("B", "KB", "MB", "GB", "TB")
+    amount = float(size)
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{size} B"
 
 
 def _path_preview(label: str) -> QLabel:
@@ -601,6 +845,7 @@ QLabel#SetupStepCount {{ color: {colors['muted']}; background: {colors['card']};
   border-radius: 10px; padding: 5px 10px; font-size: 10px; font-weight: 800; }}
 QLabel#SetupTitle {{ color: {colors['text']}; font-size: 22px; font-weight: 800; }}
 QLabel#SetupDescription {{ color: {colors['muted']}; font-size: 11px; }}
+QLabel#SetupProgressDetail {{ color: {colors['faint']}; font-size: 10px; font-weight: 700; }}
 QFrame#SetupCard, QFrame#SetupPreview {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 14px; }}
 QLabel#SetupFieldLabel {{ color: {colors['muted']}; font-size: 10px; font-weight: 800; }}
 QLabel#SetupPathPreview {{ color: {colors['muted']}; font-size: 10px; }}
@@ -623,9 +868,16 @@ QLabel#SetupError {{ color: {colors['source_youtube_text']}; background: {colors
   border-radius: 9px; padding: 8px 11px; }}
 QProgressBar#SetupProgress {{ min-height: 5px; max-height: 5px; border: 0; border-radius: 2px; background: {colors['raised']}; }}
 QProgressBar#SetupProgress::chunk {{ background: {colors['accent']}; border-radius: 2px; }}
+QFrame#SetupStageStrip {{ background: {colors['chrome']}; border: 1px solid {colors['border']}; border-radius: 10px; }}
+QLabel#SetupStageBadge {{ color: {colors['faint']}; background: transparent; border: 0; border-radius: 7px;
+  min-height: 25px; font-size: 9px; font-weight: 700; }}
+QLabel#SetupStageBadge[state='active'] {{ color: {colors['tab_active_text']}; background: {colors['tab_active']}; }}
+QLabel#SetupStageBadge[state='complete'] {{ color: {colors['source_output_text']}; }}
 QFrame#DiagnosticRow {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 11px; }}
 QFrame#DiagnosticRow[status='fail'] {{ border-color: #8a4437; }}
 QFrame#DiagnosticRow[status='warning'] {{ border-color: #7a6740; }}
+QFrame#DiagnosticRow[status='required'] {{ border-color: {warning_border}; }}
+QFrame#DiagnosticRow[status='running'] {{ border-color: {colors['focus']}; }}
 QLabel#DiagnosticTitle {{ color: {colors['text']}; font-size: 11px; font-weight: 800; }}
 QLabel#DiagnosticDetail {{ color: {colors['faint']}; font-size: 9px; }}
 QLabel#DiagnosticStatus {{ color: {colors['focus']}; background: {input_color}; border: 1px solid {colors['border']};
@@ -634,6 +886,12 @@ QLabel#DiagnosticStatus[status='pass'] {{ color: {colors['source_output_text']};
   border-color: {colors['source_output_border']}; background: {colors['source_output_background']}; }}
 QLabel#DiagnosticStatus[status='warning'] {{ color: {warning_text}; border-color: {warning_border};
   background: {warning_background}; }}
+QLabel#DiagnosticStatus[status='required'] {{ color: {warning_text}; border-color: {warning_border};
+  background: {warning_background}; }}
+QLabel#DiagnosticStatus[status='running'] {{ color: {colors['text']}; border-color: {colors['focus']};
+  background: {colors['tab_active']}; }}
+QLabel#DiagnosticStatus[status='skipped'], QLabel#DiagnosticStatus[status='pending'] {{
+  color: {colors['faint']}; border-color: {colors['border']}; background: {colors['raised']}; }}
 QLabel#DiagnosticStatus[status='fail'] {{ color: {colors['source_youtube_text']};
   border-color: {colors['source_youtube_border']}; background: {colors['source_youtube_background']}; }}
 """

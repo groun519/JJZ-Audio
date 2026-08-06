@@ -64,6 +64,10 @@ class JobDiagnosticsTests(unittest.TestCase):
         )
         self.assertEqual(classify_error("No module named 'lib.train'").code, "PYTHON_MODULE_MISSING")
         self.assertEqual(
+            classify_error("ModuleNotFoundError: No module named 'lib.jjzero_device'").code,
+            "RVC_RUNTIME_INCOMPLETE",
+        )
+        self.assertEqual(
             classify_error("Could not run operator on privateuseone:0").code,
             "DIRECTML_RUNTIME_FAILED",
         )

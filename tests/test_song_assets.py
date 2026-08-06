@@ -39,7 +39,7 @@ class SongAssetDetailsTests(unittest.TestCase):
 
             self.assertEqual(len(details.assets_for(STAGE_SOURCE)), 2)
             self.assertEqual(len(details.assets_for(STAGE_VOCAL)), 3)
-            self.assertEqual(len(details.assets_for(STAGE_STUDIO)), 1)
+            self.assertEqual(len(details.assets_for(STAGE_STUDIO)), 0)
             self.assertEqual(len(details.assets_for(STAGE_EXPORT)), 1)
             active_vocal_paths = {asset.path for asset in details.assets_for(STAGE_VOCAL) if asset.is_active}
             self.assertEqual(

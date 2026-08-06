@@ -119,7 +119,7 @@ The ROCm builder creates its own Python 3.12 runtime from the pinned official Py
 
 The ROCm builder cross-builds from pinned official packages and marks the result `required_on_install`. JJZero validates HIP, Torch, FAISS, Fairseq, Torchaudio, matrix multiplication, and 1D/2D convolutions on the target AMD PC before activation. Training is then available and any unsupported backward-pass failure is retained in the structured task log. A failed ROCm activation falls back to DirectML and then CPU without replacing user media or model data. The same failed profile version is not retried on every launch; publishing a newer profile version re-enables validation automatically.
 
-`build_runtime_packages.ps1` applies the tracked `packaging\rvc_overlay` to the project-owned RVC copy before packaging. It never edits an external WebUI installation, and it stops the release if the upstream RVC scripts no longer match the expected patch points.
+`build_runtime_packages.ps1` applies the tracked device adapter in `src\jang_app\rvc_tools` to the project-owned RVC copy before packaging. It never edits an external WebUI installation, and it stops the release if the upstream RVC scripts no longer match the expected patch points.
 
 The application installer is small and preserves an installed runtime during updates. A new PC downloads the bounded base runtime ZIP parts listed in `latest.json` plus the matching `cu128`, `directml`, or `rocm-win` profile when required. Every SHA-256 hash is verified and each runtime tree is installed atomically. Each release asset remains below GitHub Releases' 2 GiB file limit. The Windows ROCm profile is a complete Python 3.12 runtime; target-PC activation is mandatory and model training remains experimental on Windows.
 
@@ -130,17 +130,20 @@ Verify an unsigned local release and an in-place upgrade from 0.2.1:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1 -AllowUnsigned
 powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 `
-  -PreviousInstallerPath release\JJZero-Audio-0.2.1-Setup.exe `
-  -InstallerPath release\JJZero-Audio-0.2.2-Setup.exe `
+  -PreviousInstallerPath release\JJZero-Audio-0.2.2-Setup.exe `
+  -InstallerPath release\JJZero-Audio-0.2.3-Setup.exe `
   -RuntimePackageIndex release\runtime-packages.json
 ```
 
 Public releases should be Authenticode-signed. Configure `JJZERO_SIGN_CERT_THUMBPRINT` or `JJZERO_SIGN_CERT_PATH`, set `JJZERO_SIGNING_PUBLISHER`, and build with `-RequireCodeSigning`. Publishing uses GitHub Releases and requires GitHub CLI authentication:
 
 ```powershell
-.\build_release.bat -SkipRuntimeBuild -RequireCodeSigning
+.\scripts\build_release.ps1 -SkipRuntimeBuild -RequireCodeSigning `
+  -RuntimeReleaseTag v0.2.2
 powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1
 powershell -ExecutionPolicy Bypass -File scripts\publish_github_release.ps1
 ```
+
+`RuntimeReleaseTag` keeps unchanged runtime components linked to their original GitHub Release while publishing only the new application installer and manifest.
 
 The single application version source is `src\jang_app\version.py`. Windows metadata, installer names, update manifests, and release verification all read that value.

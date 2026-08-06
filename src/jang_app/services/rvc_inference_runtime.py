@@ -156,13 +156,28 @@ def _probe_rvc_inference_runtime_cached(rvc_root: str) -> RvcInferenceCapabiliti
             cuda_detail="CUDA check was skipped.",
         )
 
+    imports_ready = bool(cpu_data.get("imports_ready"))
+    cpu_ready = bool(cpu_data.get("cpu_ready"))
+    faiss_ready = bool(cpu_data.get("faiss_ready"))
+    torch_version = str(cpu_data.get("torch_version", "")).strip()
+    if not (imports_ready and cpu_ready and faiss_ready):
+        return RvcInferenceCapabilities(
+            imports_ready=imports_ready,
+            cpu_ready=cpu_ready,
+            faiss_ready=faiss_ready,
+            cuda_available=False,
+            cuda_ready=False,
+            torch_version=torch_version,
+            cpu_detail=str(cpu_data.get("detail", "")).strip(),
+            cuda_detail="GPU check was skipped until CPU inference and FAISS are ready.",
+        )
+
     profile = _installed_profile(root)
     accelerator_label = "DirectML inference" if profile == RVC_PROFILE_DIRECTML else "CUDA inference"
     accelerator_script = _DIRECTML_PROBE if profile == RVC_PROFILE_DIRECTML else _CUDA_PROBE
     cuda_result = _run_probe(python, root, accelerator_script)
     cuda_data, cuda_error = _parse_probe_result(cuda_result, accelerator_label)
     cuda_data = cuda_data or {}
-    torch_version = str(cpu_data.get("torch_version", "")).strip()
     cuda_version = str(cuda_data.get("cuda_version", "")).strip()
     device_capability = parse_cuda_capability(cuda_data.get("device_capability"))
     cuda_arch_list = parse_cuda_arch_list(cuda_data.get("cuda_arch_list"))
@@ -179,9 +194,9 @@ def _probe_rvc_inference_runtime_cached(rvc_root: str) -> RvcInferenceCapabiliti
         cuda_ready = False
         cuda_detail = " ".join(filter(None, (compatibility_error, cuda_detail, "Using CPU.")))
     return RvcInferenceCapabilities(
-        imports_ready=bool(cpu_data.get("imports_ready")),
-        cpu_ready=bool(cpu_data.get("cpu_ready")),
-        faiss_ready=bool(cpu_data.get("faiss_ready")),
+        imports_ready=imports_ready,
+        cpu_ready=cpu_ready,
+        faiss_ready=faiss_ready,
         cuda_available=bool(cuda_data.get("cuda_available")),
         cuda_ready=cuda_ready,
         device_count=_safe_int(cuda_data.get("device_count")),

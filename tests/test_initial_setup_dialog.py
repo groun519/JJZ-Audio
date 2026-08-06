@@ -69,11 +69,18 @@ class InitialSetupDialogTests(unittest.TestCase):
 
 class _ReadyWorker(QObject):
     check_ready = Signal(object)
+    stage_started = Signal(str, int, int)
     completed = Signal(object)
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, _paths) -> None:
+    def __init__(
+        self,
+        _paths,
+        *,
+        refresh_runtime: bool = False,
+        refresh_hardware: bool = False,
+    ) -> None:
         super().__init__()
         self._running = False
 
@@ -90,7 +97,8 @@ class _ReadyWorker(QObject):
                 ("cuda", "NVIDIA GPU"),
             )
         )
-        for check in checks:
+        for position, check in enumerate(checks, start=1):
+            self.stage_started.emit(check.key, position, len(checks))
             self.check_ready.emit(check)
         self.completed.emit(SystemDiagnostics(checks))
         self._running = False

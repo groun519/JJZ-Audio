@@ -4,7 +4,8 @@ param(
     [switch]$RequireCodeSigning,
     [string]$SigningPublisher = $env:JJZERO_SIGNING_PUBLISHER,
     [string]$CertificateThumbprint = $env:JJZERO_SIGN_CERT_THUMBPRINT,
-    [string]$CertificatePath = $env:JJZERO_SIGN_CERT_PATH
+    [string]$CertificatePath = $env:JJZERO_SIGN_CERT_PATH,
+    [string]$RuntimeReleaseTag = $env:JJZERO_RUNTIME_RELEASE_TAG
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,6 +79,9 @@ if ($signingConfigured) {
 $manifestArguments = @("scripts\create_release_manifest.py", $releaseDir, $version)
 if ($signingConfigured) {
     $manifestArguments += @("--signing-publisher", $SigningPublisher)
+}
+if ($RuntimeReleaseTag) {
+    $manifestArguments += @("--runtime-release-tag", $RuntimeReleaseTag)
 }
 & $python @manifestArguments
 if ($LASTEXITCODE -ne 0) {

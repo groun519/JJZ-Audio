@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
+from urllib.parse import quote
 
 from jang_app.runtime_version import AI_RUNTIME_VERSION, RVC_RUNTIME_PROFILE_VERSIONS
 
@@ -11,6 +13,10 @@ from jang_app.runtime_version import AI_RUNTIME_VERSION, RVC_RUNTIME_PROFILE_VER
 MANIFEST_NAME = "latest.json"
 RUNTIME_INDEX_NAME = "runtime-packages.json"
 GITHUB_ASSET_LIMIT = 2 * 1024 * 1024 * 1024
+GITHUB_RELEASE_DOWNLOAD_ROOT = (
+    "https://github.com/groun519/JJZ-Audio/releases/download"
+)
+_RELEASE_TAG_PATTERN = re.compile(r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
 def main() -> int:
@@ -18,11 +24,13 @@ def main() -> int:
     parser.add_argument("release_dir", type=Path)
     parser.add_argument("version")
     parser.add_argument("--signing-publisher", default="")
+    parser.add_argument("--runtime-release-tag", default="")
     arguments = parser.parse_args()
     manifest = create_release_manifest(
         arguments.release_dir,
         arguments.version,
         signing_publisher=arguments.signing_publisher,
+        runtime_release_tag=arguments.runtime_release_tag,
     )
     print(f"Created release manifest: {manifest}")
     return 0
@@ -33,8 +41,10 @@ def create_release_manifest(
     version: str,
     runtime_version: str = AI_RUNTIME_VERSION,
     signing_publisher: str = "",
+    runtime_release_tag: str = "",
 ) -> Path:
     resolved_release = release_dir.expanduser().resolve()
+    runtime_tag = _validated_release_tag(runtime_release_tag)
     artifacts = sorted(
         path
         for path in resolved_release.glob(f"JJZero-Audio-{version}-Setup*")
@@ -72,6 +82,7 @@ def create_release_manifest(
             _validated_index_artifact(resolved_release, artifact)
             for artifact in runtime_artifacts
         ]
+        runtime_artifacts = _with_release_urls(runtime_artifacts, runtime_tag)
         components.append(
             {
                 "id": "ai-runtime",
@@ -91,6 +102,7 @@ def create_release_manifest(
                 profile_index,
                 expected_component=component,
                 expected_version=profile_version,
+                release_tag=runtime_tag,
             )
 
     component_ids = {str(component.get("id", "")) for component in components}
@@ -117,6 +129,7 @@ def _append_component_index(
     *,
     expected_component: str,
     expected_version: str,
+    release_tag: str = "",
 ) -> None:
     data = json.loads(index_path.read_text(encoding="utf-8"))
     if data.get("component") != expected_component or data.get("version") != expected_version:
@@ -128,6 +141,7 @@ def _append_component_index(
         _validated_index_artifact(release_dir, artifact)
         for artifact in raw_artifacts
     ]
+    artifacts = _with_release_urls(artifacts, release_tag)
     components.append(
         {
             "id": expected_component,
@@ -175,6 +189,33 @@ def _validated_index_artifact(
 def _validate_asset_size(path: Path) -> None:
     if path.stat().st_size >= GITHUB_ASSET_LIMIT:
         raise ValueError(f"Release asset exceeds GitHub's 2 GiB limit: {path.name}")
+
+
+def _validated_release_tag(value: str) -> str:
+    tag = value.strip()
+    if not tag:
+        return ""
+    if _RELEASE_TAG_PATTERN.fullmatch(tag) is None:
+        raise ValueError(f"Invalid runtime release tag: {value!r}")
+    return tag if tag.startswith("v") else f"v{tag}"
+
+
+def _with_release_urls(
+    artifacts: list[dict[str, object]],
+    release_tag: str,
+) -> list[dict[str, object]]:
+    if not release_tag:
+        return artifacts
+    return [
+        {
+            **artifact,
+            "url": (
+                f"{GITHUB_RELEASE_DOWNLOAD_ROOT}/{quote(release_tag, safe='')}/"
+                f"{quote(str(artifact['name']), safe='')}"
+            ),
+        }
+        for artifact in artifacts
+    ]
 
 
 def _sha256(path: Path) -> str:

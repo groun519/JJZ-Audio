@@ -63,6 +63,9 @@ class RvcConvertTests(unittest.TestCase):
             args = command.call_args.args[0]
             self.assertEqual(args[8], "cpu")
             self.assertTrue(result.output_path.is_file())
+            self.assertEqual(result.voice_model, settings.voice_model)
+            self.assertEqual(result.requested_device, settings.device)
+            self.assertEqual(result.effective_device, "cpu")
 
     def test_conversion_failure_includes_rvc_process_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

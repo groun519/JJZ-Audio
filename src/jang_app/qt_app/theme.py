@@ -52,6 +52,15 @@ def theme_tokens(theme_mode: str) -> dict[str, str]:
             "source_output_text": "#c9f0dc",
             "source_output_background": "#1f3128",
             "source_output_border": "#3f6b53",
+            "success_text": "#b9dfc9",
+            "success_background": "#1f3128",
+            "success_border": "#3f6b53",
+            "warning_text": "#e7d3a0",
+            "warning_background": "#332d20",
+            "warning_border": "#685b34",
+            "danger_text": "#f0b4b4",
+            "danger_background": "#3a2022",
+            "danger_border": "#7a3a3f",
         }
 
     return {
@@ -87,6 +96,15 @@ def theme_tokens(theme_mode: str) -> dict[str, str]:
         "source_output_text": "#24543c",
         "source_output_background": "#e2f0e8",
         "source_output_border": "#9abda8",
+        "success_text": "#24543c",
+        "success_background": "#e2f0e8",
+        "success_border": "#9abda8",
+        "warning_text": "#765814",
+        "warning_background": "#f5ecd5",
+        "warning_border": "#d3bd83",
+        "danger_text": "#8a2930",
+        "danger_background": "#f6e4e4",
+        "danger_border": "#d7a2a5",
     }
 
 
@@ -124,6 +142,15 @@ def _stylesheet(
     source_output_text: str,
     source_output_background: str,
     source_output_border: str,
+    success_text: str,
+    success_background: str,
+    success_border: str,
+    warning_text: str,
+    warning_background: str,
+    warning_border: str,
+    danger_text: str,
+    danger_background: str,
+    danger_border: str,
     chevron_down: str,
     chevron_up: str,
 ) -> str:
@@ -358,7 +385,8 @@ def _stylesheet(
             font-weight: 800;
         }}
 
-        QFrame#TrainingStatusCard, QFrame#TrainingSettingsCard {{
+        QFrame#TrainingStatusCard, QFrame#TrainingSettingsCard,
+        QFrame#TrainingReadinessCard {{
             background: {raised};
             border: 1px solid {border};
             border-radius: 14px;
@@ -376,13 +404,19 @@ def _stylesheet(
         }}
 
         QLabel#TrainingStatusTitle[phase="failed"] {{
-            color: #c93d3d;
+            color: {danger_text};
         }}
 
         QLabel#TrainingStageText, QLabel#TrainingFieldLabel {{
             color: {muted};
             font-size: 10px;
             font-weight: 800;
+        }}
+
+        QLabel#TrainingCardTitle {{
+            color: {text};
+            font-size: 12px;
+            font-weight: 900;
         }}
 
         QLabel#TrainingActivityText {{
@@ -411,9 +445,174 @@ def _stylesheet(
             color: {text};
         }}
 
+        QWidget#TrainingWorkflow {{
+            background: transparent;
+        }}
+
+        QFrame#WorkflowStage {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLabel#WorkflowStageMarker {{
+            color: {faint};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 12px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#WorkflowStageLabel {{
+            color: {faint};
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QLabel#WorkflowStageMarker[stageState="active"] {{
+            color: {accent_text};
+            background: {accent};
+            border-color: {accent};
+        }}
+
+        QLabel#WorkflowStageLabel[stageState="active"] {{
+            color: {text};
+        }}
+
+        QLabel#WorkflowStageMarker[stageState="complete"] {{
+            color: {success_text};
+            background: {success_background};
+            border-color: {success_border};
+        }}
+
+        QLabel#WorkflowStageLabel[stageState="complete"] {{
+            color: {success_text};
+        }}
+
+        QLabel#WorkflowStageMarker[stageState="failed"] {{
+            color: {danger_text};
+            background: {danger_background};
+            border-color: {danger_border};
+        }}
+
+        QLabel#WorkflowStageLabel[stageState="failed"] {{
+            color: {danger_text};
+        }}
+
+        QFrame#WorkflowConnector {{
+            min-width: 14px;
+            max-height: 1px;
+            background: {border};
+            border: 0;
+        }}
+
+        QFrame#WorkflowConnector[stageState="complete"] {{
+            background: {success_border};
+        }}
+
+        QFrame#TrainingMetric {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QLabel#TrainingMetricLabel {{
+            color: {faint};
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QLabel#TrainingMetricValue {{
+            color: {text};
+            font-size: 12px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingReadinessBadge {{
+            padding: 4px 9px;
+            color: {faint};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 9px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingReadinessBadge[readiness="ready"] {{
+            color: {success_text};
+            background: {success_background};
+            border-color: {success_border};
+        }}
+
+        QLabel#TrainingReadinessBadge[readiness="review"] {{
+            color: {warning_text};
+            background: {warning_background};
+            border-color: {warning_border};
+        }}
+
+        QFrame#TrainingModeControl {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QPushButton#TrainingModeButton {{
+            min-width: 76px;
+            min-height: 26px;
+            max-height: 26px;
+            padding: 0 10px;
+            color: {muted};
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 7px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QPushButton#TrainingModeButton:hover,
+        QPushButton#TrainingModeButton[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#TrainingModeButton:checked {{
+            color: {tab_active_text};
+            background: {tab_active};
+            border-color: {tab_active_border};
+        }}
+
+        QPushButton#TrainingModeButton:pressed,
+        QPushButton#TrainingModeButton[pointerState="pressed"] {{
+            background: {pressed};
+        }}
+
+        QPushButton#TrainingModeButton:disabled {{
+            color: {faint};
+            background: transparent;
+            border-color: transparent;
+        }}
+
+        QPushButton#TrainingModeButton:checked:disabled {{
+            color: {muted};
+            background: {selection};
+            border-color: {border};
+        }}
+
+        QLabel#TrainingStartHint {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
         QSpinBox#TrainingSpinBox {{
             min-height: 34px;
             max-height: 34px;
+        }}
+
+        QSpinBox#TrainingSpinBox:disabled {{
+            color: {faint};
+            background: {surface};
+            border-color: {border};
         }}
 
         QLabel#TrainingDeviceValue {{
@@ -428,11 +627,8 @@ def _stylesheet(
             font-weight: 800;
         }}
 
-        QCheckBox#TrainingFreshCheck {{
-            color: {muted};
-            spacing: 7px;
-            font-size: 10px;
-            font-weight: 800;
+        QLabel#TrainingDeviceValue:disabled {{
+            color: {faint};
         }}
 
         QPushButton#TrainingStopButton {{
@@ -442,17 +638,17 @@ def _stylesheet(
         }}
 
         QProgressBar#TrainingProgress {{
-            min-height: 7px;
-            max-height: 7px;
+            min-height: 8px;
+            max-height: 8px;
             border: 0;
-            border-radius: 3px;
-            background: {raised};
+            border-radius: 4px;
+            background: {surface};
             color: transparent;
         }}
 
         QProgressBar#TrainingProgress::chunk {{
             background: {accent};
-            border-radius: 3px;
+            border-radius: 4px;
         }}
 
         QWidget#SongListRow {{
@@ -730,6 +926,49 @@ def _stylesheet(
             background: {raised};
             border: 1px solid {border};
             border-radius: 14px;
+        }}
+
+        QFrame#VocalCompareControl {{
+            background: {background};
+            border: 1px solid {border};
+            border-radius: 11px;
+        }}
+
+        QPushButton#VocalCompareButton {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            border-radius: 8px;
+            padding: 0 12px;
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
+        QPushButton#VocalCompareButton:hover,
+        QPushButton#VocalCompareButton[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#VocalCompareButton:checked {{
+            color: {tab_active_text};
+            background: {tab_active};
+        }}
+
+        QPushButton#VocalCompareButton:checked:pressed,
+        QPushButton#VocalCompareButton[pointerState="pressed"]:checked {{
+            background: {tab_active_pressed};
+        }}
+
+        QPushButton#VocalCompareButton:disabled {{
+            color: {faint};
+            background: transparent;
+        }}
+
+        QLabel#VocalTakeMetadata {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 700;
         }}
 
         QFrame#ModelSummaryCard, QFrame#ModelListSurface, QFrame#ModelDetailSurface {{
@@ -1555,6 +1794,24 @@ def _stylesheet(
         QPushButton#PrimaryButton[keyboardFocus="true"] {{
             background: {active_hover};
             border-color: {focus};
+        }}
+
+        QPushButton#DangerButton {{
+            color: #fff7f5;
+            background: #b43a32;
+            border-color: #b43a32;
+        }}
+
+        QPushButton#DangerButton:hover,
+        QPushButton#DangerButton[pointerState="hover"] {{
+            background: #c84940;
+            border-color: #c84940;
+        }}
+
+        QPushButton#DangerButton:pressed,
+        QPushButton#DangerButton[pointerState="pressed"] {{
+            background: #963029;
+            border-color: #963029;
         }}
 
         QPushButton#PrimaryButton:disabled {{

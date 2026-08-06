@@ -72,6 +72,27 @@ class AppBootstrapTests(unittest.TestCase):
             self.assertEqual(paths.workspace_root, (install / "workspace").resolve())
             self.assertEqual(result.copied_settings, (copied,))
 
+    def test_repairs_missing_rvc_device_adapter_during_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            package = source / "src" / "jang_app"
+            package.mkdir(parents=True)
+            paths = discover_app_paths(
+                package,
+                environ={"JJZERO_DATA_ROOT": str(root / "data")},
+                frozen=False,
+                source_root=source,
+            )
+            rvc_root = paths.runtime_root / "rvc"
+            rvc_root.mkdir(parents=True)
+
+            prepare_app_environment(paths)
+
+            adapter = rvc_root / "lib" / "jjzero_device.py"
+            self.assertTrue(adapter.is_file())
+            self.assertIn("resolve_torch_device", adapter.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
