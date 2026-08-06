@@ -62,6 +62,11 @@ def classify_error(error: str) -> ErrorClassification:
             "RVC_RUNTIME_INCOMPLETE",
             "The installed RVC runtime is missing a JJZero compatibility component.",
         ),
+        (
+            ("unicodeencodeerror", "codec can't encode character", "codec cannot encode character"),
+            "RVC_CONSOLE_ENCODING_ERROR",
+            "The RVC process could not write Unicode text using the Windows console encoding.",
+        ),
         (("3221225620", "0xc0000094", "integer division by zero"), "RVC_CPU_RUNTIME_INCOMPATIBLE", "RVC runtime crashed on the selected CPU path."),
         (("cuda out of memory", "cublas_status_alloc_failed"), "CUDA_OUT_OF_MEMORY", "The GPU did not have enough free memory."),
         (("no kernel image is available", "not compatible with the current pytorch", "cuda architecture sm_120", "requires torch 2.7.1+cu128"), "CUDA_ARCHITECTURE_UNSUPPORTED", "The bundled RVC runtime does not support this GPU architecture."),

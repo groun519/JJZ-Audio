@@ -16,6 +16,8 @@ def build_rvc_environment(rvc_root: Path) -> dict[str, str]:
         environment.get("PATH", ""),
     )
     environment["PATH"] = os.pathsep.join(part for part in path_parts if part)
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8:replace"
     environment["PYTHONFAULTHANDLER"] = "1"
     environment["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
     return environment

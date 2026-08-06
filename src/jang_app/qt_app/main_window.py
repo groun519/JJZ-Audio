@@ -42,7 +42,6 @@ from jang_app.pipeline.rvc_convert import (
     RvcConversionResult,
     convert_vocal_with_rvc,
     list_index_files,
-    list_voice_models,
 )
 from jang_app.pipeline.separate import SeparationResult, separate_audio
 from jang_app.qt_app.confirmation_dialog import ConfirmationDialog
@@ -63,6 +62,7 @@ from jang_app.qt_app.processing_queue_panel import ProcessingQueuePanel
 from jang_app.qt_app.primary_navigation import PrimaryNavigationBar
 from jang_app.qt_app.segmented_stack import SegmentedStack
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
+from jang_app.qt_app.task_attention import TaskAttentionController
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
 from jang_app.qt_app.text_input_dialog import TextInputDialog
 from jang_app.qt_app.toast_stack import ToastStack
@@ -106,12 +106,23 @@ from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.file_browser import open_in_file_browser
 from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language, tr
 from jang_app.services.job_diagnostics import get_job_diagnostics
-from jang_app.services.hardware_diagnostics_state import recorded_hardware_profile
+from jang_app.services.hardware_diagnostics_state import (
+    recorded_hardware_selection,
+)
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set, scan_output_sound_sets
 from jang_app.services.playback_queue import PlaybackQueue
 from jang_app.services.processing_queue import ProcessingQueue
-from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.rvc_execution_runtime import settings_for_managed_rvc_runtime
+from jang_app.services.rvc_model_choices import (
+    RvcModelChoice,
+    collect_rvc_model_choices,
+    resolve_optional_rvc_setting_path,
+    rvc_model_choice_from_record,
+)
+from jang_app.services.rvc_model_workspace import (
+    RvcModelRecord,
+    RvcModelWorkspace,
+)
 from jang_app.services.runtime_installation import (
     installed_rvc_runtime_profile,
     installed_runtime_version,
@@ -188,6 +199,7 @@ class MainWindow(QMainWindow):
         self._is_loading_rvc_settings = False
         self._is_loading_studio_session = False
         self.vocal_project_store = VocalProjectStore()
+        self.model_workspace = RvcModelWorkspace()
         self.studio_session_autosave = StudioSessionAutosave(self.library.save_studio_session, parent=self)
         self.studio_session_autosave.save_failed.connect(self._on_studio_session_save_failed)
 
@@ -196,6 +208,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
         self.setMinimumSize(1180, 760)
         self.resize(1500, 900)
+        self.task_attention = TaskAttentionController(self.processing_queue, self)
 
         self.playback_timer = QTimer(self)
         self.playback_timer.setInterval(120)
@@ -220,6 +233,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.update_poll_timer.stop()
+        self.task_attention.close()
         self.studio_session_autosave.flush()
         self.model_workspace_page.stop_preview()
         self.model_workspace_page.shutdown_training()
@@ -324,7 +338,11 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._position_size_grip)
 
     def _build_top_bar(self) -> QWidget:
-        self.title_bar = WindowTitleBar(APP_NAME, APP_ICON_PATH)
+        self.title_bar = WindowTitleBar(
+            APP_NAME,
+            APP_ICON_PATH,
+            version_text=f"v{__version__}",
+        )
         self.title_bar.minimize_requested.connect(self.showMinimized)
         self.title_bar.maximize_requested.connect(self._toggle_window_maximized)
         self.title_bar.close_requested.connect(self.close)
@@ -536,15 +554,27 @@ class MainWindow(QMainWindow):
         return self.export_page
 
     def _build_models_page(self) -> QWidget:
+        hardware_selection = recorded_hardware_selection(APP_PATHS)
         self.model_workspace_page = ModelWorkspacePage(
             self.settings.rvc.root,
+            workspace=self.model_workspace,
             processing_queue=self.processing_queue,
             execution_runtime_root=RVC_RUNTIME_DIR,
-            runtime_profile=recorded_hardware_profile(APP_PATHS),
+            runtime_profile=(
+                hardware_selection.profile
+                if hardware_selection is not None
+                else ""
+            ),
+            hardware_selection=hardware_selection,
         )
         self.model_workspace_page.use_in_convert_requested.connect(self._use_model_in_convert)
         self.model_workspace_page.open_location_requested.connect(self._open_model_location)
         self.model_workspace_page.preview_started.connect(self._on_model_preview_started)
+        self.model_workspace_page.log_requested.connect(self._open_log_drawer)
+        self.model_workspace_page.system_setup_requested.connect(
+            self._open_system_setup
+        )
+        self.model_workspace_page.models_changed.connect(self._refresh_rvc_choices)
         return self.model_workspace_page
 
     def _build_separate_step_page(self) -> QWidget:
@@ -590,13 +620,13 @@ class MainWindow(QMainWindow):
         self.browse_rvc_button.clicked.connect(self._choose_rvc_root)
 
         self.model_combo = ScrollSafeComboBox()
-        self.model_combo.currentIndexChanged.connect(self._save_rvc_settings_from_controls)
+        self.model_combo.currentIndexChanged.connect(self._on_rvc_model_changed)
         self.index_combo = ScrollSafeComboBox()
         self.index_combo.currentIndexChanged.connect(self._save_rvc_settings_from_controls)
         self.refresh_rvc_button = SvgIconButton("refresh", size=34)
         self.refresh_rvc_button.setObjectName("ControlIconButton")
         self.refresh_rvc_button.setToolTip("Refresh RVC models")
-        self.refresh_rvc_button.clicked.connect(self._refresh_rvc_choices)
+        self.refresh_rvc_button.clicked.connect(self._refresh_rvc_catalog)
 
         self.pitch_spin = ScrollSafeSpinBox()
         self.pitch_spin.setRange(-999, 999)
@@ -2089,6 +2119,7 @@ class MainWindow(QMainWindow):
         conversion = take.conversion
         rvc_settings = replace(
             self.settings.rvc,
+            model_id="",
             voice_model=conversion.voice_model,
             index_file=conversion.index_file,
             pitch=conversion.pitch,
@@ -2196,13 +2227,133 @@ class MainWindow(QMainWindow):
         self._save_rvc_settings_from_controls()
         self._refresh_rvc_choices()
 
+    def _refresh_rvc_catalog(self, *_args) -> None:
+        self.model_workspace_page.refresh_models()
+
     def _refresh_rvc_choices(self, *_args) -> None:
         self._is_loading_rvc_settings = True
-        root = Path(self.rvc_root_edit.text().strip() or str(self.settings.rvc.root))
-        self._populate_combo(self.model_combo, list_voice_models(root), self.settings.rvc.voice_model, "Select model")
-        self._populate_combo(self.index_combo, list_index_files(root), self.settings.rvc.index_file, "No index")
-        self._is_loading_rvc_settings = False
+        try:
+            root = Path(
+                self.rvc_root_edit.text().strip() or str(self.settings.rvc.root)
+            )
+            choices = collect_rvc_model_choices(
+                self.model_workspace.records(),
+                root,
+                current_root=self.settings.rvc.root,
+                current_model=self.settings.rvc.voice_model,
+            )
+            self._populate_model_combo(
+                choices,
+                self.settings.rvc.model_id,
+                self.settings.rvc.root,
+                self.settings.rvc.voice_model,
+            )
+            selected_model = self.model_combo.currentData()
+            preferred_index = self.settings.rvc.index_file
+            if (
+                isinstance(selected_model, RvcModelChoice)
+                and self.settings.rvc.model_id
+                and selected_model.model_id == self.settings.rvc.model_id
+            ):
+                root = selected_model.root
+                preferred_index = (
+                    str(selected_model.index_path)
+                    if selected_model.index_path is not None
+                    and selected_model.index_path.is_file()
+                    else ""
+                )
+                self.rvc_root_edit.setText(str(root))
+            self._populate_combo(
+                self.index_combo,
+                list_index_files(root),
+                preferred_index,
+                "No index",
+            )
+        finally:
+            self._is_loading_rvc_settings = False
         self._save_rvc_settings_from_controls()
+
+    def _populate_model_combo(
+        self,
+        choices: tuple[RvcModelChoice, ...],
+        current_model_id: str,
+        current_root: Path,
+        current_model: str,
+    ) -> None:
+        current_path = resolve_optional_rvc_setting_path(current_root, current_model)
+        current_key = _resolved_path_key(current_path)
+        label_counts: dict[str, int] = {}
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItem(tr("Select model"), None)
+        selected_model_index = 0
+        selected_path_index = 0
+        for choice in choices:
+            folded_label = choice.label.casefold()
+            label_counts[folded_label] = label_counts.get(folded_label, 0) + 1
+            occurrence = label_counts[folded_label]
+            label = choice.label if occurrence == 1 else f"{choice.label} ({occurrence})"
+            self.model_combo.addItem(label, choice)
+            index = self.model_combo.count() - 1
+            self.model_combo.setItemData(
+                index,
+                str(choice.model_path),
+                Qt.ItemDataRole.ToolTipRole,
+            )
+            if current_model_id and choice.model_id == current_model_id:
+                selected_model_index = index
+            if _resolved_path_key(choice.model_path) == current_key:
+                selected_path_index = index
+        self.model_combo.setCurrentIndex(
+            selected_model_index or selected_path_index
+        )
+        self.model_combo.blockSignals(False)
+
+    def _on_rvc_model_changed(self, *_args) -> None:
+        if self._is_loading_rvc_settings:
+            return
+        choice = self.model_combo.currentData()
+        if not isinstance(choice, RvcModelChoice):
+            self._save_rvc_settings_from_controls()
+            return
+        self._apply_rvc_model_choice(choice)
+
+    def _apply_rvc_model_choice(self, choice: RvcModelChoice) -> None:
+        self._is_loading_rvc_settings = True
+        try:
+            self.rvc_root_edit.setText(str(choice.root))
+            self.pitch_spin.setValue(choice.pitch)
+            self.device_combo.setCurrentText(normalize_rvc_device(choice.device))
+            preferred_index = (
+                str(choice.index_path)
+                if choice.index_path is not None and choice.index_path.is_file()
+                else ""
+            )
+            self._populate_combo(
+                self.index_combo,
+                list_index_files(choice.root),
+                preferred_index,
+                "No index",
+            )
+        finally:
+            self._is_loading_rvc_settings = False
+        self.settings = replace(
+            self.settings,
+            rvc=RvcSettings(
+                root=choice.root,
+                model_id=choice.model_id,
+                voice_model=str(choice.model_path),
+                index_file=(
+                    str(choice.index_path)
+                    if choice.index_path is not None and choice.index_path.is_file()
+                    else ""
+                ),
+                pitch=choice.pitch,
+                device=normalize_rvc_device(choice.device),
+                f0_method="rmvpe",
+            ),
+        )
+        save_app_settings(self.settings)
 
     def _populate_combo(self, combo: QComboBox, values: list[str], current_value: str, placeholder: str) -> None:
         combo.blockSignals(True)
@@ -2219,9 +2370,20 @@ class MainWindow(QMainWindow):
     def _save_rvc_settings_from_controls(self, *_args) -> None:
         if self._is_loading_rvc_settings:
             return
+        selected_model = self.model_combo.currentData()
+        voice_model = (
+            str(selected_model.model_path)
+            if isinstance(selected_model, RvcModelChoice)
+            else ""
+        )
         rvc_settings = RvcSettings(
             root=Path(self.rvc_root_edit.text().strip() or str(self.settings.rvc.root)),
-            voice_model=_combo_value(self.model_combo),
+            model_id=(
+                selected_model.model_id
+                if isinstance(selected_model, RvcModelChoice)
+                else ""
+            ),
+            voice_model=voice_model,
             index_file=_combo_value(self.index_combo),
             pitch=self.pitch_spin.value(),
             device=self.device_combo.currentText(),
@@ -2778,8 +2940,12 @@ class MainWindow(QMainWindow):
             return
         scope = WorkTaskScope(item.id)
         _set_optional_label(self.output_status_label, "Exporting track")
+        export_label = f"{item.title} - {_track_export_role(self.current_output_set, path)}"
         worker = TaskWorker(
-            lambda progress: _run_with_progress(lambda: export_audio_file(path.stem, path, output_dir), progress)
+            lambda progress: _run_with_progress(
+                lambda: export_audio_file(export_label, path, output_dir),
+                progress,
+            )
         )
         self._run_worker(
             worker,
@@ -2816,28 +2982,11 @@ class MainWindow(QMainWindow):
             self.export_page.set_audio_status(f"Open failed: {_last_error_line(str(exc))}")
 
     def _use_model_in_convert(self, record: RvcModelRecord) -> None:
-        inference_model = record.inference_model
-        if inference_model is None or not inference_model.is_file():
+        choice = rvc_model_choice_from_record(record)
+        if choice is None:
             self.model_workspace_page.show_status("This model has no usable inference file.")
             return
-
-        index_file = record.index_file
-        rvc_settings = replace(
-            self.settings.rvc,
-            root=record.runtime_root,
-            voice_model=str(inference_model.resolve()),
-            index_file=str(index_file.resolve()) if index_file is not None and index_file.is_file() else "",
-            pitch=record.default_pitch,
-            device=record.default_device,
-            f0_method="rmvpe",
-        )
-        self.settings = replace(self.settings, rvc=rvc_settings)
-        save_app_settings(self.settings)
-        self._is_loading_rvc_settings = True
-        self.rvc_root_edit.setText(str(rvc_settings.root))
-        self.pitch_spin.setValue(rvc_settings.pitch)
-        self.device_combo.setCurrentText(rvc_settings.device)
-        self._is_loading_rvc_settings = False
+        self._apply_rvc_model_choice(choice)
         self._refresh_rvc_choices()
         self.model_workspace_page.show_status(f"{record.title} is active in Convert.")
 
@@ -2994,6 +3143,10 @@ def _combo_value(combo: QComboBox) -> str:
     return str(data) if data is not None else combo.currentText().strip()
 
 
+def _resolved_path_key(path: Path | None) -> str:
+    return str(path.expanduser().resolve()).casefold() if path is not None else ""
+
+
 def _convert_with_progress(input_path: Path, output_dir: Path, settings: RvcSettings, progress) -> object:
     progress(12)
     result = convert_vocal_with_rvc(input_path, output_dir, settings)
@@ -3013,6 +3166,18 @@ def _studio_track_state(track: TrackRow) -> StudioTrackState:
         muted=track.is_muted(),
         volume_percent=track.volume_percent(),
     )
+
+
+def _track_export_role(sound_set: OutputSoundSet | None, path: Path) -> str:
+    if sound_set is None:
+        return "Audio"
+    if _same_path(path, sound_set.vocals_path):
+        return "Original Vocal"
+    if _same_path(path, sound_set.instrumental_path):
+        return "Instrumental"
+    if any(_same_path(path, converted) for converted in sound_set.converted_vocal_paths):
+        return "Converted Vocal"
+    return "Audio"
 
 
 def _active_vocal_take_path(project: VocalProject) -> Path | None:

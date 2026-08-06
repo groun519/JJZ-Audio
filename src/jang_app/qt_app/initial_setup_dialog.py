@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from jang_app.qt_app.app_dialog import AppDialog
 from jang_app.qt_app.theme import theme_tokens
+from jang_app.qt_app.widgets import configure_two_line_status_text
 from jang_app.services.app_paths import AppPaths
 from jang_app.services.app_update import DEFAULT_MANIFEST_URL
 from jang_app.services.i18n import tr
@@ -839,6 +840,12 @@ class DiagnosticRow(QFrame):
         layout.setContentsMargins(14, 9, 12, 9)
         layout.addLayout(text, 1)
         layout.addWidget(self.status_label)
+        configure_two_line_status_text(
+            self,
+            self.title_label,
+            self.detail_label,
+            spacing=text.spacing(),
+        )
 
     def set_pending(self, detail: str = "", *, status: str = "") -> None:
         text = detail or tr("Not checked")

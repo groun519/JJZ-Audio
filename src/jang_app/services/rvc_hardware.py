@@ -6,7 +6,7 @@ import logging
 import re
 import subprocess
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import lru_cache
 from typing import Protocol
@@ -114,6 +114,9 @@ def select_rvc_hardware(
         if not is_blackwell:
             is_blackwell = bool(re.search(r"\bRTX\s*50\d{2}\b", name, re.IGNORECASE))
         adapter = nvidia or GraphicsAdapter(name, "nvidia")
+        memory_bytes = max(0, int(getattr(gpu, "memory_bytes", 0) or 0))
+        if memory_bytes:
+            adapter = replace(adapter, name=name, adapter_ram=memory_bytes)
         return RvcHardwareSelection(
             "cu128" if is_blackwell else "cu118",
             RvcComputeBackend.CUDA,

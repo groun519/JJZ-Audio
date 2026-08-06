@@ -20,7 +20,11 @@ def prepare_preview_audio(source: Path) -> Path:
         return audio_path
 
     try:
-        require_executable("ffmpeg", "Place FFmpeg under third_party/ffmpeg/bin or add it to PATH.", [FFMPEG_BIN_DIR])
+        executable = require_executable(
+            "ffmpeg",
+            "Place FFmpeg under third_party/ffmpeg/bin or add it to PATH.",
+            [FFMPEG_BIN_DIR],
+        )
     except MissingExecutableError as exc:
         raise AudioPreviewError(str(exc)) from exc
 
@@ -31,7 +35,7 @@ def prepare_preview_audio(source: Path) -> Path:
 
     completed = run_command(
         [
-            "ffmpeg",
+            executable,
             "-y",
             "-hide_banner",
             "-loglevel",

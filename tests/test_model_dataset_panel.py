@@ -62,6 +62,30 @@ class ModelDatasetPanelTests(unittest.TestCase):
                 self.assertFalse(panel.clip_editor.isHidden())
                 panel.close()
 
+    def test_mark_ready_advances_to_the_next_unreviewed_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ModelDatasetStore(root / "workspace")
+            items = store.add_sources(
+                "model",
+                (_wave_file(root / "first.wav"), _wave_file(root / "second.wav")),
+            ).items
+            store.select_items("model", (item.item_id for item in items))
+            panel = ModelDatasetPanel(store)
+            with patch(
+                "jang_app.qt_app.clip_waveform_view.waveform_cache_key",
+                side_effect=OSError,
+            ):
+                panel.set_model("model")
+                panel.training_list.setCurrentRow(0)
+
+                panel.clip_editor.ready_button.click()
+
+                dataset = store.load("model")
+                self.assertEqual(dataset.training_items[0].review_state, "ready")
+                self.assertEqual(panel.training_list.currentRow(), 1)
+                panel.close()
+
 
 def _wave_file(path: Path) -> Path:
     with wave.open(str(path), "wb") as output:

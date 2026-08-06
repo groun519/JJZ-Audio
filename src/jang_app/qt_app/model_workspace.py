@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QProgressBar,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -46,7 +48,11 @@ from jang_app.qt_app.workers import TaskWorker
 from jang_app.services.clip_edit_history import REVIEW_READY
 from jang_app.services.command import CommandCancellation
 from jang_app.services.model_dataset import ModelDataset, ModelDatasetStore
+from jang_app.services.model_dataset_analysis import (
+    load_cached_model_dataset_analysis,
+)
 from jang_app.services.i18n import tr
+from jang_app.services.job_diagnostics import classify_error
 from jang_app.services.processing_queue import ProcessingQueue
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_model_workspace import RvcModelRecord, RvcModelWorkspace
@@ -62,12 +68,19 @@ from jang_app.services.rvc_training_pipeline import (
 from jang_app.services.rvc_training_state import RvcTrainingState, RvcTrainingStateStore
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 from jang_app.services.runtime_installation import installed_rvc_runtime_profile
-from jang_app.services.rvc_hardware import RvcComputeBackend
+from jang_app.services.rvc_hardware import RvcComputeBackend, RvcHardwareSelection
 from jang_app.services.rvc_runtime_profile import (
     RVC_PROFILE_DIRECTML,
     normalize_rvc_profile,
 )
+from jang_app.services.rvc_training_preflight import (
+    RvcTrainingPreflight,
+    inspect_rvc_training_preflight,
+)
 from jang_app.services.rvc_training_runtime import training_backend_for_profile
+
+
+_LOGGER = logging.getLogger("jang_app")
 
 
 @dataclass(frozen=True)
@@ -80,6 +93,9 @@ class ModelWorkspacePage(QWidget):
     use_in_convert_requested = Signal(object)
     open_location_requested = Signal(object)
     preview_started = Signal()
+    log_requested = Signal(str)
+    system_setup_requested = Signal()
+    models_changed = Signal()
 
     def __init__(
         self,
@@ -88,6 +104,7 @@ class ModelWorkspacePage(QWidget):
         processing_queue: ProcessingQueue | None = None,
         execution_runtime_root: Path | None = None,
         runtime_profile: str = "",
+        hardware_selection: RvcHardwareSelection | None = None,
     ) -> None:
         super().__init__()
         self._initial_folder = initial_folder.expanduser()
@@ -97,6 +114,7 @@ class ModelWorkspacePage(QWidget):
         self._workspace = workspace or RvcModelWorkspace()
         self._dataset_store = ModelDatasetStore(self._workspace.root)
         self._runtime_profile = runtime_profile
+        self._hardware_selection = hardware_selection
         self._records_by_id: dict[str, RvcModelRecord] = {}
         self._rows_by_id: dict[str, ModelListRow] = {}
         self._selected_model_id: str | None = None
@@ -132,9 +150,16 @@ class ModelWorkspacePage(QWidget):
             if profile == RVC_PROFILE_DIRECTML
             else training_backend_for_profile(profile)
         )
+        adapter = (
+            self._hardware_selection.adapter
+            if self._hardware_selection is not None
+            else None
+        )
         self.training_panel.set_compute_backends(
             inference_backend,
             training_backend_for_profile(profile),
+            adapter_name=adapter.name if adapter is not None else "",
+            adapter_memory_bytes=adapter.adapter_ram if adapter is not None else 0,
         )
 
     def _build_ui(self) -> None:
@@ -380,14 +405,32 @@ class ModelWorkspacePage(QWidget):
         self.training_panel = ModelTrainingPanel()
         self.training_panel.start_requested.connect(self._start_training)
         self.training_panel.stop_requested.connect(self._stop_training)
+        self.training_panel.diagnostics_requested.connect(
+            self._open_training_diagnostics
+        )
+        self.training_panel.system_setup_requested.connect(
+            self.system_setup_requested.emit
+        )
+        self.training_panel.preflight_requested.connect(
+            lambda: self._refresh_training_panel(self._selected_record())
+        )
         training_layout.addWidget(training_title)
         training_layout.addWidget(self.training_panel, 1)
+
+        self.training_scroll = QScrollArea()
+        self.training_scroll.setObjectName("ModelTrainingScroll")
+        self.training_scroll.setWidgetResizable(True)
+        self.training_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.training_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.training_scroll.setWidget(training)
 
         self.workspace_content_stack = QStackedWidget()
         self.workspace_content_stack.addWidget(overview)
         self.workspace_content_stack.addWidget(dataset)
         self.workspace_content_stack.addWidget(analysis)
-        self.workspace_content_stack.addWidget(training)
+        self.workspace_content_stack.addWidget(self.training_scroll)
 
         layout.addWidget(header)
         layout.addLayout(section_row)
@@ -423,6 +466,7 @@ class ModelWorkspacePage(QWidget):
             self.model_list.setCurrentRow(selected_index)
 
         self._update_summary(records)
+        self.models_changed.emit()
         if not records:
             self._selected_model_id = None
             self.detail_panel.set_record(None)
@@ -633,12 +677,8 @@ class ModelWorkspacePage(QWidget):
         record = self._records_by_id.get(model_id)
         if record is None:
             return
-        self._select_model_item(model_id)
-        self.detail_panel.set_record(record)
-        self.dataset_panel.set_model(record.model_id)
-        self.analysis_panel.set_model(record.model_id)
-        self._refresh_training_panel(record)
-        self._update_workspace_header(record)
+        if self._selected_model_id != model_id:
+            self._select_model_item(model_id)
         self._navigate_model_section(0)
         self.view_stack.setCurrentIndex(1)
 
@@ -698,6 +738,7 @@ class ModelWorkspacePage(QWidget):
         training_items = dataset.training_items
         ready_items = sum(item.review_state == REVIEW_READY for item in training_items)
         total_duration_ms = sum(item.training_duration_ms for item in training_items)
+        preflight = self._training_preflight(record, dataset)
         is_running = self._training_worker is not None and self._training_model_id == record.model_id
         self.training_panel.set_model(
             record,
@@ -705,6 +746,7 @@ class ModelWorkspacePage(QWidget):
             ready_items,
             len(training_items),
             total_duration_ms,
+            preflight,
         )
         self.training_panel.set_running(is_running)
         self.dataset_panel.set_training_locked(is_running)
@@ -722,6 +764,12 @@ class ModelWorkspacePage(QWidget):
         try:
             dataset = ModelDatasetStore(self._workspace.root).load(record.model_id)
             self._validate_training_dataset(dataset)
+            preflight = self._training_preflight(record, dataset)
+            if not preflight.can_start:
+                blocker = preflight.blockers[0]
+                raise ValueError(
+                    tr(blocker.detail, **blocker.format_values)
+                )
             settings.validate()
         except Exception as exc:
             self.training_panel.set_failure(str(exc))
@@ -898,11 +946,46 @@ class ModelWorkspacePage(QWidget):
         self.show_status("Training completed.")
 
     def _on_training_failed(self, traceback_text: str) -> None:
+        task_id = self._training_task_id
+        diagnostic_code = classify_error(traceback_text).code
         if self._processing_queue is not None and self._training_task_id:
             self._processing_queue.fail(self._training_task_id, traceback_text)
+        record = self._records_by_id.get(self._training_model_id)
+        if record is not None:
+            try:
+                RvcTrainingStateStore(
+                    record.model_id,
+                    self._training_layout(record),
+                ).record_failure_context(
+                    traceback_text,
+                    task_id=task_id,
+                    diagnostic_code=diagnostic_code,
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Failed to persist training recovery context for model %s",
+                    record.model_id,
+                )
         if self._selected_model_id == self._training_model_id:
-            self.training_panel.set_failure(traceback_text)
+            self.training_panel.set_failure(
+                traceback_text,
+                task_id=task_id,
+                diagnostic_code=diagnostic_code,
+            )
         self.show_status(f"Training failed: {_last_error_line(traceback_text)}")
+
+    def _open_training_diagnostics(self, task_id: str) -> None:
+        if not task_id or self._processing_queue is None:
+            return
+        if any(task.task_id == task_id for task in self._processing_queue.tasks()):
+            self.log_requested.emit(task_id)
+            return
+        diagnostics = self._processing_queue.diagnostics
+        if diagnostics is None:
+            return
+        path = diagnostics.job_path(task_id)
+        if path.exists():
+            self.open_location_requested.emit(path)
 
     def _on_training_finished(self) -> None:
         worker = self._training_worker
@@ -926,6 +1009,31 @@ class ModelWorkspacePage(QWidget):
 
     def _training_layout(self, record: RvcModelRecord) -> RvcModelPackageLayout:
         return RvcModelPackageLayout(self._workspace.library_dir / record.model_id, record.name)
+
+    def _training_preflight(
+        self,
+        record: RvcModelRecord,
+        dataset: ModelDataset,
+    ) -> RvcTrainingPreflight:
+        selection = self._hardware_selection
+        adapter = selection.adapter if selection is not None else None
+        installed = installed_rvc_runtime_profile(self._execution_runtime_root)
+        profile = normalize_rvc_profile(
+            self._runtime_profile or (installed.profile if installed is not None else "")
+        )
+        return inspect_rvc_training_preflight(
+            managed_model=record.is_managed,
+            dataset=dataset,
+            analysis=load_cached_model_dataset_analysis(
+                self._dataset_store,
+                record.model_id,
+            ),
+            runtime_root=self._execution_runtime_root,
+            workspace_root=self._workspace.root,
+            training_backend=training_backend_for_profile(profile),
+            adapter_name=adapter.name if adapter is not None else "",
+            adapter_memory_bytes=adapter.adapter_ram if adapter is not None else 0,
+        )
 
     @staticmethod
     def _validate_training_dataset(dataset: ModelDataset) -> None:
@@ -1057,6 +1165,7 @@ class ModelWorkspacePage(QWidget):
             self._refresh_training_panel(record)
             self._update_workspace_header(record)
         self._update_summary(list(self._records_by_id.values()))
+        self.models_changed.emit()
 
     def _update_summary(self, records: list[RvcModelRecord]) -> None:
         self.total_value.setText(str(len(records)))

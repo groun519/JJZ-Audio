@@ -73,6 +73,8 @@ class RvcTrainingState:
     created_at: str
     updated_at: str
     last_error: str = ""
+    last_task_id: str = ""
+    last_diagnostic_code: str = ""
 
     @property
     def can_resume(self) -> bool:
@@ -137,6 +139,8 @@ class RvcTrainingStateStore:
                 phase=RvcTrainingPhase.IDLE,
                 dataset_fingerprint=fingerprint,
                 last_error="",
+                last_task_id="",
+                last_diagnostic_code="",
             )
         )
 
@@ -147,7 +151,33 @@ class RvcTrainingStateStore:
         last_error: str = "",
     ) -> RvcTrainingState:
         state = self.load()
-        return self.save(replace(state, phase=phase, last_error=last_error.strip()[:4000]))
+        return self.save(
+            replace(
+                state,
+                phase=phase,
+                last_error=last_error.strip()[:4000],
+                last_task_id="",
+                last_diagnostic_code="",
+            )
+        )
+
+    def record_failure_context(
+        self,
+        error: str,
+        *,
+        task_id: str = "",
+        diagnostic_code: str = "",
+    ) -> RvcTrainingState:
+        state = self.refresh_checkpoint_pair()
+        return self.save(
+            replace(
+                state,
+                phase=RvcTrainingPhase.FAILED,
+                last_error=error.strip()[:4000],
+                last_task_id=task_id.strip()[:128],
+                last_diagnostic_code=diagnostic_code.strip()[:128],
+            )
+        )
 
     def begin_training(self, target_epoch: int) -> RvcTrainingState:
         state = self.load()
@@ -159,6 +189,8 @@ class RvcTrainingStateStore:
                 phase=RvcTrainingPhase.TRAIN,
                 target_epoch=target_epoch,
                 last_error="",
+                last_task_id="",
+                last_diagnostic_code="",
             )
         )
 
@@ -180,6 +212,8 @@ class RvcTrainingStateStore:
                 generator_checkpoint=None,
                 discriminator_checkpoint=None,
                 last_error="",
+                last_task_id="",
+                last_diagnostic_code="",
             )
         )
 
@@ -264,6 +298,8 @@ class RvcTrainingStateStore:
             "created_at": state.created_at,
             "updated_at": state.updated_at,
             "last_error": state.last_error,
+            "last_task_id": state.last_task_id,
+            "last_diagnostic_code": state.last_diagnostic_code,
         }
 
     def _state_from_data(self, data: object) -> RvcTrainingState:
@@ -293,6 +329,8 @@ class RvcTrainingStateStore:
             created_at=str(data["created_at"]),
             updated_at=str(data["updated_at"]),
             last_error=str(data.get("last_error", "")),
+            last_task_id=str(data.get("last_task_id", "")),
+            last_diagnostic_code=str(data.get("last_diagnostic_code", "")),
         )
         self._validate(state)
         return state

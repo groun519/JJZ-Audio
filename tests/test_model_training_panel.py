@@ -9,11 +9,12 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.model_training_panel import ModelTrainingPanel, format_training_elapsed
-from jang_app.services.i18n import LANGUAGE_ENGLISH, set_language
+from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingStateStore
+from jang_app.services.rvc_training_presets import RvcTrainingPresetId
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 
 
@@ -97,13 +98,102 @@ class ModelTrainingPanelTests(unittest.TestCase):
 
             panel.set_model(record, state, 1, 2)
             self.assertFalse(panel.start_button.isEnabled())
-            self.assertEqual(panel.readiness_badge.property("readiness"), "review")
+            self.assertEqual(panel.readiness_badge.property("readiness"), "blocked")
             self.assertFalse(panel.start_hint_label.isHidden())
 
             panel.set_model(record, state, 2, 2)
             self.assertTrue(panel.start_button.isEnabled())
-            self.assertEqual(panel.readiness_badge.property("readiness"), "ready")
+            self.assertEqual(panel.readiness_badge.property("readiness"), "review")
             self.assertTrue(panel.start_hint_label.isHidden())
+            panel.close()
+
+    def test_preflight_rows_keep_title_and_wrapped_detail_visible(self) -> None:
+        panel = ModelTrainingPanel()
+        panel.resize(1100, 500)
+        panel.show()
+        self.app.processEvents()
+
+        for frame, title, detail in panel.preflight_rows.values():
+            with self.subTest(title=title.text()):
+                self.assertTrue(detail.wordWrap())
+                self.assertGreaterEqual(frame.height(), frame.minimumHeight())
+                self.assertGreaterEqual(detail.height(), detail.minimumHeight())
+                self.assertLessEqual(
+                    detail.geometry().bottom(),
+                    frame.contentsRect().bottom(),
+                )
+        panel.close()
+
+    def test_presets_apply_settings_and_manual_edits_switch_to_custom(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layout = RvcModelPackageLayout(root / "model", "Voice")
+            layout.create()
+            state = RvcTrainingStateStore("voice", layout).initialize()
+            panel = ModelTrainingPanel()
+            panel.set_model(_record(root, layout), state, 1, 1)
+
+            panel.preset_buttons[RvcTrainingPresetId.STANDARD].click()
+
+            self.assertEqual(panel.target_epoch_spin.value(), 200)
+            self.assertEqual(panel.batch_size_spin.value(), 4)
+            self.assertEqual(panel.save_interval_spin.value(), 20)
+            self.assertIn("Balanced training", panel.preset_summary_label.text())
+
+            panel.target_epoch_spin.setValue(210)
+
+            self.assertTrue(
+                panel.preset_buttons[RvcTrainingPresetId.CUSTOM].isChecked()
+            )
+            self.assertIn("Manual training settings", panel.preset_summary_label.text())
+            panel.close()
+
+    def test_cpu_preset_and_info_popovers_explain_current_recommendation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layout = RvcModelPackageLayout(root / "model", "Voice")
+            layout.create()
+            state = RvcTrainingStateStore("voice", layout).initialize()
+            panel = ModelTrainingPanel()
+            panel.set_compute_backends(RvcComputeBackend.DIRECTML, RvcComputeBackend.CPU)
+            panel.set_model(_record(root, layout), state, 1, 1)
+
+            panel.preset_buttons[RvcTrainingPresetId.HIGH_QUALITY].click()
+
+            self.assertEqual(panel.batch_size_spin.value(), 2)
+            self.assertIn("Current recommendation: 2", panel.batch_size_info.toolTip())
+            self.assertIn("CPU mode", panel.training_device_info.toolTip())
+
+            set_language(LANGUAGE_KOREAN)
+            panel.apply_language()
+
+            self.assertEqual(
+                panel.preset_buttons[RvcTrainingPresetId.HIGH_QUALITY].text(),
+                "고품질",
+            )
+            self.assertIn("현재 권장값: 2", panel.batch_size_info.toolTip())
+            panel.close()
+
+    def test_low_memory_gpu_applies_environment_based_batch_recommendation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layout = RvcModelPackageLayout(root / "model", "Voice")
+            layout.create()
+            state = RvcTrainingStateStore("voice", layout).initialize()
+            panel = ModelTrainingPanel()
+            panel.set_compute_backends(
+                RvcComputeBackend.CUDA,
+                RvcComputeBackend.CUDA,
+                adapter_name="NVIDIA GeForce GTX 1650",
+                adapter_memory_bytes=4 * 1024**3,
+            )
+            panel.set_model(_record(root, layout), state, 1, 1)
+
+            panel.preset_buttons[RvcTrainingPresetId.STANDARD].click()
+
+            self.assertEqual(panel.batch_size_spin.value(), 2)
+            self.assertIn("GTX 1650", panel.preset_summary_label.text())
+            self.assertIn("4.0 GB VRAM", panel.batch_size_info.toolTip())
             panel.close()
 
     def test_running_state_swaps_start_for_stop_and_locks_settings(self) -> None:
@@ -207,6 +297,77 @@ class ModelTrainingPanelTests(unittest.TestCase):
                 )
             )
             panel.close()
+
+    def test_cuda_memory_recovery_retries_with_a_smaller_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layout = RvcModelPackageLayout(root / "model", "Voice")
+            layout.create()
+            state = RvcTrainingStateStore("voice", layout).initialize()
+            panel = ModelTrainingPanel()
+            panel.set_model(_record(root, layout), state, 1, 1)
+            panel.batch_size_spin.setValue(6)
+            emitted: list[RvcTrainingRunSettings] = []
+            panel.start_requested.connect(emitted.append)
+
+            panel.set_failure(
+                "RuntimeError: CUDA out of memory",
+                task_id="task-oom",
+                diagnostic_code="CUDA_OUT_OF_MEMORY",
+            )
+            panel.recovery_primary_button.click()
+
+            self.assertFalse(panel.recovery_card.isHidden())
+            self.assertTrue(panel.start_button.isHidden())
+            self.assertEqual(panel.recovery_code_label.text(), "CUDA_OUT_OF_MEMORY")
+            self.assertEqual(panel.batch_size_spin.value(), 3)
+            self.assertEqual(emitted[0].batch_size, 3)
+            panel.close()
+
+    def test_failed_checkpoint_offers_resume_and_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layout = RvcModelPackageLayout(root / "model", "Voice")
+            layout.create()
+            for name in ("G_100.pth", "D_100.pth"):
+                (layout.experiment_dir / name).write_bytes(name.encode())
+            state = RvcTrainingStateStore("voice", layout).record_failure_context(
+                "Unexpected trainer failure",
+                task_id="task-resume",
+                diagnostic_code="UNEXPECTED_ERROR",
+            )
+            panel = ModelTrainingPanel()
+            panel.set_model(_record(root, layout), state, 1, 1)
+            emitted: list[RvcTrainingRunSettings] = []
+            diagnostics: list[str] = []
+            panel.start_requested.connect(emitted.append)
+            panel.diagnostics_requested.connect(diagnostics.append)
+
+            panel.recovery_diagnostics_button.click()
+            panel.recovery_primary_button.click()
+
+            self.assertEqual(
+                panel.recovery_primary_button.text(),
+                "Resume from Checkpoint",
+            )
+            self.assertEqual(diagnostics, ["task-resume"])
+            self.assertTrue(emitted[0].resume)
+            panel.close()
+
+    def test_runtime_recovery_opens_system_setup(self) -> None:
+        panel = ModelTrainingPanel()
+        requested: list[bool] = []
+        panel.system_setup_requested.connect(lambda: requested.append(True))
+
+        panel.set_failure(
+            "ModuleNotFoundError: No module named 'torch'",
+            diagnostic_code="PYTHON_MODULE_MISSING",
+        )
+        panel.recovery_primary_button.click()
+
+        self.assertEqual(panel.recovery_primary_button.text(), "Open System Setup")
+        self.assertEqual(requested, [True])
+        panel.close()
 
 
 def _record(root: Path, layout: RvcModelPackageLayout) -> RvcModelRecord:

@@ -16,6 +16,7 @@ RVC_DEVICE_OPTIONS = (RVC_DEVICE_AUTO, RVC_DEVICE_GPU, RVC_DEVICE_CPU)
 @dataclass(frozen=True)
 class RvcSettings:
     root: Path = DEFAULT_RVC_ROOT
+    model_id: str = ""
     voice_model: str = ""
     index_file: str = ""
     pitch: int = 0
@@ -47,6 +48,7 @@ def load_app_settings() -> AppSettings:
     rvc_data = data.get("rvc") if isinstance(data.get("rvc"), dict) else {}
     rvc = RvcSettings(
         root=_path_from_data(rvc_data.get("root"), default_settings.rvc.root),
+        model_id=_string_from_data(rvc_data.get("model_id"), ""),
         voice_model=_string_from_data(rvc_data.get("voice_model"), default_settings.rvc.voice_model),
         index_file=_string_from_data(rvc_data.get("index_file"), default_settings.rvc.index_file),
         pitch=_int_from_data(rvc_data.get("pitch"), default_settings.rvc.pitch),
@@ -64,6 +66,7 @@ def save_app_settings(settings: AppSettings) -> None:
         "language": normalize_language(settings.language),
         "rvc": {
             "root": str(settings.rvc.root.expanduser()),
+            "model_id": settings.rvc.model_id,
             "voice_model": settings.rvc.voice_model,
             "index_file": settings.rvc.index_file,
             "pitch": settings.rvc.pitch,

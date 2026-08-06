@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import shutil
 from dataclasses import dataclass
 from collections.abc import Sequence
@@ -8,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+
+from jang_app.services.file_names import safe_display_filename_stem, unique_display_path
 
 class AudioExportError(RuntimeError):
     """Raised when preview audio cannot be exported."""
@@ -62,7 +63,10 @@ def export_audio_files(sources: Sequence[NamedAudioPath], output_dir: Path) -> l
     output_dir.mkdir(parents=True, exist_ok=True)
     exported_paths: list[Path] = []
     for label, source in sources:
-        target = output_dir / f"{_slugify(label)}{source.suffix.lower() or '.wav'}"
+        stem = safe_display_filename_stem(label, fallback="Audio")
+        target = unique_display_path(
+            output_dir / f"{stem}{source.suffix.lower() or '.wav'}"
+        )
         if source.expanduser().resolve() != target.expanduser().resolve():
             shutil.copy2(source, target)
         exported_paths.append(target)
@@ -115,8 +119,3 @@ def _resample_audio(audio: np.ndarray, source_sample_rate: int, target_sample_ra
 
 def _clamp_volume(volume: float) -> float:
     return max(0.0, min(2.0, volume))
-
-
-def _slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
-    return slug or "audio"

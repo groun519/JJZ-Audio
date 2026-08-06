@@ -131,7 +131,7 @@ Verify an unsigned local release and an in-place upgrade from 0.2.1:
 powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1 -AllowUnsigned
 powershell -ExecutionPolicy Bypass -File scripts\verify_installer.ps1 `
   -PreviousInstallerPath release\JJZero-Audio-0.2.2-Setup.exe `
-  -InstallerPath release\JJZero-Audio-0.2.4-Setup.exe `
+  -InstallerPath release\JJZero-Audio-0.2.5-Setup.exe `
   -RuntimePackageIndex release\runtime-packages.json
 ```
 

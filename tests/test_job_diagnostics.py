@@ -75,6 +75,10 @@ class JobDiagnosticsTests(unittest.TestCase):
             classify_error("Could not run operator on privateuseone:0").code,
             "DIRECTML_RUNTIME_FAILED",
         )
+        self.assertEqual(
+            classify_error("UnicodeEncodeError: 'cp949' codec can't encode character").code,
+            "RVC_CONSOLE_ENCODING_ERROR",
+        )
         self.assertEqual(classify_error("HIP runtime failure in ROCm").code, "ROCM_RUNTIME_FAILED")
         self.assertEqual(classify_error("unknown").code, "UNEXPECTED_ERROR")
 

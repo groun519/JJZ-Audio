@@ -59,14 +59,9 @@ def inspect_rvc_training_storage(
         else:
             valid_bytes += spectrogram.stat().st_size
 
-    estimated_cache = sum(audio.stat().st_size for audio in audio_files)
-    estimated_cache *= _SPECTROGRAM_SIZE_RATIO
-    remaining_cache = max(0, estimated_cache - valid_bytes)
-    required = (
-        remaining_cache
-        + _CHECKPOINT_RESERVE_BYTES
-        + _TRAINING_RUNTIME_RESERVE_BYTES
-        + _FREE_SPACE_RESERVE_BYTES
+    required = estimate_rvc_training_required_bytes(
+        sum(audio.stat().st_size for audio in audio_files),
+        valid_spectrogram_bytes=valid_bytes,
     )
     available = disk_usage(layout.root).free
     return RvcTrainingStorageInspection(
@@ -92,6 +87,21 @@ def prepare_rvc_training_storage(
     for path in inspection.corrupt_spectrograms:
         path.unlink(missing_ok=True)
     return inspection
+
+
+def estimate_rvc_training_required_bytes(
+    audio_bytes: int,
+    *,
+    valid_spectrogram_bytes: int = 0,
+) -> int:
+    estimated_cache = max(0, int(audio_bytes)) * _SPECTROGRAM_SIZE_RATIO
+    remaining_cache = max(0, estimated_cache - max(0, int(valid_spectrogram_bytes)))
+    return (
+        remaining_cache
+        + _CHECKPOINT_RESERVE_BYTES
+        + _TRAINING_RUNTIME_RESERVE_BYTES
+        + _FREE_SPACE_RESERVE_BYTES
+    )
 
 
 def _gib(value: int) -> str:

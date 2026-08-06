@@ -20,6 +20,8 @@ from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem
 from jang_app.services.processing_queue import ProcessingQueue, TASK_COMPLETED
 from jang_app.services.rvc_model_workspace import RvcModelWorkspace
 from jang_app.services.rvc_training_pipeline import RvcTrainingStage
+from jang_app.services.rvc_training_runtime import required_rvc_training_paths
+from jang_app.services.rvc_training_state import RvcTrainingStateStore
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 
 
@@ -33,6 +35,8 @@ class ModelWorkspacePageTests(unittest.TestCase):
             root = Path(temporary)
             workspace = RvcModelWorkspace(root / "models")
             page = ModelWorkspacePage(root / "rvc", workspace)
+            changes: list[bool] = []
+            page.models_changed.connect(lambda: changes.append(True))
 
             with (
                 patch(
@@ -51,8 +55,51 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual(page.view_stack.currentIndex(), 1)
             self.assertEqual(page.workspace_content_stack.currentIndex(), 1)
             self.assertEqual(page.workspace_content_stack.count(), 4)
+            self.assertEqual(changes, [True])
             page.training_section_button.click()
             self.assertEqual(page.workspace_content_stack.currentIndex(), 3)
+            page.close()
+
+    def test_opening_selected_model_does_not_reload_every_panel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.create_model("Voice One", root / "rvc")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            self.assertEqual(page._selected_model_id, record.model_id)
+
+            with (
+                patch.object(page.detail_panel, "set_record") as detail,
+                patch.object(page.dataset_panel, "set_model") as dataset,
+                patch.object(page.analysis_panel, "set_model") as analysis,
+                patch.object(page, "_refresh_training_panel") as training,
+            ):
+                page._open_model(record.model_id)
+
+            detail.assert_not_called()
+            dataset.assert_not_called()
+            analysis.assert_not_called()
+            training.assert_not_called()
+            self.assertEqual(page.view_stack.currentIndex(), 1)
+            page.close()
+
+    def test_model_page_does_not_probe_hardware(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+
+            with (
+                patch(
+                    "jang_app.services.rvc_runtime_profile._run_nvidia_smi"
+                ) as nvidia_probe,
+                patch(
+                    "jang_app.services.rvc_hardware._run_powershell"
+                ) as adapter_probe,
+            ):
+                page = ModelWorkspacePage(root / "rvc", workspace)
+
+            nvidia_probe.assert_not_called()
+            adapter_probe.assert_not_called()
             page.close()
 
     def test_add_model_dialog_routes_linked_inference_file(self) -> None:
@@ -93,6 +140,7 @@ class ModelWorkspacePageTests(unittest.TestCase):
             record = workspace.create_model("Voice One", root / "rvc")
             queue = ProcessingQueue()
             execution_runtime = root / "managed-rvc"
+            _create_training_runtime(execution_runtime)
             page = ModelWorkspacePage(
                 root / "rvc",
                 workspace,
@@ -132,6 +180,36 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertIsNone(page._training_worker)
             page.close()
 
+    def test_training_failure_persists_recovery_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.create_model("Voice One", root / "rvc")
+            queue = ProcessingQueue()
+            page = ModelWorkspacePage(root / "rvc", workspace, queue)
+            page._open_model(record.model_id)
+            task_id = queue.start("Train RVC Model", record.title)
+            page._training_model_id = record.model_id
+            page._training_task_id = task_id
+            requested_logs: list[str] = []
+            page.log_requested.connect(requested_logs.append)
+
+            page._on_training_failed("RuntimeError: CUDA out of memory")
+            page.training_panel.recovery_diagnostics_button.click()
+
+            state = RvcTrainingStateStore(
+                record.model_id,
+                page._training_layout(record),
+            ).load()
+            self.assertEqual(state.last_task_id, task_id)
+            self.assertEqual(
+                state.last_diagnostic_code,
+                "CUDA_OUT_OF_MEMORY",
+            )
+            self.assertFalse(page.training_panel.recovery_card.isHidden())
+            self.assertEqual(requested_logs, [task_id])
+            page.close()
+
 
 def _ready_dataset_item(root: Path) -> ModelDatasetItem:
     audio = root / "voice.wav"
@@ -147,6 +225,13 @@ def _ready_dataset_item(root: Path) -> ModelDatasetItem:
         selected_order=0,
         review_state=REVIEW_READY,
     )
+
+
+def _create_training_runtime(root: Path) -> None:
+    for relative_path in required_rvc_training_paths():
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"runtime")
 
 
 if __name__ == "__main__":

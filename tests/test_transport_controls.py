@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from PySide6.QtTest import QSignalSpy
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.theme import build_stylesheet
@@ -22,6 +23,22 @@ class TransportControlsTests(unittest.TestCase):
         controls.slider.sliderMoved.emit(250)
 
         self.assertEqual(requested.at(0)[0], 20_000)
+        controls.close()
+
+    def test_track_click_requests_seek_at_clicked_position(self) -> None:
+        controls = TransportControls()
+        controls.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        controls.resize(800, 50)
+        controls.set_duration(80_000)
+        controls.show()
+        self.app.processEvents()
+        requested = QSignalSpy(controls.seek_requested)
+        target = QPoint(round(controls.slider.width() * 0.75), controls.slider.height() // 2)
+
+        QTest.mouseClick(controls.slider, Qt.MouseButton.LeftButton, pos=target)
+
+        self.assertGreaterEqual(requested.count(), 1)
+        self.assertGreater(requested.at(requested.count() - 1)[0], 50_000)
         controls.close()
 
     def test_play_state_uses_square_icon_button(self) -> None:

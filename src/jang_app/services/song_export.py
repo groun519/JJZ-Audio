@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.services.audio_export import AudioExportError, AudioMixSource, export_mix
+from jang_app.services.export_names import (
+    migrate_legacy_song_exports,
+    next_song_export_path,
+    timestamp_export_pattern,
+)
 from jang_app.services.export_catalog import ExportedFile, list_exported_files
 from jang_app.services.output_catalog import load_output_sound_set
 from jang_app.services.song_package import EXPORT_STAGE, VOCAL_STAGE, SongPackage
@@ -11,11 +15,17 @@ from jang_app.services.studio_session import StudioSession, StudioTrackState
 
 
 SongAudioExport = ExportedFile
+_LEGACY_MIX_PATTERN = timestamp_export_pattern("mix", ".wav")
 
 
 def export_song_mix(package: SongPackage, session: StudioSession) -> Path:
     sources = build_song_mix_sources(package, session)
-    output_path = _next_mix_path(song_audio_export_dir(package))
+    output_path = next_song_export_path(
+        song_audio_export_dir(package),
+        package.title,
+        "Audio Mix",
+        ".wav",
+    )
     return export_mix(sources, output_path)
 
 
@@ -48,22 +58,19 @@ def build_song_mix_sources(package: SongPackage, session: StudioSession) -> tupl
 
 
 def list_song_audio_exports(package: SongPackage) -> tuple[SongAudioExport, ...]:
-    return list_exported_files(song_audio_export_dir(package), "*.wav")
+    output_dir = song_audio_export_dir(package)
+    migrate_legacy_song_exports(
+        output_dir,
+        package.title,
+        "Audio Mix",
+        ".wav",
+        _LEGACY_MIX_PATTERN,
+    )
+    return list_exported_files(output_dir, "*.wav")
 
 
 def song_audio_export_dir(package: SongPackage) -> Path:
     return package.folder / EXPORT_STAGE / "audio"
-
-
-def _next_mix_path(output_dir: Path) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"mix-{datetime.now(UTC):%Y%m%d-%H%M%S}"
-    candidate = output_dir / f"{stem}.wav"
-    suffix = 2
-    while candidate.exists():
-        candidate = output_dir / f"{stem}-{suffix:03d}.wav"
-        suffix += 1
-    return candidate
 
 
 def _volume_multiplier(state: StudioTrackState) -> float:

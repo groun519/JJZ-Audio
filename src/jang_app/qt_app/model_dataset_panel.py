@@ -24,7 +24,7 @@ from jang_app.qt_app.localization import apply_widget_language, set_translated_t
 from jang_app.qt_app.widgets import SvgIconButton
 from jang_app.qt_app.workers import TaskCallable, TaskWorker
 from jang_app.services.audio_metadata import format_duration
-from jang_app.services.clip_edit_history import TRAINING_MODE_CLIPS
+from jang_app.services.clip_edit_history import REVIEW_READY, TRAINING_MODE_CLIPS
 from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem, ModelDatasetStore
 from jang_app.services.i18n import tr
 from jang_app.services.segment_review import split_review_regions
@@ -525,7 +525,21 @@ class ModelDatasetPanel(QWidget):
         item = self._current_training_item()
         if item is None:
             return
-        self._run_editor_change(lambda: self._store.mark_item_ready(self._model_id, item.item_id), item.item_id)
+        try:
+            self._dataset = self._store.mark_item_ready(
+                self._model_id,
+                item.item_id,
+            )
+        except Exception as exc:
+            self._set_status(f"Edit failed: {_last_error_line(exc)}")
+            return
+        next_item_id = _next_review_item_id(
+            self._dataset.training_items,
+            item.item_id,
+        )
+        self._render(selected_training_id=next_item_id or item.item_id)
+        self._set_status("Ready for training")
+        self.dataset_changed.emit(self._dataset)
 
     def _navigate_training_item(self, offset: int) -> None:
         current_row = self.training_list.currentRow()
@@ -839,6 +853,31 @@ def _select_item(list_widget: QListWidget, item_id: str) -> None:
         if item.data(Qt.ItemDataRole.UserRole) == item_id:
             list_widget.setCurrentItem(item)
             return
+
+
+def _next_review_item_id(
+    items: tuple[ModelDatasetItem, ...],
+    current_item_id: str,
+) -> str:
+    current_index = next(
+        (
+            index
+            for index, item in enumerate(items)
+            if item.item_id == current_item_id
+        ),
+        -1,
+    )
+    if current_index < 0:
+        return ""
+    remaining = items[current_index + 1 :] + items[:current_index]
+    return next(
+        (
+            item.item_id
+            for item in remaining
+            if item.review_state != REVIEW_READY
+        ),
+        "",
+    )
 
 
 def _refresh_selected_rows(list_widget: QListWidget) -> None:

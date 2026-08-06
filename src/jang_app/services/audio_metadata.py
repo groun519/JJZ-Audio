@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import soundfile as sf
+from mutagen import File as open_mutagen_file
 
 from jang_app.config import FFMPEG_BIN_DIR
 from jang_app.services.command import run_command
@@ -36,6 +37,10 @@ def _read_audio_metadata_cached(
         duration_ms = int(info.duration * 1000) if info.duration else 0
         return AudioMetadata(duration_ms=duration_ms, sample_rate=info.samplerate, channels=info.channels)
     except Exception:
+        pass
+    try:
+        return _read_audio_metadata_with_mutagen(source)
+    except Exception:
         return _read_audio_metadata_with_ffprobe(source)
 
 
@@ -49,15 +54,34 @@ def format_duration(duration_ms: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def _read_audio_metadata_with_mutagen(path: Path) -> AudioMetadata:
+    audio = open_mutagen_file(path)
+    info = getattr(audio, "info", None)
+    if info is None:
+        raise RuntimeError(f"Could not read audio metadata: {path}")
+    duration_ms = round(float(getattr(info, "length", 0.0)) * 1000)
+    if duration_ms <= 0:
+        raise RuntimeError(f"Audio duration is unavailable: {path}")
+    return AudioMetadata(
+        duration_ms=duration_ms,
+        sample_rate=max(0, int(getattr(info, "sample_rate", 0))),
+        channels=max(0, int(getattr(info, "channels", 0))),
+    )
+
+
 def _read_audio_metadata_with_ffprobe(path: Path) -> AudioMetadata:
     try:
-        require_executable("ffprobe", "Place FFprobe under third_party/ffmpeg/bin or add it to PATH.", [FFMPEG_BIN_DIR])
+        executable = require_executable(
+            "ffprobe",
+            "Place FFprobe under third_party/ffmpeg/bin or add it to PATH.",
+            [FFMPEG_BIN_DIR],
+        )
     except MissingExecutableError as exc:
         raise RuntimeError(str(exc)) from exc
 
     completed = run_command(
         [
-            "ffprobe",
+            executable,
             "-v",
             "error",
             "-select_streams",

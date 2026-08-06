@@ -52,6 +52,7 @@ class SongVideoExportTests(unittest.TestCase):
 
             command = captured["command"]
             self.assertEqual(rendered.parent, package.folder / "04_exports" / "video")
+            self.assertEqual(rendered.name, "Song - Video.mp4")
             self.assertEqual(rendered.read_bytes(), b"rendered")
             self.assertNotIn("start_ms", captured["mix_options"])
             self.assertNotIn("end_ms", captured["mix_options"])
@@ -67,6 +68,19 @@ class SongVideoExportTests(unittest.TestCase):
             package = _package_with_output(Path(temporary))
             with self.assertRaises(SongVideoExportError):
                 render_song_video(package, VideoSource(url="https://example.test/video"), StudioSession())
+
+    def test_legacy_timestamp_video_is_renamed_when_exports_are_listed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            output_dir = package.folder / "04_exports" / "video"
+            output_dir.mkdir(parents=True)
+            legacy = output_dir / "video-20260806-160444.mp4"
+            legacy.write_bytes(b"video")
+
+            records = list_song_video_exports(package)
+
+            self.assertFalse(legacy.exists())
+            self.assertEqual([record.path.name for record in records], ["Song - Video.mp4"])
 
 
 def _package_with_output(root: Path):

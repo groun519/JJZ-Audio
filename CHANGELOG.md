@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.5 - 2026-08-07
+
+### Added
+
+- Added guided model-training presets, inline setting explanations, dataset preflight checks, and failure recovery actions.
+- Added clearer training activity, elapsed-time, stage, epoch, checkpoint, and remaining-time feedback with background task completion attention.
+- Added reusable model-choice discovery so newly created or imported inference models become available for conversion without manual activation.
+- Added keyboard-driven material review, persistent review decisions, safer zoom controls, and improved audio-preview preparation.
+- Added generation-aware NVIDIA, AMD, and CPU runtime diagnostics with richer task reports for conversion and training failures.
+
+### Fixed
+
+- Prevented metadata, audio-preview, and RVC diagnostic helpers from flashing console windows when opening model and material pages.
+- Preserved model-training artifacts and exposed resume or restart choices after interrupted and failed runs.
+- Kept application playback controls synchronized while navigating between floating, Vocal, and Studio players.
+- Replaced timestamp-only export names with song-based audio, video, and individual-track names while retaining collision-safe numbering.
+- Prevented mouse-wheel changes on numeric controls and corrected shared button, slider, keyboard, and training-status interactions.
+
+### Quality
+
+- Added regression coverage for training presets, preflight, recovery, model discovery, task attention, preview conversion, export naming, windowless commands, and synchronized transport controls.
+- Extended runtime and hardware diagnostics coverage across current and legacy NVIDIA GPUs, AMD backends, and CPU fallback.
+
 ## 0.2.4 - 2026-08-06
 
 ### Added

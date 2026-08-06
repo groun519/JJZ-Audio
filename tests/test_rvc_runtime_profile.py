@@ -35,13 +35,14 @@ class RvcRuntimeProfileTests(unittest.TestCase):
         result = subprocess.CompletedProcess(
             (),
             0,
-            "NVIDIA GeForce RTX 3060, 8.6\n",
+            "NVIDIA GeForce RTX 3060, 8.6, 12288\n",
             "",
         )
 
         gpus = probe_nvidia_gpus(lambda _args: result)
 
         self.assertEqual(gpus[0].compute_capability, (8, 6))
+        self.assertEqual(gpus[0].memory_bytes, 12288 * 1024**2)
         self.assertEqual(select_rvc_runtime_profile(gpus), RVC_PROFILE_CU118)
 
     def test_selects_cu128_from_blackwell_product_name(self) -> None:

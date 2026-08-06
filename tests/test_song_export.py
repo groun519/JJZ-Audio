@@ -52,10 +52,25 @@ class SongExportTests(unittest.TestCase):
                 second = export_song_mix(package, StudioSession())
 
             self.assertNotEqual(first, second)
+            self.assertEqual(first.name, "Song - Audio Mix.wav")
+            self.assertEqual(second.name, "Song - Audio Mix (2).wav")
             self.assertEqual(first.parent, song_audio_export_dir(package))
             records = list_song_audio_exports(package)
             self.assertEqual({record.path for record in records}, {first, second})
             self.assertTrue(all(record.size_bytes == 3 for record in records))
+
+    def test_legacy_timestamp_mix_is_renamed_when_exports_are_listed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            output_dir = song_audio_export_dir(package)
+            output_dir.mkdir(parents=True)
+            legacy = output_dir / "mix-20260806-160444.wav"
+            legacy.write_bytes(b"mix")
+
+            records = list_song_audio_exports(package)
+
+            self.assertFalse(legacy.exists())
+            self.assertEqual([record.path.name for record in records], ["Song - Audio Mix.wav"])
 
     def test_export_rejects_a_session_with_every_track_muted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

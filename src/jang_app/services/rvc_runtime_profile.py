@@ -48,6 +48,7 @@ GpuCommandRunner = Callable[[Sequence[str]], CommandResultLike]
 class NvidiaGpu:
     name: str
     compute_capability: tuple[int, int] = ()
+    memory_bytes: int = 0
 
     @property
     def is_blackwell(self) -> bool:
@@ -123,23 +124,35 @@ def probe_nvidia_gpus(command_runner: GpuCommandRunner | None = None) -> tuple[N
     result = runner(
         (
             "nvidia-smi",
-            "--query-gpu=name,compute_cap",
+            "--query-gpu=name,compute_cap,memory.total",
             "--format=csv,noheader,nounits",
         )
     )
     if result.returncode == 0:
-        parsed = _parse_gpu_rows(result.stdout, with_capability=True)
+        parsed = _parse_gpu_rows(
+            result.stdout,
+            with_capability=True,
+            with_memory=True,
+        )
         if parsed:
             return parsed
 
     fallback = runner(
         (
             "nvidia-smi",
-            "--query-gpu=name",
+            "--query-gpu=name,memory.total",
             "--format=csv,noheader,nounits",
         )
     )
-    return _parse_gpu_rows(fallback.stdout, with_capability=False) if fallback.returncode == 0 else ()
+    return (
+        _parse_gpu_rows(
+            fallback.stdout,
+            with_capability=False,
+            with_memory=True,
+        )
+        if fallback.returncode == 0
+        else ()
+    )
 
 
 def _run_nvidia_smi(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -158,20 +171,30 @@ def _run_nvidia_smi(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(list(args), 1, "", str(exc))
 
 
-def _parse_gpu_rows(output: str, *, with_capability: bool) -> tuple[NvidiaGpu, ...]:
+def _parse_gpu_rows(
+    output: str,
+    *,
+    with_capability: bool,
+    with_memory: bool,
+) -> tuple[NvidiaGpu, ...]:
     gpus: list[NvidiaGpu] = []
     for raw_line in output.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        if with_capability:
-            name, separator, raw_capability = line.rpartition(",")
-            if not separator or not name.strip():
-                continue
-            capability = _parse_capability(raw_capability)
-            gpus.append(NvidiaGpu(name.strip(), capability))
-        else:
-            gpus.append(NvidiaGpu(line))
+        parts = [part.strip() for part in line.split(",")]
+        minimum_parts = 1 + int(with_capability) + int(with_memory)
+        if len(parts) < minimum_parts:
+            if len(parts) == 1:
+                gpus.append(NvidiaGpu(parts[0]))
+            elif with_capability and len(parts) == 2:
+                gpus.append(NvidiaGpu(parts[0], _parse_capability(parts[1])))
+            continue
+        name = ",".join(parts[: len(parts) - int(with_capability) - int(with_memory)])
+        offset = len(parts) - int(with_capability) - int(with_memory)
+        capability = _parse_capability(parts[offset]) if with_capability else ()
+        memory_mib = _parse_memory_mib(parts[-1]) if with_memory else 0
+        gpus.append(NvidiaGpu(name.strip(), capability, memory_mib * 1024**2))
     return tuple(gpus)
 
 
@@ -180,3 +203,8 @@ def _parse_capability(value: str) -> tuple[int, int]:
     if match is None:
         return ()
     return int(match.group("major")), int(match.group("minor"))
+
+
+def _parse_memory_mib(value: str) -> int:
+    match = re.search(r"\d+", value)
+    return int(match.group()) if match is not None else 0

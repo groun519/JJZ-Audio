@@ -152,6 +152,34 @@ class RvcTrainingStateStoreTests(unittest.TestCase):
             self.assertEqual(recovered.checkpoint_step, 100)
             self.assertTrue(recovered.can_resume)
 
+    def test_failure_context_survives_reload_and_clears_on_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            layout = RvcModelPackageLayout(Path(temporary) / "model", "voice")
+            layout.create()
+            for name in ("G_100.pth", "D_100.pth"):
+                (layout.experiment_dir / name).write_bytes(name.encode())
+            store = RvcTrainingStateStore("created-voice", layout)
+
+            failed = store.record_failure_context(
+                "CUDA out of memory",
+                task_id="task-123",
+                diagnostic_code="CUDA_OUT_OF_MEMORY",
+            )
+            reloaded = RvcTrainingStateStore("created-voice", layout).load()
+
+            self.assertEqual(reloaded, failed)
+            self.assertEqual(reloaded.last_task_id, "task-123")
+            self.assertEqual(
+                reloaded.last_diagnostic_code,
+                "CUDA_OUT_OF_MEMORY",
+            )
+            self.assertTrue(reloaded.can_resume)
+
+            retried = store.begin_training(20)
+
+            self.assertEqual(retried.last_task_id, "")
+            self.assertEqual(retried.last_diagnostic_code, "")
+
 
 if __name__ == "__main__":
     unittest.main()

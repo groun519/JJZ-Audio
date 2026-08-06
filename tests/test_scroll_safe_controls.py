@@ -4,7 +4,15 @@ import unittest
 
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtTest import QSignalSpy, QTest
+from PySide6.QtWidgets import (
+    QApplication,
+    QScrollArea,
+    QStyle,
+    QStyleOptionSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
 from jang_app.qt_app.widgets import ScrollSafeComboBox, ScrollSafeSlider, ScrollSafeSpinBox
 
@@ -56,6 +64,52 @@ class ScrollSafeControlTests(unittest.TestCase):
         self.assertEqual(spin.value(), 50)
         self.assertGreater(scroll_bar.value(), 300)
         area.close()
+
+    def test_clicking_slider_track_moves_directly_to_pointer(self) -> None:
+        slider = ScrollSafeSlider(Qt.Orientation.Horizontal)
+        slider.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        slider.setRange(0, 100)
+        slider.setValue(0)
+        slider.resize(240, 30)
+        slider.show()
+        self.app.processEvents()
+        option = QStyleOptionSlider()
+        slider.initStyleOption(option)
+        groove = slider.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider,
+            option,
+            QStyle.SubControl.SC_SliderGroove,
+            slider,
+        )
+        target = groove.center()
+        target.setX(round(groove.left() + groove.width() * 0.75))
+        moved = QSignalSpy(slider.sliderMoved)
+
+        QTest.mouseClick(slider, Qt.MouseButton.LeftButton, pos=target)
+
+        self.assertGreaterEqual(slider.value(), 70)
+        self.assertLessEqual(slider.value(), 80)
+        self.assertGreaterEqual(moved.count(), 1)
+        slider.close()
+
+    def test_dragging_from_slider_track_continues_to_follow_pointer(self) -> None:
+        slider = ScrollSafeSlider(Qt.Orientation.Horizontal)
+        slider.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        slider.setRange(0, 100)
+        slider.setValue(0)
+        slider.resize(240, 30)
+        slider.show()
+        self.app.processEvents()
+        start = slider.rect().center()
+        end = start + QPoint(80, 0)
+
+        QTest.mousePress(slider, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(slider, end)
+        QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, pos=end)
+
+        self.assertGreater(slider.value(), 75)
+        self.assertFalse(slider.isSliderDown())
+        slider.close()
 
 
 def _wheel_event() -> QWheelEvent:

@@ -199,6 +199,13 @@ def _stylesheet(
             letter-spacing: 0;
         }}
 
+        QFrame#WindowTitleBar QLabel#AppVersion {{
+            color: {muted};
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0;
+        }}
+
         QFrame#NavigationDock {{
             background: {chrome};
             border: 0;
@@ -392,6 +399,44 @@ def _stylesheet(
             border-radius: 14px;
         }}
 
+        QFrame#TrainingRecoveryCard {{
+            background: {danger_background};
+            border: 1px solid {danger_border};
+            border-radius: 14px;
+        }}
+
+        QLabel#TrainingRecoveryCode {{
+            color: {danger_text};
+            background: {surface};
+            border: 1px solid {danger_border};
+            border-radius: 8px;
+            padding: 3px 8px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingRecoveryTitle {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 12px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingRecoveryDetail {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QPushButton#TrainingRecoverySecondaryButton {{
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0 14px;
+        }}
+
         QLabel#TrainingStatusTitle {{
             color: {text};
             font-size: 15px;
@@ -528,6 +573,41 @@ def _stylesheet(
             font-weight: 900;
         }}
 
+        QFrame#TrainingPreflightCheck {{
+            background: {surface};
+            border: 1px solid {border};
+            border-left: 3px solid {border};
+            border-radius: 9px;
+        }}
+
+        QFrame#TrainingPreflightCheck[checkLevel="ready"] {{
+            border-left-color: {success_border};
+        }}
+
+        QFrame#TrainingPreflightCheck[checkLevel="warning"] {{
+            border-left-color: {warning_border};
+        }}
+
+        QFrame#TrainingPreflightCheck[checkLevel="blocker"] {{
+            border-left-color: {danger_border};
+        }}
+
+        QLabel#TrainingPreflightTitle {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingPreflightDetail {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 9px;
+            font-weight: 700;
+        }}
+
         QLabel#TrainingReadinessBadge {{
             padding: 4px 9px;
             color: {faint};
@@ -550,13 +630,19 @@ def _stylesheet(
             border-color: {warning_border};
         }}
 
-        QFrame#TrainingModeControl {{
+        QLabel#TrainingReadinessBadge[readiness="blocked"] {{
+            color: {danger_text};
+            background: {danger_background};
+            border-color: {danger_border};
+        }}
+
+        QFrame#TrainingModeControl, QFrame#TrainingPresetControl {{
             background: {surface};
             border: 1px solid {border};
             border-radius: 10px;
         }}
 
-        QPushButton#TrainingModeButton {{
+        QPushButton#TrainingModeButton, QPushButton#TrainingPresetButton {{
             min-width: 76px;
             min-height: 26px;
             max-height: 26px;
@@ -570,32 +656,87 @@ def _stylesheet(
         }}
 
         QPushButton#TrainingModeButton:hover,
-        QPushButton#TrainingModeButton[pointerState="hover"] {{
+        QPushButton#TrainingModeButton[pointerState="hover"],
+        QPushButton#TrainingPresetButton:hover,
+        QPushButton#TrainingPresetButton[pointerState="hover"] {{
             color: {text};
             background: {hover};
         }}
 
-        QPushButton#TrainingModeButton:checked {{
+        QPushButton#TrainingModeButton:checked,
+        QPushButton#TrainingPresetButton:checked {{
             color: {tab_active_text};
             background: {tab_active};
             border-color: {tab_active_border};
         }}
 
         QPushButton#TrainingModeButton:pressed,
-        QPushButton#TrainingModeButton[pointerState="pressed"] {{
+        QPushButton#TrainingModeButton[pointerState="pressed"],
+        QPushButton#TrainingPresetButton:pressed,
+        QPushButton#TrainingPresetButton[pointerState="pressed"] {{
             background: {pressed};
         }}
 
-        QPushButton#TrainingModeButton:disabled {{
+        QPushButton#TrainingModeButton:disabled,
+        QPushButton#TrainingPresetButton:disabled {{
             color: {faint};
             background: transparent;
             border-color: transparent;
         }}
 
-        QPushButton#TrainingModeButton:checked:disabled {{
+        QPushButton#TrainingModeButton:checked:disabled,
+        QPushButton#TrainingPresetButton:checked:disabled {{
             color: {muted};
             background: {selection};
             border-color: {border};
+        }}
+
+        QLabel#TrainingPresetSummary {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QWidget#TrainingFieldHeader {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QPushButton#InfoPopoverButton {{
+            min-width: 18px;
+            max-width: 18px;
+            min-height: 18px;
+            max-height: 18px;
+            padding: 0;
+            color: {muted};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 9px;
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
+        QPushButton#InfoPopoverButton:hover,
+        QPushButton#InfoPopoverButton[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+            border-color: {button_border};
+        }}
+
+        QPushButton#InfoPopoverButton:pressed,
+        QPushButton#InfoPopoverButton[pointerState="pressed"] {{
+            color: {text};
+            background: {pressed};
+            border-color: {accent};
+        }}
+
+        QToolTip {{
+            color: {text};
+            background: {raised};
+            border: 1px solid {button_border};
+            border-radius: 8px;
+            padding: 8px 10px;
+            font-size: 10px;
         }}
 
         QLabel#TrainingStartHint {{
@@ -625,6 +766,12 @@ def _stylesheet(
             border-radius: 9px;
             font-size: 11px;
             font-weight: 800;
+        }}
+
+        QScrollArea#ModelTrainingScroll,
+        QScrollArea#ModelTrainingScroll > QWidget > QWidget {{
+            background: transparent;
+            border: 0;
         }}
 
         QLabel#TrainingDeviceValue:disabled {{
@@ -981,6 +1128,18 @@ def _stylesheet(
             font-weight: 800;
         }}
 
+        QLabel#DatasetShortcutKey {{
+            min-height: 20px;
+            max-height: 20px;
+            padding: 0 6px;
+            color: {muted};
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 6px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
         QLabel#DatasetReviewBadge {{
             min-width: 76px;
             min-height: 22px;
@@ -1007,6 +1166,24 @@ def _stylesheet(
             background: {surface};
             border: 1px solid {border};
             border-radius: 10px;
+        }}
+
+        QFrame#DatasetReviewBar {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 11px;
+        }}
+
+        QFrame#DatasetSecondaryTools {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QFrame#DatasetToolPanel,
+        QStackedWidget#DatasetToolStack {{
+            background: transparent;
+            border: 0;
         }}
 
         QScrollArea#DatasetAnalysisScroll,
@@ -1856,23 +2033,28 @@ def _stylesheet(
             background: {raised};
         }}
 
-        QPushButton#PrimaryButton {{
+        QPushButton#PrimaryButton, QPushButton#DatasetEditorPrimaryButton {{
             background: {accent};
             color: {accent_text};
             border-color: {accent};
         }}
 
         QPushButton#PrimaryButton:hover,
-        QPushButton#PrimaryButton[pointerState="hover"] {{
+        QPushButton#PrimaryButton[pointerState="hover"],
+        QPushButton#DatasetEditorPrimaryButton:hover,
+        QPushButton#DatasetEditorPrimaryButton[pointerState="hover"] {{
             background: {active_hover};
         }}
 
         QPushButton#PrimaryButton:pressed,
-        QPushButton#PrimaryButton[pointerState="pressed"] {{
+        QPushButton#PrimaryButton[pointerState="pressed"],
+        QPushButton#DatasetEditorPrimaryButton:pressed,
+        QPushButton#DatasetEditorPrimaryButton[pointerState="pressed"] {{
             background: {active_pressed};
         }}
 
-        QPushButton#PrimaryButton[keyboardFocus="true"] {{
+        QPushButton#PrimaryButton[keyboardFocus="true"],
+        QPushButton#DatasetEditorPrimaryButton[keyboardFocus="true"] {{
             background: {active_hover};
             border-color: {focus};
         }}
@@ -1895,7 +2077,8 @@ def _stylesheet(
             border-color: #963029;
         }}
 
-        QPushButton#PrimaryButton:disabled {{
+        QPushButton#PrimaryButton:disabled,
+        QPushButton#DatasetEditorPrimaryButton:disabled {{
             color: {faint};
             background: {raised};
             border-color: {border};
@@ -1978,10 +2161,10 @@ def _stylesheet(
         }}
 
         QPushButton#DatasetEditorIconButton {{
-            min-width: 30px;
-            max-width: 30px;
-            min-height: 30px;
-            max-height: 30px;
+            min-width: 32px;
+            max-width: 32px;
+            min-height: 32px;
+            max-height: 32px;
             padding: 0;
             border: 0;
             background: transparent;
@@ -1999,6 +2182,15 @@ def _stylesheet(
             padding: 0 12px;
             border-radius: 9px;
             background: {surface};
+        }}
+
+        QPushButton#DatasetEditorPrimaryButton {{
+            min-height: 30px;
+            max-height: 30px;
+            padding: 0 12px;
+            border-radius: 9px;
+            font-size: 10px;
+            font-weight: 900;
         }}
 
         QPushButton#DatasetEditorSecondaryButton:hover,

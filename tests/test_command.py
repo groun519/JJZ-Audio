@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.command import (
     CommandCancellation,
@@ -26,6 +27,25 @@ class CancellableCommandTests(unittest.TestCase):
         startupinfo = options["startupinfo"]
         self.assertTrue(startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW)
         self.assertEqual(startupinfo.wShowWindow, subprocess.SW_HIDE)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-only windowless Python behavior")
+    def test_background_runner_prefers_pythonw_for_child_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            python = runtime / "python.exe"
+            pythonw = runtime / "pythonw.exe"
+            python.write_bytes(b"python")
+            pythonw.write_bytes(b"pythonw")
+            completed = subprocess.CompletedProcess((), 0, "ready", "")
+
+            with patch(
+                "jang_app.services.command.subprocess.run",
+                return_value=completed,
+            ) as runner:
+                result = run_command([str(python), "-c", "print('ready')"])
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(Path(runner.call_args.args[0][0]), pythonw)
 
     def test_cancellation_terminates_a_running_process(self) -> None:
         cancellation = CommandCancellation()

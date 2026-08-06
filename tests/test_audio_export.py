@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from jang_app.services.audio_export import AudioMixSource, export_mix
+from jang_app.services.audio_export import AudioMixSource, export_audio_file, export_mix
 
 
 class AudioExportTests(unittest.TestCase):
@@ -26,6 +26,19 @@ class AudioExportTests(unittest.TestCase):
 
             self.assertAlmostEqual(float(mixed[0]), 1.0, places=4)
             self.assertAlmostEqual(float(mixed[1]), 0.4, places=3)
+
+    def test_track_export_preserves_display_title_and_uses_numbered_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.wav"
+            source.write_bytes(b"audio")
+            output_dir = root / "exports"
+
+            first = export_audio_file("윤하 - Instrumental", source, output_dir)
+            second = export_audio_file("윤하 - Instrumental", source, output_dir)
+
+            self.assertEqual(first.name, "윤하 - Instrumental.wav")
+            self.assertEqual(second.name, "윤하 - Instrumental (2).wav")
 
 
 if __name__ == "__main__":

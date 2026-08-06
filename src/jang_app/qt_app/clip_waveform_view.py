@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -17,6 +18,12 @@ _WAVEFORM_POINT_COUNT = 2400
 _WAVEFORM_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-waveform")
 _WAVEFORM_CACHE: dict[tuple[str, int, int, int], list[float]] = {}
 atexit.register(lambda: _WAVEFORM_EXECUTOR.shutdown(wait=False, cancel_futures=True))
+
+
+@dataclass(frozen=True)
+class ClipWaveformViewState:
+    zoom: int
+    center_ms: int
 
 
 class ClipWaveformView(QWidget):
@@ -61,6 +68,14 @@ class ClipWaveformView(QWidget):
     @property
     def selected_clip_id(self) -> str:
         return self._selected_clip_id
+
+    def view_state(self) -> ClipWaveformViewState:
+        return ClipWaveformViewState(self._zoom, self._view_center_ms)
+
+    def restore_view_state(self, state: ClipWaveformViewState) -> None:
+        self._zoom = max(1, min(12, state.zoom))
+        self._view_center_ms = self._clamp_center(state.center_ms)
+        self.update()
 
     def set_audio(self, path: Path | None, duration_ms: int, clips: tuple[ModelDatasetClip, ...]) -> None:
         self._duration_ms = max(0, duration_ms)

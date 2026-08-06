@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QWheelEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -19,12 +19,43 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QSlider,
     QSpinBox,
+    QStyle,
+    QStyleOptionSlider,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
 from jang_app.services.waveform import build_waveform_peaks
+
+
+def configure_two_line_status_text(
+    container: QFrame,
+    title: QLabel,
+    detail: QLabel,
+    *,
+    spacing: int,
+    detail_lines: int = 2,
+) -> None:
+    """Keep compact status cards readable when their parent is vertically constrained."""
+    title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    detail.setWordWrap(True)
+    detail.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+    detail.setMinimumHeight(detail.fontMetrics().lineSpacing() * max(1, detail_lines))
+    container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
+    layout = container.layout()
+    if layout is None:
+        return
+    margins = layout.contentsMargins()
+    container.setMinimumHeight(
+        margins.top()
+        + title.fontMetrics().lineSpacing()
+        + spacing
+        + detail.minimumHeight()
+        + margins.bottom()
+    )
 
 
 class _ScrollSafeControl:
@@ -55,7 +86,91 @@ class ScrollSafeComboBox(_ScrollSafeControl, QComboBox):
 
 
 class ScrollSafeSlider(_ScrollSafeControl, QSlider):
-    pass
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._absolute_drag_active = False
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton or not self.isEnabled():
+            super().mousePressEvent(event)
+            return
+        option, handle = self._style_option_and_handle()
+        if handle.contains(event.position().toPoint()):
+            super().mousePressEvent(event)
+            return
+        self._absolute_drag_active = True
+        self.setSliderDown(True)
+        self._move_to_pointer(event.position(), option, handle)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if (
+            self._absolute_drag_active
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and self.isEnabled()
+        ):
+            option, handle = self._style_option_and_handle()
+            self._move_to_pointer(event.position(), option, handle)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._absolute_drag_active:
+            self._absolute_drag_active = False
+            if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+                option, handle = self._style_option_and_handle()
+                self._move_to_pointer(event.position(), option, handle)
+                if not self.hasTracking():
+                    self.setValue(self.sliderPosition())
+                self.setSliderDown(False)
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+    def _style_option_and_handle(self) -> tuple[QStyleOptionSlider, QRect]:
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        handle = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider,
+            option,
+            QStyle.SubControl.SC_SliderHandle,
+            self,
+        )
+        return option, handle
+
+    def _move_to_pointer(
+        self,
+        position: QPointF,
+        option: QStyleOptionSlider,
+        handle: QRect,
+    ) -> None:
+        groove = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider,
+            option,
+            QStyle.SubControl.SC_SliderGroove,
+            self,
+        )
+        if self.orientation() == Qt.Orientation.Horizontal:
+            slider_length = handle.width()
+            slider_min = groove.left()
+            slider_max = groove.right() - slider_length + 1
+            pointer = round(position.x()) - slider_length // 2
+        else:
+            slider_length = handle.height()
+            slider_min = groove.top()
+            slider_max = groove.bottom() - slider_length + 1
+            pointer = round(position.y()) - slider_length // 2
+        span = max(0, slider_max - slider_min)
+        slider_position = max(0, min(span, pointer - slider_min))
+        value = QStyle.sliderValueFromPosition(
+            self.minimum(),
+            self.maximum(),
+            slider_position,
+            span,
+            option.upsideDown,
+        )
+        self.setSliderPosition(value)
 
 
 class ScrollSafeSpinBox(_ScrollSafeControl, QSpinBox):
@@ -135,6 +250,42 @@ class FeedbackButton(QPushButton):
         painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), max(2.0, radius - 2), max(2.0, radius - 2))
 
 
+class InfoPopoverButton(FeedbackButton):
+    """Compact help button that exposes the same content to pointer and keyboard users."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("i", parent)
+        self.setObjectName("InfoPopoverButton")
+        self.setFixedSize(18, 18)
+        self.setAccessibleName("Information")
+        self.clicked.connect(self.show_popover)
+
+    def set_content(
+        self,
+        title: str,
+        body: str,
+        recommendation: str = "",
+    ) -> None:
+        sections = [f"<b>{title.strip()}</b>", body.strip()]
+        if recommendation.strip():
+            sections.append(recommendation.strip())
+        self.setToolTip("<br><br>".join(section for section in sections if section))
+
+    def show_popover(self) -> None:
+        if not self.toolTip():
+            return
+        position = self.mapToGlobal(QPoint(self.width() + 6, self.height() + 2))
+        QToolTip.showText(position, self.toolTip(), self)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        super().enterEvent(event)
+        self.show_popover()
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        self.show_popover()
+
+
 def _nearest_scroll_area(widget: QWidget) -> QAbstractScrollArea | None:
     parent = widget.parentWidget()
     while parent is not None:
@@ -154,6 +305,7 @@ class WindowTitleBar(QFrame):
         title: str,
         logo_path: Path,
         *,
+        version_text: str = "",
         allow_minimize: bool = True,
         allow_maximize: bool = True,
     ) -> None:
@@ -170,11 +322,21 @@ class WindowTitleBar(QFrame):
         title_label = QLabel(title)
         title_label.setObjectName("AppTitle")
 
+        self.version_label = QLabel(version_text.strip())
+        self.version_label.setObjectName("AppVersion")
+        self.version_label.setVisible(bool(self.version_label.text()))
+
+        brand_text_layout = QHBoxLayout()
+        brand_text_layout.setContentsMargins(0, 0, 0, 0)
+        brand_text_layout.setSpacing(7)
+        brand_text_layout.addWidget(title_label, 0)
+        brand_text_layout.addWidget(self.version_label, 0)
+
         brand_layout = QHBoxLayout()
         brand_layout.setContentsMargins(0, 0, 0, 0)
         brand_layout.setSpacing(12)
         brand_layout.addWidget(logo, 0)
-        brand_layout.addWidget(title_label, 0)
+        brand_layout.addLayout(brand_text_layout, 0)
 
         self.center_widget = QWidget()
         self.center_widget.setObjectName("TitleBarCenter")

@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QDialog
 
-from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
+from jang_app.qt_app.initial_setup_dialog import DiagnosticRow, InitialSetupDialog
 from jang_app.services.app_paths import discover_app_paths
 from jang_app.services.initial_setup import is_initial_setup_complete
 from jang_app.services.storage_migration import migrate_storage, plan_storage_migration
@@ -70,6 +70,27 @@ class InitialSetupDialogTests(unittest.TestCase):
             self.assertTrue(dialog.restart_required)
             self.assertEqual(dialog.configured_paths.storage_version, 2)
             dialog.close()
+
+    def test_diagnostic_row_keeps_wrapped_detail_visible(self) -> None:
+        row = DiagnosticRow("RVC Assets")
+        row.set_pending(
+            "Runtime package and model verification has not been run yet."
+        )
+        row.resize(520, 30)
+        row.show()
+        self.app.processEvents()
+
+        self.assertTrue(row.detail_label.wordWrap())
+        self.assertGreaterEqual(row.height(), row.minimumHeight())
+        self.assertGreaterEqual(
+            row.detail_label.height(),
+            row.detail_label.minimumHeight(),
+        )
+        self.assertLessEqual(
+            row.detail_label.geometry().bottom(),
+            row.contentsRect().bottom(),
+        )
+        row.close()
 
 
 class _ReadyWorker(QObject):

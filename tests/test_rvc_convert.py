@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,8 +27,34 @@ class RvcConvertTests(unittest.TestCase):
         self.assertEqual(path_parts[0], str(FFMPEG_BIN_DIR))
         self.assertEqual(path_parts[1], str(rvc_root))
         self.assertEqual(path_parts[2], str(rvc_root / "runtime"))
+        self.assertEqual(environment["PYTHONUTF8"], "1")
+        self.assertEqual(environment["PYTHONIOENCODING"], "utf-8:replace")
         self.assertEqual(environment["PYTHONFAULTHANDLER"], "1")
         self.assertEqual(environment["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"], "1")
+
+    def test_environment_overrides_legacy_windows_console_encoding(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"PYTHONUTF8": "0", "PYTHONIOENCODING": "cp949"},
+            clear=False,
+        ):
+            environment = build_rvc_environment(Path("C:/rvc"))
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print(sys.stdout.encoding); print('\u663e\u5361')",
+            ],
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.splitlines(), ["utf-8", "\u663e\u5361"])
 
     def test_conversion_uses_effective_cpu_device_after_cuda_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

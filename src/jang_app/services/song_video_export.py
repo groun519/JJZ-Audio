@@ -4,7 +4,6 @@ import os
 import tempfile
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.config import FFMPEG_BIN_DIR
@@ -12,6 +11,11 @@ from jang_app.services.audio_export import export_mix
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.command import run_command
 from jang_app.services.environment import MissingExecutableError, require_executable
+from jang_app.services.export_names import (
+    migrate_legacy_song_exports,
+    next_song_export_path,
+    timestamp_export_pattern,
+)
 from jang_app.services.export_catalog import ExportedFile, list_exported_files
 from jang_app.services.song_export import build_song_mix_sources
 from jang_app.services.song_package import EXPORT_STAGE, SongPackage
@@ -24,6 +28,7 @@ class SongVideoExportError(RuntimeError):
 
 
 SongVideoExport = ExportedFile
+_LEGACY_VIDEO_PATTERN = timestamp_export_pattern("video", ".mp4")
 
 
 def render_song_video(
@@ -45,8 +50,12 @@ def render_song_video(
         raise SongVideoExportError(str(exc)) from exc
 
     output_dir = song_video_export_dir(package)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = _next_video_path(output_dir)
+    output_path = next_song_export_path(
+        output_dir,
+        package.title,
+        "Video",
+        ".mp4",
+    )
     temporary_output = output_path.with_name(f"{output_path.stem}.{uuid.uuid4().hex}.rendering.mp4")
     if progress is not None:
         progress(1)
@@ -87,7 +96,15 @@ def song_video_export_dir(package: SongPackage) -> Path:
 
 
 def list_song_video_exports(package: SongPackage) -> tuple[SongVideoExport, ...]:
-    return list_exported_files(song_video_export_dir(package), "*.mp4")
+    output_dir = song_video_export_dir(package)
+    migrate_legacy_song_exports(
+        output_dir,
+        package.title,
+        "Video",
+        ".mp4",
+        _LEGACY_VIDEO_PATTERN,
+    )
+    return list_exported_files(output_dir, "*.mp4")
 
 
 def _render_command(
@@ -152,16 +169,6 @@ def _ffmpeg_progress(
         progress(max(12, min(99, 12 + round(position_ms * 87 / duration_ms))))
 
     return report
-
-
-def _next_video_path(output_dir: Path) -> Path:
-    stem = f"video-{datetime.now(UTC):%Y%m%d-%H%M%S}"
-    candidate = output_dir / f"{stem}.mp4"
-    suffix = 2
-    while candidate.exists():
-        candidate = output_dir / f"{stem}-{suffix:03d}.mp4"
-        suffix += 1
-    return candidate
 
 
 def _unlink_quietly(path: Path) -> None:

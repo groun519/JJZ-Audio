@@ -84,16 +84,21 @@ def run_command(
     *,
     diagnostics: JobDiagnostics | None = None,
 ) -> CommandResult:
+    command_args = background_command_args(args)
     logger = get_logger()
-    logger.info("Running command: %s", " ".join(redact_command(args)))
-    task_id, recorder, command_id, started = _start_diagnostic_command(args, cwd, diagnostics)
+    logger.info("Running command: %s", " ".join(redact_command(command_args)))
+    task_id, recorder, command_id, started = _start_diagnostic_command(
+        command_args,
+        cwd,
+        diagnostics,
+    )
     callback = _diagnostic_output_callback(task_id, recorder, output_callback)
     try:
         if output_callback is not None:
-            result = _run_streaming_command(args, cwd, env, callback)
+            result = _run_streaming_command(command_args, cwd, env, callback)
         else:
             completed = subprocess.run(
-                [str(arg) for arg in args],
+                command_args,
                 cwd=str(cwd) if cwd else None,
                 env=dict(env) if env is not None else None,
                 check=False,
@@ -104,7 +109,7 @@ def run_command(
                 **hidden_subprocess_kwargs(),
             )
             result = CommandResult(
-                args=args,
+                args=command_args,
                 returncode=completed.returncode,
                 stdout=completed.stdout,
                 stderr=completed.stderr,
@@ -131,14 +136,19 @@ def run_cancellable_command(
     *,
     diagnostics: JobDiagnostics | None = None,
 ) -> CommandResult:
+    command_args = background_command_args(args)
     token = cancellation or CommandCancellation()
     logger = get_logger()
-    logger.info("Running cancellable command: %s", " ".join(redact_command(args)))
-    task_id, recorder, command_id, started = _start_diagnostic_command(args, cwd, diagnostics)
+    logger.info("Running cancellable command: %s", " ".join(redact_command(command_args)))
+    task_id, recorder, command_id, started = _start_diagnostic_command(
+        command_args,
+        cwd,
+        diagnostics,
+    )
     callback = _diagnostic_output_callback(task_id, recorder, output_callback)
     try:
         process = subprocess.Popen(
-            [str(arg) for arg in args],
+            command_args,
             cwd=str(cwd) if cwd else None,
             env=dict(env) if env is not None else None,
             stdout=subprocess.PIPE,
@@ -165,7 +175,7 @@ def run_cancellable_command(
         token._detach(process)
     logger.info("Cancellable command exited with code %s", returncode)
     result = CommandResult(
-        args=args,
+        args=command_args,
         returncode=returncode,
         stdout="",
         stderr=output,
@@ -180,6 +190,20 @@ def run_cancellable_command(
         cancelled=result.cancelled,
     )
     return result
+
+
+def background_command_args(args: Sequence[str]) -> list[str]:
+    """Normalize commands for background execution without visible windows."""
+    command = [str(arg) for arg in args]
+    if os.name != "nt" or not command:
+        return command
+    executable = Path(command[0])
+    if executable.name.casefold() != "python.exe":
+        return command
+    windowless = executable.with_name("pythonw.exe")
+    if windowless.is_file():
+        command[0] = str(windowless)
+    return command
 
 
 def _run_streaming_command(

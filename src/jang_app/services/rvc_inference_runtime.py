@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from jang_app.services.command import hidden_subprocess_kwargs
+from jang_app.services.command import background_command_args, hidden_subprocess_kwargs
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_cuda_compatibility import (
     cuda_architecture_error,
@@ -245,7 +245,7 @@ class _ProbeResult:
 def _run_probe(python: Path, rvc_root: Path, script: str) -> _ProbeResult:
     try:
         completed = subprocess.run(
-            [str(python), "-c", script],
+            background_command_args([str(python), "-c", script]),
             cwd=rvc_root,
             env=build_rvc_environment(rvc_root),
             check=False,

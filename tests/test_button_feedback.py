@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.widgets import (
     FeedbackButton,
+    InfoPopoverButton,
     WindowTitleBar,
     _TRACK_ICON_SVGS,
     _track_button_palette,
@@ -92,9 +93,27 @@ class ButtonFeedbackTests(unittest.TestCase):
 
             button.close()
 
+    def test_info_popover_exposes_compact_reusable_help_content(self) -> None:
+        button = InfoPopoverButton()
+        button.set_content(
+            "Batch Size",
+            "Controls memory usage.",
+            "Current recommendation: 4",
+        )
+
+        self.assertEqual((button.width(), button.height()), (18, 18))
+        self.assertIn("<b>Batch Size</b>", button.toolTip())
+        self.assertIn("Controls memory usage.", button.toolTip())
+        self.assertIn("Current recommendation: 4", button.toolTip())
+        button.close()
+
     def test_title_bar_does_not_clip_action_buttons(self) -> None:
         for theme_mode in ("dark", "white"):
-            title_bar = WindowTitleBar("JJZero Audio", Path())
+            title_bar = WindowTitleBar(
+                "JJZero Audio",
+                Path(),
+                version_text="v0.2.5",
+            )
             title_bar.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
             title_bar.setStyleSheet(build_stylesheet(theme_mode))
             language_button = FeedbackButton("KR" if theme_mode == "dark" else "EN")
@@ -107,6 +126,9 @@ class ButtonFeedbackTests(unittest.TestCase):
 
             with self.subTest(theme_mode=theme_mode):
                 self.assertGreaterEqual(title_bar.action_widget.height(), language_button.height())
+                self.assertEqual(title_bar.version_label.text(), "v0.2.5")
+                self.assertEqual(title_bar.version_label.objectName(), "AppVersion")
+                self.assertTrue(title_bar.version_label.isVisible())
 
             title_bar.close()
 

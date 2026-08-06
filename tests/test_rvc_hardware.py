@@ -21,12 +21,19 @@ class RvcHardwareTests(unittest.TestCase):
                 GraphicsAdapter("AMD Radeon Graphics", "amd"),
                 GraphicsAdapter("NVIDIA GeForce RTX 5070", "nvidia"),
             ),
-            nvidia_gpus=(NvidiaGpu("NVIDIA GeForce RTX 5070", (12, 0)),),
+            nvidia_gpus=(
+                NvidiaGpu(
+                    "NVIDIA GeForce RTX 5070",
+                    (12, 0),
+                    12 * 1024**3,
+                ),
+            ),
         )
 
         self.assertEqual(selection.profile, "cu128")
         self.assertEqual(selection.backend, RvcComputeBackend.CUDA)
         self.assertTrue(selection.training_accelerated)
+        self.assertEqual(selection.adapter.adapter_ram, 12 * 1024**3)
 
     def test_supported_amd_card_selects_windows_rocm(self) -> None:
         selection = select_rvc_hardware(

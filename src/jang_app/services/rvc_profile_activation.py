@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from jang_app.services.app_logging import get_logger
-from jang_app.services.command import hidden_subprocess_kwargs
+from jang_app.services.command import background_command_args, hidden_subprocess_kwargs
 from jang_app.services.rvc_runtime_profile import (
     RVC_PROFILE_CU118,
     RVC_PROFILE_CU128,
@@ -160,7 +160,7 @@ print(json.dumps(result, ensure_ascii=False))
 def _run_command(args: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
-            list(args),
+            background_command_args(args),
             cwd=cwd,
             check=False,
             capture_output=True,
