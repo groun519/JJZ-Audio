@@ -13,7 +13,7 @@ from jang_app.services.initial_setup import (
     InitialSetupError,
     build_storage_layout,
     persist_storage_layout,
-    prepare_storage_layout,
+    prepare_configured_storage_layout,
 )
 from jang_app.services.managed_files import copy_file_atomic, file_sha256, write_json_atomic
 
@@ -41,6 +41,8 @@ class StorageMigrationPlan:
     components: tuple[StorageMigrationComponent, ...]
     total_files: int
     total_bytes: int
+    transaction_id: str
+    cache_reset: bool = False
 
     @property
     def required(self) -> bool:
@@ -55,9 +57,12 @@ class StorageMigrationPlan:
         return self.total_bytes + headroom if self.required else 0
 
 
-def plan_storage_migration(paths: AppPaths, storage_root: Path) -> StorageMigrationPlan:
+def plan_storage_migration(
+    paths: AppPaths,
+    storage: Path | AppPaths,
+) -> StorageMigrationPlan:
     try:
-        configured = build_storage_layout(paths, storage_root)
+        configured = storage if isinstance(storage, AppPaths) else build_storage_layout(paths, storage)
     except InitialSetupError as exc:
         raise StorageMigrationError(str(exc)) from exc
 
@@ -65,7 +70,6 @@ def plan_storage_migration(paths: AppPaths, storage_root: Path) -> StorageMigrat
         ("Data", paths.workspace_root, configured.workspace_root),
         ("Output", paths.output_root, configured.output_root),
         ("Runtime", paths.runtime_root, configured.runtime_root),
-        ("Cache", paths.cache_dir, configured.cache_dir),
     )
     components: list[StorageMigrationComponent] = []
     for name, source, target in pairs:
@@ -73,7 +77,7 @@ def plan_storage_migration(paths: AppPaths, storage_root: Path) -> StorageMigrat
         target = target.expanduser().resolve()
         if source == target or not source.exists():
             continue
-        if _is_within(configured.storage_root, source):
+        if _is_within(target, source):
             raise StorageMigrationError(
                 f"Storage location cannot be placed inside the current {name} folder."
             )
@@ -99,14 +103,17 @@ def plan_storage_migration(paths: AppPaths, storage_root: Path) -> StorageMigrat
         components=tuple(components),
         total_files=sum(component.file_count for component in components),
         total_bytes=sum(component.size_bytes for component in components),
+        transaction_id=uuid4().hex,
+        cache_reset=paths.cache_dir.resolve() != configured.cache_dir.resolve(),
     )
-    if plan.required:
-        disk_root = _nearest_existing_parent(configured.storage_root)
+    for disk_root, components_on_disk in _components_by_disk(plan.components):
+        required_bytes = sum(component.size_bytes for component in components_on_disk)
+        required_free = _required_free_bytes(required_bytes)
         free_bytes = shutil.disk_usage(disk_root).free
-        if free_bytes < plan.required_free_bytes:
+        if free_bytes < required_free:
             raise StorageMigrationError(
                 "The selected storage does not have enough free space. "
-                f"Required: {_format_bytes(plan.required_free_bytes)}, "
+                f"Required: {_format_bytes(required_free)}, "
                 f"available: {_format_bytes(free_bytes)}."
             )
     return plan
@@ -115,36 +122,54 @@ def plan_storage_migration(paths: AppPaths, storage_root: Path) -> StorageMigrat
 def migrate_storage(
     plan: StorageMigrationPlan,
     progress: StorageProgress | None = None,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> AppPaths:
     if not plan.required:
-        configured = prepare_storage_layout(plan.current, plan.configured.storage_root)
+        configured = prepare_configured_storage_layout(plan.configured)
         persist_storage_layout(configured)
         _report(progress, "Storage ready", 100)
         return configured
 
-    root = plan.configured.storage_root
-    root.mkdir(parents=True, exist_ok=True)
-    staging = root / f".jjzero-migration-{uuid4().hex}"
-    staging.mkdir()
+    staging = {
+        component.name: component.target.parent
+        / f".jjzero-migration-{plan.transaction_id}-{component.name.lower()}"
+        for component in plan.components
+    }
+    for path in staging.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir()
+    journal = _write_migration_journal(plan, "copying", staging)
     copied_bytes = 0
 
-    def copy_progress(base: int, value: int) -> None:
+    def copy_progress(component_name: str, base: int, value: int) -> None:
         completed = base + value
         percent = int(completed * 80 / max(1, plan.total_bytes))
-        _report(progress, "Copying files", min(80, percent))
+        _report(progress, f"Copying {component_name}", min(80, percent))
 
     try:
         for component in plan.components:
-            stage_target = staging / component.name
-            stage_target.mkdir(parents=True)
+            _raise_if_cancelled(cancelled)
+            stage_target = staging[component.name]
             component_base = copied_bytes
             for source in _component_files(component.source):
+                _raise_if_cancelled(cancelled)
                 relative = source.relative_to(component.source)
                 file_base = copied_bytes
+
+                def report_file_progress(
+                    value: int,
+                    *,
+                    base: int = file_base,
+                    component_name: str = component.name,
+                ) -> None:
+                    _raise_if_cancelled(cancelled)
+                    copy_progress(component_name, base, value)
+
                 copy_file_atomic(
                     source,
                     stage_target / relative,
-                    lambda value, base=file_base: copy_progress(base, value),
+                    report_file_progress,
                 )
                 copied_bytes += source.stat().st_size
             if component.size_bytes == 0:
@@ -153,38 +178,143 @@ def migrate_storage(
                 raise StorageMigrationError(f"{component.name} copy did not complete.")
 
         _report(progress, "Verifying copied files", 82)
+        _update_migration_journal(journal, "verifying")
         _verify_staging(plan, staging, progress)
         _rebase_json_paths(plan, staging)
+        _raise_if_cancelled(cancelled)
         _report(progress, "Activating storage", 94)
+        _update_migration_journal(journal, "activating")
         for component in plan.components:
-            staged = staging / component.name
+            staged = staging[component.name]
             target = component.target
             if target.exists():
                 _remove_empty_tree(target)
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged, target)
+            _record_activated_component(journal, component.name)
 
         _rebase_settings_paths(plan)
-        configured = prepare_storage_layout(plan.current, root)
+        configured = prepare_configured_storage_layout(plan.configured)
         persist_storage_layout(configured)
+        _update_migration_journal(journal, "ready")
         _report(progress, "Storage ready", 100)
         return configured
+    except StorageMigrationError:
+        _update_migration_journal(journal, "cancelled" if cancelled and cancelled() else "failed")
+        raise
     except (OSError, ValueError) as exc:
+        _update_migration_journal(journal, "failed", error=str(exc))
         raise StorageMigrationError(f"Storage migration failed: {exc}") from exc
     finally:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
+        for path in staging.values():
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+
+
+def recover_storage_migrations(paths: AppPaths) -> tuple[Path, ...]:
+    migration_dir = paths.data_root / "migrations"
+    if not migration_dir.is_dir():
+        return ()
+    recovered: list[Path] = []
+    active_roots = {
+        path.resolve()
+        for path in (
+            paths.workspace_root,
+            paths.output_root,
+            paths.runtime_root,
+            paths.cache_dir,
+        )
+    }
+    for journal in migration_dir.glob("storage-relocation-*.json"):
+        try:
+            data = json.loads(journal.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict) or data.get("status") == "ready":
+            continue
+        for value in data.get("staging", {}).values() if isinstance(data.get("staging"), dict) else ():
+            path = Path(str(value)).expanduser()
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+        activated = set(data.get("activated", ()))
+        targets = data.get("targets") if isinstance(data.get("targets"), dict) else {}
+        for name in activated:
+            value = targets.get(name)
+            if not value:
+                continue
+            target = Path(str(value)).expanduser().resolve()
+            if target in active_roots:
+                continue
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+        _update_migration_journal(journal, "recovered")
+        recovered.append(journal)
+    return tuple(recovered)
+
+
+def _raise_if_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise StorageMigrationError("Storage migration was cancelled. Original data was not changed.")
+
+
+def _write_migration_journal(
+    plan: StorageMigrationPlan,
+    status: str,
+    staging: dict[str, Path],
+) -> Path:
+    journal = (
+        plan.current.data_root
+        / "migrations"
+        / f"storage-relocation-{plan.transaction_id}.json"
+    )
+    write_json_atomic(
+        journal,
+        {
+            "version": 1,
+            "transaction_id": plan.transaction_id,
+            "status": status,
+            "staging": {name: str(path) for name, path in staging.items()},
+            "targets": {component.name: str(component.target) for component in plan.components},
+            "activated": [],
+        },
+    )
+    return journal
+
+
+def _update_migration_journal(journal: Path, status: str, *, error: str = "") -> None:
+    try:
+        data = json.loads(journal.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {"version": 1}
+    if not isinstance(data, dict):
+        data = {"version": 1}
+    data["status"] = status
+    if error:
+        data["error"] = error
+    write_json_atomic(journal, data)
+
+
+def _record_activated_component(journal: Path, name: str) -> None:
+    try:
+        data = json.loads(journal.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StorageMigrationError(f"Could not update storage migration journal: {exc}") from exc
+    activated = list(data.get("activated", ()))
+    if name not in activated:
+        activated.append(name)
+    data["activated"] = activated
+    write_json_atomic(journal, data)
 
 
 def _verify_staging(
     plan: StorageMigrationPlan,
-    staging: Path,
+    staging: dict[str, Path],
     progress: StorageProgress | None,
 ) -> None:
     verified = 0
     total = max(1, plan.total_files)
     for component in plan.components:
-        stage_root = staging / component.name
+        stage_root = staging[component.name]
         for source in _component_files(component.source):
             target = stage_root / source.relative_to(component.source)
             if not target.is_file() or source.stat().st_size != target.stat().st_size:
@@ -192,15 +322,23 @@ def _verify_staging(
             if file_sha256(source) != file_sha256(target):
                 raise StorageMigrationError(f"Copied file verification failed: {source.name}")
             verified += 1
-            _report(progress, "Verifying copied files", 82 + int(10 * verified / total))
+            _report(
+                progress,
+                f"Verifying {component.name}",
+                82 + int(10 * verified / total),
+            )
 
 
-def _rebase_json_paths(plan: StorageMigrationPlan, staging: Path) -> None:
+def _rebase_json_paths(plan: StorageMigrationPlan, staging: dict[str, Path]) -> None:
     replacements = tuple(
         (component.source, component.target)
         for component in plan.components
     )
-    for path in staging.rglob("*.json"):
+    for path in (
+        path
+        for stage_root in staging.values()
+        for path in stage_root.rglob("*.json")
+    ):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -343,6 +481,24 @@ def _nearest_existing_parent(path: Path) -> Path:
     while not candidate.exists() and candidate.parent != candidate:
         candidate = candidate.parent
     return candidate
+
+
+def _components_by_disk(
+    components: tuple[StorageMigrationComponent, ...],
+) -> tuple[tuple[Path, tuple[StorageMigrationComponent, ...]], ...]:
+    grouped: dict[Path, list[StorageMigrationComponent]] = {}
+    for component in components:
+        disk = _nearest_existing_parent(component.target)
+        anchor = Path(disk.anchor) if disk.anchor else disk
+        grouped.setdefault(anchor, []).append(component)
+    return tuple((root, tuple(items)) for root, items in grouped.items())
+
+
+def _required_free_bytes(total_bytes: int) -> int:
+    if total_bytes <= 0:
+        return 0
+    headroom = min(2 * 1024**3, max(512 * 1024**2, total_bytes // 10))
+    return total_bytes + headroom
 
 
 def _format_bytes(value: int) -> str:

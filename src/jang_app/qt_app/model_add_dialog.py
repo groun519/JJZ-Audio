@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -29,6 +30,7 @@ class ModelAddAction(StrEnum):
 class ModelImportSource(StrEnum):
     INFERENCE_FILE = "inference_file"
     RVC_FOLDER = "rvc_folder"
+    DRIVE_LINK = "drive_link"
 
 
 class ModelImportMode(StrEnum):
@@ -41,6 +43,7 @@ class ModelAddRequest:
     action: ModelAddAction
     source: ModelImportSource = ModelImportSource.INFERENCE_FILE
     mode: ModelImportMode = ModelImportMode.MANAGED
+    link: str = ""
 
 
 class ModelAddDialog(AppDialog):
@@ -59,6 +62,7 @@ class ModelAddDialog(AppDialog):
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_action_page())
         self.stack.addWidget(self._build_import_page())
+        self.stack.addWidget(self._build_drive_page())
         self.content_layout.addWidget(self.stack)
 
     @classmethod
@@ -88,15 +92,51 @@ class ModelAddDialog(AppDialog):
             tr("Import Existing Model\nUse an inference file or import a complete RVC folder."),
         )
         self.existing_button.clicked.connect(lambda: self.stack.setCurrentIndex(1))
+        self.drive_button = _choice_button(
+            tr("Import Drive Link\nDownload a JJZero RVC model shared through Google Drive."),
+        )
+        self.drive_button.clicked.connect(lambda: self.stack.setCurrentIndex(2))
         cancel = FeedbackButton(tr("Cancel"))
         cancel.clicked.connect(self.reject)
 
         layout.addWidget(self.create_button)
         layout.addWidget(self.existing_button)
+        layout.addWidget(self.drive_button)
         layout.addStretch(1)
         footer = QHBoxLayout()
         footer.addStretch(1)
         footer.addWidget(cancel)
+        layout.addLayout(footer)
+        return page
+
+    def _build_drive_page(self) -> QWidget:
+        page, layout = _dialog_page(
+            tr("Import Drive Link"),
+            tr("Paste a public JJZero RVC model link from Google Drive."),
+        )
+        self.drive_link_edit = QLineEdit()
+        self.drive_link_edit.setObjectName("ModelAddDriveLink")
+        self.drive_link_edit.setPlaceholderText(tr("Google Drive file link"))
+        self.drive_link_edit.textChanged.connect(
+            lambda value: self.drive_import_button.setEnabled(bool(value.strip()))
+        )
+        back = FeedbackButton(tr("Back"))
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        cancel = FeedbackButton(tr("Cancel"))
+        cancel.clicked.connect(self.reject)
+        self.drive_import_button = FeedbackButton(tr("Download and Import"))
+        self.drive_import_button.setObjectName("PrimaryButton")
+        self.drive_import_button.setEnabled(False)
+        self.drive_import_button.clicked.connect(self._accept_drive_import)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        footer.addWidget(back)
+        footer.addStretch(1)
+        footer.addWidget(cancel)
+        footer.addWidget(self.drive_import_button)
+        layout.addWidget(self.drive_link_edit)
+        layout.addStretch(1)
         layout.addLayout(footer)
         return page
 
@@ -185,6 +225,18 @@ class ModelAddDialog(AppDialog):
         self._request = ModelAddRequest(ModelAddAction.IMPORT, source, mode)
         self.accept()
 
+    def _accept_drive_import(self) -> None:
+        link = self.drive_link_edit.text().strip()
+        if not link:
+            return
+        self._request = ModelAddRequest(
+            ModelAddAction.IMPORT,
+            ModelImportSource.DRIVE_LINK,
+            ModelImportMode.MANAGED,
+            link,
+        )
+        self.accept()
+
 
 def _dialog_page(title: str, description: str) -> tuple[QFrame, QVBoxLayout]:
     page = QFrame()
@@ -206,7 +258,7 @@ def _dialog_page(title: str, description: str) -> tuple[QFrame, QVBoxLayout]:
 def _choice_button(text: str) -> FeedbackButton:
     button = FeedbackButton(text)
     button.setObjectName("ModelAddChoice")
-    button.setFixedHeight(92)
+    button.setFixedHeight(76)
     return button
 
 

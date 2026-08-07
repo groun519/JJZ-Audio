@@ -49,6 +49,8 @@ class RuntimeBootstrapTests(unittest.TestCase):
 
             def download(artifact, destination, *, progress):
                 downloaded.append(artifact.name)
+                destination.mkdir(parents=True, exist_ok=True)
+                (destination / artifact.name).write_bytes(artifact.name.encode("utf-8"))
                 progress(100)
                 return destination / artifact.name
 
@@ -76,6 +78,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
             self.assertEqual(download_activity[-1].total_bytes, 30)
             self.assertEqual(activity[0].stage, RuntimeProvisionStage.PREPARING)
             self.assertEqual(activity[-1].stage, RuntimeProvisionStage.VERIFYING)
+            self.assertFalse((paths.cache_dir / "runtime" / release.version).exists())
 
     def test_blackwell_install_adds_cu128_profile_after_base_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

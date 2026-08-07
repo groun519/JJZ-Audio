@@ -32,9 +32,12 @@ class ModelDatasetPanelTests(unittest.TestCase):
                 panel.set_model("model")
                 panel.training_list.setCurrentRow(0)
 
+                self.assertTrue(panel.footer.isHidden())
+
                 panel.clip_editor.close_button.click()
 
                 self.assertTrue(panel.clip_editor.isHidden())
+                self.assertFalse(panel.footer.isHidden())
                 self.assertEqual(panel.training_list.selectedItems(), [])
                 self.assertEqual(len(store.load("model").training_items), 1)
                 panel.close()

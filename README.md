@@ -103,6 +103,8 @@ When the RTX 50-series profile changes, prepare it from the unmodified base RVC 
 
 Prepare the DirectML profile from the bundled Python 3.9 RVC runtime. Prepare the Windows ROCm profile from a complete Python 3.12 / PyTorch 2.9.1 / ROCm 7.2.1 runtime. Windows ROCm training remains experimental because AMD does not officially support ML training on Windows; JJZero intentionally allows the attempt after HIP/GPU forward validation and records the full failure if backward propagation is unavailable.
 
+The DirectML profile owns `onnxruntime-directml` and `rmvpe.onnx`; these are excluded from the shared base runtime so non-AMD installations do not download the additional RMVPE model. Profile preparation fails if either the DirectML execution provider or model asset is missing.
+
 Build both release profiles on the packaging PC with:
 
 ```powershell

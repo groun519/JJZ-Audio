@@ -19,7 +19,12 @@ from PySide6.QtWidgets import (
 )
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
-from jang_app.qt_app.widgets import FeedbackButton
+from jang_app.qt_app.widgets import (
+    FeedbackButton,
+    SurfaceFrame,
+    TransparentContainer,
+    attach_list_item_widget,
+)
 from jang_app.qt_app.workers import TaskWorker
 from jang_app.services.audio_metadata import format_duration
 from jang_app.services.i18n import tr
@@ -75,16 +80,16 @@ class ModelDatasetAnalysisPanel(QWidget):
         metrics = QHBoxLayout()
         metrics.setContentsMargins(0, 0, 0, 0)
         metrics.setSpacing(10)
-        duration_card, self.duration_value = _metric_card("Usable Duration")
-        pitch_card, self.pitch_value = _metric_card("Model Center")
-        active_card, self.active_value = _metric_card("Voice Activity")
-        issue_card, self.issue_value = _metric_card("Needs Attention")
+        duration_card, self.duration_value = _metric_card("Usable Duration", self)
+        pitch_card, self.pitch_value = _metric_card("Model Center", self)
+        active_card, self.active_value = _metric_card("Voice Activity", self)
+        issue_card, self.issue_value = _metric_card("Needs Attention", self)
         metrics.addWidget(duration_card, 1)
         metrics.addWidget(pitch_card, 1)
         metrics.addWidget(active_card, 1)
         metrics.addWidget(issue_card, 1)
 
-        pitch_panel = QFrame()
+        pitch_panel = SurfaceFrame("raised", self)
         pitch_panel.setObjectName("DatasetAnalysisSection")
         pitch_layout = QVBoxLayout(pitch_panel)
         pitch_layout.setContentsMargins(16, 14, 16, 14)
@@ -101,7 +106,7 @@ class ModelDatasetAnalysisPanel(QWidget):
         pitch_layout.addWidget(self.pitch_reference)
         pitch_layout.addWidget(self.pitch_chart, 1)
 
-        quality_panel = QFrame()
+        quality_panel = SurfaceFrame("raised", self)
         quality_panel.setObjectName("DatasetAnalysisSection")
         quality_layout = QVBoxLayout(quality_panel)
         quality_layout.setContentsMargins(16, 14, 16, 14)
@@ -109,10 +114,10 @@ class ModelDatasetAnalysisPanel(QWidget):
         quality_title = QLabel("Signal Overview")
         quality_title.setObjectName("DatasetAnalysisSectionTitle")
         quality_layout.addWidget(quality_title)
-        self.level_row = _quality_row("Average Level")
-        self.noise_row = _quality_row("Noise Contrast")
-        self.clipping_row = _quality_row("Clipping")
-        self.ready_row = _quality_row("Material Ready")
+        self.level_row = _quality_row("Average Level", quality_panel)
+        self.noise_row = _quality_row("Noise Contrast", quality_panel)
+        self.clipping_row = _quality_row("Clipping", quality_panel)
+        self.ready_row = _quality_row("Material Ready", quality_panel)
         for row in (self.level_row, self.noise_row, self.clipping_row, self.ready_row):
             quality_layout.addWidget(row)
         quality_layout.addStretch(1)
@@ -123,7 +128,7 @@ class ModelDatasetAnalysisPanel(QWidget):
         overview.addWidget(pitch_panel, 2)
         overview.addWidget(quality_panel, 1)
 
-        issues_panel = QFrame()
+        issues_panel = SurfaceFrame("raised", self)
         issues_panel.setObjectName("DatasetAnalysisSection")
         issues_layout = QVBoxLayout(issues_panel)
         issues_layout.setContentsMargins(16, 14, 16, 14)
@@ -147,8 +152,7 @@ class ModelDatasetAnalysisPanel(QWidget):
         issues_layout.addLayout(issue_heading)
         issues_layout.addWidget(self.issue_list)
 
-        content = QWidget()
-        content.setObjectName("DatasetAnalysisContent")
+        content = TransparentContainer(self, object_name="DatasetAnalysisContent")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(10)
@@ -158,7 +162,7 @@ class ModelDatasetAnalysisPanel(QWidget):
         content_layout.addLayout(overview)
         content_layout.addWidget(issues_panel)
 
-        scroll = QScrollArea()
+        scroll = QScrollArea(self)
         scroll.setObjectName("DatasetAnalysisScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -305,12 +309,10 @@ class ModelDatasetAnalysisPanel(QWidget):
         for issue in issue_items:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, issue.item_id)
-            row = DatasetIssueRow(issue)
-            item.setSizeHint(row.sizeHint())
+            row = DatasetIssueRow(issue, self.issue_list.viewport())
             if not issue.item_id:
                 item.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.issue_list.addItem(item)
-            self.issue_list.setItemWidget(item, row)
+            attach_list_item_widget(self.issue_list, item, row)
 
     def _open_issue(self, item: QListWidgetItem) -> None:
         item_id = item.data(Qt.ItemDataRole.UserRole)
@@ -534,15 +536,19 @@ class PitchHistogramView(QWidget):
 
 
 class DatasetIssueRow(QWidget):
-    def __init__(self, issue: DatasetAnalysisIssue) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        issue: DatasetAnalysisIssue,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self.setObjectName("DatasetIssueRow")
         self.setProperty("severity", issue.severity)
 
-        title = QLabel(tr(issue.message))
+        title = QLabel(tr(issue.message), self)
         title.setObjectName("DatasetIssueTitle")
         title.setWordWrap(True)
-        detail = QLabel(_issue_detail(issue))
+        detail = QLabel(_issue_detail(issue), self)
         detail.setObjectName("DatasetAnalysisMeta")
         detail.setVisible(bool(detail.text()))
         text = QVBoxLayout()
@@ -551,7 +557,10 @@ class DatasetIssueRow(QWidget):
         text.addWidget(title)
         text.addWidget(detail)
 
-        badge = QLabel(tr("Attention" if issue.severity == "attention" else "Info"))
+        badge = QLabel(
+            tr("Attention" if issue.severity == "attention" else "Info"),
+            self,
+        )
         badge.setObjectName("DatasetIssueBadge")
         badge.setProperty("severity", issue.severity)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -564,8 +573,8 @@ class DatasetIssueRow(QWidget):
 
 
 class _QualityRow(QFrame):
-    def __init__(self, label: str) -> None:
-        super().__init__()
+    def __init__(self, label: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.setObjectName("DatasetQualityRow")
         self.label = QLabel(label)
         self.label.setObjectName("DatasetAnalysisMeta")
@@ -581,8 +590,11 @@ class _QualityRow(QFrame):
         self.value.setText(value)
 
 
-def _metric_card(caption: str) -> tuple[QFrame, QLabel]:
-    card = QFrame()
+def _metric_card(
+    caption: str,
+    parent: QWidget | None = None,
+) -> tuple[QFrame, QLabel]:
+    card = SurfaceFrame("raised", parent)
     card.setObjectName("DatasetAnalysisMetric")
     caption_label = QLabel(caption)
     caption_label.setObjectName("DatasetAnalysisMetricLabel")
@@ -596,8 +608,8 @@ def _metric_card(caption: str) -> tuple[QFrame, QLabel]:
     return card, value_label
 
 
-def _quality_row(label: str) -> _QualityRow:
-    return _QualityRow(label)
+def _quality_row(label: str, parent: QWidget | None = None) -> _QualityRow:
+    return _QualityRow(label, parent)
 
 
 def _coverage_summary(ranges: tuple[PitchCoverageRange, ...]) -> str:

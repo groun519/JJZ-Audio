@@ -6,7 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QObject, QPointF
+from PySide6.QtGui import QEnterEvent
+from PySide6.QtWidgets import QApplication, QWidget
 
 from jang_app.qt_app.model_add_dialog import (
     ModelAddAction,
@@ -15,11 +17,14 @@ from jang_app.qt_app.model_add_dialog import (
     ModelImportSource,
 )
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
+from jang_app.qt_app.theme import build_stylesheet
 from jang_app.services.clip_edit_history import REVIEW_READY
+from jang_app.services.i18n import tr
 from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem
 from jang_app.services.processing_queue import ProcessingQueue, TASK_COMPLETED
 from jang_app.services.rvc_model_workspace import RvcModelWorkspace
 from jang_app.services.rvc_training_pipeline import RvcTrainingStage
+from jang_app.services.rvc_training_preflight import RvcTrainingPreflight
 from jang_app.services.rvc_training_runtime import required_rvc_training_paths
 from jang_app.services.rvc_training_state import RvcTrainingStateStore
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
@@ -102,6 +107,40 @@ class ModelWorkspacePageTests(unittest.TestCase):
             adapter_probe.assert_not_called()
             page.close()
 
+    def test_model_navigation_never_shows_temporary_child_windows(self) -> None:
+        unexpected: list[str] = []
+
+        class WindowShowProbe(QObject):
+            def eventFilter(self, watched, event):  # noqa: N802
+                if (
+                    event.type() == QEvent.Type.Show
+                    and isinstance(watched, QWidget)
+                    and watched.isWindow()
+                ):
+                    unexpected.append(
+                        f"{type(watched).__name__}:{watched.objectName()}:{watched.windowTitle()}"
+                    )
+                return False
+
+        probe = WindowShowProbe()
+        self.app.installEventFilter(probe)
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                workspace = RvcModelWorkspace(root / "models")
+                record = workspace.create_model("Voice One", root / "rvc")
+                page = ModelWorkspacePage(root / "rvc", workspace)
+                with patch.object(page.analysis_panel, "ensure_analysis"):
+                    page._open_model(record.model_id)
+                    for section in range(page.workspace_content_stack.count()):
+                        page._navigate_model_section(section)
+                        self.app.processEvents()
+                page.close()
+        finally:
+            self.app.removeEventFilter(probe)
+
+        self.assertEqual(unexpected, [])
+
     def test_add_model_dialog_routes_linked_inference_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -133,6 +172,188 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertTrue(records[0].can_convert)
             page.close()
 
+    def test_add_model_dialog_routes_drive_link_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            requested: list[str] = []
+            page.drive_import_requested.connect(requested.append)
+            link = "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view"
+
+            with patch(
+                "jang_app.qt_app.model_workspace.ModelAddDialog.get_request",
+                return_value=ModelAddRequest(
+                    ModelAddAction.IMPORT,
+                    ModelImportSource.DRIVE_LINK,
+                    ModelImportMode.MANAGED,
+                    link,
+                ),
+            ):
+                page.add_model_button.click()
+
+            self.assertEqual(requested, [link])
+            page.close()
+
+    def test_selected_inference_model_can_be_shared(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_file = root / "voice.pth"
+            model_file.write_bytes(b"inference")
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.link_inference_file(model_file)
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            shared: list[object] = []
+            page.share_requested.connect(shared.append)
+            row = page._rows_by_id[record.model_id]
+
+            self.assertTrue(row.share_button.isHidden())
+            row.enterEvent(
+                QEnterEvent(
+                    QPointF(1, 1),
+                    QPointF(1, 1),
+                    QPointF(1, 1),
+                )
+            )
+            self.assertFalse(row.share_button.isHidden())
+            self.assertTrue(row.share_action.progress_bar.isHidden())
+            self.assertTrue(row.share_action.progress_label.isHidden())
+            row.share_button.click()
+            row.leaveEvent(QEvent(QEvent.Type.Leave))
+
+            self.assertEqual(shared, [record])
+            self.assertTrue(row.share_button.isHidden())
+            page.close()
+
+    def test_model_share_progress_replaces_redundant_badges_inline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_file = root / "voice.pth"
+            model_file.write_bytes(b"inference")
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.link_inference_file(model_file)
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            row = page._rows_by_id[record.model_id]
+
+            page.set_share_started(record.model_id)
+            page.set_share_progress(record.model_id, 46)
+
+            self.assertIn(tr(record.status_label), row.detail_label.text())
+            self.assertIn(tr(record.mode_label), row.detail_label.text())
+            self.assertFalse(row.share_action.progress_bar.isHidden())
+            self.assertEqual(row.share_action.progress_bar.value(), 46)
+            self.assertEqual(row.share_action.progress_label.text(), "46%")
+            self.assertTrue(row.share_button.isHidden())
+
+            page.set_share_failed(record.model_id)
+            self.assertTrue(row.share_action.progress_bar.isHidden())
+            page.close()
+
+    def test_model_share_completion_confirms_copy_without_clipping_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_file = root / "voice.pth"
+            model_file.write_bytes(b"inference")
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.link_inference_file(model_file)
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            row = page._rows_by_id[record.model_id]
+
+            page.set_share_completed(record.model_id)
+
+            self.assertEqual(row.share_action.copied_label.text(), tr("Copied"))
+            self.assertFalse(row.share_action.copied_label.isHidden())
+            self.assertTrue(row.share_button.isHidden())
+            self.assertEqual(row.share_button.width(), 36)
+            self.assertEqual(row.share_action.delete_button.width(), 36)
+            self.assertGreater(row.share_action.height(), row.share_button.height())
+            self.assertGreater(row.share_action.height(), row.share_action.delete_button.height())
+            page.close()
+
+    def test_shared_model_is_marked_and_exposes_drive_delete_on_hover(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_file = root / "voice.pth"
+            model_file.write_bytes(b"inference")
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.link_inference_file(model_file)
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            deleted: list[object] = []
+            page.delete_share_requested.connect(deleted.append)
+            page.set_share_status_provider(lambda _record: True)
+            row = page._rows_by_id[record.model_id]
+
+            self.assertEqual(row.share_button.icon_name(), "cloud_check")
+            self.assertFalse(row.share_action.isHidden())
+            self.assertTrue(row.share_action.delete_button.isHidden())
+
+            row.enterEvent(
+                QEnterEvent(
+                    QPointF(1, 1),
+                    QPointF(1, 1),
+                    QPointF(1, 1),
+                )
+            )
+            row.share_action.delete_button.click()
+
+            self.assertEqual(deleted, [record])
+            page.set_share_deleted(record.model_id)
+            row.leaveEvent(QEvent(QEvent.Type.Leave))
+            self.assertEqual(row.share_button.icon_name(), "link")
+            self.assertTrue(row.share_action.isHidden())
+            page.close()
+
+    def test_model_share_action_stays_hidden_when_feature_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_file = root / "voice.pth"
+            model_file.write_bytes(b"inference")
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.link_inference_file(model_file)
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            shared: list[object] = []
+            page.share_requested.connect(shared.append)
+            row = page._rows_by_id[record.model_id]
+            page.set_sharing_enabled(False)
+
+            row.enterEvent(
+                QEnterEvent(
+                    QPointF(1, 1),
+                    QPointF(1, 1),
+                    QPointF(1, 1),
+                )
+            )
+            row.share_button.click()
+            page._emit_share_model(record.model_id)
+
+            self.assertTrue(row.share_button.isHidden())
+            self.assertFalse(row.share_button.isEnabled())
+            self.assertEqual(shared, [])
+            page.close()
+
+    def test_hidden_model_share_slot_renders_as_row_background(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_file = root / "voice.pth"
+            model_file.write_bytes(b"inference")
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.link_inference_file(model_file)
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            row = page._rows_by_id[record.model_id]
+            row.setStyleSheet(build_stylesheet("dark"))
+            row.resize(620, row.sizeHint().height())
+            row.show()
+            self.app.processEvents()
+
+            image = row.grab().toImage()
+            slot_center = row.action_slot.geometry().center()
+            slot_color = image.pixelColor(slot_center)
+            row_color = image.pixelColor(10, slot_center.y())
+
+            self.assertEqual(slot_color, row_color)
+            row.close()
+            page.close()
+
     def test_training_updates_global_processing_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -160,6 +381,10 @@ class ModelWorkspacePageTests(unittest.TestCase):
 
             with (
                 patch("jang_app.qt_app.model_workspace.ModelDatasetStore.load", return_value=dataset),
+                patch(
+                    "jang_app.qt_app.model_workspace.inspect_rvc_training_preflight",
+                    return_value=RvcTrainingPreflight(()),
+                ),
                 patch("jang_app.qt_app.model_workspace.run_rvc_training_pipeline", side_effect=run_pipeline),
                 patch(
                     "jang_app.qt_app.model_workspace.finalize_rvc_training_artifacts",

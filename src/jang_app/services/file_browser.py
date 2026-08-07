@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import ctypes
-import subprocess
 import sys
 from pathlib import Path
 
 from jang_app.services.app_logging import get_logger
+from jang_app.services.command import start_detached_command
 
 
 def open_in_file_browser(path: Path) -> Path:
@@ -23,7 +23,8 @@ def open_in_file_browser(path: Path) -> Path:
             logger.warning("Windows Shell API failed for %s; using Explorer fallback: %s", target, exc)
             _open_windows_explorer_fallback(target)
     else:
-        subprocess.Popen(["open", str(target if target.is_dir() else target.parent)])
+        if not start_detached_command(("open", str(target if target.is_dir() else target.parent))):
+            raise OSError(f"Could not open file browser for: {target}")
     return target
 
 
@@ -85,6 +86,9 @@ def _open_windows_shell(target: Path) -> None:
 
 def _open_windows_explorer_fallback(target: Path) -> None:
     if target.is_dir():
-        subprocess.Popen(["explorer.exe", str(target)])
+        started = start_detached_command(("explorer.exe", str(target)))
+        if not started:
+            raise OSError(f"Could not open directory in Explorer: {target}")
         return
-    subprocess.Popen(f'explorer.exe /select,"{target}"')
+    if not start_detached_command(("explorer.exe", f'/select,"{target}"')):
+        raise OSError(f"Could not select file in Explorer: {target}")

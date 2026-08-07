@@ -16,12 +16,20 @@ except ModuleNotFoundError:  # Direct script execution adds scripts/, not the pr
 
 DIRECTML_VERSION = "0.2.5.dev240914"
 DIRECTML_TORCH_VERSION = "2.4.1"
+DIRECTML_ONNXRUNTIME_VERSION = "1.19.2"
 DIRECTML_REQUIREMENTS = (
     f"torch-directml=={DIRECTML_VERSION}",
     f"torch=={DIRECTML_TORCH_VERSION}",
     f"torchaudio=={DIRECTML_TORCH_VERSION}",
     "torchvision==0.19.1",
+    f"onnxruntime-directml=={DIRECTML_ONNXRUNTIME_VERSION}",
     "numpy==1.23.5",
+)
+DIRECTML_REPLACED_PACKAGE_PATTERNS = (
+    "onnxruntime",
+    "onnxruntime-*.dist-info",
+    "onnxruntime_gpu-*.dist-info",
+    "onnxruntime_directml-*.dist-info",
 )
 ROCM_WINDOWS_TORCH_VERSION = "2.9.1"
 ROCM_WINDOWS_HIP_VERSION = "7.2.1"
@@ -45,8 +53,9 @@ def prepare_directml_profile(
     command_runner: CommandRunner | None = None,
 ) -> Path:
     source, target, staging, backup = _profile_paths(source_runtime, destination)
-    _copy_runtime(source, staging, replace_torch=True)
+    _copy_runtime(source, staging, replace_torch=True, replace_onnxruntime=True)
     try:
+        _copy_directml_rmvpe_model(source, target, staging)
         if install_packages:
             runner = command_runner or _run_command
             python = staging / "python.exe"
@@ -75,7 +84,10 @@ def prepare_directml_profile(
             torch=f"{DIRECTML_TORCH_VERSION} / torch-directml {DIRECTML_VERSION}",
             python="3.9",
             hardware_validation="validated_at_build" if install_packages else "not_run",
-            operation_validation="inference_forward" if install_packages else "not_run",
+            operation_validation=(
+                "inference_forward_and_onnx_provider" if install_packages else "not_run"
+            ),
+            onnxruntime=f"{DIRECTML_ONNXRUNTIME_VERSION} / DirectML",
         )
         _swap_tree(staging, target, backup)
     except Exception:
@@ -92,7 +104,7 @@ def prepare_rocm_windows_profile(
     command_runner: CommandRunner | None = None,
 ) -> Path:
     source, target, staging, backup = _profile_paths(source_runtime, destination)
-    _copy_runtime(source, staging, replace_torch=False)
+    _copy_runtime(source, staging, replace_torch=False, replace_onnxruntime=False)
     try:
         if validate_gpu:
             _validate_rocm(staging / "python.exe", staging, command_runner or _run_command)
@@ -126,12 +138,36 @@ def _profile_paths(source_runtime: Path, destination: Path) -> tuple[Path, Path,
     )
 
 
-def _copy_runtime(source: Path, staging: Path, *, replace_torch: bool) -> None:
+def _copy_runtime(
+    source: Path,
+    staging: Path,
+    *,
+    replace_torch: bool,
+    replace_onnxruntime: bool,
+) -> None:
     _remove_tree(staging)
     patterns = ("__pycache__", "*.pyc", "*.pyo")
     if replace_torch:
         patterns += REPLACED_PACKAGE_PATTERNS
+    if replace_onnxruntime:
+        patterns += DIRECTML_REPLACED_PACKAGE_PATTERNS
     shutil.copytree(source, staging, ignore=shutil.ignore_patterns(*patterns))
+
+
+def _copy_directml_rmvpe_model(source: Path, target: Path, staging: Path) -> Path:
+    candidates = (
+        target.parent / "assets" / "rmvpe.onnx",
+        source.parent / "rmvpe.onnx",
+    )
+    model = next((path for path in candidates if path.is_file()), None)
+    if model is None:
+        raise FileNotFoundError(
+            "The DirectML RMVPE model was not found. Prepare the base RVC runtime "
+            "from a source containing rmvpe.onnx before building this profile."
+        )
+    destination = staging / "rmvpe.onnx"
+    shutil.copy2(model, destination)
+    return destination
 
 
 def _validate_directml(python: Path, cwd: Path, runner: CommandRunner) -> None:
@@ -141,6 +177,9 @@ def _validate_directml(python: Path, cwd: Path, runner: CommandRunner) -> None:
         "print('probe:numpy', flush=True); import numpy; "
         "print('probe:torch', flush=True); import torch; "
         "print('probe:torch_directml', flush=True); import torch_directml; "
+        "print('probe:onnxruntime', flush=True); import onnxruntime as ort; "
+        "providers=list(ort.get_available_providers()); "
+        "rmvpe=(__import__('pathlib').Path.cwd() / 'rmvpe.onnx'); "
         "device=torch_directml.device(torch_directml.default_device()); "
         "left=torch.arange(1024, dtype=torch.float32).reshape(32, 32).to(device); "
         "conv1=torch.nn.Conv1d(4, 8, 3, padding=1).to(device); "
@@ -149,7 +188,8 @@ def _validate_directml(python: Path, cwd: Path, runner: CommandRunner) -> None:
         "conv2(torch.randn(1, 1, 32, 32).to(device))); "
         "valid=all(bool(torch.isfinite(value.cpu()).all().item()) for value in values); "
         "print(json.dumps({'torch': torch.__version__, 'numpy': numpy.__version__, "
-        "'device': str(device), 'valid': valid}))"
+        "'device': str(device), 'valid': valid, 'providers': providers, "
+        "'rmvpe_ready': rmvpe.is_file() and rmvpe.stat().st_size > 0}))"
     )
     result = runner((str(python), "-c", script), cwd)
     _require_success(result, "Validating the RVC DirectML profile")
@@ -159,6 +199,8 @@ def _validate_directml(python: Path, cwd: Path, runner: CommandRunner) -> None:
         or data.get("numpy") != "1.23.5"
         or not str(data.get("device", "")).startswith("privateuseone")
         or data.get("valid") is not True
+        or "DmlExecutionProvider" not in data.get("providers", [])
+        or data.get("rmvpe_ready") is not True
     ):
         raise RuntimeError(f"The RVC DirectML profile is incompatible: {data}")
 
@@ -217,6 +259,7 @@ def write_accelerator_profile_manifest(
     python: str,
     hardware_validation: str,
     operation_validation: str,
+    onnxruntime: str = "",
 ) -> None:
     (root / "jjzero-profile-build.json").write_text(
         json.dumps(
@@ -227,6 +270,7 @@ def write_accelerator_profile_manifest(
                 "python": python,
                 "hardware_validation": hardware_validation,
                 "operation_validation": operation_validation,
+                "onnxruntime": onnxruntime,
             },
             indent=2,
         ),

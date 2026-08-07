@@ -76,6 +76,14 @@ class JobDiagnosticsTests(unittest.TestCase):
             "DIRECTML_RUNTIME_FAILED",
         )
         self.assertEqual(
+            classify_error("ONNX Runtime has no DmlExecutionProvider").code,
+            "DIRECTML_RUNTIME_FAILED",
+        )
+        self.assertEqual(
+            classify_error("The installed DirectML runtime is missing rmvpe.onnx").code,
+            "DIRECTML_RUNTIME_FAILED",
+        )
+        self.assertEqual(
             classify_error("UnicodeEncodeError: 'cp949' codec can't encode character").code,
             "RVC_CONSOLE_ENCODING_ERROR",
         )

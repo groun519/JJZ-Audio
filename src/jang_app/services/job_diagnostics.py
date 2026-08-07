@@ -71,7 +71,7 @@ def classify_error(error: str) -> ErrorClassification:
         (("cuda out of memory", "cublas_status_alloc_failed"), "CUDA_OUT_OF_MEMORY", "The GPU did not have enough free memory."),
         (("no kernel image is available", "not compatible with the current pytorch", "cuda architecture sm_120", "requires torch 2.7.1+cu128"), "CUDA_ARCHITECTURE_UNSUPPORTED", "The bundled RVC runtime does not support this GPU architecture."),
         (("cuda is not available", "no cuda gpus are available", "invalid device ordinal"), "CUDA_UNAVAILABLE", "The selected CUDA device is unavailable."),
-        (("torch_directml", "privateuseone", "directml device"), "DIRECTML_RUNTIME_FAILED", "The DirectML runtime or selected DirectML device failed."),
+        (("torch_directml", "privateuseone", "directml runtime", "directml device", "dmlexecutionprovider", "onnxruntime-directml", "rmvpe.onnx"), "DIRECTML_RUNTIME_FAILED", "The DirectML runtime or selected DirectML device failed."),
         (("rocm", "hip error", "hip runtime"), "ROCM_RUNTIME_FAILED", "The AMD ROCm runtime or selected AMD GPU failed."),
         (("no space left on device", "not enough space on the disk", "disk full"), "STORAGE_INSUFFICIENT", "The storage device does not have enough free space."),
         (("ffmpeg is not available", "ffmpeg was not found", "no such file or directory: 'ffmpeg'"), "FFMPEG_UNAVAILABLE", "FFmpeg is unavailable."),

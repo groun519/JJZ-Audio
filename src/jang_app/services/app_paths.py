@@ -10,10 +10,12 @@ from pathlib import Path
 
 APP_DATA_DIR_NAME = "JJZero Audio"
 LEGACY_STORAGE_LAYOUT_VERSION = 1
-STORAGE_LAYOUT_VERSION = 2
+MANAGED_STORAGE_LAYOUT_VERSION = 2
+STORAGE_LAYOUT_VERSION = 3
 STORAGE_FILE_NAME = "storage.json"
 LEGACY_INITIAL_SETUP_VERSION = 1
-INITIAL_SETUP_VERSION = 2
+MANAGED_INITIAL_SETUP_VERSION = 2
+INITIAL_SETUP_VERSION = 3
 INITIAL_SETUP_FILE_NAME = "initial_setup.json"
 
 
@@ -36,6 +38,7 @@ class AppPaths:
     legacy_root: Path | None
     workspace_source: str
     storage_version: int
+    storage_mode: str = "linked"
 
     @property
     def storage_file(self) -> Path:
@@ -62,7 +65,7 @@ def discover_app_paths(
     stored = _stored_storage_layout(settings_dir / STORAGE_FILE_NAME)
     stored_workspace = stored.workspace_root if stored is not None else None
     stored_anchor = stored.workspace_anchor if stored is not None else None
-    setup_workspace, setup_anchor = _stored_initial_setup_workspace(
+    setup_workspace, setup_anchor, setup_output, setup_runtime, setup_cache = _stored_initial_setup_layout(
         settings_dir / INITIAL_SETUP_FILE_NAME
     )
     legacy_root = _legacy_root(
@@ -83,12 +86,14 @@ def discover_app_paths(
     storage_override = _absolute_environment_path(environment, "JJZERO_STORAGE_ROOT")
     uses_managed_storage = storage_override is not None or (
         stored is not None
-        and stored.version == STORAGE_LAYOUT_VERSION
-        and workspace_source == "storage"
+        and stored.version in {MANAGED_STORAGE_LAYOUT_VERSION, STORAGE_LAYOUT_VERSION}
     ) or (
         workspace_source == "initial_setup"
         and setup_workspace is not None
-        and setup_workspace.name == "Data"
+        and (
+            setup_workspace.name == "Data"
+            or any(path is not None for path in (setup_output, setup_runtime, setup_cache))
+        )
     )
     storage_root = (
         storage_override
@@ -99,34 +104,71 @@ def discover_app_paths(
         workspace_root = storage_root / "Data"
         workspace_anchor = storage_root
         workspace_source = "environment"
-    if uses_managed_storage:
+    if storage_override is not None:
         output_root = (
-            stored.output_root
+            _absolute_environment_path(environment, "JJZERO_OUTPUT_ROOT")
+            or storage_root / "Output"
+        )
+        cache_dir = (
+            _absolute_environment_path(environment, "JJZERO_CACHE_ROOT")
+            or storage_root / "Cache"
+        )
+        runtime_default = storage_root / "Runtime"
+        storage_version = STORAGE_LAYOUT_VERSION
+    elif uses_managed_storage:
+        output_root = _absolute_environment_path(environment, "JJZERO_OUTPUT_ROOT") or (
+            setup_output
+            if workspace_source == "initial_setup" and setup_output is not None
+            else stored.output_root
             if stored is not None and stored.output_root is not None
             else storage_root / "Output"
         )
-        cache_dir = (
-            stored.cache_root
+        cache_dir = _absolute_environment_path(environment, "JJZERO_CACHE_ROOT") or (
+            setup_cache
+            if workspace_source == "initial_setup" and setup_cache is not None
+            else stored.cache_root
             if stored is not None and stored.cache_root is not None
             else storage_root / "Cache"
         )
         runtime_default = (
-            stored.runtime_root
+            setup_runtime
+            if workspace_source == "initial_setup" and setup_runtime is not None
+            else stored.runtime_root
             if stored is not None and stored.runtime_root is not None
             else storage_root / "Runtime"
         )
-        storage_version = STORAGE_LAYOUT_VERSION
+        storage_version = (
+            stored.version
+            if stored is not None
+            else STORAGE_LAYOUT_VERSION if storage_override is not None else MANAGED_STORAGE_LAYOUT_VERSION
+        )
     else:
-        output_root = workspace_anchor / "output"
-        cache_dir = data_root / "cache"
+        output_root = _absolute_environment_path(environment, "JJZERO_OUTPUT_ROOT") or workspace_anchor / "output"
+        cache_dir = _absolute_environment_path(environment, "JJZERO_CACHE_ROOT") or data_root / "cache"
         runtime_default = None
-        storage_version = LEGACY_STORAGE_LAYOUT_VERSION
+        storage_version = (
+            STORAGE_LAYOUT_VERSION
+            if any(
+                _absolute_environment_path(environment, name) is not None
+                for name in ("JJZERO_WORKSPACE_ROOT", "JJZERO_OUTPUT_ROOT", "JJZERO_RUNTIME_ROOT", "JJZERO_CACHE_ROOT")
+            )
+            else LEGACY_STORAGE_LAYOUT_VERSION
+        )
     runtime_root = _runtime_root(
         environment,
         install_root,
         resolved_source,
         is_frozen,
         default=runtime_default,
+    )
+    has_component_override = any(
+        _absolute_environment_path(environment, name) is not None
+        for name in (
+            "JJZERO_WORKSPACE_ROOT",
+            "JJZERO_OUTPUT_ROOT",
+            "JJZERO_RUNTIME_ROOT",
+            "JJZERO_CACHE_ROOT",
+        )
     )
     return AppPaths(
         is_frozen=is_frozen,
@@ -146,6 +188,18 @@ def discover_app_paths(
         legacy_root=legacy_root,
         workspace_source=workspace_source,
         storage_version=storage_version,
+        storage_mode=_resolved_storage_mode(
+            (
+                ""
+                if storage_override is not None or has_component_override
+                else stored.mode if stored is not None else ""
+            ),
+            storage_root,
+            workspace_root,
+            output_root,
+            runtime_root,
+            cache_dir,
+        ),
     )
 
 
@@ -236,6 +290,7 @@ class _StoredStorageLayout:
     output_root: Path | None = None
     runtime_root: Path | None = None
     cache_root: Path | None = None
+    mode: str = ""
 
 
 def _stored_storage_layout(path: Path) -> _StoredStorageLayout | None:
@@ -243,7 +298,11 @@ def _stored_storage_layout(path: Path) -> _StoredStorageLayout | None:
     if data is None:
         return None
     version = data.get("version")
-    if version not in {LEGACY_STORAGE_LAYOUT_VERSION, STORAGE_LAYOUT_VERSION}:
+    if version not in {
+        LEGACY_STORAGE_LAYOUT_VERSION,
+        MANAGED_STORAGE_LAYOUT_VERSION,
+        STORAGE_LAYOUT_VERSION,
+    }:
         return None
     workspace = _absolute_data_path(data.get("workspace_root"))
     anchor = _absolute_data_path(data.get("workspace_anchor"))
@@ -254,7 +313,7 @@ def _stored_storage_layout(path: Path) -> _StoredStorageLayout | None:
         version=int(version),
         storage_root=(
             _absolute_data_path(data.get("storage_root"))
-            if version == STORAGE_LAYOUT_VERSION
+            if version in {MANAGED_STORAGE_LAYOUT_VERSION, STORAGE_LAYOUT_VERSION}
             else anchor
         ),
         workspace_root=workspace,
@@ -262,23 +321,61 @@ def _stored_storage_layout(path: Path) -> _StoredStorageLayout | None:
         output_root=_absolute_data_path(data.get("output_root")),
         runtime_root=_absolute_data_path(data.get("runtime_root")),
         cache_root=_absolute_data_path(data.get("cache_root")),
+        mode=str(data.get("mode", "")).strip().lower(),
     )
 
 
-def _stored_initial_setup_workspace(path: Path) -> tuple[Path | None, Path | None]:
+def _stored_initial_setup_layout(
+    path: Path,
+) -> tuple[Path | None, Path | None, Path | None, Path | None, Path | None]:
     data = _read_json_object(path)
     if data is None or data.get("version") not in {
         LEGACY_INITIAL_SETUP_VERSION,
+        MANAGED_INITIAL_SETUP_VERSION,
         INITIAL_SETUP_VERSION,
     }:
-        return None, None
+        return None, None, None, None, None
     anchor = _absolute_data_path(data.get("storage_root")) or _absolute_data_path(
         data.get("media_root")
     )
     if anchor is None:
-        return None, None
-    directory_name = "Data" if data.get("version") == INITIAL_SETUP_VERSION else "workspace"
-    return anchor / directory_name, anchor
+        return None, None, None, None, None
+    directory_name = (
+        "Data"
+        if data.get("version") in {MANAGED_INITIAL_SETUP_VERSION, INITIAL_SETUP_VERSION}
+        else "workspace"
+    )
+    workspace = _absolute_data_path(data.get("workspace_root")) or anchor / directory_name
+    return (
+        workspace,
+        anchor,
+        _absolute_data_path(data.get("output_root")),
+        _absolute_data_path(data.get("runtime_root")),
+        _absolute_data_path(data.get("cache_root")),
+    )
+
+
+def _resolved_storage_mode(
+    stored_mode: str,
+    storage_root: Path,
+    workspace_root: Path,
+    output_root: Path,
+    runtime_root: Path,
+    cache_root: Path,
+) -> str:
+    expected = (
+        storage_root / "Data",
+        storage_root / "Output",
+        storage_root / "Runtime",
+        storage_root / "Cache",
+    )
+    actual = (workspace_root, output_root, runtime_root, cache_root)
+    matches_linked = all(
+        left.resolve() == right.resolve() for left, right in zip(actual, expected)
+    )
+    if stored_mode == "custom":
+        return "custom"
+    return "linked" if matches_linked else "custom"
 
 
 def _read_json_object(path: Path) -> dict[str, object] | None:

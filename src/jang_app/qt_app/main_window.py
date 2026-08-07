@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 
-from PySide6.QtCore import QEvent, QProcess, Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QIcon
 from PySide6.QtWidgets import (
     QComboBox,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QScrollArea,
@@ -33,6 +34,8 @@ from jang_app.config import (
     APP_ICON_PATH,
     APP_NAME,
     APP_PATHS,
+    GOOGLE_ICON_PATH,
+    GOOGLE_OAUTH_CLIENT_PATH,
     LOG_FILE,
     RVC_RUNTIME_DIR,
     SUPPORTED_AUDIO_EXTENSIONS,
@@ -46,10 +49,12 @@ from jang_app.pipeline.rvc_convert import (
 from jang_app.pipeline.separate import SeparationResult, separate_audio
 from jang_app.qt_app.confirmation_dialog import ConfirmationDialog
 from jang_app.qt_app.export_page import ExportPage
-from jang_app.qt_app.floating_playback_panel import FloatingPlaybackPanel, floating_player_position
+from jang_app.qt_app.google_account_button import GoogleAccountButton
+from jang_app.qt_app.google_drive_controller import GoogleDriveController
+from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
 from jang_app.qt_app.library_details_panel import LibraryDetailsPanel
 from jang_app.qt_app.library_row import SongListRow
-from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
+from jang_app.qt_app.library_source_filter import LibrarySourceFilter
 from jang_app.qt_app.localization import (
     apply_widget_language,
     set_translated_placeholder,
@@ -86,16 +91,20 @@ from jang_app.qt_app.widgets import (
     TaskActionWidget,
     ThemeToggleButton,
     TrackRow,
+    TransparentContainer,
     UrlDownloadCard,
     WindowTitleBar,
-    make_list_item,
+    attach_transparent_scroll_widget,
+    attach_list_item_widget,
 )
 from jang_app.qt_app.workers import TaskProgressTarget, TaskWorker
 from jang_app.services.app_logging import get_logger
 from jang_app.services.app_update import (
     DEFAULT_MANIFEST_URL,
+    ReleaseManifest,
     UpdatePlan,
     create_update_plan,
+    discard_cached_artifacts,
     download_artifact,
     fetch_release_manifest_if_changed,
 )
@@ -103,6 +112,7 @@ from jang_app.services.audio_export import export_audio_file
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.audio_player import AudioPlaybackError, AudioPlayer
 from jang_app.services.audio_preview import prepare_preview_audio
+from jang_app.services.command import start_detached_command
 from jang_app.services.file_browser import open_in_file_browser
 from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language, tr
 from jang_app.services.job_diagnostics import get_job_diagnostics
@@ -159,6 +169,7 @@ PAGE_MODELS = 1
 PAGE_VOCAL = 2
 PAGE_STUDIO = 3
 PAGE_EXPORT = 4
+GOOGLE_DRIVE_FEATURE = "google_drive_sharing"
 
 
 class MainWindow(QMainWindow):
@@ -219,6 +230,46 @@ class MainWindow(QMainWindow):
         self.update_poll_timer.timeout.connect(self._start_update_check)
 
         self._build_ui()
+        self.google_drive = GoogleDriveController(
+            self,
+            paths=APP_PATHS,
+            oauth_asset=GOOGLE_OAUTH_CLIENT_PATH,
+            model_workspace=self.model_workspace,
+            run_worker=self._run_worker,
+            model_status=self.model_workspace_page.show_status,
+            models_imported=self._on_drive_models_imported,
+            logger=self._logger,
+        )
+        self.google_account_button.connect_requested.connect(
+            self.google_drive.connect_account
+        )
+        self.google_account_button.switch_requested.connect(
+            self.google_drive.switch_account
+        )
+        self.google_account_button.disconnect_requested.connect(
+            self.google_drive.disconnect_account
+        )
+        self.google_drive.account_changed.connect(self.google_account_button.set_account)
+        self.google_drive.account_busy_changed.connect(self.google_account_button.set_running)
+        self.google_drive.account_error.connect(self.google_account_button.set_error)
+        self.google_drive.account_unavailable.connect(
+            self.google_account_button.set_unavailable
+        )
+        self.google_drive.feature_availability_changed.connect(
+            self._set_google_drive_entry_points_enabled
+        )
+        self.google_drive.share_started.connect(self._on_drive_share_started)
+        self.google_drive.share_progress.connect(self._on_drive_share_progress)
+        self.google_drive.share_succeeded.connect(self._on_drive_share_succeeded)
+        self.google_drive.share_failed.connect(self._on_drive_share_failed)
+        self.google_drive.share_deleted.connect(self._on_drive_share_deleted)
+        self.model_workspace_page.set_share_status_provider(
+            self.google_drive.is_model_shared
+        )
+        self.export_page.set_share_status_provider(
+            self.google_drive.is_export_shared
+        )
+        self.google_drive.refresh_account_state()
         self._apply_theme()
         self._apply_language()
         self._refresh_song_list()
@@ -233,6 +284,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.update_poll_timer.stop()
+        self.google_drive.shutdown()
         self.task_attention.close()
         self.studio_session_autosave.flush()
         self.model_workspace_page.stop_preview()
@@ -252,7 +304,6 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._position_floating_playback()
         self._position_update_status()
         self._position_processing_queue()
         self._position_size_grip()
@@ -306,12 +357,6 @@ class MainWindow(QMainWindow):
         self.workspace_dock.hide()
         content_layout.addWidget(self.workspace_dock, 0)
 
-        self.floating_playback_panel = FloatingPlaybackPanel(content_widget)
-        self.floating_playback_panel.play_toggled.connect(self._toggle_global_playback)
-        self.floating_playback_panel.seek_requested.connect(self._seek_global_playback)
-        self.floating_playback_panel.dismiss_requested.connect(self._dismiss_floating_playback)
-        self.floating_playback_panel.hide()
-
         self.update_status_button = UpdateStatusButton(content_widget)
         self.update_status_button.clicked.connect(self._open_available_update)
 
@@ -326,7 +371,6 @@ class MainWindow(QMainWindow):
         self.log_drawer = LogDrawer(self.processing_queue, content_widget)
         self.log_drawer.close_requested.connect(self._close_log_drawer)
         self.log_drawer.open_location_requested.connect(self._open_log_location)
-        QTimer.singleShot(0, self._position_floating_playback)
         QTimer.singleShot(0, self._position_update_status)
         QTimer.singleShot(0, self._position_processing_queue)
 
@@ -380,8 +424,10 @@ class MainWindow(QMainWindow):
             self.language_action_group.addAction(action)
             self.language_actions[language] = action
         self.language_button.setMenu(self.language_menu)
+        self.google_account_button = GoogleAccountButton(GOOGLE_ICON_PATH)
         self.settings_button = self.primary_navigation.settings_button
         set_translated_tooltip(self.settings_button, "System setup")
+        self.title_bar.add_action_widget(self.google_account_button)
         self.title_bar.add_action_widget(self.language_button)
         self.title_bar.add_action_widget(self.theme_button)
 
@@ -446,9 +492,8 @@ class MainWindow(QMainWindow):
         self.library_search_edit = QLineEdit()
         set_translated_placeholder(self.library_search_edit, "Search songs")
         self.library_search_edit.textChanged.connect(self._apply_library_filters)
-        self.library_source_filter = ScrollSafeComboBox()
-        self.library_source_filter.setFixedWidth(150)
-        self.library_source_filter.currentIndexChanged.connect(self._apply_library_filters)
+        self.library_source_filter = LibrarySourceFilter()
+        self.library_source_filter.selection_changed.connect(self._apply_library_filters)
         self.library_sort_combo = ScrollSafeComboBox()
         self.library_sort_combo.setFixedWidth(150)
         set_translated_tooltip(self.library_sort_combo, "Sort songs")
@@ -475,7 +520,6 @@ class MainWindow(QMainWindow):
         self.library_content_stack = QStackedWidget()
         self.library_content_stack.addWidget(list_panel)
         self.library_content_stack.addWidget(self.library_details_panel)
-        self._populate_library_source_filter()
         self._populate_library_sort_combo()
 
         layout.addWidget(import_panel, 1)
@@ -551,6 +595,10 @@ class MainWindow(QMainWindow):
         self.export_page.audio_export_requested.connect(self._start_audio_mix_export)
         self.export_page.video_export_requested.connect(self._start_video_render)
         self.export_page.open_location_requested.connect(self._open_export_location)
+        self.export_page.share_requested.connect(self._open_export_drive_share)
+        self.export_page.delete_share_requested.connect(
+            self._delete_export_drive_share
+        )
         return self.export_page
 
     def _build_models_page(self) -> QWidget:
@@ -575,6 +623,13 @@ class MainWindow(QMainWindow):
             self._open_system_setup
         )
         self.model_workspace_page.models_changed.connect(self._refresh_rvc_choices)
+        self.model_workspace_page.share_requested.connect(self._open_model_drive_share)
+        self.model_workspace_page.delete_share_requested.connect(
+            self._delete_model_drive_share
+        )
+        self.model_workspace_page.drive_import_requested.connect(
+            self._start_drive_model_import
+        )
         return self.model_workspace_page
 
     def _build_separate_step_page(self) -> QWidget:
@@ -689,8 +744,8 @@ class MainWindow(QMainWindow):
         self.output_status_label.hide()
 
         track_scroll = QScrollArea()
-        track_scroll.setWidgetResizable(True)
-        track_content = QWidget()
+        track_scroll.setObjectName("StudioOutputScroll")
+        track_content = TransparentContainer(object_name="StudioOutputTrackContent")
         track_layout = QVBoxLayout(track_content)
         track_layout.setContentsMargins(0, 0, 0, 0)
         track_layout.setSpacing(10)
@@ -707,7 +762,7 @@ class MainWindow(QMainWindow):
             track.source_changed.connect(self._on_output_track_source_changed)
             track_layout.addWidget(track)
         track_layout.addStretch(1)
-        track_scroll.setWidget(track_content)
+        attach_transparent_scroll_widget(track_scroll, track_content)
 
         panel_layout.addLayout(header)
         panel_layout.addWidget(self.output_status_label, 0)
@@ -722,8 +777,6 @@ class MainWindow(QMainWindow):
         self.settings_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "workspace_dock"):
             self.workspace_dock.set_theme_mode(self.settings.theme_mode)
-        if hasattr(self, "floating_playback_panel"):
-            self.floating_playback_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "update_status_button"):
             self.update_status_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "processing_queue_panel"):
@@ -761,10 +814,10 @@ class MainWindow(QMainWindow):
         apply_widget_language(self)
         self.language_button.setText("KR" if self.settings.language == LANGUAGE_KOREAN else "EN")
         set_translated_tooltip(self.language_button, "Language")
+        self.google_account_button.apply_language()
         for language, action in self.language_actions.items():
             action.setChecked(language == self.settings.language)
         self.workspace_dock.apply_language()
-        self.floating_playback_panel.apply_language()
         self.update_status_button.apply_language()
         self.processing_queue_panel.apply_language()
         self.toast_stack.apply_language()
@@ -774,28 +827,9 @@ class MainWindow(QMainWindow):
         self.library_details_panel.apply_language()
         self.export_page.apply_language()
         self.video_preview_panel.apply_language()
-        self._populate_library_source_filter()
+        self.library_source_filter.apply_language()
         self._populate_library_sort_combo()
         set_translated_tooltip(self.library_sort_combo, "Sort songs")
-
-    def _position_floating_playback(self) -> None:
-        if not hasattr(self, "floating_playback_panel") or not hasattr(self, "workspace_dock"):
-            return
-        panel = self.floating_playback_panel
-        if not panel.isVisible():
-            return
-        parent = self._content_widget
-        anchor_top = (
-            self.workspace_dock.geometry().top() if self.workspace_dock.isVisible() else None
-        )
-        panel.move(
-            *floating_player_position(
-                parent.height(),
-                panel.height(),
-                anchor_top=anchor_top,
-            )
-        )
-        panel.raise_()
 
     def _position_update_status(self) -> None:
         if not hasattr(self, "update_status_button"):
@@ -806,8 +840,6 @@ class MainWindow(QMainWindow):
         anchor_tops: list[int] = []
         if self.workspace_dock.isVisible():
             anchor_tops.append(self.workspace_dock.geometry().top())
-        if self.floating_playback_panel.isVisible():
-            anchor_tops.append(self.floating_playback_panel.geometry().top())
         button.move(
             *update_button_position(
                 self._content_widget.height(),
@@ -818,16 +850,11 @@ class MainWindow(QMainWindow):
         button.raise_()
 
     def _sync_playback_surfaces(self) -> None:
-        if not hasattr(self, "floating_playback_panel") or not hasattr(self, "workspace_dock"):
+        if not hasattr(self, "workspace_dock"):
             return
         page_index = self.page_stack.currentIndex()
         is_workspace_page = page_index in {PAGE_VOCAL, PAGE_STUDIO}
-        queue = self.current_playback_queue
         self.workspace_dock.setVisible(is_workspace_page)
-        self.floating_playback_panel.setVisible(
-            queue is not None and (not is_workspace_page or queue.context == "library")
-        )
-        self._position_floating_playback()
         position_update_status = getattr(self, "_position_update_status", None)
         if callable(position_update_status):
             position_update_status()
@@ -920,7 +947,7 @@ class MainWindow(QMainWindow):
             arguments = sys.argv[1:]
         else:
             arguments = [str(Path(sys.argv[0]).resolve()), *sys.argv[1:]]
-        if QProcess.startDetached(sys.executable, arguments, str(Path.cwd())):
+        if start_detached_command((sys.executable, *arguments), cwd=Path.cwd()):
             QApplication.quit()
 
     def _start_update_check(self) -> None:
@@ -952,6 +979,8 @@ class MainWindow(QMainWindow):
             self._update_manifest_etag = result.etag
             self._update_manifest_last_modified = result.last_modified
             plan = result.plan
+            if plan is not None:
+                self._apply_release_feature_policy(plan.release)
             if plan is not None and plan.required:
                 self._available_update_plan = plan
                 self.update_status_button.set_available(
@@ -978,6 +1007,17 @@ class MainWindow(QMainWindow):
         worker.failed.connect(failed)
         worker.finished.connect(cleanup)
         worker.start()
+
+    def _apply_release_feature_policy(self, release: ReleaseManifest) -> None:
+        enabled = GOOGLE_DRIVE_FEATURE not in release.disabled_features
+        self.google_drive.set_feature_enabled(
+            enabled,
+            tr("Google Drive sharing is temporarily unavailable."),
+        )
+
+    def _set_google_drive_entry_points_enabled(self, is_enabled: bool) -> None:
+        self.model_workspace_page.set_sharing_enabled(is_enabled)
+        self.export_page.set_sharing_enabled(is_enabled)
 
     def _schedule_next_update_check(self) -> None:
         if not self._update_polling_enabled or self._available_update_plan is not None:
@@ -1113,7 +1153,7 @@ class MainWindow(QMainWindow):
             )
             self._run_worker(
                 worker,
-                lambda _result: self._launch_downloaded_installer_or_restart(),
+                lambda _result: self._finish_runtime_update_install(plan),
                 lambda error: self._set_update_download_failed(
                     dialog,
                     _last_error_line(error),
@@ -1129,6 +1169,14 @@ class MainWindow(QMainWindow):
             return
         self._launch_downloaded_installer_or_restart()
 
+    def _finish_runtime_update_install(self, plan: UpdatePlan) -> None:
+        runtime_names = {artifact.name for artifact in plan.runtime_artifacts}
+        runtime_packages = tuple(
+            path for path in self._downloaded_update if path.name in runtime_names
+        )
+        discard_cached_artifacts(runtime_packages, APP_PATHS.cache_dir)
+        self._launch_downloaded_installer_or_restart()
+
     def _launch_downloaded_installer_or_restart(self) -> None:
         installer = next(
             (path for path in self._downloaded_update if path.suffix.lower() == ".exe"),
@@ -1141,7 +1189,7 @@ class MainWindow(QMainWindow):
                     arguments = sys.argv[1:]
                 else:
                     arguments = [str(Path(sys.argv[0]).resolve()), *sys.argv[1:]]
-                if QProcess.startDetached(sys.executable, arguments, str(Path.cwd())):
+                if start_detached_command((sys.executable, *arguments), cwd=Path.cwd()):
                     QApplication.quit()
                     return
             if self._update_dialog is not None:
@@ -1157,7 +1205,7 @@ class MainWindow(QMainWindow):
             "/CLOSEAPPLICATIONS",
             "/RUN",
         )
-        if not QProcess.startDetached(str(installer), list(arguments), str(installer.parent)):
+        if not start_detached_command((str(installer), *arguments), cwd=installer.parent):
             if self._update_dialog is not None:
                 self._set_update_download_failed(
                     self._update_dialog,
@@ -1177,13 +1225,15 @@ class MainWindow(QMainWindow):
         previous_index = self.page_stack.currentIndex()
         if previous_index == PAGE_STUDIO and index != PAGE_STUDIO:
             self.studio_session_autosave.flush()
+        workspace_pages = {PAGE_VOCAL, PAGE_STUDIO}
+        if previous_index != index and not ({previous_index, index} <= workspace_pages):
+            self._suspend_playback()
         if index != PAGE_MODELS:
             self.model_workspace_page.stop_preview()
         self.page_stack.setCurrentIndex(index)
         self.primary_navigation.set_current_page(index)
         if index == PAGE_EXPORT:
             self._refresh_export_page()
-        workspace_pages = {PAGE_VOCAL, PAGE_STUDIO}
         if previous_index in workspace_pages and index in workspace_pages:
             self._sync_playback_queue_for_page(index, force=True)
         else:
@@ -1435,18 +1485,28 @@ class MainWindow(QMainWindow):
         sort_mode = str(self.library_sort_combo.currentData() or "newest")
         for item in sort_song_items(items, sort_mode):
             metadata = build_song_display_metadata(item, self.settings.output_root)
-            row = SongListRow(item.id, item.title, metadata)
+            row = SongListRow(
+                item.id,
+                item.title,
+                metadata,
+                self.song_list.viewport(),
+            )
             row.set_theme_mode(self.settings.theme_mode)
             apply_widget_language(row)
             row.use_requested.connect(self._use_library_item)
             row.details_requested.connect(self._open_library_details)
             row.rename_requested.connect(self._rename_library_item)
             row.remove_requested.connect(self._remove_library_item)
-            row.preview_requested.connect(self._select_library_preview)
-            list_item = make_list_item(row)
+            row.preview_requested.connect(self._toggle_library_preview)
+            row.preview_play_toggled.connect(self._toggle_library_preview_playback)
+            row.preview_seek_requested.connect(self._seek_library_preview)
+            row.preview_height_changed.connect(self._sync_library_row_height)
+            list_item = QListWidgetItem()
             list_item.setData(Qt.ItemDataRole.UserRole, item.id)
-            self.song_list.addItem(list_item)
-            self.song_list.setItemWidget(list_item, row)
+            attach_list_item_widget(self.song_list, list_item, row)
+            if item.id == self._library_preview_song_id:
+                row.set_preview_expanded(True)
+                list_item.setSizeHint(row.sizeHint())
         self.song_list.blockSignals(False)
         if selected_id and self._select_library_song(selected_id):
             pass
@@ -1476,34 +1536,67 @@ class MainWindow(QMainWindow):
     def _on_library_selection_changed(self, *_args) -> None:
         self._sync_song_row_selection()
 
-    def _select_library_preview(self, song_id: str) -> None:
+    def _toggle_library_preview(self, song_id: str) -> None:
+        if song_id == self._library_preview_song_id:
+            if self._current_playback_context() == "library":
+                self._stop_playback(clear_queue=True)
+            self._playback_resume_positions.pop(("library", song_id), None)
+            self._set_library_preview_expanded(song_id, False)
+            self._library_preview_song_id = ""
+            return
+
+        previous_id = self._library_preview_song_id
+        if previous_id:
+            self._set_library_preview_expanded(previous_id, False)
+        if self._current_playback_context() == "library":
+            self._suspend_playback()
+
         song = self._song_items_by_id.get(song_id)
         if song is None:
             self._library_preview_song_id = ""
             return
         self._select_library_song(song_id)
-        queue = self.current_playback_queue
-        if queue is not None and queue.context == "library" and queue.source_id == song_id:
-            self._library_preview_song_id = song_id
-            self._sync_playback_surfaces()
-            return
         self._library_preview_song_id = song_id
+        self._set_library_preview_expanded(song_id, True)
         self._load_library_playback_queue(song)
 
-    def _populate_library_source_filter(self) -> None:
-        current = self.library_source_filter.currentData() if self.library_source_filter.count() else "all"
-        self.library_source_filter.blockSignals(True)
-        self.library_source_filter.clear()
-        for label, value in (
-            ("All Sources", "all"),
-            ("LOCAL", "local"),
-            ("YOUTUBE", "youtube"),
-            ("OUTPUT", "output"),
-        ):
-            self.library_source_filter.addItem(tr(label), value)
-        index = self.library_source_filter.findData(current)
-        self.library_source_filter.setCurrentIndex(index if index >= 0 else 0)
-        self.library_source_filter.blockSignals(False)
+    def _toggle_library_preview_playback(self, song_id: str) -> None:
+        if song_id != self._library_preview_song_id:
+            self._toggle_library_preview(song_id)
+        queue = self.current_playback_queue
+        if queue is None or queue.context != "library" or queue.source_id != song_id:
+            song = self._song_items_by_id.get(song_id)
+            if song is None:
+                return
+            self._load_library_playback_queue(song)
+        self._toggle_global_playback()
+
+    def _seek_library_preview(self, song_id: str, position_ms: int) -> None:
+        queue = self.current_playback_queue
+        if queue is None or queue.context != "library" or queue.source_id != song_id:
+            return
+        self._seek_global_playback(position_ms)
+
+    def _set_library_preview_expanded(self, song_id: str, is_expanded: bool) -> None:
+        list_item, row = self._library_row(song_id)
+        if list_item is None or row is None:
+            return
+        row.set_preview_expanded(is_expanded)
+        list_item.setSizeHint(row.sizeHint())
+
+    def _sync_library_row_height(self, song_id: str) -> None:
+        list_item, row = self._library_row(song_id)
+        if list_item is not None and row is not None:
+            list_item.setSizeHint(row.sizeHint())
+
+    def _library_row(self, song_id: str) -> tuple[QListWidgetItem | None, SongListRow | None]:
+        for index in range(self.song_list.count()):
+            item = self.song_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) != song_id:
+                continue
+            row = self.song_list.itemWidget(item)
+            return item, row if isinstance(row, SongListRow) else None
+        return None, None
 
     def _populate_library_sort_combo(self) -> None:
         current = self.library_sort_combo.currentData() if self.library_sort_combo.count() else "newest"
@@ -1522,19 +1615,31 @@ class MainWindow(QMainWindow):
 
     def _apply_library_filters(self, *_args) -> None:
         query = self.library_search_edit.text().strip().casefold()
-        source_filter = str(self.library_source_filter.currentData() or "all")
+        source_filters = self.library_source_filter.selected_sources()
         visible_items = []
+        preview_is_visible = False
         for index in range(self.song_list.count()):
             list_item = self.song_list.item(index)
-            song = self._song_items_by_id.get(list_item.data(Qt.ItemDataRole.UserRole))
+            song_id = list_item.data(Qt.ItemDataRole.UserRole)
+            song = self._song_items_by_id.get(song_id)
             is_visible = song is not None and (
                 not query or query in song.title.casefold() or query in song.path.name.casefold()
             )
-            if is_visible and source_filter != "all":
-                is_visible = song.source_type == source_filter
+            if is_visible and source_filters:
+                is_visible = song.source_type in source_filters
             list_item.setHidden(not is_visible)
             if is_visible:
                 visible_items.append(list_item)
+            if song_id == self._library_preview_song_id:
+                preview_is_visible = is_visible
+
+        if self._library_preview_song_id and not preview_is_visible:
+            preview_song_id = self._library_preview_song_id
+            self._set_library_preview_expanded(preview_song_id, False)
+            if self._current_playback_context() == "library":
+                self._stop_playback(clear_queue=True)
+            else:
+                self._library_preview_song_id = ""
 
         self.library_count_label.setText(f"{len(visible_items)} / {self.song_list.count()}")
         current = self.song_list.currentItem()
@@ -2478,13 +2583,6 @@ class MainWindow(QMainWindow):
         )
         self._play_current_queue(start_ms)
 
-    def _dismiss_floating_playback(self) -> None:
-        queue = self.current_playback_queue
-        self._stop_playback(clear_queue=True)
-        if queue is not None:
-            self._playback_resume_positions.pop((queue.context, queue.source_id), None)
-        self._library_preview_song_id = ""
-
     def _on_model_preview_started(self) -> None:
         if self.player.is_playing():
             self._pause_playback()
@@ -2667,7 +2765,6 @@ class MainWindow(QMainWindow):
         self._playback_position_ms = 0
         if queue is None:
             self.workspace_dock.clear()
-            self.floating_playback_panel.clear()
             self._sync_playback_surfaces()
             self._update_output_playheads(0, 0)
             return
@@ -2691,7 +2788,6 @@ class MainWindow(QMainWindow):
         if clear_queue:
             self.current_playback_queue = None
             self.workspace_dock.clear()
-            self.floating_playback_panel.clear()
             if queue is not None and queue.context == "library":
                 self._library_preview_song_id = ""
             self._sync_playback_surfaces()
@@ -2700,6 +2796,22 @@ class MainWindow(QMainWindow):
         self._refresh_playback_ui(is_playing=False)
         duration = self.current_playback_queue.duration_ms if self.current_playback_queue is not None else 0
         self._update_output_playheads(0, duration)
+
+    def _suspend_playback(self) -> None:
+        queue = self.current_playback_queue
+        if queue is not None:
+            position_ms = (
+                self.player.position_ms()
+                if self.player.is_playing()
+                else self._playback_position_ms
+            )
+            self._playback_resume_positions[(queue.context, queue.source_id)] = max(
+                0,
+                min(position_ms, queue.duration_ms),
+            )
+            if queue.context == "library":
+                self._set_library_preview_expanded(queue.source_id, False)
+        self._stop_playback(clear_queue=True)
 
     def _resume_position(self, queue: PlaybackQueue) -> int:
         return max(
@@ -2751,7 +2863,7 @@ class MainWindow(QMainWindow):
         self._update_output_playheads(0, queue.duration_ms)
 
     def _sync_playback_queue_for_page(self, index: int, *, force: bool = False) -> None:
-        if self.current_playback_queue is not None and not force:
+        if self.player.is_playing() and not force:
             return
         if index == PAGE_LIBRARY and self._library_preview_song_id:
             self._load_library_playback_queue(
@@ -2764,17 +2876,20 @@ class MainWindow(QMainWindow):
         queue = self.current_playback_queue
         if queue is None:
             self.workspace_dock.clear()
-            self.floating_playback_panel.clear()
             self._sync_playback_surfaces()
             self._sync_video_playback(False)
             return
 
-        self.floating_playback_panel.set_queue(queue.title, queue.duration_ms)
-        self.floating_playback_panel.set_position(self._playback_position_ms, queue.duration_ms)
-        self.floating_playback_panel.set_playing(is_playing)
-        self.workspace_dock.set_queue(queue.duration_ms)
-        self.workspace_dock.set_position(self._playback_position_ms, queue.duration_ms)
-        self.workspace_dock.set_playing(is_playing)
+        if queue.context == "library":
+            _item, row = self._library_row(queue.source_id)
+            if row is not None:
+                row.set_preview_queue(queue.duration_ms)
+                row.set_preview_position(self._playback_position_ms, queue.duration_ms)
+                row.set_preview_playing(is_playing)
+        else:
+            self.workspace_dock.set_queue(queue.duration_ms)
+            self.workspace_dock.set_position(self._playback_position_ms, queue.duration_ms)
+            self.workspace_dock.set_playing(is_playing)
         self._sync_playback_surfaces()
         self._sync_video_playback(is_playing)
 
@@ -2981,6 +3096,64 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.export_page.set_audio_status(f"Open failed: {_last_error_line(str(exc))}")
 
+    def _open_export_drive_share(self, path: Path) -> None:
+        self.google_drive.open_export_share(path)
+
+    def _open_model_drive_share(self, record: RvcModelRecord) -> None:
+        self.google_drive.open_model_share(record)
+
+    def _delete_export_drive_share(self, path: Path) -> None:
+        if self._confirm_drive_share_delete(path.name):
+            self.google_drive.delete_export_share(path)
+
+    def _delete_model_drive_share(self, record: RvcModelRecord) -> None:
+        if self._confirm_drive_share_delete(record.title):
+            self.google_drive.delete_model_share(record)
+
+    def _confirm_drive_share_delete(self, title: str) -> bool:
+        return ConfirmationDialog.confirm(
+            self,
+            tr("Remove Google Drive Share"),
+            tr(
+                "Delete '{name}' from Google Drive? The local file will not be deleted.",
+                name=title,
+            ),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Delete"),
+            cancel_label=tr("Cancel"),
+        )
+
+    def _on_drive_share_started(self, target_id: str) -> None:
+        self.model_workspace_page.set_share_started(target_id)
+        self.export_page.set_share_started(target_id)
+
+    def _on_drive_share_progress(self, target_id: str, progress: int) -> None:
+        self.model_workspace_page.set_share_progress(target_id, progress)
+        self.export_page.set_share_progress(target_id, progress)
+
+    def _on_drive_share_succeeded(self, target_id: str, _link: str) -> None:
+        self.model_workspace_page.set_share_completed(target_id)
+        self.export_page.set_share_completed(target_id)
+
+    def _on_drive_share_failed(self, target_id: str, _error: str) -> None:
+        self.model_workspace_page.set_share_failed(target_id)
+        self.export_page.set_share_failed(target_id)
+
+    def _on_drive_share_deleted(self, target_id: str) -> None:
+        self.model_workspace_page.set_share_deleted(target_id)
+        self.export_page.set_share_deleted(target_id)
+
+    def _start_drive_model_import(self, link: str) -> None:
+        self.google_drive.import_model_link(link)
+
+    def _on_drive_models_imported(
+        self,
+        records: tuple[RvcModelRecord, ...],
+    ) -> None:
+        self.model_workspace_page.apply_drive_import(records)
+        self._refresh_rvc_choices()
+
     def _use_model_in_convert(self, record: RvcModelRecord) -> None:
         choice = rvc_model_choice_from_record(record)
         if choice is None:
@@ -3006,6 +3179,7 @@ class MainWindow(QMainWindow):
         task_title: str,
         task_detail: str = "",
         action_scope: Callable[[], bool] | None = None,
+        cancelled_error: Callable[[str], bool] | None = None,
     ) -> None:
         task_id = self.processing_queue.start(task_title, task_detail)
         worker.set_diagnostic_task_id(task_id)
@@ -3033,7 +3207,10 @@ class MainWindow(QMainWindow):
 
         def handle_failure(error: str) -> None:
             release_action()
-            self.processing_queue.fail(task_id, error)
+            if cancelled_error is not None and cancelled_error(error):
+                self.processing_queue.cancel(task_id)
+            else:
+                self.processing_queue.fail(task_id, error)
             on_failed(error)
 
         def cleanup() -> None:

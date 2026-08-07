@@ -35,8 +35,8 @@ class ClipWaveformView(QWidget):
     seek_requested = Signal(int)
     zoom_changed = Signal(int)
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.setObjectName("DatasetEditorWaveform")
         self.setMinimumHeight(118)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -49,6 +49,8 @@ class ClipWaveformView(QWidget):
         self._suggestions: tuple[tuple[SpeechRegion, bool], ...] = ()
         self._selection_start_ms = 0
         self._selection_end_ms = 0
+        self._noise_sample_start_ms = 0
+        self._noise_sample_end_ms = 0
         self._playhead_ms = 0
         self._zoom = 1
         self._view_center_ms = 0
@@ -139,6 +141,14 @@ class ClipWaveformView(QWidget):
             self._edit_end_ms = self._selection_end_ms
         self.update()
 
+    def set_noise_sample(self, start_ms: int, end_ms: int) -> None:
+        self._noise_sample_start_ms = max(0, min(start_ms, self._duration_ms))
+        self._noise_sample_end_ms = max(
+            self._noise_sample_start_ms,
+            min(end_ms, self._duration_ms),
+        )
+        self.update()
+
     def select_clip(self, clip_id: str) -> tuple[int, int] | None:
         clip = self._clip_by_id(clip_id)
         if clip is None:
@@ -183,6 +193,7 @@ class ClipWaveformView(QWidget):
         visible_start, visible_end = self._visible_range()
         self._paint_suggestions(painter, content, colors)
         self._paint_clips(painter, content, colors)
+        self._paint_noise_sample(painter, content, colors)
         self._paint_peaks(painter, content, visible_start, visible_end, colors["wave"])
         self._paint_selection(painter, content, colors)
         self._paint_playhead(painter, content, colors)
@@ -313,6 +324,26 @@ class ClipWaveformView(QWidget):
             painter.fillRect(clip_rect.intersected(content), colors["selected_clip" if is_selected else "clip"])
         if self._selected_clip_id:
             self._paint_handles(painter, content, colors, self._edit_start_ms, self._edit_end_ms)
+
+    def _paint_noise_sample(
+        self,
+        painter: QPainter,
+        content: QRectF,
+        colors: dict[str, QColor],
+    ) -> None:
+        if self._noise_sample_end_ms - self._noise_sample_start_ms < 100:
+            return
+        left = self._ms_to_x(self._noise_sample_start_ms)
+        right = self._ms_to_x(self._noise_sample_end_ms)
+        sample_rect = QRectF(left, content.top(), max(1.0, right - left), content.height())
+        visible_rect = sample_rect.intersected(content)
+        if visible_rect.isEmpty():
+            return
+        painter.fillRect(visible_rect, colors["noise_sample"])
+        painter.fillRect(
+            QRectF(visible_rect.left(), visible_rect.top(), visible_rect.width(), 3),
+            colors["noise_sample_edge"],
+        )
 
     def _paint_handles(
         self,
@@ -473,6 +504,8 @@ def _waveform_palette(theme_mode: str) -> dict[str, QColor]:
             "selected_clip": QColor(236, 235, 231, 58),
             "suggestion": QColor(85, 145, 104, 65),
             "suggestion_disabled": QColor(137, 135, 128, 25),
+            "noise_sample": QColor(214, 154, 76, 45),
+            "noise_sample_edge": QColor("#d69a4c"),
             "handle": QColor("#c93d3d"),
             "playhead": QColor("#c93d3d"),
             "text": QColor("#898780"),
@@ -488,6 +521,8 @@ def _waveform_palette(theme_mode: str) -> dict[str, QColor]:
         "selected_clip": QColor(16, 16, 14, 42),
         "suggestion": QColor(55, 125, 78, 55),
         "suggestion_disabled": QColor(110, 106, 97, 20),
+        "noise_sample": QColor(170, 105, 30, 35),
+        "noise_sample_edge": QColor("#a8691e"),
         "handle": QColor("#c93d3d"),
         "playhead": QColor("#c93d3d"),
         "text": QColor("#6e6a61"),

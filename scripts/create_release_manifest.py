@@ -115,6 +115,7 @@ def create_release_manifest(
         "version": version,
         "architecture": "x64",
         "minimum_windows": "10.0.17763",
+        "disabled_features": [],
         "components": components,
     }
     manifest = resolved_release / MANIFEST_NAME

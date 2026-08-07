@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 
@@ -8,8 +8,10 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
+from jang_app.qt_app.share_progress_action import ShareProgressAction
 from jang_app.qt_app.work_song_selector import WorkSongSelector
 from jang_app.qt_app.widgets import SvgIconButton, TaskActionWidget
+from jang_app.services.google_drive_share import drive_share_target_id
 from jang_app.services.song_export import SongAudioExport
 from jang_app.services.song_video_export import SongVideoExport
 
@@ -19,12 +21,18 @@ class ExportPage(QWidget):
     audio_export_requested = Signal(str)
     video_export_requested = Signal(str)
     open_location_requested = Signal(object)
+    share_requested = Signal(object)
+    delete_share_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
         self._export_dir: Path | None = None
         self._target_song_id = ""
         self._theme_mode = "white"
+        self._sharing_enabled = True
+        self._share_progress_by_id: dict[str, int] = {}
+        self._shared_target_ids: set[str] = set()
+        self._share_status_provider: Callable[[Path], bool] | None = None
         self.export_rows: list[_ExportRow] = []
 
         left_panel = QFrame()
@@ -119,7 +127,14 @@ class ExportPage(QWidget):
         for exported, export_kind in exports:
             row = _ExportRow(exported, export_kind)
             row.set_theme_mode(self._theme_mode)
+            row.set_sharing_enabled(self._sharing_enabled)
+            row.set_shared(self._path_is_shared(exported.path, row.target_id))
+            if row.target_id in self._share_progress_by_id:
+                row.set_share_started()
+                row.set_share_progress(self._share_progress_by_id[row.target_id])
             row.open_location_requested.connect(self.open_location_requested.emit)
+            row.share_requested.connect(self.share_requested.emit)
+            row.delete_share_requested.connect(self.delete_share_requested.emit)
             self.export_rows.append(row)
             self.export_layout.addWidget(row, 0)
         self.export_layout.addStretch(1)
@@ -173,6 +188,54 @@ class ExportPage(QWidget):
         for row in self.export_rows:
             row.set_theme_mode(theme_mode)
 
+    def set_sharing_enabled(self, is_enabled: bool) -> None:
+        self._sharing_enabled = is_enabled
+        for row in self.export_rows:
+            row.set_sharing_enabled(is_enabled)
+
+    def set_share_status_provider(self, provider: Callable[[Path], bool]) -> None:
+        self._share_status_provider = provider
+        for row in self.export_rows:
+            row.set_shared(
+                self._path_is_shared(row.path, row.target_id, refresh=True)
+            )
+
+    def set_share_started(self, target_id: str) -> None:
+        row = self._row_for_target(target_id)
+        if row is None:
+            return
+        self._share_progress_by_id[target_id] = 0
+        row.set_share_started()
+
+    def set_share_progress(self, target_id: str, progress: int) -> None:
+        if target_id not in self._share_progress_by_id:
+            return
+        value = max(0, min(100, int(progress)))
+        self._share_progress_by_id[target_id] = value
+        row = self._row_for_target(target_id)
+        if row is not None:
+            row.set_share_progress(value)
+
+    def set_share_completed(self, target_id: str) -> None:
+        self._share_progress_by_id.pop(target_id, None)
+        self._shared_target_ids.add(target_id)
+        row = self._row_for_target(target_id)
+        if row is not None:
+            row.set_share_completed()
+
+    def set_share_failed(self, target_id: str) -> None:
+        self._share_progress_by_id.pop(target_id, None)
+        row = self._row_for_target(target_id)
+        if row is not None:
+            row.set_share_failed()
+
+    def set_share_deleted(self, target_id: str) -> None:
+        self._share_progress_by_id.pop(target_id, None)
+        self._shared_target_ids.discard(target_id)
+        row = self._row_for_target(target_id)
+        if row is not None:
+            row.set_share_deleted()
+
     def apply_language(self) -> None:
         apply_widget_language(self)
         self.song_selector.apply_language()
@@ -201,13 +264,41 @@ class ExportPage(QWidget):
                 widget.hide()
                 widget.deleteLater()
 
+    def _row_for_target(self, target_id: str) -> "_ExportRow | None":
+        return next((row for row in self.export_rows if row.target_id == target_id), None)
+
+    def _path_is_shared(
+        self,
+        path: Path,
+        target_id: str,
+        *,
+        refresh: bool = False,
+    ) -> bool:
+        if not refresh and target_id in self._shared_target_ids:
+            return True
+        is_shared = False
+        if self._share_status_provider is not None:
+            try:
+                is_shared = self._share_status_provider(path)
+            except OSError:
+                is_shared = False
+        if is_shared:
+            self._shared_target_ids.add(target_id)
+        else:
+            self._shared_target_ids.discard(target_id)
+        return is_shared
+
 
 class _ExportRow(QFrame):
     open_location_requested = Signal(object)
+    share_requested = Signal(object)
+    delete_share_requested = Signal(object)
 
     def __init__(self, exported: SongAudioExport | SongVideoExport, export_kind: str) -> None:
         super().__init__()
         self.setObjectName("ExportRow")
+        self.path = exported.path
+        self.target_id = drive_share_target_id(exported.path)
 
         badge = QLabel(export_kind)
         badge.setObjectName("SourceBadge")
@@ -231,16 +322,54 @@ class _ExportRow(QFrame):
         self.open_button = SvgIconButton("folder", size=30)
         set_translated_tooltip(self.open_button, "Open file location")
         self.open_button.clicked.connect(lambda: self.open_location_requested.emit(exported.path))
+        self.share_action = ShareProgressAction(button_size=30)
+        self.share_action.requested.connect(lambda: self.share_requested.emit(exported.path))
+        self.share_action.delete_requested.connect(
+            lambda: self.delete_share_requested.emit(exported.path)
+        )
+        self.share_button = self.share_action.button
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
         layout.addWidget(badge, 0)
         layout.addLayout(text_layout, 1)
+        layout.addWidget(self.share_action, 0)
         layout.addWidget(self.open_button, 0)
 
     def set_theme_mode(self, theme_mode: str) -> None:
+        self.share_action.set_theme_mode(theme_mode)
         self.open_button.set_theme_mode(theme_mode)
+
+    def set_sharing_enabled(self, is_enabled: bool) -> None:
+        self.share_action.set_feature_enabled(is_enabled)
+
+    def set_share_started(self) -> None:
+        self.share_action.set_running(True)
+
+    def set_share_progress(self, progress: int) -> None:
+        self.share_action.set_progress(progress)
+
+    def set_share_completed(self) -> None:
+        self.share_action.set_completed()
+
+    def set_share_failed(self) -> None:
+        self.share_action.set_failed()
+
+    def set_shared(self, is_shared: bool) -> None:
+        self.share_action.set_shared(is_shared)
+
+    def set_share_deleted(self) -> None:
+        self.share_action.set_running(False)
+        self.share_action.set_deleted()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.share_action.set_actions_expanded(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.share_action.set_actions_expanded(False)
+        super().leaveEvent(event)
 
 
 def _size_label(size_bytes: int) -> str:

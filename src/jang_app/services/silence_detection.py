@@ -50,18 +50,78 @@ def detect_speech_regions(
     return _merge_regions(tuple(region for region in padded if region.duration_ms >= 100))
 
 
+def split_regions_at_low_energy(
+    source: Path,
+    regions: tuple[SpeechRegion, ...],
+    max_duration_ms: int,
+    *,
+    frame_ms: int = 20,
+    search_window_ms: int = 1500,
+    progress: Callable[[int], None] | None = None,
+) -> tuple[tuple[int, int], ...]:
+    maximum = max(100, int(max_duration_ms))
+    if not regions:
+        if progress is not None:
+            progress(100)
+        return ()
+    preview_path = prepare_preview_audio(source)
+    with sf.SoundFile(preview_path) as audio:
+        levels = _stream_frame_levels(audio, frame_ms, progress)
+    if levels.size == 0:
+        return tuple((region.start_ms, region.end_ms) for region in regions)
+
+    ranges: list[tuple[int, int]] = []
+    for region in regions:
+        duration = region.duration_ms
+        segment_count = min(
+            max(1, (duration + maximum - 1) // maximum),
+            max(1, duration // 100),
+        )
+        if segment_count == 1:
+            ranges.append((region.start_ms, region.end_ms))
+            continue
+        minimum_segment_ms = min(3000, max(100, round(duration / segment_count * 0.45)))
+        boundaries = [region.start_ms]
+        for index in range(1, segment_count):
+            target_ms = region.start_ms + round(duration * index / segment_count)
+            remaining_segments = segment_count - index
+            earliest = boundaries[-1] + minimum_segment_ms
+            latest = region.end_ms - remaining_segments * minimum_segment_ms
+            search_start = max(earliest, target_ms - max(0, search_window_ms))
+            search_end = min(latest, target_ms + max(0, search_window_ms))
+            boundary = _lowest_energy_position(levels, frame_ms, search_start, search_end, target_ms)
+            boundaries.append(boundary)
+        boundaries.append(region.end_ms)
+        ranges.extend(
+            (start_ms, end_ms)
+            for start_ms, end_ms in zip(boundaries, boundaries[1:])
+            if end_ms - start_ms >= 100
+        )
+    if progress is not None:
+        progress(100)
+    return tuple(ranges)
+
+
 def _stream_active_frames(
     audio: sf.SoundFile,
     frame_ms: int,
     threshold_db: int,
     progress: Callable[[int], None] | None,
 ) -> np.ndarray:
+    threshold = max(-100, min(0, threshold_db))
+    return _stream_frame_levels(audio, frame_ms, progress) >= threshold
+
+
+def _stream_frame_levels(
+    audio: sf.SoundFile,
+    frame_ms: int,
+    progress: Callable[[int], None] | None,
+) -> np.ndarray:
     if audio.samplerate <= 0 or len(audio) <= 0:
-        return np.array([], dtype=bool)
+        return np.array([], dtype=np.float64)
     frame_size = max(1, round(audio.samplerate * frame_ms / 1000))
     block_size = frame_size * 2048
-    threshold = max(-100, min(0, threshold_db))
-    active_blocks: list[np.ndarray] = []
+    level_blocks: list[np.ndarray] = []
     processed = 0
     while True:
         block = audio.read(block_size, always_2d=True, dtype="float32")
@@ -73,13 +133,28 @@ def _stream_active_frames(
             mono = np.pad(mono, (0, frame_size - remainder))
         frames = mono.reshape(-1, frame_size)
         rms = np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=1))
-        active_blocks.append(20 * np.log10(np.maximum(rms, 1e-9)) >= threshold)
+        level_blocks.append(20 * np.log10(np.maximum(rms, 1e-9)))
         processed += len(block)
         if progress is not None:
-            progress(max(0, min(100, round(processed * 100 / len(audio)))))
+            progress(max(0, min(99, round(processed * 100 / len(audio)))))
     if progress is not None:
         progress(100)
-    return np.concatenate(active_blocks) if active_blocks else np.array([], dtype=bool)
+    return np.concatenate(level_blocks) if level_blocks else np.array([], dtype=np.float64)
+
+
+def _lowest_energy_position(
+    levels: np.ndarray,
+    frame_ms: int,
+    start_ms: int,
+    end_ms: int,
+    fallback_ms: int,
+) -> int:
+    start_frame = max(0, min(len(levels), start_ms // frame_ms))
+    end_frame = max(start_frame + 1, min(len(levels), (end_ms + frame_ms - 1) // frame_ms))
+    if start_frame >= len(levels) or end_frame <= start_frame:
+        return fallback_ms
+    local_index = int(np.argmin(levels[start_frame:end_frame]))
+    return max(start_ms, min(end_ms, (start_frame + local_index) * frame_ms))
 
 
 def _fill_short_silent_gaps(active: np.ndarray, max_gap_frames: int) -> np.ndarray:

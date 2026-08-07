@@ -32,6 +32,7 @@ DEFAULT_MANIFEST_URL = (
 MAX_MANIFEST_BYTES = 1024 * 1024
 DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_FEATURE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 class UpdateError(RuntimeError):
@@ -74,6 +75,7 @@ class ReleaseComponent:
 class ReleaseManifest:
     version: str
     components: tuple[ReleaseComponent, ...]
+    disabled_features: frozenset[str] = frozenset()
 
     def component(self, component_id: str) -> ReleaseComponent | None:
         return next(
@@ -129,6 +131,12 @@ class UpdatePlan:
         selected: list[ReleaseArtifact] = []
         if self.application_required:
             selected.extend(self.release.application.artifacts)
+        selected.extend(self.runtime_artifacts)
+        return tuple(selected)
+
+    @property
+    def runtime_artifacts(self) -> tuple[ReleaseArtifact, ...]:
+        selected: list[ReleaseArtifact] = []
         if self.runtime_required and self.release.ai_runtime is not None:
             selected.extend(self.release.ai_runtime.artifacts)
         if self.rvc_profile_required and self.rvc_profile_component is not None:
@@ -246,7 +254,8 @@ def parse_release_manifest(data: object, manifest_url: str) -> ReleaseManifest:
         raise UpdateError(f"Unsupported release manifest schema: {schema_version!r}")
     if len({component.component_id for component in components}) != len(components):
         raise UpdateError("The release manifest contains duplicate components.")
-    release = ReleaseManifest(version, components)
+    disabled_features = _parse_disabled_features(data.get("disabled_features"))
+    release = ReleaseManifest(version, components, disabled_features)
     release.application
     return release
 
@@ -433,6 +442,28 @@ def verify_artifact(path: Path, artifact: ReleaseArtifact) -> bool:
     )
 
 
+def discard_cached_artifacts(paths: tuple[Path, ...], cache_root: Path) -> None:
+    """Best-effort cleanup for verified packages after a successful install."""
+    root = cache_root.expanduser().resolve()
+    for path in paths:
+        candidate = path.expanduser().resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            continue
+        parent = candidate.parent
+        while parent != root and root in parent.parents:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
 def verify_authenticode_signature(path: Path, publisher: str = "") -> bool:
     environment = os.environ.copy()
     environment["JJZERO_VERIFY_SIGNATURE_PATH"] = str(path.expanduser().resolve())
@@ -476,6 +507,19 @@ def _parse_component(data: object, manifest_url: str) -> ReleaseComponent:
         raise UpdateError(f"Unsupported install mode: {install_mode}")
     artifacts = _parse_artifacts(data.get("artifacts"), manifest_url)
     return ReleaseComponent(component_id, version, install_mode, artifacts)
+
+
+def _parse_disabled_features(data: object) -> frozenset[str]:
+    if data is None:
+        return frozenset()
+    if not isinstance(data, list):
+        raise UpdateError("The disabled feature list must be an array.")
+    features: set[str] = set()
+    for value in data:
+        if not isinstance(value, str) or _FEATURE_NAME_PATTERN.fullmatch(value) is None:
+            raise UpdateError(f"Invalid disabled feature name: {value!r}")
+        features.add(value)
+    return frozenset(features)
 
 
 def _parse_legacy_application(

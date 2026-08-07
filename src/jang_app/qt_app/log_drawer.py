@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from jang_app.config import LOG_FILE
 from jang_app.qt_app.localization import apply_widget_language
-from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
+from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton, attach_list_item_widget
 from jang_app.services.i18n import tr
 from jang_app.services.log_reader import read_log_tail
 from jang_app.services.processing_queue import (
@@ -214,11 +214,9 @@ class LogDrawer(QFrame):
         for task in self._tasks:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, task.task_id)
-            row = ActivityTaskRow(task)
+            row = ActivityTaskRow(task, self.activity_list.viewport())
             row.activated.connect(self.select_task)
-            item.setSizeHint(row.sizeHint())
-            self.activity_list.addItem(item)
-            self.activity_list.setItemWidget(item, row)
+            attach_list_item_widget(self.activity_list, item, row)
             self._activity_rows[task.task_id] = row
         self.activity_list.blockSignals(False)
 
@@ -288,8 +286,12 @@ class LogDrawer(QFrame):
 class ActivityTaskRow(QWidget):
     activated = Signal(str)
 
-    def __init__(self, task: ProcessingTask) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        task: ProcessingTask,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self.setObjectName("ActivityTaskRow")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setProperty("selected", False)

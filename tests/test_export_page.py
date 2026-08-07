@@ -7,6 +7,7 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.export_page import ExportPage
+from jang_app.services.google_drive_share import drive_share_target_id
 from jang_app.services.song_export import SongAudioExport
 from jang_app.services.song_video_export import SongVideoExport
 
@@ -73,6 +74,75 @@ class ExportPageTests(unittest.TestCase):
 
         self.assertEqual(changed.at(0)[0], "song-2")
         self.assertEqual(page.selected_song_id(), "song-2")
+        page.close()
+
+    def test_export_row_emits_drive_share_request(self) -> None:
+        page = ExportPage()
+        export_dir = Path("song-package") / "04_exports"
+        audio = SongAudioExport(export_dir / "audio" / "mix.wav", 2048, 1_786_000_000)
+        shared = QSignalSpy(page.share_requested)
+        page.set_exports((audio,), (), export_dir)
+
+        page.export_rows[0].share_button.click()
+
+        self.assertEqual(shared.at(0)[0], audio.path)
+        self.assertTrue(page.export_rows[0].share_action.progress_bar.isHidden())
+        page.close()
+
+    def test_drive_share_actions_follow_feature_availability(self) -> None:
+        page = ExportPage()
+        export_dir = Path("song-package") / "04_exports"
+        audio = SongAudioExport(export_dir / "audio" / "mix.wav", 2048, 1_786_000_000)
+        page.set_exports((audio,), (), export_dir)
+
+        page.set_sharing_enabled(False)
+
+        self.assertTrue(page.export_rows[0].share_button.isHidden())
+        self.assertFalse(page.export_rows[0].share_button.isEnabled())
+        page.set_sharing_enabled(True)
+        self.assertFalse(page.export_rows[0].share_button.isHidden())
+        self.assertTrue(page.export_rows[0].share_button.isEnabled())
+        page.close()
+
+    def test_export_row_displays_drive_upload_progress_inline(self) -> None:
+        page = ExportPage()
+        export_dir = Path("song-package") / "04_exports"
+        audio = SongAudioExport(export_dir / "audio" / "mix.wav", 2048, 1_786_000_000)
+        page.set_exports((audio,), (), export_dir)
+        row = page.export_rows[0]
+        target_id = drive_share_target_id(audio.path)
+
+        page.set_share_started(target_id)
+        page.set_share_progress(target_id, 63)
+
+        self.assertFalse(row.share_action.progress_bar.isHidden())
+        self.assertEqual(row.share_action.progress_bar.value(), 63)
+        self.assertEqual(row.share_action.progress_label.text(), "63%")
+        self.assertTrue(row.share_button.isHidden())
+
+        page.set_share_failed(target_id)
+        self.assertTrue(row.share_action.progress_bar.isHidden())
+        self.assertFalse(row.share_button.isHidden())
+        page.close()
+
+    def test_shared_export_is_marked_and_can_request_drive_deletion(self) -> None:
+        page = ExportPage()
+        export_dir = Path("song-package") / "04_exports"
+        audio = SongAudioExport(export_dir / "audio" / "mix.wav", 2048, 1_786_000_000)
+        deleted = QSignalSpy(page.delete_share_requested)
+        page.set_exports((audio,), (), export_dir)
+
+        page.set_share_status_provider(lambda _path: True)
+        row = page.export_rows[0]
+        row.share_action.set_actions_expanded(True)
+
+        self.assertEqual(row.share_button.icon_name(), "cloud_check")
+        self.assertFalse(row.share_action.delete_button.isHidden())
+        row.share_action.delete_button.click()
+        self.assertEqual(deleted.at(0)[0], audio.path)
+
+        page.set_share_deleted(row.target_id)
+        self.assertEqual(row.share_button.icon_name(), "link")
         page.close()
 
 

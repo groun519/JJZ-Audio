@@ -7,9 +7,10 @@ from pathlib import Path
 
 from jang_app.services.app_paths import AppPaths
 from jang_app.services.data_migrations import run_data_migrations
-from jang_app.services.initial_setup import persist_storage_layout
+from jang_app.services.initial_setup import persist_storage_layout, promote_storage_layout
 from jang_app.services.managed_files import copy_file_atomic, write_json_atomic
 from jang_app.services.rvc_runtime_repair import repair_rvc_runtime_adapter
+from jang_app.services.storage_migration import recover_storage_migrations
 
 
 _LEGACY_SETTINGS_FILES = ("app_settings.json", "song_library.json", "work_song.json")
@@ -30,6 +31,10 @@ def prepare_app_environment(paths: AppPaths | None = None) -> AppBootstrapResult
 
         paths = APP_PATHS
 
+    recovered = recover_storage_migrations(paths)
+    if recovered:
+        _LOGGER.warning("Recovered interrupted storage migrations: %s", len(recovered))
+
     for directory in (
         paths.settings_dir,
         paths.log_dir,
@@ -42,7 +47,9 @@ def prepare_app_environment(paths: AppPaths | None = None) -> AppBootstrapResult
 
     repair_rvc_runtime_adapter(paths.runtime_root / "rvc")
     copied = _copy_legacy_settings(paths)
-    if not paths.storage_file.is_file():
+    if paths.storage_file.is_file() and paths.storage_version < 3:
+        promote_storage_layout(paths)
+    elif not paths.storage_file.is_file():
         if paths.storage_version >= 2:
             persist_storage_layout(paths)
         else:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from threading import Event
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
@@ -24,7 +25,11 @@ from jang_app.services.app_paths import AppPaths
 from jang_app.services.app_update import DEFAULT_MANIFEST_URL
 from jang_app.services.i18n import tr
 from jang_app.services.initial_setup import (
+    InitialSetupError,
+    build_custom_storage_layout,
+    build_storage_layout,
     complete_initial_setup,
+    normalize_storage_root,
     persist_storage_layout,
 )
 from jang_app.services.hardware_diagnostics_state import record_hardware_diagnostics
@@ -152,18 +157,23 @@ class StorageMigrationWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, paths: AppPaths, storage_root: Path) -> None:
+    def __init__(self, paths: AppPaths, configured: AppPaths) -> None:
         super().__init__()
         self._paths = paths
-        self._storage_root = storage_root
+        self._configured = configured
+        self._cancelled = Event()
+
+    def request_cancel(self) -> None:
+        self._cancelled.set()
 
     def run(self) -> None:
         try:
-            plan = plan_storage_migration(self._paths, self._storage_root)
+            plan = plan_storage_migration(self._paths, self._configured)
             self.plan_ready.emit(plan)
             configured = migrate_storage(
                 plan,
                 lambda stage, value: self.progress_changed.emit(stage, value),
+                cancelled=self._cancelled.is_set,
             )
             self.completed.emit(configured)
         except Exception as exc:
@@ -203,10 +213,11 @@ class InitialSetupDialog(AppDialog):
         self._diagnostics: SystemDiagnostics | None = None
         self._storage_migration_succeeded = False
         self._storage_migration_error = ""
+        self._storage_plan_summary = ""
         self.restart_required = False
 
-        self.setMinimumSize(780, 560)
-        self.resize(820, 590)
+        self.setMinimumSize(820, 620)
+        self.resize(900, 700)
         self.setStyleSheet(_build_setup_stylesheet(theme_mode))
         self._build_ui()
         if diagnostics_only:
@@ -256,7 +267,7 @@ class InitialSetupDialog(AppDialog):
 
         self.cancel_button = QPushButton(tr("Cancel"))
         self.cancel_button.setObjectName("SetupSecondaryButton")
-        self.cancel_button.clicked.connect(self.reject)
+        self.cancel_button.clicked.connect(self._cancel_or_reject)
         self.back_button = QPushButton(tr("Back"))
         self.back_button.setObjectName("SetupSecondaryButton")
         self.back_button.clicked.connect(self._go_back)
@@ -288,12 +299,7 @@ class InitialSetupDialog(AppDialog):
         page = QWidget()
         title = QLabel(tr("Choose Storage Location"))
         title.setObjectName("SetupTitle")
-        description = QLabel(
-            tr(
-                "Songs, models, the audio engine, rendered files, and cache "
-                "are kept together in this location."
-            )
-        )
+        description = QLabel(tr("Choose one location or configure each storage category separately."))
         description.setObjectName("SetupDescription")
         self.storage_layout_status = QLabel("")
         self.storage_layout_status.setObjectName("SetupDescription")
@@ -303,8 +309,7 @@ class InitialSetupDialog(AppDialog):
         elif self._paths.storage_version < 2:
             self.storage_layout_status.setText(
                 tr(
-                    "Legacy storage is active. Continue to copy it into the "
-                    "managed storage layout."
+                    "Existing storage locations will be kept unless you choose new ones."
                 )
             )
         else:
@@ -317,20 +322,71 @@ class InitialSetupDialog(AppDialog):
         media_layout = QVBoxLayout(media_card)
         media_layout.setContentsMargins(18, 16, 18, 16)
         media_layout.setSpacing(9)
-        media_label = QLabel(tr("Storage Location"))
-        media_label.setObjectName("SetupFieldLabel")
-        self.media_edit = QLineEdit(str(self._paths.workspace_anchor))
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+        self.linked_storage_button = QPushButton(tr("Keep Together"))
+        self.custom_storage_button = QPushButton(tr("Separate Locations"))
+        for button in (self.linked_storage_button, self.custom_storage_button):
+            button.setCheckable(True)
+            button.setObjectName("SetupModeButton")
+            mode_row.addWidget(button)
+        mode_row.addStretch(1)
+        self.linked_storage_button.clicked.connect(lambda: self._set_storage_mode("linked"))
+        self.custom_storage_button.clicked.connect(lambda: self._set_storage_mode("custom"))
+        media_layout.addLayout(mode_row)
+        self.storage_mode_detail = QLabel("")
+        self.storage_mode_detail.setObjectName("SetupDescription")
+        self.storage_mode_detail.setWordWrap(True)
+        media_layout.addWidget(self.storage_mode_detail)
+
+        self.media_label = QLabel(tr("Base Location"))
+        self.media_label.setObjectName("SetupFieldLabel")
+        self.storage_browse_buttons: list[QPushButton] = []
+        self.media_edit = QLineEdit(str(self._paths.storage_root))
         self.media_edit.setObjectName("SetupPathEdit")
         self.media_edit.textChanged.connect(self._update_storage_preview)
         browse = QPushButton(tr("Browse"))
         browse.setObjectName("SetupBrowseButton")
         browse.clicked.connect(self._browse_media_root)
+        self.media_browse_button = browse
+        self.storage_browse_buttons.append(browse)
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
         input_row.addWidget(self.media_edit, 1)
         input_row.addWidget(browse)
-        media_layout.addWidget(media_label)
+        media_layout.addWidget(self.media_label)
         media_layout.addLayout(input_row)
+
+        self.custom_paths = QFrame()
+        self.custom_paths.setObjectName("SetupPathGroup")
+        custom_layout = QVBoxLayout(self.custom_paths)
+        custom_layout.setContentsMargins(0, 8, 0, 0)
+        custom_layout.setSpacing(8)
+        self.storage_path_edits: dict[str, QLineEdit] = {}
+        linked_default = self._paths.storage_root
+        custom_defaults = (
+            (
+                linked_default / "Data",
+                linked_default / "Output",
+                linked_default / "Runtime",
+                linked_default / "Cache",
+            )
+            if self._first_run
+            else (
+                self._paths.workspace_root,
+                self._paths.output_root,
+                self._paths.runtime_root,
+                self._paths.cache_dir,
+            )
+        )
+        for key, label, path in (
+            ("workspace", "Data", custom_defaults[0]),
+            ("output", "Output", custom_defaults[1]),
+            ("runtime", "Audio Engine", custom_defaults[2]),
+            ("cache", "Cache", custom_defaults[3]),
+        ):
+            custom_layout.addLayout(self._build_storage_path_row(key, tr(label), path))
+        media_layout.addWidget(self.custom_paths)
         self.storage_progress_label = QLabel("")
         self.storage_progress_label.setObjectName("SetupProgressDetail")
         self.storage_progress_label.hide()
@@ -344,15 +400,19 @@ class InitialSetupDialog(AppDialog):
 
         preview = QFrame()
         preview.setObjectName("SetupPreview")
+        self.storage_preview_card = preview
         preview_layout = QVBoxLayout(preview)
         preview_layout.setContentsMargins(16, 14, 16, 14)
         preview_layout.setSpacing(7)
-        self.workspace_preview = _path_preview("Workspace")
+        self.workspace_preview = _path_preview("Data")
         self.output_preview = _path_preview("Output")
-        self.data_preview = _path_preview("App Data")
+        self.runtime_preview = _path_preview("Audio Engine")
+        self.cache_preview = _path_preview("Cache")
         preview_layout.addWidget(self.workspace_preview)
         preview_layout.addWidget(self.output_preview)
-        preview_layout.addWidget(self.data_preview)
+        preview_layout.addWidget(self.runtime_preview)
+        preview_layout.addWidget(self.cache_preview)
+        self._set_storage_mode("linked" if self._first_run else self._paths.storage_mode)
         self._update_storage_preview()
 
         layout = QVBoxLayout(page)
@@ -365,6 +425,25 @@ class InitialSetupDialog(AppDialog):
         layout.addWidget(preview)
         layout.addStretch(1)
         return page
+
+    def _build_storage_path_row(self, key: str, label: str, path: Path) -> QHBoxLayout:
+        edit = QLineEdit(str(path))
+        edit.setObjectName("SetupPathEdit")
+        edit.textChanged.connect(self._update_storage_preview)
+        self.storage_path_edits[key] = edit
+        browse = QPushButton(tr("Browse"))
+        browse.setObjectName("SetupBrowseButton")
+        browse.clicked.connect(lambda _checked=False, item=key: self._browse_storage_path(item))
+        self.storage_browse_buttons.append(browse)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        field_label = QLabel(label)
+        field_label.setObjectName("SetupFieldLabel")
+        field_label.setFixedWidth(96)
+        row.addWidget(field_label)
+        row.addWidget(edit, 1)
+        row.addWidget(browse)
+        return row
 
     def _build_diagnostics_page(self) -> QWidget:
         page = QWidget()
@@ -450,13 +529,62 @@ class InitialSetupDialog(AppDialog):
         if selected:
             self.media_edit.setText(selected)
 
-    def _update_storage_preview(self) -> None:
-        media = Path(self.media_edit.text().strip()).expanduser()
-        self.workspace_preview.setText(f"{tr('Workspace')}  |  {media / 'Data'}")
-        self.output_preview.setText(f"{tr('Output')}  |  {media / 'Output'}")
-        self.data_preview.setText(
-            f"{tr('Audio Engine')} / Cache  |  {media / 'Runtime'} / {media / 'Cache'}"
+    def _browse_storage_path(self, key: str) -> None:
+        edit = self.storage_path_edits[key]
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            tr("Choose Storage Location"),
+            edit.text(),
         )
+        if selected:
+            edit.setText(selected)
+
+    def _set_storage_mode(self, mode: str) -> None:
+        custom = mode == "custom"
+        self.linked_storage_button.setChecked(not custom)
+        self.custom_storage_button.setChecked(custom)
+        self.media_edit.setEnabled(not custom)
+        self.media_label.setVisible(not custom)
+        self.media_edit.setVisible(not custom)
+        self.media_browse_button.setVisible(not custom)
+        self.custom_paths.setVisible(custom)
+        if hasattr(self, "storage_preview_card"):
+            self.storage_preview_card.setVisible(not custom)
+        self._storage_mode = "custom" if custom else "linked"
+        if hasattr(self, "storage_mode_detail"):
+            self.storage_mode_detail.setText(
+                tr(
+                    "Edit each location independently. Only changed Data, Output, or Audio Engine files are copied; Cache starts empty."
+                    if custom
+                    else "Changing the base location keeps Data, Output, Audio Engine, and Cache together."
+                )
+            )
+        self._update_storage_preview()
+
+    def _update_storage_preview(self) -> None:
+        if not hasattr(self, "workspace_preview"):
+            return
+        if getattr(self, "_storage_mode", "linked") == "custom":
+            workspace = Path(self.storage_path_edits["workspace"].text().strip()).expanduser()
+            output = Path(self.storage_path_edits["output"].text().strip()).expanduser()
+            runtime = Path(self.storage_path_edits["runtime"].text().strip()).expanduser()
+            cache = Path(self.storage_path_edits["cache"].text().strip()).expanduser()
+        else:
+            media = Path(self.media_edit.text().strip()).expanduser()
+            try:
+                media = normalize_storage_root(media)
+            except InitialSetupError:
+                pass
+            workspace, output, runtime, cache = (
+                media / "Data",
+                media / "Output",
+                media / "Runtime",
+                media / "Cache",
+            )
+        self.workspace_preview.setText(f"{tr('Data')}  |  {workspace}")
+        self.output_preview.setText(f"{tr('Output')}  |  {output}")
+        self.runtime_preview.setText(f"{tr('Audio Engine')}  |  {runtime}")
+        self.cache_preview.setText(f"{tr('Cache')}  |  {cache}")
 
     def _advance(self) -> None:
         if self.stack.currentIndex() == 0:
@@ -476,9 +604,28 @@ class InitialSetupDialog(AppDialog):
         self.accept()
 
     def _prepare_storage(self) -> None:
-        self._start_storage_migration(Path(self.media_edit.text().strip()))
+        try:
+            configured = self._configured_storage_paths()
+        except InitialSetupError as exc:
+            self._show_error(str(exc))
+            return
+        self._start_storage_migration(configured)
 
-    def _start_storage_migration(self, storage_root: Path) -> None:
+    def _configured_storage_paths(self) -> AppPaths:
+        if self._storage_mode == "linked":
+            return build_storage_layout(self._paths, Path(self.media_edit.text().strip()))
+        edits = self.storage_path_edits
+        return build_custom_storage_layout(
+            self._paths,
+            workspace_root=Path(edits["workspace"].text().strip()),
+            output_root=Path(edits["output"].text().strip()),
+            runtime_root=Path(edits["runtime"].text().strip()),
+            cache_root=Path(edits["cache"].text().strip()),
+            storage_root=self._paths.storage_root,
+            mode="custom",
+        )
+
+    def _start_storage_migration(self, configured: AppPaths) -> None:
         self._show_error("")
         self._storage_migration_succeeded = False
         self._storage_migration_error = ""
@@ -486,10 +633,11 @@ class InitialSetupDialog(AppDialog):
         self.storage_progress.setRange(0, 0)
         self.storage_progress_label.show()
         self.storage_progress.show()
-        self.media_edit.setEnabled(False)
+        self._set_storage_controls_enabled(False)
         self.primary_button.setEnabled(False)
-        self.cancel_button.setEnabled(False)
-        worker = self._storage_worker_type(self._paths, storage_root)
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.setText(tr("Cancel"))
+        worker = self._storage_worker_type(self._paths, configured)
         worker.setParent(self)
         worker.plan_ready.connect(self._on_storage_plan_ready)
         worker.progress_changed.connect(self._on_storage_migration_progress)
@@ -505,18 +653,24 @@ class InitialSetupDialog(AppDialog):
         self.storage_progress.setRange(0, 100)
         self.storage_progress.setValue(0)
         if plan.required:
-            self.storage_progress_label.setText(
-                f"{tr('Moving storage')} | {_format_bytes(plan.total_bytes)} data | "
-                f"{_format_bytes(plan.required_free_bytes)} free space | "
-                f"{plan.total_files} files"
+            component_names = ", ".join(tr(item.name) for item in plan.components)
+            if plan.cache_reset:
+                component_names = f"{component_names}, {tr('Cache reset')}"
+            self._storage_plan_summary = (
+                f"{component_names} | {_format_bytes(plan.total_bytes)} | "
+                f"{plan.total_files} {tr('files')}"
             )
+            self.storage_progress_label.setText(f"{tr('Copying storage')} | {self._storage_plan_summary}")
         else:
-            self.storage_progress_label.setText(tr("Preparing storage..."))
+            self._storage_plan_summary = tr("Cache reset") if plan.cache_reset else ""
+            suffix = f" | {self._storage_plan_summary}" if self._storage_plan_summary else ""
+            self.storage_progress_label.setText(f"{tr('Preparing storage...')}{suffix}")
 
     def _on_storage_migration_progress(self, stage: str, value: int) -> None:
         self.storage_progress.setRange(0, 100)
         self.storage_progress.setValue(value)
-        self.storage_progress_label.setText(f"{tr(stage)} | {value}%")
+        summary = f" | {self._storage_plan_summary}" if self._storage_plan_summary else ""
+        self.storage_progress_label.setText(f"{tr(stage)} | {value}%{summary}")
 
     def _on_storage_migrated(self, configured: object) -> None:
         if isinstance(configured, AppPaths):
@@ -530,8 +684,9 @@ class InitialSetupDialog(AppDialog):
 
     def _on_storage_worker_finished(self) -> None:
         self._on_worker_finished()
-        self.media_edit.setEnabled(True)
+        self._set_storage_controls_enabled(True)
         self.cancel_button.setEnabled(True)
+        self.cancel_button.setText(tr("Cancel"))
         self.storage_progress.hide()
         self.storage_progress_label.hide()
         if self._storage_migration_succeeded:
@@ -539,6 +694,24 @@ class InitialSetupDialog(AppDialog):
             return
         self.primary_button.setEnabled(True)
         self._show_error(self._storage_migration_error or "Storage migration failed.")
+
+    def _set_storage_controls_enabled(self, enabled: bool) -> None:
+        self.media_edit.setEnabled(enabled and self._storage_mode == "linked")
+        self.linked_storage_button.setEnabled(enabled)
+        self.custom_storage_button.setEnabled(enabled)
+        for edit in self.storage_path_edits.values():
+            edit.setEnabled(enabled)
+        for button in self.storage_browse_buttons:
+            button.setEnabled(enabled)
+
+    def _cancel_or_reject(self) -> None:
+        worker = self._worker
+        if isinstance(worker, StorageMigrationWorker) and worker.isRunning():
+            worker.request_cancel()
+            self.cancel_button.setEnabled(False)
+            self.storage_progress_label.setText(tr("Cancelling storage migration safely..."))
+            return
+        self.reject()
 
     def _show_diagnostics_page(self) -> None:
         self._show_error("")
@@ -995,6 +1168,7 @@ QLabel#SetupTitle {{ color: {colors['text']}; font-size: 22px; font-weight: 800;
 QLabel#SetupDescription {{ color: {colors['muted']}; font-size: 11px; }}
 QLabel#SetupProgressDetail {{ color: {colors['faint']}; font-size: 10px; font-weight: 700; }}
 QFrame#SetupCard, QFrame#SetupPreview {{ background: {colors['card']}; border: 1px solid {colors['border']}; border-radius: 14px; }}
+QFrame#SetupPathGroup {{ background: transparent; border: 0; }}
 QLabel#SetupFieldLabel {{ color: {colors['muted']}; font-size: 10px; font-weight: 800; }}
 QLabel#SetupPathPreview {{ color: {colors['muted']}; font-size: 10px; }}
 QLineEdit#SetupPathEdit {{ color: {colors['text']}; background: {input_color}; border: 1px solid {colors['button_border']};
@@ -1008,6 +1182,11 @@ QPushButton#SetupPrimaryButton:pressed {{ background: {colors['active_pressed']}
 QPushButton#SetupSecondaryButton, QPushButton#SetupBrowseButton {{ color: {colors['text']}; background: {colors['card']};
   border: 1px solid {colors['button_border']}; }}
 QPushButton#SetupSecondaryButton:hover, QPushButton#SetupBrowseButton:hover {{ background: {colors['hover']}; }}
+QPushButton#SetupModeButton {{ color: {colors['muted']}; background: {colors['raised']}; border: 1px solid {colors['border']};
+  border-radius: 9px; min-height: 32px; padding: 0 14px; font-weight: 800; }}
+QPushButton#SetupModeButton:hover {{ color: {colors['text']}; background: {colors['hover']}; }}
+QPushButton#SetupModeButton:checked {{ color: {colors['tab_active_text']}; background: {colors['tab_active']};
+  border-color: {colors['button_border']}; }}
 QPushButton#SetupPrimaryButton:disabled, QPushButton#SetupSecondaryButton:disabled,
 QPushButton#SetupBrowseButton:disabled {{ color: {colors['faint']}; background: {colors['card']};
   border-color: {colors['border']}; }}

@@ -26,6 +26,9 @@ def main(started_at: float | None = None) -> None:
     startup.mark("qt_imported")
 
     app = QApplication(application_arguments)
+    from jang_app.qt_app.window_lifecycle import install_window_lifecycle_guard
+
+    install_window_lifecycle_guard(app)
     app._jjzero_mutex_handle = mutex_handle
     app.setApplicationName("JJZero Audio")
     app.setOrganizationName("JJZero")

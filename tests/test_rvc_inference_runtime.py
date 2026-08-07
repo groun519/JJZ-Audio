@@ -17,6 +17,10 @@ from jang_app.services.rvc_inference_runtime import (
 
 
 class RvcInferenceRuntimeTests(unittest.TestCase):
+    def test_directml_probe_requires_complete_rmvpe_runtime(self) -> None:
+        self.assertIn("DmlExecutionProvider", runtime_module._DIRECTML_PROBE)
+        self.assertIn("runtime/rmvpe.onnx", runtime_module._DIRECTML_PROBE)
+
     def test_skips_accelerator_probe_when_cpu_runtime_is_broken(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

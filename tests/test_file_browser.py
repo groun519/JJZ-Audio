@@ -47,11 +47,11 @@ class FileBrowserTests(unittest.TestCase):
             with (
                 patch.object(file_browser.sys, "platform", "win32"),
                 patch.object(file_browser, "_open_windows_shell", side_effect=OSError("shell failed")),
-                patch.object(file_browser.subprocess, "Popen") as popen,
+                patch.object(file_browser, "start_detached_command", return_value=True) as start,
             ):
                 file_browser.open_in_file_browser(target)
 
-        popen.assert_called_once_with(f'explorer.exe /select,"{target.resolve()}"')
+        start.assert_called_once_with(("explorer.exe", f'/select,"{target.resolve()}"'))
 
     def test_missing_target_is_rejected_before_opening_browser(self) -> None:
         target = Path("missing", "file.wav").resolve()

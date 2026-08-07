@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from jang_app.services.command import background_command_args, hidden_subprocess_kwargs
 from scripts.bootstrap_rvc_rocm_windows_runtime import (
     _enable_site_packages,
     _patch_fairseq_dataclasses,
@@ -17,15 +18,16 @@ class BootstrapRvcRocmWindowsRuntimeTests(unittest.TestCase):
     def test_script_entry_point_loads_without_project_on_python_path(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         result = subprocess.run(
-            [
+            background_command_args([
                 sys.executable,
                 str(project_root / "scripts" / "bootstrap_rvc_rocm_windows_runtime.py"),
                 "--help",
-            ],
+            ]),
             cwd=project_root.parent,
             capture_output=True,
             text=True,
             check=False,
+            **hidden_subprocess_kwargs(),
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)

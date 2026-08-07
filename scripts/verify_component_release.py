@@ -209,7 +209,14 @@ def _verify_accelerator_package_layouts(manifest, release_root: Path) -> None:
             "jjzero-profile-build.json",
         }
         if profile == "directml":
-            required.add("Lib/site-packages/torch_directml/__init__.py")
+            required.update(
+                {
+                    "Lib/site-packages/torch_directml/__init__.py",
+                    "Lib/site-packages/onnxruntime/__init__.py",
+                    "Lib/site-packages/onnxruntime_directml-1.19.2.dist-info/METADATA",
+                    "rmvpe.onnx",
+                }
+            )
         found: set[str] = set()
         metadata: dict[str, object] | None = None
         for artifact in component.artifacts:
@@ -244,12 +251,14 @@ def _accelerator_metadata_matches(profile: str, metadata: dict[str, object]) -> 
     python_version = str(metadata.get("python", ""))
     hardware_validation = str(metadata.get("hardware_validation", ""))
     operation_validation = str(metadata.get("operation_validation", ""))
+    onnxruntime = str(metadata.get("onnxruntime", ""))
     if profile == "directml":
         return (
             torch_version.startswith("2.4.1 / torch-directml 0.2.5.dev240914")
             and python_version.startswith("3.9")
             and hardware_validation == "validated_at_build"
-            and operation_validation == "inference_forward"
+            and operation_validation == "inference_forward_and_onnx_provider"
+            and onnxruntime.startswith("1.19.2 / DirectML")
         )
     return (
         torch_version.startswith("2.9.1 / ROCm 7.2.1")

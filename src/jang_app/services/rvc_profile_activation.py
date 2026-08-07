@@ -98,6 +98,7 @@ def validate_rvc_profile_activation(
 def _activation_probe(profile: str) -> str:
     return f"""
 import json
+from pathlib import Path
 
 result = {{
     "ready": False,
@@ -116,7 +117,17 @@ try:
     result["torch"] = str(torch.__version__)
     profile = {profile!r}
     if profile == "directml":
+        import onnxruntime as ort
         import torch_directml
+
+        providers = list(ort.get_available_providers())
+        if "DmlExecutionProvider" not in providers:
+            raise RuntimeError(
+                f"ONNX Runtime has no DmlExecutionProvider: {{providers}}"
+            )
+        rmvpe_model = Path.cwd() / "rmvpe.onnx"
+        if not rmvpe_model.is_file() or rmvpe_model.stat().st_size <= 0:
+            raise RuntimeError("DirectML RMVPE model is missing: rmvpe.onnx")
 
         index = int(torch_directml.default_device())
         device = torch_directml.device(index)

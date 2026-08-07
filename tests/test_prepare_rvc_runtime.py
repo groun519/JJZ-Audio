@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.prepare_rvc_runtime import (
+    DIRECTML_PROFILE_ASSET_FILES,
     MANIFEST_FILE,
     RUNTIME_DIRECTORIES,
     RUNTIME_FILES,
@@ -37,6 +38,10 @@ class PrepareRvcRuntimeTests(unittest.TestCase):
             self.assertFalse((destination / "runtime" / "__pycache__").exists())
             self.assertTrue((destination / "weights").is_dir())
             self.assertTrue((destination / "logs").is_dir())
+            self.assertFalse((destination / "rmvpe.onnx").exists())
+            self.assertTrue(
+                (destination.parent / "rvc_profiles" / "assets" / "rmvpe.onnx").is_file()
+            )
             self.assertTrue((destination / "pretrained_v2" / "f0G40k.pth").is_file())
             self.assertTrue((destination / "logs" / "mute" / "3_feature768" / "mute.npy").is_file())
             manifest = json.loads((destination / MANIFEST_FILE).read_text(encoding="utf-8"))
@@ -65,6 +70,8 @@ class PrepareRvcRuntimeTests(unittest.TestCase):
         (source / "runtime" / "python.exe").write_bytes(b"python")
         for file_name in RUNTIME_FILES:
             (source / file_name).write_bytes(b"content")
+        for file_name in DIRECTML_PROFILE_ASSET_FILES:
+            (source / file_name).write_bytes(b"directml")
         for relative_path in TRAINING_ASSET_FILES:
             path = source / relative_path
             path.parent.mkdir(parents=True, exist_ok=True)

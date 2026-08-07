@@ -12,9 +12,11 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QListWidgetItem,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QLineEdit,
     QSlider,
@@ -28,6 +30,57 @@ from PySide6.QtWidgets import (
 
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
 from jang_app.services.waveform import build_waveform_peaks
+
+
+class TransparentContainer(QWidget):
+    """Layout-only container that must never paint an opaque theme surface."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        object_name: str = "",
+    ) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setProperty("surfaceRole", "transparent")
+        if object_name:
+            self.setObjectName(object_name)
+
+
+class SurfaceFrame(QFrame):
+    """Explicit theme surface used instead of relying on a global QWidget fill."""
+
+    _ROLES = frozenset(("background", "surface", "card", "raised"))
+
+    def __init__(
+        self,
+        role: str = "surface",
+        parent: QWidget | None = None,
+        *,
+        object_name: str = "",
+    ) -> None:
+        if role not in self._ROLES:
+            raise ValueError(f"Unsupported surface role: {role}")
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setProperty("surfaceRole", role)
+        if object_name:
+            self.setObjectName(object_name)
+
+
+def attach_transparent_scroll_widget(
+    scroll_area: QScrollArea,
+    content: QWidget,
+) -> None:
+    """Attach layout content without exposing the platform viewport palette."""
+    scroll_area.setWidgetResizable(True)
+    scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+    for widget in (scroll_area, scroll_area.viewport(), content):
+        widget.setAutoFillBackground(False)
+        widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        widget.setProperty("surfaceRole", "transparent")
+    scroll_area.setWidget(content)
 
 
 def configure_two_line_status_text(
@@ -322,9 +375,10 @@ class WindowTitleBar(QFrame):
         title_label = QLabel(title)
         title_label.setObjectName("AppTitle")
 
-        self.version_label = QLabel(version_text.strip())
+        self.version_label = QLabel(version_text.strip(), self)
         self.version_label.setObjectName("AppVersion")
-        self.version_label.setVisible(bool(self.version_label.text()))
+        if not self.version_label.text():
+            self.version_label.hide()
 
         brand_text_layout = QHBoxLayout()
         brand_text_layout.setContentsMargins(0, 0, 0, 0)
@@ -768,10 +822,17 @@ class WaveformView(QWidget):
 
 
 class SvgIconButton(FeedbackButton):
-    def __init__(self, icon_name: str, size: int = 26) -> None:
+    def __init__(
+        self,
+        icon_name: str,
+        size: int = 26,
+        *,
+        paint_inset: int = 1,
+    ) -> None:
         super().__init__()
         self._icon_name = icon_name
         self._icon_size = size
+        self._paint_inset = max(1, int(paint_inset))
         self._theme_mode = "white"
         self.setText("")
         self.setObjectName("SvgIconButton")
@@ -801,15 +862,20 @@ class SvgIconButton(FeedbackButton):
             self.objectName(),
         )
 
-        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        inset = self._paint_inset
+        rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
+        background_rect = QRectF(rect)
+        if self.objectName() == "WindowCloseButton":
+            background_rect.translate(0, -1)
         border = palette.get("border", QColor(0, 0, 0, 0))
         painter.setPen(QPen(border, 1) if border.alpha() else Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(palette["background"]))
-        painter.drawRoundedRect(rect, 9, 9)
+        painter.drawRoundedRect(background_rect, 9, 9)
         padding = max(6, int(self._icon_size * 0.25))
+        icon_rect = rect.adjusted(padding, padding, -padding, -padding)
         render_app_icon(
             painter,
-            rect.adjusted(padding, padding, -padding, -padding),
+            icon_rect,
             self._icon_key(),
             palette["icon"],
         )
@@ -1112,10 +1178,16 @@ class TrackRow(QFrame):
             self.playback_settings_changed.emit()
 
 
-def make_list_item(row: QWidget) -> QListWidgetItem:
-    item = QListWidgetItem()
+def attach_list_item_widget(
+    list_widget: QListWidget,
+    item: QListWidgetItem,
+    row: QWidget,
+) -> None:
+    """Attach a row before measuring it so Qt never treats it as a window."""
+    row.setParent(list_widget.viewport())
     item.setSizeHint(row.sizeHint())
-    return item
+    list_widget.addItem(item)
+    list_widget.setItemWidget(item, row)
 
 
 class ValueSlider(ScrollSafeSlider):
@@ -1221,8 +1293,19 @@ def _track_button_palette(
         return _embedded_action_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
     if object_name in {"TrackActionButton", "TrackMuteButton"}:
         return _track_icon_button_palette(theme_mode, is_checked, is_enabled, is_hovered, is_pressed)
+    if object_name == "RowSharedButton":
+        return _shared_icon_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
     if object_name == "DangerIconButton":
         return _danger_icon_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
+
+    if object_name in {"DatasetTransportButton", "DatasetFlatIconButton"}:
+        return _transport_group_button_palette(
+            theme_mode,
+            is_checked,
+            is_enabled,
+            is_hovered,
+            is_pressed,
+        )
 
     if theme_mode == "dark":
         colors = {
@@ -1262,6 +1345,102 @@ def _track_button_palette(
     if is_hovered:
         return {"background": colors["hover"], "border": colors["hover_border"], "icon": colors["icon"]}
     return {"background": colors["background"], "border": colors["border"], "icon": colors["icon"]}
+
+
+def _transport_group_button_palette(
+    theme_mode: str,
+    is_checked: bool,
+    is_enabled: bool,
+    is_hovered: bool,
+    is_pressed: bool,
+) -> dict[str, QColor]:
+    transparent = QColor(0, 0, 0, 0)
+    if theme_mode == "dark":
+        colors = {
+            "hover": QColor("#30302e"),
+            "pressed": QColor("#3a3a37"),
+            "active": QColor("#ecebe7"),
+            "active_icon": QColor("#171717"),
+            "icon": QColor("#ecebe7"),
+            "disabled": QColor("#6c6b66"),
+        }
+    else:
+        colors = {
+            "hover": QColor("#e7e1d5"),
+            "pressed": QColor("#d1c8b8"),
+            "active": QColor("#10100e"),
+            "active_icon": QColor("#fffdf7"),
+            "icon": QColor("#10100e"),
+            "disabled": QColor("#aaa397"),
+        }
+
+    if not is_enabled:
+        return {"background": transparent, "border": transparent, "icon": colors["disabled"]}
+    if is_pressed:
+        return {
+            "background": colors["pressed"],
+            "border": transparent,
+            "icon": colors["active_icon"] if is_checked else colors["icon"],
+        }
+    if is_checked:
+        return {
+            "background": colors["active"],
+            "border": transparent,
+            "icon": colors["active_icon"],
+        }
+    if is_hovered:
+        return {"background": colors["hover"], "border": transparent, "icon": colors["icon"]}
+    return {"background": transparent, "border": transparent, "icon": colors["icon"]}
+
+
+def _shared_icon_button_palette(
+    theme_mode: str,
+    is_enabled: bool,
+    is_hovered: bool,
+    is_pressed: bool,
+) -> dict[str, QColor]:
+    transparent = QColor(0, 0, 0, 0)
+    if theme_mode == "dark":
+        colors = {
+            "background": transparent,
+            "hover": QColor("#1f3128"),
+            "pressed": QColor("#294234"),
+            "border": QColor("#3f6b53"),
+            "icon": QColor("#b9dfc9"),
+            "disabled": QColor("#6c6b66"),
+        }
+    else:
+        colors = {
+            "background": transparent,
+            "hover": QColor("#e2f0e8"),
+            "pressed": QColor("#cbe2d5"),
+            "border": QColor("#9abda8"),
+            "icon": QColor("#24543c"),
+            "disabled": QColor("#aaa397"),
+        }
+    if not is_enabled:
+        return {
+            "background": colors["background"],
+            "border": colors["background"],
+            "icon": colors["disabled"],
+        }
+    if is_pressed:
+        return {
+            "background": colors["pressed"],
+            "border": colors["border"],
+            "icon": colors["icon"],
+        }
+    if is_hovered:
+        return {
+            "background": colors["hover"],
+            "border": colors["border"],
+            "icon": colors["icon"],
+        }
+    return {
+        "background": colors["background"],
+        "border": colors["background"],
+        "icon": colors["icon"],
+    }
 
 
 def _danger_icon_button_palette(
@@ -1331,6 +1510,8 @@ def _window_control_palette(
             "icon": QColor("#aaa8a1"),
             "hover_icon": QColor("#ecebe7"),
             "disabled": QColor("#6c6b66"),
+            "close_background": QColor("#2d2020"),
+            "close_icon": QColor("#d9a0a0"),
         }
     else:
         colors = {
@@ -1340,6 +1521,8 @@ def _window_control_palette(
             "icon": QColor("#6e6a61"),
             "hover_icon": QColor("#10100e"),
             "disabled": QColor("#aaa397"),
+            "close_background": QColor("#f5e5e5"),
+            "close_icon": QColor("#8a2930"),
         }
 
     if not is_enabled:
@@ -1348,6 +1531,12 @@ def _window_control_palette(
         return {"background": QColor("#9f2929"), "border": QColor("#9f2929"), "icon": QColor("#fffdf7")}
     if object_name == "WindowCloseButton" and is_hovered:
         return {"background": QColor("#c93d3d"), "border": QColor("#c93d3d"), "icon": QColor("#fffdf7")}
+    if object_name == "WindowCloseButton":
+        return {
+            "background": colors["close_background"],
+            "border": colors["close_background"],
+            "icon": colors["close_icon"],
+        }
     if is_pressed:
         return {"background": colors["pressed"], "border": colors["pressed"], "icon": colors["hover_icon"]}
     if is_hovered:
@@ -1665,6 +1854,14 @@ _TRACK_ICON_SVGS = {
         '<path d="M19 12h-8a6 6 0 0 0-6 6"/>'
         "</svg>"
     ),
+    "more_horizontal": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="{color}" stroke="none">'
+        '<circle cx="5" cy="12" r="1.7"/>'
+        '<circle cx="12" cy="12" r="1.7"/>'
+        '<circle cx="19" cy="12" r="1.7"/>'
+        "</svg>"
+    ),
     "repeat": (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
         'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" '
@@ -1691,6 +1888,14 @@ _TRACK_ICON_SVGS = {
         'stroke-linecap="round" stroke-linejoin="round">'
         '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/>'
         '<path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/>'
+        "</svg>"
+    ),
+    "cloud_check": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.1" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M17.5 18H7a5 5 0 1 1 1.4-9.8A6 6 0 0 1 20 10.5a3.8 3.8 0 0 1-2.5 7.5z"/>'
+        '<path d="m9.5 13 1.8 1.8 3.7-3.7"/>'
         "</svg>"
     ),
     "split": (

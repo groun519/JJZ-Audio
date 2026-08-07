@@ -22,7 +22,8 @@ class ComponentReleaseValidationTests(unittest.TestCase):
                     "torch": "2.4.1 / torch-directml 0.2.5.dev240914",
                     "python": "3.9",
                     "hardware_validation": "validated_at_build",
-                    "operation_validation": "inference_forward",
+                    "operation_validation": "inference_forward_and_onnx_provider",
+                    "onnxruntime": "1.19.2 / DirectML",
                 },
             )
         )

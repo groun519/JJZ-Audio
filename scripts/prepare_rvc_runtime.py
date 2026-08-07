@@ -23,6 +23,7 @@ RUNTIME_FILES = (
     "LICENSE",
     "requirements.txt",
 )
+DIRECTML_PROFILE_ASSET_FILES = ("rmvpe.onnx",)
 TRAINING_ASSET_FILES = RVC_TRAINING_ASSET_FILES
 MANIFEST_FILE = "jjzero_runtime.json"
 DEMUCS_REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements-rvc-runtime.txt"
@@ -80,6 +81,11 @@ def prepare_rvc_runtime(
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(resolved_source / relative_path, target)
 
+    directml_assets = resolved_destination.parent / "rvc_profiles" / "assets"
+    directml_assets.mkdir(parents=True, exist_ok=True)
+    for file_name in DIRECTML_PROFILE_ASSET_FILES:
+        shutil.copy2(resolved_source / file_name, directml_assets / file_name)
+
     for model_directory in ("weights", "logs"):
         (resolved_destination / model_directory).mkdir(exist_ok=True)
     if install_demucs:
@@ -101,6 +107,7 @@ def _validate_source(source: Path) -> None:
         for path in (
             *(source / name for name in RUNTIME_DIRECTORIES),
             *(source / name for name in RUNTIME_FILES),
+            *(source / name for name in DIRECTML_PROFILE_ASSET_FILES),
             *(source / path for path in TRAINING_ASSET_FILES),
             source / "runtime" / "python.exe",
         )

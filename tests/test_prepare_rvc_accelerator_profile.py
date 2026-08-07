@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.prepare_rvc_accelerator_profile import (
+    DIRECTML_REQUIREMENTS,
     _patch_directml_staticmethod_defaults,
     is_compatible_rocm_hip_version,
     prepare_directml_profile,
@@ -14,6 +15,9 @@ from scripts.prepare_rvc_accelerator_profile import (
 
 
 class PrepareRvcAcceleratorProfileTests(unittest.TestCase):
+    def test_directml_profile_replaces_cuda_onnx_runtime(self) -> None:
+        self.assertIn("onnxruntime-directml==1.19.2", DIRECTML_REQUIREMENTS)
+
     def test_accepts_rocm_internal_hip_build_version_for_release_series(self) -> None:
         self.assertTrue(is_compatible_rocm_hip_version("7.2.53211-158bd99533"))
         self.assertTrue(is_compatible_rocm_hip_version("7.2.1"))
@@ -52,8 +56,10 @@ class PrepareRvcAcceleratorProfileTests(unittest.TestCase):
                 (destination / "jjzero-profile-build.json").read_text(encoding="utf-8")
             )
             self.assertEqual(metadata["profile"], "directml")
+            self.assertEqual(metadata["onnxruntime"], "1.19.2 / DirectML")
             self.assertEqual(metadata["hardware_validation"], "not_run")
             self.assertEqual(metadata["operation_validation"], "not_run")
+            self.assertEqual((destination / "rmvpe.onnx").read_bytes(), b"rmvpe")
 
     def test_prepares_prevalidated_rocm_runtime_as_a_separate_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -81,6 +87,7 @@ def _runtime(path: Path) -> Path:
     path.mkdir(parents=True)
     (path / "python.exe").write_bytes(b"python")
     (path / "source.txt").write_text("original", encoding="utf-8")
+    (path.parent / "rmvpe.onnx").write_bytes(b"rmvpe")
     return path
 
 

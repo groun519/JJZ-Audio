@@ -28,4 +28,4 @@ where = ["src"]
 version = {attr = "jang_app.version.__version__"}
 
 [tool.setuptools.package-data]
-jang_app = ["assets/*.svg", "rvc_tools/jjzero_device.py"]
+jang_app = ["assets/*.svg", "assets/*.json", "rvc_tools/jjzero_device.py"]

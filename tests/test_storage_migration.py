@@ -4,13 +4,17 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from jang_app.services.app_paths import discover_app_paths
 from jang_app.services.storage_migration import (
     StorageMigrationError,
     migrate_storage,
     plan_storage_migration,
+    recover_storage_migrations,
 )
+from jang_app.services.initial_setup import build_custom_storage_layout
 
 
 class StorageMigrationTests(unittest.TestCase):
@@ -72,8 +76,9 @@ class StorageMigrationTests(unittest.TestCase):
             plan = plan_storage_migration(paths, target_root)
             self.assertEqual(
                 tuple(component.name for component in plan.components),
-                ("Data", "Output", "Runtime", "Cache"),
+                ("Data", "Output", "Runtime"),
             )
+            self.assertTrue(plan.cache_reset)
 
             configured = migrate_storage(plan)
             rediscovered = _discover_paths(root)
@@ -99,10 +104,8 @@ class StorageMigrationTests(unittest.TestCase):
                 (target_root / "Runtime" / "rvc" / "weights" / "voice.pth").read_bytes(),
                 b"model",
             )
-            self.assertEqual(
-                (target_root / "Cache" / "runtime" / "package.zip").read_bytes(),
-                b"cache",
-            )
+            self.assertTrue((target_root / "Cache").is_dir())
+            self.assertFalse((target_root / "Cache" / "runtime" / "package.zip").exists())
 
             migrated_manifest = json.loads(
                 (
@@ -198,11 +201,12 @@ class StorageMigrationTests(unittest.TestCase):
             )
             self.assertTrue((target / "Output" / "mix.wav").is_file())
             self.assertTrue((target / "Runtime" / "rvc" / "runtime.bin").is_file())
-            self.assertTrue((target / "Cache" / "download.pkg").is_file())
-            self.assertEqual(configured.storage_version, 2)
+            self.assertTrue((target / "Cache").is_dir())
+            self.assertFalse((target / "Cache" / "download.pkg").exists())
+            self.assertEqual(configured.storage_version, 3)
             self.assertEqual(configured.storage_root, target.resolve())
             storage = json.loads(paths.storage_file.read_text(encoding="utf-8"))
-            self.assertEqual(storage["version"], 2)
+            self.assertEqual(storage["version"], 3)
             migrated_manifest = json.loads(
                 (target / "Data" / song_manifest.relative_to(paths.workspace_root)).read_text(
                     encoding="utf-8"
@@ -249,6 +253,83 @@ class StorageMigrationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(StorageMigrationError, "already contains files"):
                 plan_storage_migration(paths, target)
+
+    def test_custom_layout_moves_only_changed_output_and_resets_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _managed_paths(root, root / "current")
+            output = paths.output_root / "mix.wav"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"mix")
+            cache = paths.cache_dir / "runtime.zip"
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(b"cache")
+            configured = build_custom_storage_layout(
+                paths,
+                workspace_root=paths.workspace_root,
+                output_root=root / "external-output",
+                runtime_root=paths.runtime_root,
+                cache_root=root / "new-cache",
+            )
+
+            plan = plan_storage_migration(paths, configured)
+            result = migrate_storage(plan)
+
+            self.assertEqual(tuple(item.name for item in plan.components), ("Output",))
+            self.assertTrue(plan.cache_reset)
+            self.assertEqual((result.output_root / "mix.wav").read_bytes(), b"mix")
+            self.assertTrue(result.cache_dir.is_dir())
+            self.assertFalse((result.cache_dir / "runtime.zip").exists())
+            self.assertTrue(cache.is_file())
+
+    def test_cancelled_copy_preserves_source_and_records_recoverable_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _managed_paths(root, root / "current")
+            source = paths.workspace_root / "song.wav"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"audio")
+            configured = build_custom_storage_layout(
+                paths,
+                workspace_root=root / "new-data",
+                output_root=paths.output_root,
+                runtime_root=paths.runtime_root,
+                cache_root=paths.cache_dir,
+            )
+            plan = plan_storage_migration(paths, configured)
+
+            with self.assertRaisesRegex(StorageMigrationError, "cancelled"):
+                migrate_storage(plan, cancelled=lambda: True)
+
+            self.assertTrue(source.is_file())
+            journal = paths.data_root / "migrations" / f"storage-relocation-{plan.transaction_id}.json"
+            self.assertTrue(journal.is_file())
+            recovered = recover_storage_migrations(paths)
+            self.assertEqual(recovered, (journal,))
+
+    def test_checks_free_space_on_the_changed_component_drive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _managed_paths(root, root / "current")
+            output = paths.output_root / "large.wav"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"audio")
+            configured = build_custom_storage_layout(
+                paths,
+                workspace_root=paths.workspace_root,
+                output_root=Path("D:/JJZero Audio/Output"),
+                runtime_root=paths.runtime_root,
+                cache_root=paths.cache_dir,
+            )
+
+            with (
+                patch(
+                    "jang_app.services.storage_migration.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=1),
+                ),
+                self.assertRaisesRegex(StorageMigrationError, "enough free space"),
+            ):
+                plan_storage_migration(paths, configured)
 
 
 def _legacy_paths(root: Path):

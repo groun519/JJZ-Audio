@@ -14,6 +14,7 @@ from jang_app.services.command import (
     hidden_subprocess_kwargs,
     run_cancellable_command,
     run_command,
+    start_detached_command,
 )
 from jang_app.services.job_diagnostics import JobDiagnostics, diagnostic_task
 
@@ -46,6 +47,33 @@ class CancellableCommandTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0)
             self.assertEqual(Path(runner.call_args.args[0][0]), pythonw)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-only detached process behavior")
+    def test_detached_runner_is_windowless_and_prefers_pythonw(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            python = runtime / "python.exe"
+            pythonw = runtime / "pythonw.exe"
+            python.write_bytes(b"python")
+            pythonw.write_bytes(b"pythonw")
+
+            with patch("jang_app.services.command.subprocess.Popen") as popen:
+                started = start_detached_command((str(python), "worker.py"), cwd=runtime)
+
+            self.assertTrue(started)
+            command = popen.call_args.args[0]
+            options = popen.call_args.kwargs
+            self.assertEqual(Path(command[0]), pythonw)
+            self.assertTrue(int(options["creationflags"]) & subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(options["stdout"], subprocess.DEVNULL)
+            self.assertEqual(options["stderr"], subprocess.DEVNULL)
+
+    def test_detached_runner_reports_launch_failure(self) -> None:
+        with patch(
+            "jang_app.services.command.subprocess.Popen",
+            side_effect=OSError("launch failed"),
+        ):
+            self.assertFalse(start_detached_command(("missing-tool",)))
 
     def test_cancellation_terminates_a_running_process(self) -> None:
         cancellation = CommandCancellation()

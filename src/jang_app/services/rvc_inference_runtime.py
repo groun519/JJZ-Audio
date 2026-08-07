@@ -374,6 +374,7 @@ print(json.dumps(result, ensure_ascii=False))
 
 _DIRECTML_PROBE = """
 import json
+from pathlib import Path
 
 result = {
     "directml_available": False,
@@ -383,10 +384,22 @@ result = {
     "detail": "",
 }
 try:
+    import onnxruntime as ort
     import torch
     import torch_directml
 
     result["directml_available"] = True
+    providers = list(ort.get_available_providers())
+    if "DmlExecutionProvider" not in providers:
+        raise RuntimeError(
+            f"ONNX Runtime has no DmlExecutionProvider: {providers}"
+        )
+    rmvpe_model = next(
+        (path for path in (Path("runtime/rmvpe.onnx"), Path("rmvpe.onnx")) if path.is_file()),
+        None,
+    )
+    if rmvpe_model is None or rmvpe_model.stat().st_size <= 0:
+        raise RuntimeError("DirectML RMVPE model is missing: rmvpe.onnx")
     index = int(torch_directml.default_device())
     device = torch_directml.device(index)
     result["directml_device"] = str(device)

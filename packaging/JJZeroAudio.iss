@@ -62,6 +62,7 @@ const
 
 var
   ManagedRuntimeCanBeDeleted: Boolean;
+  ManagedCacheCanBeDeleted: Boolean;
   RuntimePreservationPrepared: Boolean;
   PreservedRuntimeData: Boolean;
   PreservedRuntimePath: String;
@@ -71,6 +72,83 @@ begin
   Result := GetEnv('JJZERO_DATA_ROOT');
   if Result = '' then
     Result := ExpandConstant('{localappdata}\JJZero Audio');
+end;
+
+function StorageSettingsFile: String;
+begin
+  Result := AddBackslash(RuntimeDataRoot) + 'settings\storage.json';
+end;
+
+function ReadStoragePath(const Key: String): String;
+var
+  Content: AnsiString;
+  Tail: String;
+  Marker: String;
+  MarkerPosition: Integer;
+  ColonPosition: Integer;
+  QuotePosition: Integer;
+  EndPosition: Integer;
+begin
+  Result := '';
+  if not LoadStringFromFile(StorageSettingsFile, Content) then
+    Exit;
+  Marker := '"' + Key + '"';
+  MarkerPosition := Pos(Marker, String(Content));
+  if MarkerPosition = 0 then
+    Exit;
+  Tail := Copy(String(Content), MarkerPosition + Length(Marker), MaxInt);
+  ColonPosition := Pos(':', Tail);
+  if ColonPosition = 0 then
+    Exit;
+  Tail := Copy(Tail, ColonPosition + 1, MaxInt);
+  QuotePosition := Pos('"', Tail);
+  if QuotePosition = 0 then
+    Exit;
+  Tail := Copy(Tail, QuotePosition + 1, MaxInt);
+  EndPosition := Pos('"', Tail);
+  if EndPosition = 0 then
+    Exit;
+  Result := Copy(Tail, 1, EndPosition - 1);
+  StringChangeEx(Result, '\\', '\', True);
+  Result := RemoveBackslashUnlessRoot(Result);
+end;
+
+function SamePath(const Left, Right: String): Boolean;
+begin
+  Result := CompareText(
+    RemoveBackslashUnlessRoot(Left),
+    RemoveBackslashUnlessRoot(Right)) = 0;
+end;
+
+function PathContains(const ParentPath, ChildPath: String): Boolean;
+var
+  ParentWithSlash: String;
+  ChildWithSlash: String;
+begin
+  ParentWithSlash := Lowercase(AddBackslash(RemoveBackslashUnlessRoot(ParentPath)));
+  ChildWithSlash := Lowercase(AddBackslash(RemoveBackslashUnlessRoot(ChildPath)));
+  Result := Pos(ParentWithSlash, ChildWithSlash) = 1;
+end;
+
+function IsSafeGeneratedRoot(const Candidate: String): Boolean;
+var
+  WorkspaceRoot: String;
+  OutputRoot: String;
+begin
+  Result := False;
+  if Candidate = '' then
+    Exit;
+  if SamePath(Candidate, ExtractFileDrive(Candidate) + '\') then
+    Exit;
+  WorkspaceRoot := ReadStoragePath('workspace_root');
+  OutputRoot := ReadStoragePath('output_root');
+  if (WorkspaceRoot <> '') and PathContains(Candidate, WorkspaceRoot) then
+    Exit;
+  if (OutputRoot <> '') and PathContains(Candidate, OutputRoot) then
+    Exit;
+  if PathContains(Candidate, RuntimeDataRoot) then
+    Exit;
+  Result := True;
 end;
 
 function DirectoryHasContents(const Directory: String): Boolean;
@@ -168,21 +246,16 @@ begin
     Result := DelTree(Source, True, True, True);
 end;
 
-procedure PrepareRuntimeRemoval;
+procedure RemoveRuntimeRoot(const RuntimeRoot: String);
 var
-  RuntimeRoot: String;
   RvcRoot: String;
   WeightsRoot: String;
   LogsRoot: String;
   BackupRoot: String;
   HasPreservableData: Boolean;
 begin
-  if RuntimePreservationPrepared then
+  if (not DirExists(RuntimeRoot)) or (not IsSafeGeneratedRoot(RuntimeRoot)) then
     Exit;
-  RuntimePreservationPrepared := True;
-  ManagedRuntimeCanBeDeleted := True;
-
-  RuntimeRoot := ExpandConstant('{app}\runtime');
   RvcRoot := AddBackslash(RuntimeRoot) + 'rvc';
   WeightsRoot := AddBackslash(RvcRoot) + 'weights';
   LogsRoot := AddBackslash(RvcRoot) + 'logs';
@@ -204,14 +277,45 @@ begin
     if ManagedRuntimeCanBeDeleted and HasPreservableData then
     begin
       PreservedRuntimeData := True;
-      PreservedRuntimePath := BackupRoot;
+      if PreservedRuntimePath = '' then
+        PreservedRuntimePath := BackupRoot
+      else
+        PreservedRuntimePath := PreservedRuntimePath + Chr(13) + Chr(10) + BackupRoot;
     end;
   end;
+end;
+
+procedure PrepareRuntimeRemoval;
+var
+  AppRuntimeRoot: String;
+  ConfiguredRuntimeRoot: String;
+  ConfiguredCacheRoot: String;
+begin
+  if RuntimePreservationPrepared then
+    Exit;
+  RuntimePreservationPrepared := True;
+  ManagedRuntimeCanBeDeleted := True;
+  ManagedCacheCanBeDeleted := True;
+
+  AppRuntimeRoot := ExpandConstant('{app}\runtime');
+  ConfiguredRuntimeRoot := ReadStoragePath('runtime_root');
+  if ConfiguredRuntimeRoot = '' then
+    ConfiguredRuntimeRoot := AppRuntimeRoot;
+  RemoveRuntimeRoot(ConfiguredRuntimeRoot);
+  if not SamePath(AppRuntimeRoot, ConfiguredRuntimeRoot) then
+    RemoveRuntimeRoot(AppRuntimeRoot);
+
+  ConfiguredCacheRoot := ReadStoragePath('cache_root');
+  if ConfiguredCacheRoot = '' then
+    ConfiguredCacheRoot := AddBackslash(RuntimeDataRoot) + 'cache';
+  if DirExists(ConfiguredCacheRoot) and IsSafeGeneratedRoot(ConfiguredCacheRoot) then
+    ManagedCacheCanBeDeleted := DelTree(ConfiguredCacheRoot, True, True, True);
 end;
 
 function InitializeUninstall: Boolean;
 begin
   ManagedRuntimeCanBeDeleted := True;
+  ManagedCacheCanBeDeleted := True;
   RuntimePreservationPrepared := False;
   PreservedRuntimeData := False;
   PreservedRuntimePath := '';
@@ -224,9 +328,10 @@ begin
     PrepareRuntimeRemoval
   else if CurUninstallStep = usPostUninstall then
   begin
-    if (not ManagedRuntimeCanBeDeleted) and (not UninstallSilent) then
+    if ((not ManagedRuntimeCanBeDeleted) or (not ManagedCacheCanBeDeleted)) and
+       (not UninstallSilent) then
       MsgBox(
-        'The downloaded audio engine could not be fully removed because user RVC data could not be preserved. No user data was deleted.',
+        'Some generated audio engine or cache files could not be removed. No song, model, or exported data was deleted.',
         mbError,
         MB_OK)
     else if PreservedRuntimeData and (not UninstallSilent) then

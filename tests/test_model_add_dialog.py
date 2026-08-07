@@ -44,6 +44,21 @@ class ModelAddDialogTests(unittest.TestCase):
         self.assertEqual(request.mode, ModelImportMode.LINKED)
         dialog.close()
 
+    def test_drive_link_choice_returns_managed_link_request(self) -> None:
+        dialog = ModelAddDialog(APP_ICON_PATH, theme_mode="dark")
+
+        dialog.drive_button.click()
+        dialog.drive_link_edit.setText("https://drive.google.com/file/d/1234567890abc/view")
+        dialog.drive_import_button.click()
+
+        request = dialog.request()
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        self.assertIsNotNone(request)
+        self.assertEqual(request.source, ModelImportSource.DRIVE_LINK)
+        self.assertEqual(request.mode, ModelImportMode.MANAGED)
+        self.assertIn("drive.google.com", request.link)
+        dialog.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ from jang_app.services.app_update import (
     UpdatePlan,
     UpdateError,
     create_update_plan,
+    discard_cached_artifacts,
     download_artifact,
     fetch_release_manifest,
     verify_artifact,
@@ -94,9 +95,11 @@ def provision_ai_runtime(
         activity=activity,
     )
     _report_activity(activity, RuntimeProvisionStage.VERIFYING, detail="Verifying installed components")
-    return next(
+    result = next(
         item for item in installations if isinstance(item, RuntimeInstallation)
     )
+    discard_cached_artifacts(packages, paths.cache_dir)
+    return result
 
 
 def provision_ai_runtime_offline(

@@ -3,11 +3,11 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEvent, Qt
+from PySide6.QtCore import QByteArray, QEvent, QObject, Qt
 from PySide6.QtGui import QFocusEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.widgets import (
@@ -16,6 +16,7 @@ from jang_app.qt_app.widgets import (
     WindowTitleBar,
     _TRACK_ICON_SVGS,
     _track_button_palette,
+    _window_control_palette,
 )
 
 
@@ -72,6 +73,27 @@ class ButtonFeedbackTests(unittest.TestCase):
                 self.assertNotEqual(normal["background"], hovered["background"])
                 self.assertNotEqual(hovered["background"], pressed["background"])
                 self.assertNotEqual(checked["background"], checked_pressed["background"])
+
+    def test_window_close_button_is_distinct_before_hover(self) -> None:
+        for theme_mode in ("dark", "white"):
+            close = _window_control_palette(
+                theme_mode,
+                "WindowCloseButton",
+                True,
+                False,
+                False,
+            )
+            minimize = _window_control_palette(
+                theme_mode,
+                "WindowControlButton",
+                True,
+                False,
+                False,
+            )
+
+            with self.subTest(theme_mode=theme_mode):
+                self.assertNotEqual(close["background"], minimize["background"])
+                self.assertNotEqual(close["icon"], minimize["icon"])
 
     def test_every_registered_icon_is_valid_svg(self) -> None:
         for name, template in _TRACK_ICON_SVGS.items():
@@ -131,6 +153,31 @@ class ButtonFeedbackTests(unittest.TestCase):
                 self.assertTrue(title_bar.version_label.isVisible())
 
             title_bar.close()
+
+    def test_title_bar_version_never_shows_as_an_independent_window(self) -> None:
+        unexpected: list[QWidget] = []
+
+        class WindowShowProbe(QObject):
+            def eventFilter(self, watched, event):  # noqa: N802
+                if (
+                    event.type() == QEvent.Type.Show
+                    and isinstance(watched, QWidget)
+                    and watched.objectName() == "AppVersion"
+                    and watched.isWindow()
+                ):
+                    unexpected.append(watched)
+                return False
+
+        probe = WindowShowProbe()
+        self.app.installEventFilter(probe)
+        try:
+            title_bar = WindowTitleBar("JJZero Audio", Path(), version_text="v0.2.5")
+            self.app.processEvents()
+            self.assertEqual(unexpected, [])
+            self.assertIs(title_bar.version_label.parentWidget(), title_bar)
+            title_bar.close()
+        finally:
+            self.app.removeEventFilter(probe)
 
 
 if __name__ == "__main__":

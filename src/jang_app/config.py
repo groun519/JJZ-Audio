@@ -11,6 +11,8 @@ PROJECT_ROOT = APP_PATHS.workspace_anchor
 APP_NAME = "JJZero Audio"
 ASSETS_DIR = PACKAGE_ROOT / "assets"
 APP_ICON_PATH = ASSETS_DIR / "jjzero_logo.svg"
+GOOGLE_ICON_PATH = ASSETS_DIR / "google_g.svg"
+GOOGLE_OAUTH_CLIENT_PATH = ASSETS_DIR / "google_oauth_client.json"
 RVC_RUNTIME_DIR = APP_PATHS.runtime_root / "rvc"
 DEFAULT_RVC_ROOT = (
     RVC_RUNTIME_DIR

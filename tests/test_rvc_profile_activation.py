@@ -14,6 +14,12 @@ from jang_app.services.rvc_profile_activation import (
 
 
 class RvcProfileActivationTests(unittest.TestCase):
+    def test_directml_probe_requires_onnx_provider_and_rmvpe_model(self) -> None:
+        probe = _activation_probe("directml")
+
+        self.assertIn("DmlExecutionProvider", probe)
+        self.assertIn("rmvpe.onnx", probe)
+
     def test_rocm_probe_allows_training_attempt_after_gpu_forward_validation(self) -> None:
         probe = _activation_probe("rocm-win")
 

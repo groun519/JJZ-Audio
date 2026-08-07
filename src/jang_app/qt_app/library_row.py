@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QSizePolic
 
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
 from jang_app.qt_app.overflow_title_label import OverflowTitleLabel
+from jang_app.qt_app.transport_controls import TransportControls
 from jang_app.qt_app.widgets import SvgIconButton
 from jang_app.services.song_metadata import SongDisplayMetadata
 from jang_app.services.waveform import build_waveform_peaks, waveform_cache_key
@@ -27,14 +28,24 @@ class SongListRow(QWidget):
     use_requested = Signal(str)
     details_requested = Signal(str)
     preview_requested = Signal(str)
+    preview_play_toggled = Signal(str)
+    preview_seek_requested = Signal(str, int)
+    preview_height_changed = Signal(str)
 
-    def __init__(self, item_id: str, title: str, metadata: SongDisplayMetadata) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        item_id: str,
+        title: str,
+        metadata: SongDisplayMetadata,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self.setObjectName("SongListRow")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setProperty("selected", False)
         self._item_id = item_id
         self._is_editing = False
+        self._preview_expanded = False
         self.setMouseTracking(True)
 
         self.source_badge = QLabel()
@@ -101,19 +112,65 @@ class SongListRow(QWidget):
         body_layout.addWidget(self.waveform, 3)
         body_layout.addWidget(action_container, 0)
 
+        self.preview_divider = QFrame()
+        self.preview_divider.setObjectName("LibraryPreviewDivider")
+        self.preview_divider.setFixedHeight(1)
+        self.preview_divider.hide()
+
+        self.preview_transport = TransportControls()
+        self.preview_transport.setObjectName("LibraryPreviewTransport")
+        self.preview_transport.play_toggled.connect(
+            lambda: self.preview_play_toggled.emit(self._item_id)
+        )
+        self.preview_transport.seek_requested.connect(
+            lambda position_ms: self.preview_seek_requested.emit(self._item_id, position_ms)
+        )
+        self.preview_transport.hide()
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(9)
         layout.addLayout(body_layout)
+        layout.addWidget(self.preview_divider)
+        layout.addWidget(self.preview_transport)
 
         self._set_actions_visible(False)
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(0, 84)
+        return QSize(0, 138 if self._preview_expanded else 84)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self.waveform.set_theme_mode(theme_mode)
+        self.preview_transport.set_theme_mode(theme_mode)
         for button in self.action_buttons:
             button.set_theme_mode(theme_mode)
+
+    def set_preview_expanded(self, is_expanded: bool) -> None:
+        if self._preview_expanded == is_expanded:
+            return
+        self._preview_expanded = is_expanded
+        self.preview_divider.setVisible(is_expanded)
+        self.preview_transport.setVisible(is_expanded)
+        if not is_expanded:
+            self.preview_transport.set_playing(False)
+        self.updateGeometry()
+        self.preview_height_changed.emit(self._item_id)
+
+    def is_preview_expanded(self) -> bool:
+        return self._preview_expanded
+
+    def set_preview_queue(self, duration_ms: int) -> None:
+        self.preview_transport.set_duration(duration_ms)
+        self.preview_transport.set_position(0, duration_ms)
+
+    def clear_preview(self) -> None:
+        self.preview_transport.clear()
+
+    def set_preview_playing(self, is_playing: bool) -> None:
+        self.preview_transport.set_playing(is_playing)
+
+    def set_preview_position(self, position_ms: int, duration_ms: int) -> None:
+        self.preview_transport.set_position(position_ms, duration_ms)
 
     def set_selected(self, is_selected: bool) -> None:
         self.setProperty("selected", is_selected)

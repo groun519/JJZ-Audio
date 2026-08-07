@@ -8,6 +8,7 @@ from pathlib import Path
 from jang_app.services.app_paths import discover_app_paths
 from jang_app.services.initial_setup import (
     InitialSetupError,
+    build_custom_storage_layout,
     complete_initial_setup,
     is_initial_setup_complete,
     prepare_storage_layout,
@@ -42,6 +43,20 @@ class InitialSetupTests(unittest.TestCase):
 
             with self.assertRaises(InitialSetupError):
                 prepare_storage_layout(paths, paths.install_root / "user-data")
+
+    def test_rejects_overlapping_custom_storage_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _paths(root)
+
+            with self.assertRaisesRegex(InitialSetupError, "cannot overlap"):
+                build_custom_storage_layout(
+                    paths,
+                    workspace_root=root / "shared",
+                    output_root=root / "shared" / "exports",
+                    runtime_root=root / "runtime",
+                    cache_root=root / "cache",
+                )
 
 
 def _paths(root: Path):

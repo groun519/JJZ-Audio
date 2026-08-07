@@ -51,6 +51,11 @@ This document records the working rules for this project.
 - The app should feel like a real desktop tool, not a default Tkinter prototype.
 - Improve the UI through a dedicated theme/style layer.
 - Keep UI behavior separate from audio processing logic.
+- Do not give every `QWidget` an opaque global background. Window roots and visual panels must opt into an explicit surface role.
+- Use `TransparentContainer` for layout-only wrappers and `SurfaceFrame` for reusable visual surfaces instead of relying on incidental QSS inheritance.
+- Parent dynamic child widgets before calling `show()`, `setVisible(True)`, or measuring them for an item view.
+- Cover dynamic Qt screens with a top-level `Show` event regression test so child widgets cannot flash as temporary windows.
+- Keep the application-wide `WindowLifecycleGuard` enabled; legitimate non-dialog top-level widgets must opt in explicitly or use a framework window type such as popup, tooltip, or splash screen.
 - Required user inputs should fail clearly instead of failing silently.
 - Show meaningful status and result paths after each operation.
 

@@ -49,10 +49,14 @@ def prepare_rvc_script_launcher(
     # the same path bootstrap before importing the original RVC script.
     lines = [
         "from pathlib import Path",
+        "import multiprocessing",
         "import sys",
         "",
         f"RVC_ROOT = Path({str(root)!r})",
         f"RVC_SCRIPT = Path({str(source)!r})",
+        "RVC_PYTHONW = RVC_ROOT / 'runtime' / 'pythonw.exe'",
+        "if RVC_PYTHONW.is_file():",
+        "    multiprocessing.set_executable(str(RVC_PYTHONW))",
         "sys.path.insert(0, str(RVC_ROOT))",
     ]
     if legacy_i18n:

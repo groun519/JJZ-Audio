@@ -11,6 +11,7 @@ from jang_app.services.clip_edit_history import (
     history_from_data,
     history_to_data,
 )
+from jang_app.services.segment_review import SEGMENT_HELD, SegmentCandidate
 
 
 class ClipEditHistoryTests(unittest.TestCase):
@@ -35,6 +36,23 @@ class ClipEditHistoryTests(unittest.TestCase):
         data["undo"][0]["ranges"].append([400, 420])
 
         restored = history_from_data(data)
+
+        self.assertEqual(restored, history)
+
+    def test_history_serialization_preserves_review_regions(self) -> None:
+        candidate = SegmentCandidate("region-1", 200, 900, SEGMENT_HELD)
+        history = ClipEditHistory(
+            undo_states=(
+                ClipEditState(
+                    TRAINING_MODE_CLIPS,
+                    REVIEW_EDITING,
+                    ((1000, 1500),),
+                    (candidate,),
+                ),
+            ),
+        )
+
+        restored = history_from_data(history_to_data(history))
 
         self.assertEqual(restored, history)
 

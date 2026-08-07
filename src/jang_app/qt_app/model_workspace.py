@@ -43,7 +43,7 @@ from jang_app.qt_app.model_training_panel import (
 )
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
 from jang_app.qt_app.text_input_dialog import TextInputDialog
-from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
+from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton, attach_list_item_widget
 from jang_app.qt_app.workers import TaskWorker
 from jang_app.services.clip_edit_history import REVIEW_READY
 from jang_app.services.command import CommandCancellation
@@ -96,6 +96,9 @@ class ModelWorkspacePage(QWidget):
     log_requested = Signal(str)
     system_setup_requested = Signal()
     models_changed = Signal()
+    share_requested = Signal(object)
+    delete_share_requested = Signal(object)
+    drive_import_requested = Signal(str)
 
     def __init__(
         self,
@@ -117,6 +120,10 @@ class ModelWorkspacePage(QWidget):
         self._hardware_selection = hardware_selection
         self._records_by_id: dict[str, RvcModelRecord] = {}
         self._rows_by_id: dict[str, ModelListRow] = {}
+        self._share_progress_by_id: dict[str, int] = {}
+        self._shared_model_ids: set[str] = set()
+        self._share_status_provider: Callable[[RvcModelRecord], bool] | None = None
+        self._sharing_enabled = True
         self._selected_model_id: str | None = None
         self._active_worker: TaskWorker | None = None
         self._active_action_label = ""
@@ -452,11 +459,17 @@ class ModelWorkspacePage(QWidget):
             for record in records:
                 item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, record.model_id)
-                row = ModelListRow(record)
+                row = ModelListRow(record, self.model_list.viewport())
                 row.activated.connect(self._open_model)
-                item.setSizeHint(row.sizeHint())
-                self.model_list.addItem(item)
-                self.model_list.setItemWidget(item, row)
+                row.share_requested.connect(self._emit_share_model)
+                row.delete_share_requested.connect(self._emit_delete_share_model)
+                row.set_theme_mode(self._theme_mode)
+                row.set_sharing_enabled(self._sharing_enabled)
+                row.set_shared(self._record_is_shared(record))
+                if record.model_id in self._share_progress_by_id:
+                    row.set_share_started()
+                    row.set_share_progress(self._share_progress_by_id[record.model_id])
+                attach_list_item_widget(self.model_list, item, row)
                 self._rows_by_id[record.model_id] = row
 
             selected_index = next(
@@ -481,9 +494,64 @@ class ModelWorkspacePage(QWidget):
         self.refresh_button.set_theme_mode(theme_mode)
         self.workspace_back_button.set_theme_mode(theme_mode)
         self.workspace_open_button.set_theme_mode(theme_mode)
+        for row in self._rows_by_id.values():
+            row.set_theme_mode(theme_mode)
         self.detail_panel.set_theme_mode(theme_mode)
         self.dataset_panel.set_theme_mode(theme_mode)
         self.analysis_panel.set_theme_mode(theme_mode)
+
+    def set_sharing_enabled(self, is_enabled: bool) -> None:
+        self._sharing_enabled = is_enabled
+        for row in self._rows_by_id.values():
+            row.set_sharing_enabled(is_enabled)
+
+    def set_share_status_provider(
+        self,
+        provider: Callable[[RvcModelRecord], bool],
+    ) -> None:
+        self._share_status_provider = provider
+        for model_id, record in self._records_by_id.items():
+            is_shared = self._record_is_shared(record, refresh=True)
+            row = self._rows_by_id.get(model_id)
+            if row is not None:
+                row.set_shared(is_shared)
+
+    def set_share_started(self, model_id: str) -> None:
+        if model_id not in self._records_by_id:
+            return
+        self._share_progress_by_id[model_id] = 0
+        row = self._rows_by_id.get(model_id)
+        if row is not None:
+            row.set_share_started()
+
+    def set_share_progress(self, model_id: str, progress: int) -> None:
+        if model_id not in self._share_progress_by_id:
+            return
+        value = max(0, min(100, int(progress)))
+        self._share_progress_by_id[model_id] = value
+        row = self._rows_by_id.get(model_id)
+        if row is not None:
+            row.set_share_progress(value)
+
+    def set_share_completed(self, model_id: str) -> None:
+        self._share_progress_by_id.pop(model_id, None)
+        self._shared_model_ids.add(model_id)
+        row = self._rows_by_id.get(model_id)
+        if row is not None:
+            row.set_share_completed()
+
+    def set_share_failed(self, model_id: str) -> None:
+        self._share_progress_by_id.pop(model_id, None)
+        row = self._rows_by_id.get(model_id)
+        if row is not None:
+            row.set_share_failed()
+
+    def set_share_deleted(self, model_id: str) -> None:
+        self._share_progress_by_id.pop(model_id, None)
+        self._shared_model_ids.discard(model_id)
+        row = self._rows_by_id.get(model_id)
+        if row is not None:
+            row.set_share_deleted()
 
     def apply_language(self) -> None:
         apply_widget_language(self)
@@ -536,6 +604,9 @@ class ModelWorkspacePage(QWidget):
             return
         if request.action == ModelAddAction.CREATE:
             self._create_model()
+            return
+        if request.source == ModelImportSource.DRIVE_LINK:
+            self.drive_import_requested.emit(request.link)
             return
         if request.source == ModelImportSource.INFERENCE_FILE:
             self._choose_inference_file(request.mode)
@@ -1079,6 +1150,49 @@ class ModelWorkspacePage(QWidget):
         record = self._selected_record()
         if record is not None:
             self.open_location_requested.emit(record.primary_location)
+
+    def _emit_share_model(self, model_id: str) -> None:
+        record = self._records_by_id.get(model_id)
+        if self._sharing_enabled and record is not None and record.can_convert:
+            self.share_requested.emit(record)
+
+    def _emit_delete_share_model(self, model_id: str) -> None:
+        record = self._records_by_id.get(model_id)
+        if (
+            self._sharing_enabled
+            and model_id in self._shared_model_ids
+            and record is not None
+        ):
+            self.delete_share_requested.emit(record)
+
+    def _record_is_shared(
+        self,
+        record: RvcModelRecord,
+        *,
+        refresh: bool = False,
+    ) -> bool:
+        if not refresh and record.model_id in self._shared_model_ids:
+            return True
+        is_shared = False
+        if self._share_status_provider is not None:
+            try:
+                is_shared = self._share_status_provider(record)
+            except OSError:
+                is_shared = False
+        if is_shared:
+            self._shared_model_ids.add(record.model_id)
+        else:
+            self._shared_model_ids.discard(record.model_id)
+        return is_shared
+
+    def apply_drive_import(self, records: tuple[RvcModelRecord, ...]) -> None:
+        if records:
+            self._selected_model_id = records[0].model_id
+        self.refresh_models()
+        if records:
+            self._open_model(records[0].model_id)
+            self.show_status(f"Imported {records[0].title} from Google Drive.")
+        self.models_changed.emit()
 
     def _selected_record(self) -> RvcModelRecord | None:
         if self._selected_model_id is None:

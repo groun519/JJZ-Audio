@@ -37,7 +37,7 @@ from jang_app.services.segment_review import (
 )
 
 
-DATASET_VERSION = 5
+DATASET_VERSION = 6
 DATASET_DIRECTORY_NAME = "datasets"
 DATASET_MANIFEST_NAME = "dataset.json"
 _MODEL_ID_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
@@ -152,7 +152,7 @@ class ModelDatasetStore:
             data = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ModelDatasetError(f"Dataset manifest cannot be read: {manifest}") from exc
-        if data.get("version") not in {1, 2, 3, 4, DATASET_VERSION} or data.get("model_id") != model_id:
+        if data.get("version") not in {1, 2, 3, 4, 5, DATASET_VERSION} or data.get("model_id") != model_id:
             raise ModelDatasetError("Dataset manifest is not compatible with this model.")
         raw_items = data.get("items")
         if not isinstance(raw_items, list):
@@ -418,7 +418,13 @@ class ModelDatasetStore:
         review_state = REVIEW_EDITING if candidates else item.review_state
         updated = _replace_dataset_item(
             dataset,
-            replace(item, duration_ms=duration_ms, segment_candidates=candidates, review_state=review_state),
+            replace(
+                item,
+                duration_ms=duration_ms,
+                segment_candidates=candidates,
+                review_state=review_state,
+                edit_history=item.edit_history.record(_item_edit_state(item)),
+            ),
         )
         self._save(updated)
         return updated
@@ -437,7 +443,12 @@ class ModelDatasetStore:
         candidates = update_candidate_status(item.segment_candidates, candidate_id, status)
         updated = _replace_dataset_item(
             dataset,
-            replace(item, segment_candidates=candidates, review_state=REVIEW_EDITING),
+            replace(
+                item,
+                segment_candidates=candidates,
+                review_state=REVIEW_EDITING,
+                edit_history=item.edit_history.record(_item_edit_state(item)),
+            ),
         )
         self._save(updated)
         return updated
@@ -457,14 +468,67 @@ class ModelDatasetStore:
             return dataset
         duration_ms = item.duration_ms or _safe_duration_ms(item.working_path)
         accepted_range = _normalize_clip_ranges(((start_ms, end_ms),), duration_ms)[0]
-        updated = self._commit_user_edit(dataset, item, _clip_ranges(item) + (accepted_range,), progress)
-        updated_item = _require_item(updated, item_id)
         remaining = tuple(
-            candidate for candidate in updated_item.segment_candidates if candidate.candidate_id != candidate_id
+            candidate for candidate in item.segment_candidates if candidate.candidate_id != candidate_id
         )
-        completed = _replace_dataset_item(updated, replace(updated_item, segment_candidates=remaining))
-        self._save(completed)
-        return completed
+        current = _item_edit_state(item)
+        target = ClipEditState(
+            TRAINING_MODE_CLIPS,
+            REVIEW_EDITING,
+            _clip_ranges(item) + (accepted_range,),
+            remaining,
+        )
+        return self._commit_edit_state(
+            dataset,
+            item,
+            target,
+            item.edit_history.record(current),
+            progress,
+        )
+
+    def move_clip_to_review_status(
+        self,
+        model_id: str,
+        item_id: str,
+        clip_id: str,
+        status: str,
+    ) -> ModelDataset:
+        dataset = self.load(model_id)
+        item = _require_item(dataset, item_id)
+        clip_index = _clip_index(item, clip_id)
+        if clip_index is None:
+            return dataset
+        clip = item.clips[clip_index]
+        candidates = tuple(
+            candidate
+            for candidate in item.segment_candidates
+            if candidate.candidate_id != clip.clip_id
+        ) + (
+            SegmentCandidate(
+                candidate_id=clip.clip_id,
+                start_ms=clip.start_ms,
+                end_ms=clip.end_ms,
+                status=normalize_segment_status(status),
+            ),
+        )
+        ranges = tuple(
+            (candidate.start_ms, candidate.end_ms)
+            for index, candidate in enumerate(item.clips)
+            if index != clip_index
+        )
+        current = _item_edit_state(item)
+        target = ClipEditState(
+            TRAINING_MODE_CLIPS,
+            REVIEW_EDITING,
+            ranges,
+            candidates,
+        )
+        return self._commit_edit_state(
+            dataset,
+            item,
+            target,
+            item.edit_history.record(current),
+        )
 
     def apply_denoise(
         self,
@@ -553,7 +617,12 @@ class ModelDatasetStore:
         duration_ms = item.duration_ms or _safe_duration_ms(item.working_path)
         normalized = _normalize_clip_ranges(ranges, duration_ms)
         current = _item_edit_state(item)
-        target = ClipEditState(TRAINING_MODE_CLIPS, REVIEW_EDITING, normalized)
+        target = ClipEditState(
+            TRAINING_MODE_CLIPS,
+            REVIEW_EDITING,
+            normalized,
+            item.segment_candidates,
+        )
         if target == current:
             if progress is not None:
                 progress(100)
@@ -603,6 +672,11 @@ class ModelDatasetStore:
                     created_at=datetime.now(UTC).isoformat(),
                 )
             completed_clips = tuple(clip for clip in clips if clip is not None)
+            segment_candidates = (
+                item.segment_candidates
+                if target.segment_candidates is None
+                else target.segment_candidates
+            )
             updated_item = replace(
                 item,
                 duration_ms=duration_ms,
@@ -610,6 +684,7 @@ class ModelDatasetStore:
                 training_mode=target.training_mode,
                 review_state=target.review_state,
                 edit_history=history,
+                segment_candidates=segment_candidates,
             )
             updated = _replace_dataset_item(dataset, updated_item)
             self._save(updated)
@@ -915,7 +990,12 @@ def _range_is_covered(candidate_range: tuple[int, int], clips: tuple[ModelDatase
 
 
 def _item_edit_state(item: ModelDatasetItem) -> ClipEditState:
-    return ClipEditState(item.training_mode, item.review_state, _clip_ranges(item))
+    return ClipEditState(
+        item.training_mode,
+        item.review_state,
+        _clip_ranges(item),
+        item.segment_candidates,
+    )
 
 
 def _normalize_clip_ranges(ranges: Iterable[tuple[int, int]], duration_ms: int) -> tuple[tuple[int, int], ...]:

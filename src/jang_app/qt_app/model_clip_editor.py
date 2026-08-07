@@ -1,22 +1,43 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup,
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QLineEdit,
+    QMenu,
+    QPlainTextEdit,
     QStackedWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from jang_app.qt_app.clip_waveform_view import ClipWaveformView, ClipWaveformViewState
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
-from jang_app.qt_app.widgets import FeedbackButton, ScrollSafeSlider, ScrollSafeSpinBox, SvgIconButton
+from jang_app.qt_app.model_clip_editor_controls import (
+    ClipCommandBar,
+    ClipEditorHeader,
+)
+from jang_app.qt_app.model_clip_editor_tools import (
+    AudioToolInspector,
+    DenoiseToolPanel,
+    RegionDetectionToolPanel,
+)
+from jang_app.qt_app.widgets import (
+    FeedbackButton,
+    SvgIconButton,
+    TransparentContainer,
+)
 from jang_app.services.audio_player import AudioPlayer
 from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.clip_edit_history import (
@@ -47,6 +68,7 @@ class ModelClipEditor(QFrame):
     analyze_requested = Signal(int, int, int, int)
     use_candidate_requested = Signal(str, int, int)
     candidate_status_requested = Signal(str, str)
+    clip_status_requested = Signal(str, str)
     remove_clip_requested = Signal(str)
     undo_requested = Signal()
     redo_requested = Signal()
@@ -55,6 +77,7 @@ class ModelClipEditor(QFrame):
     navigate_requested = Signal(int)
     close_requested = Signal()
     denoise_requested = Signal(int, int, int)
+    denoise_preview_requested = Signal(int, int, int, int, int)
     remove_denoise_requested = Signal()
     playback_started = Signal()
     playback_failed = Signal(str)
@@ -75,6 +98,10 @@ class ModelClipEditor(QFrame):
         self._preview_version = "original"
         self._noise_sample_start_ms = 0
         self._noise_sample_end_ms = 0
+        self._denoise_preview_path: Path | None = None
+        self._denoise_preview_start_ms = 0
+        self._denoise_preview_end_ms = 0
+        self._analysis_stale = False
         self._playback_timer = QTimer(self)
         self._playback_timer.setInterval(50)
         self._playback_timer.timeout.connect(self._sync_playback)
@@ -82,8 +109,8 @@ class ModelClipEditor(QFrame):
         self._install_shortcuts()
 
     def _build_ui(self) -> None:
-        header = self._build_header()
-        self.waveform = ClipWaveformView()
+        self.editor_header = self._build_header()
+        self.waveform = ClipWaveformView(self)
         self.waveform.selection_changed.connect(self._on_selection_changed)
         self.waveform.clip_preview_changed.connect(self._on_clip_preview_changed)
         self.waveform.clip_edit_finished.connect(self._on_clip_edit_finished)
@@ -92,267 +119,131 @@ class ModelClipEditor(QFrame):
         self.waveform.zoom_changed.connect(self.zoom_slider.setValue)
 
         result_header, result_row = self._build_result_area()
-        review_bar = self._build_review_bar()
+        self.command_bar = self._build_command_bar()
         self.cleanup_bar = self._build_cleanup_bar()
         self.analysis_bar = self._build_analysis_bar()
-        self.secondary_tools = self._build_secondary_tools()
+        self.audio_inspector = AudioToolInspector(
+            self.cleanup_bar,
+            self.analysis_bar,
+            self,
+        )
+        self.cleanup_tool_button = self.audio_inspector.cleanup_button
+        self.analysis_tool_button = self.audio_inspector.analysis_button
+        self.tool_stack = self.audio_inspector.stack
+        self.secondary_tools = self.audio_inspector
+
+        work_area = TransparentContainer(self, object_name="DatasetEditorWorkArea")
+        work_layout = QVBoxLayout(work_area)
+        work_layout.setContentsMargins(0, 0, 0, 0)
+        work_layout.setSpacing(8)
+        work_layout.addWidget(self.waveform, 1)
+        work_layout.addLayout(result_header)
+        work_layout.addLayout(result_row)
+        work_layout.addWidget(self.command_bar)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(10)
+        body.addWidget(work_area, 1)
+        body.addWidget(self.audio_inspector)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
-        layout.addLayout(header)
-        layout.addWidget(self.waveform, 1)
-        layout.addLayout(result_header)
-        layout.addLayout(result_row)
-        layout.addWidget(review_bar)
-        layout.addWidget(self.secondary_tools)
+        layout.addWidget(self.editor_header)
+        layout.addLayout(body, 1)
         self.setMinimumHeight(420)
 
-    def _build_header(self) -> QHBoxLayout:
-        self.title_label = QLabel("Clip Editor")
-        self.title_label.setObjectName("DatasetEditorTitle")
-        self.detail_label = QLabel("")
-        self.detail_label.setObjectName("DatasetEditorMeta")
-        identity = QVBoxLayout()
-        identity.setContentsMargins(0, 0, 0, 0)
-        identity.setSpacing(2)
-        identity.addWidget(self.title_label)
-        identity.addWidget(self.detail_label)
-
-        self.review_badge = QLabel("UNREVIEWED")
-        self.review_badge.setObjectName("DatasetReviewBadge")
-        self.review_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.previous_button = _icon_button("arrow_left", "Previous training audio")
+    def _build_header(self) -> ClipEditorHeader:
+        header = ClipEditorHeader(self)
+        self.title_label = header.title_label
+        self.detail_label = header.detail_label
+        self.review_badge = header.review_badge
+        self.previous_button = header.previous_button
         self.previous_button.clicked.connect(lambda: self.navigate_requested.emit(-1))
-        self.next_button = _icon_button("arrow_right", "Next training audio")
+        self.next_button = header.next_button
         self.next_button.clicked.connect(lambda: self.navigate_requested.emit(1))
-        self.ready_button = FeedbackButton("Finish  R")
-        self.ready_button.setObjectName("DatasetReadyButton")
-        _size_review_action(self.ready_button)
-        set_translated_tooltip(
-            self.ready_button,
-            "Mark ready and continue to the next audio (R)",
-        )
-        self.ready_button.clicked.connect(self.ready_requested.emit)
-        self.close_button = _icon_button("close", "Close editor")
+        self.close_button = header.close_button
         self.close_button.clicked.connect(self.close_requested.emit)
-
-        self.zoom_label = QLabel("1x")
-        self.zoom_label.setObjectName("DatasetEditorMeta")
-        self.zoom_label.setFixedWidth(28)
-        self.zoom_slider = ScrollSafeSlider(Qt.Orientation.Horizontal)
-        self.zoom_slider.setObjectName("DatasetZoomSlider")
-        self.zoom_slider.setRange(1, 12)
-        self.zoom_slider.setValue(1)
-        self.zoom_slider.setFixedWidth(140)
+        self.zoom_label = header.zoom_label
+        self.zoom_slider = header.zoom_slider
         self.zoom_slider.valueChanged.connect(self._set_zoom)
-
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(8)
-        header.addLayout(identity)
-        header.addWidget(self.review_badge)
-        header.addStretch(1)
-        header.addWidget(QLabel("ZOOM"))
-        header.addWidget(self.zoom_slider)
-        header.addWidget(self.zoom_label)
-        header.addWidget(self.close_button)
         return header
 
-    def _build_review_bar(self) -> QFrame:
-        self.review_bar = QFrame()
-        self.review_bar.setObjectName("DatasetReviewBar")
+    def _build_command_bar(self) -> ClipCommandBar:
         self.play_button = _icon_button("play", "Preview selection (Space)")
+        self.play_button.setObjectName("DatasetFlatIconButton")
         self.play_button.clicked.connect(self._toggle_playback)
-        self.play_shortcut_badge = QLabel("SPACE")
-        self.play_shortcut_badge.setObjectName("DatasetShortcutKey")
-        set_translated_tooltip(
-            self.play_shortcut_badge,
-            "Preview selection (Space)",
-        )
         self.loop_button = _icon_button("repeat", "Loop selection")
+        self.loop_button.setObjectName("DatasetFlatIconButton")
         self.loop_button.setCheckable(True)
         self.split_button = _icon_button("split", "Split selected clip at playhead")
+        self.split_button.setObjectName("DatasetFlatIconButton")
         self.split_button.clicked.connect(self._emit_split_clip)
+        self.more_button = _icon_button("more_horizontal", "More clip actions")
+        self.more_button.setObjectName("DatasetFlatIconButton")
+        self.more_button.clicked.connect(self._show_clip_actions_menu)
+        self._build_clip_actions_menu()
         self.position_label = QLabel("00:00.0")
         self.position_label.setObjectName("DatasetEditorTime")
         self.selection_label = QLabel("Select a range")
         self.selection_label.setObjectName("DatasetEditorSelection")
+        self.ready_button = FeedbackButton("Finish  T")
+        self.ready_button.setObjectName("DatasetReadyButton")
+        _size_review_action(self.ready_button)
+        set_translated_tooltip(
+            self.ready_button,
+            "Mark ready and continue to the next audio (T)",
+        )
+        self.ready_button.clicked.connect(self.ready_requested.emit)
+        command_bar = ClipCommandBar(
+            play_button=self.play_button,
+            loop_button=self.loop_button,
+            position_label=self.position_label,
+            selection_label=self.selection_label,
+            action_stack=self.action_stack,
+            review_actions=self.review_actions,
+            ready_button=self.ready_button,
+            split_button=self.split_button,
+            more_button=self.more_button,
+            parent=self,
+        )
+        self.review_bar = command_bar
+        self.play_shortcut_badge = command_bar.play_shortcut_badge
+        return command_bar
 
-        layout = QHBoxLayout(self.review_bar)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(7)
-        layout.addWidget(self.previous_button)
-        layout.addWidget(self.play_button)
-        layout.addWidget(self.play_shortcut_badge)
-        layout.addWidget(self.next_button)
-        layout.addSpacing(3)
-        layout.addWidget(self.action_stack)
-        layout.addWidget(self.ready_button)
-        layout.addStretch(1)
-        layout.addWidget(self.position_label)
-        layout.addWidget(self.selection_label)
-        layout.addWidget(self.loop_button)
-        layout.addWidget(self.split_button)
-        return self.review_bar
+    def _build_cleanup_bar(self) -> DenoiseToolPanel:
+        panel = DenoiseToolPanel(self)
+        panel.capture_sample_requested.connect(self._capture_noise_sample)
+        panel.clear_sample_requested.connect(self._clear_noise_sample)
+        panel.reference_mode_changed.connect(self._on_noise_reference_mode_changed)
+        panel.preview_requested.connect(self._emit_denoise_preview)
+        panel.apply_requested.connect(self._emit_denoise)
+        panel.remove_requested.connect(self.remove_denoise_requested.emit)
+        panel.source_requested.connect(self._set_preview_version)
+        panel.strength_slider.valueChanged.connect(self._invalidate_denoise_preview)
 
-    def _build_cleanup_bar(self) -> QFrame:
-        cleanup_bar = QFrame()
-        cleanup_bar.setObjectName("DatasetToolPanel")
-        layout = QVBoxLayout(cleanup_bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
-        label = QLabel("NOISE CLEANUP")
-        label.setObjectName("DatasetAnalysisLabel")
+        self.original_source_button = panel.original_button
+        self.denoised_source_button = panel.processed_button
+        self.set_noise_sample_button = panel.sample_button
+        self.noise_sample_label = panel.sample_status_label
+        self.clear_noise_sample_button = panel.clear_sample_button
+        self.denoise_slider = panel.strength_slider
+        self.denoise_value_label = panel.strength_value_label
+        self.apply_denoise_button = panel.apply_button
+        self.preview_denoise_button = panel.preview_button
+        self.restore_denoise_button = panel.restore_button
+        return panel
 
-        source_control = QFrame()
-        source_control.setObjectName("DatasetResultTabs")
-        source_layout = QHBoxLayout(source_control)
-        source_layout.setContentsMargins(2, 2, 2, 2)
-        source_layout.setSpacing(0)
-        self.original_source_button = FeedbackButton("Original")
-        self.denoised_source_button = FeedbackButton("Denoised")
-        self.source_button_group = QButtonGroup(self)
-        self.source_button_group.setExclusive(True)
-        for index, button in enumerate((self.original_source_button, self.denoised_source_button)):
-            button.setObjectName("DatasetResultTab")
-            button.setCheckable(True)
-            self.source_button_group.addButton(button, index)
-            source_layout.addWidget(button)
-        self.original_source_button.setChecked(True)
-        self.original_source_button.clicked.connect(lambda: self._set_preview_version("original"))
-        self.denoised_source_button.clicked.connect(lambda: self._set_preview_version("denoised"))
-
-        self.set_noise_sample_button = FeedbackButton("Set Noise Sample")
-        self.set_noise_sample_button.setObjectName("DatasetEditorSecondaryButton")
-        self.set_noise_sample_button.clicked.connect(self._capture_noise_sample)
-        self.noise_sample_label = QLabel("")
-        self.noise_sample_label.setObjectName("DatasetEditorTime")
-        self.clear_noise_sample_button = _icon_button("close", "Clear noise sample", 26)
-        self.clear_noise_sample_button.clicked.connect(self._clear_noise_sample)
-
-        self.denoise_slider = ScrollSafeSlider(Qt.Orientation.Horizontal)
-        self.denoise_slider.setObjectName("DatasetDenoiseSlider")
-        self.denoise_slider.setRange(0, 100)
-        self.denoise_slider.setValue(50)
-        self.denoise_slider.setFixedWidth(160)
-        self.denoise_slider.valueChanged.connect(self._refresh_denoise_strength)
-        self.denoise_value_label = QLabel("50%")
-        self.denoise_value_label.setObjectName("DatasetEditorTime")
-        self.denoise_value_label.setFixedWidth(36)
-        self.remove_denoise_button = FeedbackButton("Remove Denoise")
-        self.remove_denoise_button.setObjectName("DatasetEditorSecondaryButton")
-        self.remove_denoise_button.clicked.connect(self.remove_denoise_requested.emit)
-        self.apply_denoise_button = FeedbackButton("Apply Denoise")
-        self.apply_denoise_button.setObjectName("PrimaryButton")
-        self.apply_denoise_button.clicked.connect(self._emit_denoise)
-
-        source_row = QHBoxLayout()
-        source_row.setContentsMargins(0, 0, 0, 0)
-        source_row.setSpacing(8)
-        source_row.addWidget(label)
-        source_row.addWidget(source_control)
-        source_row.addWidget(self.set_noise_sample_button)
-        source_row.addWidget(self.noise_sample_label)
-        source_row.addWidget(self.clear_noise_sample_button)
-        source_row.addStretch(1)
-
-        strength_row = QHBoxLayout()
-        strength_row.setContentsMargins(0, 0, 0, 0)
-        strength_row.setSpacing(8)
-        strength_row.addWidget(QLabel("Strength"))
-        strength_row.addWidget(self.denoise_slider)
-        strength_row.addWidget(self.denoise_value_label)
-        strength_row.addStretch(1)
-        strength_row.addWidget(self.remove_denoise_button)
-        strength_row.addWidget(self.apply_denoise_button)
-        layout.addLayout(source_row)
-        layout.addLayout(strength_row)
-        return cleanup_bar
-
-    def _build_analysis_bar(self) -> QFrame:
-        analysis_bar = QFrame()
-        analysis_bar.setObjectName("DatasetToolPanel")
-        layout = QVBoxLayout(analysis_bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
-        label = QLabel("SILENCE GUIDE")
-        label.setObjectName("DatasetAnalysisLabel")
-        self.threshold_spin = _analysis_spin(-80, -10, -40, " dB", 1)
-        self.silence_spin = _analysis_spin(100, 5000, 500, " ms", 100)
-        self.padding_spin = _analysis_spin(0, 1000, 120, " ms", 20)
-        self.max_clip_spin = _analysis_spin(3, 30, 12, " s", 1)
-        self.analyze_button = FeedbackButton("Analyze")
-        self.analyze_button.setObjectName("DatasetAnalyzeButton")
-        self.analyze_button.clicked.connect(self._emit_analyze)
-
-        detection_row = QHBoxLayout()
-        detection_row.setContentsMargins(0, 0, 0, 0)
-        detection_row.setSpacing(7)
-        detection_row.addWidget(label)
-        detection_row.addWidget(QLabel("Threshold"))
-        detection_row.addWidget(self.threshold_spin)
-        detection_row.addWidget(QLabel("Silence"))
-        detection_row.addWidget(self.silence_spin)
-        detection_row.addStretch(1)
-
-        shaping_row = QHBoxLayout()
-        shaping_row.setContentsMargins(0, 0, 0, 0)
-        shaping_row.setSpacing(7)
-        shaping_row.addWidget(QLabel("Padding"))
-        shaping_row.addWidget(self.padding_spin)
-        shaping_row.addWidget(QLabel("Max Clip"))
-        shaping_row.addWidget(self.max_clip_spin)
-        shaping_row.addStretch(1)
-        shaping_row.addWidget(self.analyze_button)
-        layout.addLayout(detection_row)
-        layout.addLayout(shaping_row)
-        return analysis_bar
-
-    def _build_secondary_tools(self) -> QFrame:
-        self.cleanup_tool_button = FeedbackButton("Cleanup")
-        self.analysis_tool_button = FeedbackButton("Detection")
-        for index, button in enumerate(
-            (self.cleanup_tool_button, self.analysis_tool_button)
-        ):
-            button.setObjectName("DatasetResultTab")
-            button.setCheckable(True)
-            button.setAutoExclusive(True)
-            button.clicked.connect(
-                lambda _checked=False, page=index: self.tool_stack.setCurrentIndex(page)
-            )
-        self.cleanup_tool_button.setChecked(True)
-
-        tabs = QFrame()
-        tabs.setObjectName("DatasetResultTabs")
-        tabs_layout = QHBoxLayout(tabs)
-        tabs_layout.setContentsMargins(2, 2, 2, 2)
-        tabs_layout.setSpacing(0)
-        tabs_layout.addWidget(self.cleanup_tool_button)
-        tabs_layout.addWidget(self.analysis_tool_button)
-
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(8)
-        title = QLabel("AUDIO TOOLS")
-        title.setObjectName("DatasetAnalysisLabel")
-        header.addWidget(title)
-        header.addWidget(tabs)
-        header.addStretch(1)
-
-        self.tool_stack = QStackedWidget()
-        self.tool_stack.setObjectName("DatasetToolStack")
-        self.tool_stack.addWidget(self.cleanup_bar)
-        self.tool_stack.addWidget(self.analysis_bar)
-
-        tools = QFrame()
-        tools.setObjectName("DatasetSecondaryTools")
-        tools_layout = QVBoxLayout(tools)
-        tools_layout.setContentsMargins(10, 7, 10, 8)
-        tools_layout.setSpacing(6)
-        tools_layout.addLayout(header)
-        tools_layout.addWidget(self.tool_stack)
-        return tools
+    def _build_analysis_bar(self) -> RegionDetectionToolPanel:
+        panel = RegionDetectionToolPanel(self)
+        panel.analyze_requested.connect(self._emit_analyze)
+        self.threshold_spin = panel.threshold_spin
+        self.silence_spin = panel.silence_spin
+        self.padding_spin = panel.padding_spin
+        self.max_clip_spin = panel.max_clip_spin
+        self.analyze_button = panel.analyze_button
+        return panel
 
     def _build_result_area(self) -> tuple[QHBoxLayout, QHBoxLayout]:
         self.queue_tab = FeedbackButton("Queue 0")
@@ -399,12 +290,13 @@ class ModelClipEditor(QFrame):
         self.result_stack.addWidget(self.clip_list)
         self.result_stack.setFixedHeight(54)
 
+        self.review_actions = self._build_review_actions()
         self.action_stack = QStackedWidget()
         self.action_stack.setObjectName("DatasetActionStack")
-        self.action_stack.addWidget(self._build_candidate_actions())
         self.action_stack.addWidget(self._build_clip_actions())
-        self.action_stack.setCurrentIndex(1)
         self.action_stack.setFixedHeight(32)
+        self._resize_action_stack()
+        self.action_stack.hide()
 
         result_row = QHBoxLayout()
         result_row.setContentsMargins(0, 0, 0, 0)
@@ -412,12 +304,11 @@ class ModelClipEditor(QFrame):
         result_row.addWidget(self.result_stack, 1)
         return result_header, result_row
 
-    def _build_candidate_actions(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("DatasetActionPage")
-        self.queue_candidate_button = FeedbackButton("Queue")
-        self.hold_candidate_button = FeedbackButton("Hold  H")
-        self.exclude_candidate_button = FeedbackButton("Exclude  X")
+    def _build_review_actions(self) -> QWidget:
+        page = TransparentContainer(self, object_name="DatasetActionPage")
+        self.queue_candidate_button = FeedbackButton("Queue  Q")
+        self.hold_candidate_button = FeedbackButton("Hold  W")
+        self.exclude_candidate_button = FeedbackButton("Exclude  E")
         for button, status in (
             (self.queue_candidate_button, SEGMENT_PENDING),
             (self.hold_candidate_button, SEGMENT_HELD),
@@ -426,12 +317,13 @@ class ModelClipEditor(QFrame):
             button.setObjectName("DatasetEditorSecondaryButton")
             _size_review_action(button)
             button.clicked.connect(lambda _checked=False, value=status: self._set_candidate_status(value))
-        set_translated_tooltip(self.hold_candidate_button, "Hold region (H)")
-        set_translated_tooltip(self.exclude_candidate_button, "Exclude region (X)")
-        self.use_candidate_button = FeedbackButton("Use  A")
+        set_translated_tooltip(self.queue_candidate_button, "Queue region (Q)")
+        set_translated_tooltip(self.hold_candidate_button, "Hold region (W)")
+        set_translated_tooltip(self.exclude_candidate_button, "Exclude region (E)")
+        self.use_candidate_button = FeedbackButton("Use  R")
         self.use_candidate_button.setObjectName("DatasetEditorPrimaryButton")
         _size_review_action(self.use_candidate_button)
-        set_translated_tooltip(self.use_candidate_button, "Use region (A)")
+        set_translated_tooltip(self.use_candidate_button, "Use region (R)")
         self.use_candidate_button.clicked.connect(self._emit_use_candidate)
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -443,44 +335,66 @@ class ModelClipEditor(QFrame):
         return page
 
     def _build_clip_actions(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("DatasetActionPage")
-        self.remove_clip_button = _icon_button("trash", "Remove selected clip")
-        self.remove_clip_button.clicked.connect(self._remove_selected_clip)
+        page = TransparentContainer(self, object_name="DatasetActionPage")
         self.undo_button = _icon_button("undo", "Undo edit")
+        self.undo_button.setObjectName("DatasetFlatIconButton")
         self.undo_button.clicked.connect(self.undo_requested.emit)
         self.redo_button = _icon_button("redo", "Redo edit")
+        self.redo_button.setObjectName("DatasetFlatIconButton")
         self.redo_button.clicked.connect(self.redo_requested.emit)
-        self.reset_button = FeedbackButton("Reset Original")
-        self.reset_button.setObjectName("DatasetEditorSecondaryButton")
-        _size_review_action(self.reset_button)
-        self.reset_button.clicked.connect(self.reset_requested.emit)
-        self.add_clip_button = FeedbackButton("Add Clip")
+        self.add_clip_button = FeedbackButton("Add Selection")
         self.add_clip_button.setObjectName("DatasetEditorPrimaryButton")
         _size_review_action(self.add_clip_button)
         self.add_clip_button.clicked.connect(self._emit_add_clip)
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(7)
-        layout.addWidget(self.remove_clip_button)
         layout.addWidget(self.undo_button)
         layout.addWidget(self.redo_button)
-        layout.addWidget(self.reset_button)
         layout.addWidget(self.add_clip_button)
         return page
+
+    def _build_clip_actions_menu(self) -> None:
+        self.clip_actions_menu = QMenu(self)
+        self.remove_clip_action = QAction(self.clip_actions_menu)
+        self.remove_clip_action.triggered.connect(self._remove_selected_clip)
+        self.reset_action = QAction(self.clip_actions_menu)
+        self.reset_action.triggered.connect(self.reset_requested.emit)
+        self.clip_actions_menu.addAction(self.remove_clip_action)
+        self.clip_actions_menu.addSeparator()
+        self.clip_actions_menu.addAction(self.reset_action)
+        self._refresh_clip_action_translations()
+
+    def _show_clip_actions_menu(self) -> None:
+        position = self.more_button.mapToGlobal(QPoint(0, self.more_button.height() + 4))
+        self.clip_actions_menu.popup(position)
+
+    def _refresh_clip_action_translations(self) -> None:
+        self.remove_clip_action.setText(tr("Remove selected clip"))
+        self.reset_action.setText(tr("Reset Original"))
 
     def _install_shortcuts(self) -> None:
         bindings = (
             ("Space", self.play_button.click),
-            ("A", self.use_candidate_button.click),
-            ("H", self.hold_candidate_button.click),
-            ("X", self.exclude_candidate_button.click),
-            ("R", self.ready_button.click),
+            ("Q", self.queue_candidate_button.click),
+            ("W", self.hold_candidate_button.click),
+            ("E", self.exclude_candidate_button.click),
+            ("R", self.use_candidate_button.click),
+            ("T", self.ready_button.click),
         )
         self._review_shortcuts: list[QShortcut] = []
+        self._review_shortcut_actions = {
+            Qt.Key.Key_Space: self.play_button.click,
+            Qt.Key.Key_Q: self.queue_candidate_button.click,
+            Qt.Key.Key_W: self.hold_candidate_button.click,
+            Qt.Key.Key_E: self.exclude_candidate_button.click,
+            Qt.Key.Key_R: self.use_candidate_button.click,
+            Qt.Key.Key_T: self.ready_button.click,
+        }
+        self._shortcut_filter_installed = False
         for sequence, callback in bindings:
             shortcut = QShortcut(QKeySequence(sequence), self)
-            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
             shortcut.activated.connect(callback)
             shortcut.setEnabled(False)
             self._review_shortcuts.append(shortcut)
@@ -500,6 +414,9 @@ class ModelClipEditor(QFrame):
         previous_candidate_filter = self._candidate_filter
         previous_clip_id = self._selected_clip_id() if same_item else ""
         self.stop_preview()
+        self._clear_temporary_denoise_preview()
+        if not same_item:
+            self._analysis_stale = False
         self._item = item
         self.clip_list.clear()
         self._clear_candidates()
@@ -515,6 +432,7 @@ class ModelClipEditor(QFrame):
             self._noise_sample_end_ms = 0
             self.original_source_button.setChecked(True)
             self._refresh_noise_sample()
+            self.analysis_bar.set_result(0)
             self._sync_action_state()
             self._sync_shortcut_state()
             return
@@ -533,6 +451,10 @@ class ModelClipEditor(QFrame):
         self.denoised_source_button.setChecked(self._preview_version == "denoised")
         self._refresh_noise_sample()
         self.waveform.set_audio(item.active_audio_path, item.duration_ms, item.clips)
+        self.waveform.set_noise_sample(
+            self._noise_sample_start_ms,
+            self._noise_sample_end_ms,
+        )
         self.waveform.set_selection(0, item.duration_ms)
         for index, clip in enumerate(item.clips, start=1):
             list_item = QListWidgetItem(
@@ -567,17 +489,35 @@ class ModelClipEditor(QFrame):
         else:
             self.zoom_slider.setValue(1)
         self._refresh_time_labels()
+        self.analysis_bar.set_result(
+            len(item.segment_candidates),
+            stale=self._analysis_stale,
+        )
         self._sync_action_state()
         self._sync_shortcut_state()
 
-    def set_navigation_state(self, has_previous: bool, has_next: bool) -> None:
+    def set_navigation_state(
+        self,
+        has_previous: bool,
+        has_next: bool,
+        current_number: int = 0,
+        total_count: int = 0,
+    ) -> None:
         self._has_previous = has_previous
         self._has_next = has_next
+        self.editor_header.set_navigation(
+            has_previous,
+            has_next,
+            current_number,
+            total_count,
+        )
         self._sync_action_state()
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
         self.waveform.set_theme_mode(theme_mode)
+        self.editor_header.set_theme_mode(theme_mode)
+        self.audio_inspector.set_theme_mode(theme_mode)
         for button in self._icon_buttons():
             button.set_theme_mode(theme_mode)
 
@@ -592,24 +532,82 @@ class ModelClipEditor(QFrame):
         self._refresh_result_tabs()
         self._populate_candidate_list()
         self._refresh_noise_sample()
+        self._refresh_clip_action_translations()
+        self.cleanup_bar.apply_language()
+        self.analysis_bar.apply_language()
         self._sync_action_state()
 
     def set_busy(self, is_busy: bool) -> None:
         self._is_busy = is_busy
         for widget in self._interactive_widgets():
             widget.setDisabled(is_busy)
-        if not is_busy:
-            self._sync_action_state()
+        self._sync_action_state()
         self._sync_shortcut_state()
+
+    def set_tool_processing(self, tool: str, is_processing: bool, progress: int = 0) -> None:
+        if tool == "denoise":
+            self.cleanup_bar.set_processing(is_processing, progress)
+        elif tool == "analysis":
+            self.analysis_bar.set_processing(is_processing, progress)
+
+    def set_tool_progress(self, tool: str, progress: int) -> None:
+        if tool == "denoise":
+            self.cleanup_bar.set_progress(progress)
+        elif tool == "analysis":
+            self.analysis_bar.set_progress(progress)
+
+    def set_analysis_stale(self, is_stale: bool) -> None:
+        self._analysis_stale = is_stale
+        count = len(self._item.segment_candidates) if self._item is not None else 0
+        self.analysis_bar.set_result(count, stale=is_stale)
+
+    def set_denoise_preview(self, path: Path, start_ms: int, end_ms: int) -> None:
+        self._denoise_preview_path = path
+        self._denoise_preview_start_ms = max(0, start_ms)
+        self._denoise_preview_end_ms = max(self._denoise_preview_start_ms, end_ms)
+        self._selection_start_ms = self._denoise_preview_start_ms
+        self._selection_end_ms = self._denoise_preview_end_ms
+        self._play_position_ms = self._selection_start_ms
+        self.waveform.set_selection(self._selection_start_ms, self._selection_end_ms)
+        self._set_preview_version("denoised")
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        application = QApplication.instance()
+        if application is not None and not self._shortcut_filter_installed:
+            application.installEventFilter(self)
+            self._shortcut_filter_installed = True
         self._sync_shortcut_state()
+        QTimer.singleShot(0, self._sync_shortcut_state)
 
     def hideEvent(self, event) -> None:  # noqa: N802
+        application = QApplication.instance()
+        if application is not None and self._shortcut_filter_installed:
+            application.removeEventFilter(self)
+            self._shortcut_filter_installed = False
         for shortcut in self._review_shortcuts:
             shortcut.setEnabled(False)
         super().hideEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and not event.isAutoRepeat()
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+            and self.isVisible()
+            and self._item is not None
+            and not self._is_busy
+        ):
+            focus = QApplication.focusWidget()
+            if not isinstance(
+                focus,
+                (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox),
+            ):
+                action = self._review_shortcut_actions.get(event.key())
+                if action is not None:
+                    action()
+                    return True
+        return super().eventFilter(watched, event)
 
     def stop_preview(self) -> None:
         self._player.stop()
@@ -632,15 +630,29 @@ class ModelClipEditor(QFrame):
     def _set_preview_version(self, version: str) -> None:
         if self._item is None:
             return
-        if version == "denoised" and not self._item.has_denoised_audio:
+        has_temporary_preview = bool(
+            self._denoise_preview_path and self._denoise_preview_path.is_file()
+        )
+        if version == "denoised" and not (self._item.has_denoised_audio or has_temporary_preview):
             version = "original"
-        self.stop_preview()
+        was_playing = self._player.is_playing()
+        if was_playing:
+            self._play_position_ms = self._global_playback_position()
+        self._player.stop()
+        self._playback_timer.stop()
+        self.play_button.set_icon_name("play")
         self._preview_version = version
         self.original_source_button.setChecked(version == "original")
         self.denoised_source_button.setChecked(version == "denoised")
-        self.waveform.set_audio(self._preview_audio_path(), self._item.duration_ms, self._item.clips)
+        view_state = self.waveform.view_state()
+        self.waveform.set_audio(self._waveform_audio_path(), self._item.duration_ms, self._item.clips)
         self.waveform.set_zoom(self.zoom_slider.value())
+        self.waveform.restore_view_state(view_state)
         self.waveform.set_selection(self._selection_start_ms, self._selection_end_ms)
+        self.waveform.set_noise_sample(
+            self._noise_sample_start_ms,
+            self._noise_sample_end_ms,
+        )
         clip_id = self._selected_clip_id()
         if clip_id:
             self.waveform.select_clip(clip_id)
@@ -648,20 +660,31 @@ class ModelClipEditor(QFrame):
             self._refresh_candidate_overlays()
         self.waveform.set_playhead(self._play_position_ms)
         self._sync_action_state()
+        if was_playing:
+            self._start_playback()
 
-    def _preview_audio_path(self) -> Path:
+    def _waveform_audio_path(self) -> Path:
         if self._item is None:
             return Path()
         if self._preview_version == "denoised" and self._item.has_denoised_audio:
             return self._item.denoised_path or self._item.working_path
         return self._item.working_path
 
-    def _refresh_denoise_strength(self, value: int) -> None:
-        self.denoise_value_label.setText(f"{value}%")
+    def _playback_audio(self) -> tuple[Path, int]:
+        if self._item is None:
+            return (Path(), 0)
+        if (
+            self._preview_version == "denoised"
+            and self._denoise_preview_path is not None
+            and self._denoise_preview_path.is_file()
+        ):
+            return (self._denoise_preview_path, self._denoise_preview_start_ms)
+        return (self._waveform_audio_path(), 0)
 
     def _capture_noise_sample(self) -> None:
-        if self._selection_end_ms - self._selection_start_ms < 100:
+        if self._selection_end_ms - self._selection_start_ms < 500:
             return
+        self._invalidate_denoise_preview()
         self._noise_sample_start_ms = self._selection_start_ms
         self._noise_sample_end_ms = self._selection_end_ms
         self._refresh_noise_sample()
@@ -670,26 +693,83 @@ class ModelClipEditor(QFrame):
     def _clear_noise_sample(self) -> None:
         self._noise_sample_start_ms = 0
         self._noise_sample_end_ms = 0
+        self._invalidate_denoise_preview()
         self._refresh_noise_sample()
+        self._sync_action_state()
+
+    def _on_noise_reference_mode_changed(self, _mode: str) -> None:
+        self._invalidate_denoise_preview()
         self._sync_action_state()
 
     def _refresh_noise_sample(self) -> None:
         has_sample = self._noise_sample_end_ms - self._noise_sample_start_ms >= 100
-        self.noise_sample_label.setText(
-            f"{_format_editor_time(self._noise_sample_start_ms)} - "
-            f"{_format_editor_time(self._noise_sample_end_ms)}"
-            if has_sample
-            else tr("No sample")
+        self.cleanup_bar.set_noise_sample(
+            self._noise_sample_start_ms,
+            self._noise_sample_end_ms,
         )
-        self.clear_noise_sample_button.setVisible(has_sample)
+        if hasattr(self, "waveform"):
+            self.waveform.set_noise_sample(
+                self._noise_sample_start_ms if has_sample else 0,
+                self._noise_sample_end_ms if has_sample else 0,
+            )
 
     def _emit_denoise(self) -> None:
         if self._item is not None:
+            sample_start_ms, sample_end_ms = self._active_noise_sample()
             self.denoise_requested.emit(
                 self.denoise_slider.value(),
-                self._noise_sample_start_ms,
-                self._noise_sample_end_ms,
+                sample_start_ms,
+                sample_end_ms,
             )
+
+    def _emit_denoise_preview(self) -> None:
+        if self._item is None:
+            return
+        start_ms, end_ms = self._bounded_preview_range()
+        if end_ms - start_ms < 100:
+            return
+        sample_start_ms, sample_end_ms = self._active_noise_sample()
+        self.denoise_preview_requested.emit(
+            self.denoise_slider.value(),
+            sample_start_ms,
+            sample_end_ms,
+            start_ms,
+            end_ms,
+        )
+
+    def _active_noise_sample(self) -> tuple[int, int]:
+        if self.cleanup_bar.reference_mode() != "selection":
+            return (0, 0)
+        return (self._noise_sample_start_ms, self._noise_sample_end_ms)
+
+    def _bounded_preview_range(self) -> tuple[int, int]:
+        maximum = 12000
+        start_ms = self._selection_start_ms
+        end_ms = self._selection_end_ms
+        if end_ms - start_ms <= maximum:
+            return (start_ms, end_ms)
+        anchor = max(start_ms, min(self._play_position_ms, end_ms))
+        preview_start = max(start_ms, anchor - maximum // 2)
+        preview_end = min(end_ms, preview_start + maximum)
+        preview_start = max(start_ms, preview_end - maximum)
+        return (preview_start, preview_end)
+
+    def _invalidate_denoise_preview(self, _value: int | None = None) -> None:
+        had_preview = self._denoise_preview_path is not None
+        if had_preview and self._player.is_playing():
+            self.stop_preview()
+        self._clear_temporary_denoise_preview()
+        if had_preview and self._preview_version == "denoised" and not (
+            self._item and self._item.has_denoised_audio
+        ):
+            self._preview_version = "original"
+        if hasattr(self, "cleanup_bar"):
+            self._sync_action_state()
+
+    def _clear_temporary_denoise_preview(self) -> None:
+        self._denoise_preview_path = None
+        self._denoise_preview_start_ms = 0
+        self._denoise_preview_end_ms = 0
 
     def _refresh_item_detail(self) -> None:
         if self._item is None:
@@ -706,9 +786,11 @@ class ModelClipEditor(QFrame):
         self.detail_label.setText("  /  ".join(parts))
 
     def _on_selection_changed(self, start_ms: int, end_ms: int) -> None:
+        self._invalidate_denoise_preview()
         self._set_selection_state(start_ms, end_ms, start_ms)
 
     def _on_clip_preview_changed(self, start_ms: int, end_ms: int) -> None:
+        self._invalidate_denoise_preview()
         self._selection_start_ms = start_ms
         self._selection_end_ms = end_ms
         self._play_position_ms = max(start_ms, min(self._play_position_ms, end_ms))
@@ -762,7 +844,7 @@ class ModelClipEditor(QFrame):
         if self._item is None:
             return
         if self._player.is_playing():
-            self._play_position_ms = self._player.position_ms()
+            self._play_position_ms = self._global_playback_position()
             self._player.pause()
             self._playback_timer.stop()
             self.play_button.set_icon_name("play")
@@ -773,11 +855,27 @@ class ModelClipEditor(QFrame):
         if self._item is None:
             return
         try:
-            preview_path = prepare_preview_audio(self._preview_audio_path())
+            source_path, source_offset_ms = self._playback_audio()
+            preview_path = prepare_preview_audio(source_path)
+            using_bounded_preview = bool(
+                self._denoise_preview_path
+                and source_path == self._denoise_preview_path
+            )
+            source_end_ms = source_offset_ms + max(
+                0,
+                self._denoise_preview_end_ms - self._denoise_preview_start_ms,
+            )
             if not (self._selection_start_ms <= self._play_position_ms < self._selection_end_ms):
                 self._play_position_ms = self._selection_start_ms
+            if using_bounded_preview and not (
+                source_offset_ms <= self._play_position_ms < source_end_ms
+            ):
+                self._play_position_ms = source_offset_ms
             self.playback_started.emit()
-            self._player.play([preview_path], start_ms=self._play_position_ms)
+            self._player.play(
+                [preview_path],
+                start_ms=max(0, self._play_position_ms - source_offset_ms),
+            )
         except Exception as exc:
             self.stop_preview()
             self.playback_failed.emit(str(exc))
@@ -786,7 +884,7 @@ class ModelClipEditor(QFrame):
         self._playback_timer.start()
 
     def _sync_playback(self) -> None:
-        self._play_position_ms = self._player.position_ms()
+        self._play_position_ms = self._global_playback_position()
         if self._play_position_ms >= self._selection_end_ms:
             if self.loop_button.isChecked():
                 self._player.stop()
@@ -810,6 +908,10 @@ class ModelClipEditor(QFrame):
         if self._player.is_playing():
             self._player.stop()
             self._start_playback()
+
+    def _global_playback_position(self) -> int:
+        _source_path, source_offset_ms = self._playback_audio()
+        return source_offset_ms + self._player.position_ms()
 
     def _emit_add_clip(self) -> None:
         if self._selection_end_ms - self._selection_start_ms >= 100:
@@ -841,6 +943,10 @@ class ModelClipEditor(QFrame):
             )
 
     def _set_candidate_status(self, status: str) -> None:
+        clip_id = self._selected_clip_id()
+        if clip_id:
+            self.clip_status_requested.emit(clip_id, status)
+            return
         candidate = self._selected_candidate()
         if candidate is not None and candidate.status != status:
             self.candidate_status_requested.emit(candidate.candidate_id, status)
@@ -853,7 +959,8 @@ class ModelClipEditor(QFrame):
     def _show_candidate_page(self, status: str) -> None:
         self._candidate_filter = status
         self.result_stack.setCurrentIndex(0)
-        self.action_stack.setCurrentIndex(0)
+        self.action_stack.hide()
+        self._resize_action_stack()
         self.queue_tab.setChecked(status == SEGMENT_PENDING)
         self.held_tab.setChecked(status == SEGMENT_HELD)
         self.excluded_tab.setChecked(status == SEGMENT_REJECTED)
@@ -865,7 +972,8 @@ class ModelClipEditor(QFrame):
 
     def _show_clips_page(self, _checked: bool = False) -> None:
         self.result_stack.setCurrentIndex(1)
-        self.action_stack.setCurrentIndex(1)
+        self.action_stack.show()
+        self._resize_action_stack()
         self.queue_tab.setChecked(False)
         self.held_tab.setChecked(False)
         self.excluded_tab.setChecked(False)
@@ -873,6 +981,11 @@ class ModelClipEditor(QFrame):
         self.candidate_list.clearSelection()
         self.waveform.set_suggestions(())
         self._sync_action_state()
+
+    def _resize_action_stack(self) -> None:
+        page = self.action_stack.currentWidget()
+        if page is not None:
+            self.action_stack.setFixedWidth(max(1, page.sizeHint().width()))
 
     def _restore_result_selection(
         self,
@@ -896,6 +1009,14 @@ class ModelClipEditor(QFrame):
                 item = self.clip_list.item(index)
                 if item.data(Qt.ItemDataRole.UserRole) == clip_id:
                     self.clip_list.setCurrentRow(index)
+                    return True
+        restored_candidate = self._candidate_by_id(clip_id)
+        if restored_candidate is not None:
+            self._show_candidate_page(restored_candidate.status)
+            for index in range(self.candidate_list.count()):
+                item = self.candidate_list.item(index)
+                if item.data(Qt.ItemDataRole.UserRole) == clip_id:
+                    self.candidate_list.setCurrentRow(index)
                     return True
         return False
 
@@ -953,6 +1074,8 @@ class ModelClipEditor(QFrame):
         )
 
     def _selected_candidate_id(self) -> str:
+        if self.result_stack.currentIndex() != 0:
+            return ""
         current = self.candidate_list.currentItem()
         candidate_id = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
         return candidate_id if isinstance(candidate_id, str) else ""
@@ -969,6 +1092,8 @@ class ModelClipEditor(QFrame):
         )
 
     def _selected_clip_id(self) -> str:
+        if self.result_stack.currentIndex() != 1:
+            return ""
         current = self.clip_list.currentItem()
         clip_id = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
         return clip_id if isinstance(clip_id, str) else ""
@@ -984,6 +1109,7 @@ class ModelClipEditor(QFrame):
         self._selection_end_ms = end_ms
         self._play_position_ms = play_position_ms
         self.waveform.set_playhead(play_position_ms)
+        self.cleanup_bar.set_selection(start_ms, end_ms)
         self._refresh_time_labels()
         self._sync_action_state()
 
@@ -1010,48 +1136,71 @@ class ModelClipEditor(QFrame):
         self.play_button.setEnabled(available and has_selection)
         self.loop_button.setEnabled(available and has_selection)
         self.split_button.setEnabled(available and can_split)
-        self.analyze_button.setEnabled(available)
         has_denoised = bool(self._item and self._item.has_denoised_audio)
-        self.original_source_button.setEnabled(available)
-        self.denoised_source_button.setEnabled(available and has_denoised)
-        self.denoise_slider.setEnabled(available)
-        self.set_noise_sample_button.setEnabled(available and has_selection)
         has_noise_sample = self._noise_sample_end_ms - self._noise_sample_start_ms >= 100
-        self.clear_noise_sample_button.setEnabled(available and has_noise_sample)
-        self.apply_denoise_button.setEnabled(available)
-        self.remove_denoise_button.setEnabled(available and has_denoised)
-        set_translated_text(
-            self.apply_denoise_button,
-            "Update Denoise" if has_denoised else "Apply Denoise",
+        self.cleanup_bar.set_selection(self._selection_start_ms, self._selection_end_ms)
+        self.cleanup_bar.set_state(
+            available,
+            has_selection,
+            has_noise_sample,
+            has_denoised,
+            self._preview_version,
+            has_temporary_preview=bool(
+                self._denoise_preview_path and self._denoise_preview_path.is_file()
+            ),
+        )
+        self.analysis_bar.set_available(available)
+        self.analysis_bar.set_result(
+            len(self._item.segment_candidates) if self._item is not None else 0,
+            stale=self._analysis_stale,
         )
         self.add_clip_button.setEnabled(available and has_selection and selected_clip is None)
         selected_candidate = self._selected_candidate()
         has_candidate = available and selected_candidate is not None
+        has_clip = available and selected_clip is not None
         self.use_candidate_button.setEnabled(has_candidate)
-        self.queue_candidate_button.setEnabled(has_candidate and selected_candidate.status != SEGMENT_PENDING)
-        self.hold_candidate_button.setEnabled(has_candidate and selected_candidate.status != SEGMENT_HELD)
-        self.exclude_candidate_button.setEnabled(has_candidate and selected_candidate.status != SEGMENT_REJECTED)
-        self.remove_clip_button.setEnabled(available and selected_clip is not None)
+        self.queue_candidate_button.setEnabled(
+            has_clip or (has_candidate and selected_candidate.status != SEGMENT_PENDING)
+        )
+        self.hold_candidate_button.setEnabled(
+            has_clip or (has_candidate and selected_candidate.status != SEGMENT_HELD)
+        )
+        self.exclude_candidate_button.setEnabled(
+            has_clip or (has_candidate and selected_candidate.status != SEGMENT_REJECTED)
+        )
+        active_changed = self.use_candidate_button.property("active") != has_clip
+        self.use_candidate_button.setProperty("active", has_clip)
+        if active_changed:
+            self.use_candidate_button.style().unpolish(self.use_candidate_button)
+            self.use_candidate_button.style().polish(self.use_candidate_button)
+        self.remove_clip_action.setEnabled(available and selected_clip is not None)
         self.undo_button.setEnabled(available and bool(self._item and self._item.can_undo))
         self.redo_button.setEnabled(available and bool(self._item and self._item.can_redo))
-        self.reset_button.setEnabled(available)
+        self.reset_action.setEnabled(available)
         has_training_audio = bool(self._item and self._item.training_paths)
         is_ready = bool(self._item and self._item.review_state == REVIEW_READY)
         set_translated_text(
             self.ready_button,
-            "Done  R" if is_ready else "Finish  R",
+            "Done  T" if is_ready else "Finish  T",
         )
         has_open_segments = bool(self._item and self._item.open_segment_count)
         self.ready_button.setEnabled(available and has_training_audio and not has_open_segments and not is_ready)
         self.previous_button.setEnabled(available and self._has_previous)
         self.next_button.setEnabled(available and self._has_next)
+        clip_page_active = self.result_stack.currentIndex() == 1
+        self.split_button.setVisible(clip_page_active)
+        self.more_button.setVisible(clip_page_active)
+        self.more_button.setEnabled(
+            clip_page_active
+            and (self.remove_clip_action.isEnabled() or self.reset_action.isEnabled())
+        )
 
     def _refresh_time_labels(self) -> None:
         self.position_label.setText(_format_editor_time(self._play_position_ms))
         duration = max(0, self._selection_end_ms - self._selection_start_ms)
         self.selection_label.setText(
             f"{_format_editor_time(self._selection_start_ms)}  -  {_format_editor_time(self._selection_end_ms)}"
-            f"   /   {_format_editor_time(duration)}"
+            f"  ·  {_format_editor_time(duration)}"
         )
 
     def _sync_shortcut_state(self) -> None:
@@ -1059,14 +1208,14 @@ class ModelClipEditor(QFrame):
         for shortcut in self._review_shortcuts:
             shortcut.setEnabled(enabled)
 
-    def _icon_buttons(self) -> tuple[SvgIconButton, ...]:
+    def _icon_buttons(self) -> tuple[FeedbackButton, ...]:
         return (
             self.play_button,
             self.loop_button,
             self.split_button,
+            self.more_button,
             self.previous_button,
             self.next_button,
-            self.remove_clip_button,
             self.undo_button,
             self.redo_button,
             self.close_button,
@@ -1085,9 +1234,9 @@ class ModelClipEditor(QFrame):
             self.denoised_source_button,
             self.denoise_slider,
             self.set_noise_sample_button,
-            self.noise_sample_label,
-            self.remove_denoise_button,
             self.apply_denoise_button,
+            self.preview_denoise_button,
+            self.restore_denoise_button,
             self.analyze_button,
             self.cleanup_tool_button,
             self.analysis_tool_button,
@@ -1098,7 +1247,6 @@ class ModelClipEditor(QFrame):
             self.clips_tab,
             self.candidate_list,
             self.clip_list,
-            self.reset_button,
             self.add_clip_button,
             self.queue_candidate_button,
             self.hold_candidate_button,
@@ -1132,17 +1280,6 @@ def _icon_button(
 def _size_review_action(button: FeedbackButton) -> None:
     button.setFixedHeight(_REVIEW_CONTROL_SIZE)
     button.setMinimumWidth(_REVIEW_ACTION_MIN_WIDTH)
-
-
-def _analysis_spin(minimum: int, maximum: int, value: int, suffix: str, step: int) -> ScrollSafeSpinBox:
-    spin = ScrollSafeSpinBox()
-    spin.setObjectName("DatasetAnalysisSpin")
-    spin.setRange(minimum, maximum)
-    spin.setValue(value)
-    spin.setSuffix(suffix)
-    spin.setSingleStep(step)
-    spin.setFixedWidth(108)
-    return spin
 
 
 def _format_editor_time(milliseconds: int) -> str:

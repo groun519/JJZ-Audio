@@ -156,10 +156,31 @@ def _stylesheet(
 ) -> str:
     return f"""
         QWidget {{
-            background: {background};
             color: {text};
             font-family: "Malgun Gothic", "Segoe UI", "Arial";
             font-size: 13px;
+        }}
+
+        QMainWindow, QDialog,
+        QWidget[surfaceRole="background"] {{
+            background: {background};
+        }}
+
+        QWidget[surfaceRole="transparent"] {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QFrame[surfaceRole="surface"] {{
+            background: {surface};
+        }}
+
+        QFrame[surfaceRole="card"] {{
+            background: {card};
+        }}
+
+        QFrame[surfaceRole="raised"] {{
+            background: {raised};
         }}
 
         QLabel {{
@@ -233,33 +254,6 @@ def _stylesheet(
             background: {surface};
             border: 1px solid {border};
             border-radius: 16px;
-        }}
-
-        QFrame#FloatingPlaybackPanel {{
-            background: {surface};
-            border: 1px solid {border};
-            border-radius: 15px;
-        }}
-
-        QWidget#FloatingPlaybackHeader, QWidget#FloatingPlaybackTransport {{
-            background: transparent;
-            border: 0;
-        }}
-
-        #FloatingPlaybackTitle {{
-            color: {text};
-            font-size: 12px;
-            font-weight: 900;
-        }}
-
-        QPushButton#FloatingPlaybackClose {{
-            min-width: 28px;
-            max-width: 28px;
-            min-height: 28px;
-            max-height: 28px;
-            padding: 0;
-            border: 0;
-            background: transparent;
         }}
 
         QComboBox#WorkSongCombo {{
@@ -813,6 +807,70 @@ def _stylesheet(
             border: 1px solid {tab_active_border};
         }}
 
+        QFrame#LibraryPreviewDivider {{
+            background: {border};
+            border: 0;
+        }}
+
+        QWidget#LibraryPreviewTransport {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QFrame#LibrarySourceFilter {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QPushButton#LibrarySourceFlag {{
+            min-height: 28px;
+            max-height: 28px;
+            padding: 0 9px;
+            color: {muted};
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 9px;
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
+        QPushButton#LibrarySourceFlag:hover,
+        QPushButton#LibrarySourceFlag[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#LibrarySourceFlag:pressed,
+        QPushButton#LibrarySourceFlag[pointerState="pressed"] {{
+            color: {text};
+            background: {pressed};
+        }}
+
+        QPushButton#LibrarySourceFlag:checked {{
+            color: {tab_active_text};
+            background: {tab_active};
+            border-color: {tab_active_border};
+        }}
+
+        QPushButton#LibrarySourceFlag[sourceType="local"]:checked {{
+            color: {source_local_text};
+            background: {source_local_background};
+            border-color: {source_local_border};
+        }}
+
+        QPushButton#LibrarySourceFlag[sourceType="youtube"]:checked {{
+            color: {source_youtube_text};
+            background: {source_youtube_background};
+            border-color: {source_youtube_border};
+        }}
+
+        QPushButton#LibrarySourceFlag[sourceType="output"]:checked {{
+            color: {source_output_text};
+            background: {source_output_background};
+            border-color: {source_output_border};
+        }}
+
         QWidget#ModelListRow {{
             background: {raised};
             border: 1px solid {border};
@@ -826,6 +884,40 @@ def _stylesheet(
         QWidget#ModelListRow[selected="true"] {{
             background: {selection};
             border: 1px solid {tab_active_border};
+        }}
+
+        QWidget#ShareProgressAction,
+        QWidget#ModelRowActionSlot {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLabel#RowShareProgressLabel {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QLabel#ShareCopiedLabel {{
+            color: {success_text};
+            background: {success_background};
+            border: 1px solid {success_border};
+            border-radius: 9px;
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
+        QProgressBar#RowShareProgress {{
+            min-height: 4px;
+            max-height: 4px;
+            background: {border};
+            border: 0;
+            border-radius: 2px;
+        }}
+
+        QProgressBar#RowShareProgress::chunk {{
+            background: {accent};
+            border-radius: 2px;
         }}
 
         QLabel#ModelRowTitle, QLabel#ModelDetailTitle {{
@@ -1128,16 +1220,36 @@ def _stylesheet(
             font-weight: 800;
         }}
 
-        QLabel#DatasetShortcutKey {{
-            min-height: 20px;
-            max-height: 20px;
-            padding: 0 6px;
-            color: {muted};
+        QWidget#ClipEditorHeader {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QFrame#DatasetHeaderNavigation,
+        QFrame#DatasetPlaybackGroup {{
             background: {raised};
             border: 1px solid {border};
-            border-radius: 6px;
-            font-size: 9px;
-            font-weight: 900;
+            border-radius: 10px;
+        }}
+
+        QLabel#DatasetNavigationPosition {{
+            min-width: 46px;
+            color: {muted};
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
+        QFrame#DatasetTimingGroup {{
+            min-height: 30px;
+            max-height: 30px;
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 9px;
+        }}
+
+        QFrame#DatasetEditorDivider {{
+            background: {border};
+            border: 0;
         }}
 
         QLabel#DatasetReviewBadge {{
@@ -1168,22 +1280,120 @@ def _stylesheet(
             border-radius: 10px;
         }}
 
-        QFrame#DatasetReviewBar {{
+        QFrame#DatasetCommandBar,
+        QFrame#DatasetAudioInspector {{
             background: {surface};
             border: 1px solid {border};
-            border-radius: 11px;
+            border-radius: 12px;
         }}
 
-        QFrame#DatasetSecondaryTools {{
-            background: {surface};
+        QWidget#DatasetInspectorHeader {{
+            background: transparent;
+            border: 0;
+            border-radius: 0;
+        }}
+
+        QLabel#DatasetShortcutKey {{
+            min-width: 34px;
+            max-width: 34px;
+            min-height: 22px;
+            max-height: 22px;
+            color: {muted};
+            background: {raised};
             border: 1px solid {border};
-            border-radius: 10px;
+            border-radius: 6px;
+            font-size: 8px;
+            font-weight: 900;
         }}
 
         QFrame#DatasetToolPanel,
-        QStackedWidget#DatasetToolStack {{
+        QStackedWidget#DatasetInspectorStack {{
             background: transparent;
             border: 0;
+        }}
+
+        QFrame#DatasetToolSection {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLabel#DatasetToolSectionLabel {{
+            color: {muted};
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#DatasetToolHint {{
+            color: {faint};
+            font-size: 9px;
+            font-weight: 700;
+        }}
+
+        QLabel#DatasetToolValue {{
+            color: {text};
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
+        QFrame#DatasetToolDivider {{
+            background: {border};
+            border: 0;
+        }}
+
+        QProgressBar#DatasetToolProgress {{
+            min-height: 4px;
+            max-height: 4px;
+            border: 0;
+            border-radius: 2px;
+            background: {border};
+        }}
+
+        QProgressBar#DatasetToolProgress::chunk {{
+            border-radius: 2px;
+            background: {accent};
+        }}
+
+        QFrame#DatasetInspectorContent {{
+            background: {raised};
+            border: 0;
+            border-top: 1px solid {border};
+        }}
+
+        QLabel#DatasetInspectorTitle {{
+            color: {muted};
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QFrame#DatasetInspectorTabs {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 9px;
+        }}
+
+        QPushButton#DatasetInspectorTab {{
+            min-width: 88px;
+            min-height: 24px;
+            max-height: 24px;
+            padding: 0 10px;
+            color: {muted};
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 7px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QPushButton#DatasetInspectorTab:hover,
+        QPushButton#DatasetInspectorTab[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#DatasetInspectorTab:checked {{
+            color: {tab_active_text};
+            background: {tab_active};
+            border-color: {tab_active_border};
         }}
 
         QScrollArea#DatasetAnalysisScroll,
@@ -2120,6 +2330,31 @@ def _stylesheet(
             border-color: {accent};
         }}
 
+        QFrame#DriveAccountCard, QFrame#DriveFileCard, QFrame#DriveResultCard {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QLabel#DriveAccountBadge {{
+            color: {tab_active_text};
+            background: {tab_active};
+            border: 1px solid {tab_active_border};
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 900;
+        }}
+
+        QLineEdit#ModelAddDriveLink {{
+            min-height: 34px;
+            padding: 0 11px;
+            color: {text};
+            background: {background};
+            border: 1px solid {border};
+            border-radius: 9px;
+            selection-background-color: {selection};
+        }}
+
         QPushButton#ModelWorkspaceBackButton {{
             min-width: 34px;
             max-width: 34px;
@@ -2176,6 +2411,24 @@ def _stylesheet(
             border-radius: 8px;
         }}
 
+        QPushButton#DatasetFlatIconButton {{
+            min-width: 32px;
+            max-width: 32px;
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+        }}
+
+        QPushButton#DatasetEditorSecondaryButton,
+        QPushButton#DatasetEditorPrimaryButton,
+        QPushButton#DatasetReadyButton {{
+            font-family: "Malgun Gothic", "Segoe UI", "Arial";
+            font-size: 11px;
+            font-weight: 800;
+        }}
+
         QPushButton#DatasetEditorSecondaryButton {{
             min-height: 30px;
             max-height: 30px;
@@ -2189,8 +2442,13 @@ def _stylesheet(
             max-height: 30px;
             padding: 0 12px;
             border-radius: 9px;
-            font-size: 10px;
-            font-weight: 900;
+        }}
+
+        QPushButton#DatasetEditorPrimaryButton[active="true"],
+        QPushButton#DatasetEditorPrimaryButton[active="true"]:disabled {{
+            color: {accent_text};
+            background: {accent};
+            border-color: {accent};
         }}
 
         QPushButton#DatasetEditorSecondaryButton:hover,
@@ -2218,19 +2476,22 @@ def _stylesheet(
             min-height: 30px;
             max-height: 30px;
             padding: 0 12px;
+            color: {accent_text};
+            background: {accent};
+            border-color: {accent};
             border-radius: 9px;
-            font-size: 10px;
-            font-weight: 900;
         }}
 
         QPushButton#DatasetReadyButton:hover,
         QPushButton#DatasetReadyButton[pointerState="hover"] {{
-            background: {hover};
+            background: {active_hover};
+            border-color: {active_hover};
         }}
 
         QPushButton#DatasetReadyButton:pressed,
         QPushButton#DatasetReadyButton[pointerState="pressed"] {{
-            background: {pressed};
+            background: {active_pressed};
+            border-color: {active_pressed};
         }}
 
         QPushButton#DatasetReadyButton[keyboardFocus="true"] {{
@@ -2241,6 +2502,7 @@ def _stylesheet(
         QPushButton#DatasetReadyButton:disabled {{
             color: {muted};
             background: {surface};
+            border-color: {border};
         }}
 
         QFrame#SegmentedControl {{
@@ -2367,6 +2629,39 @@ def _stylesheet(
             color: {text};
             font-size: 10px;
             font-weight: 900;
+        }}
+
+        QPushButton#GoogleAccountButton {{
+            min-width: 30px;
+            max-width: 30px;
+            min-height: 24px;
+            max-height: 24px;
+            padding: 0;
+            border: 1px solid {border};
+            border-radius: 9px;
+            background: {raised};
+        }}
+
+        QPushButton#GoogleAccountButton[connected="true"] {{
+            border-color: {success_border};
+            background: {success_background};
+        }}
+
+        QPushButton#GoogleAccountButton:hover,
+        QPushButton#GoogleAccountButton[pointerState="hover"] {{
+            background: {hover};
+            border-color: {faint};
+        }}
+
+        QPushButton#GoogleAccountButton:pressed,
+        QPushButton#GoogleAccountButton[pointerState="pressed"] {{
+            background: {pressed};
+            border-color: {text};
+        }}
+
+        QPushButton#GoogleAccountButton:disabled {{
+            background: {surface};
+            border-color: {border};
         }}
 
         QPushButton#TitleBarLanguageButton:hover,

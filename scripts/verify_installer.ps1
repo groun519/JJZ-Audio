@@ -264,8 +264,7 @@ $managedFiles = @(
     (Join-Path $managedStorageRoot "Data\library\songs\upgrade-song\02_vocal\separations\run-upgrade\htdemucs\upgrade-song\vocals.wav"),
     (Join-Path $managedStorageRoot "Data\models\catalog.json"),
     (Join-Path $managedStorageRoot "Output\exports\upgrade-mix.wav"),
-    (Join-Path $managedStorageRoot "Runtime\rvc\weights\preserve-runtime-model.pth"),
-    (Join-Path $managedStorageRoot "Cache\upgrade-cache.bin")
+    (Join-Path $managedStorageRoot "Runtime\rvc\weights\preserve-runtime-model.pth")
 )
 $managedHashes = @{}
 foreach ($path in $managedFiles) {
@@ -274,6 +273,8 @@ foreach ($path in $managedFiles) {
     }
     $managedHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 }
+$managedUserHashes = $managedHashes.Clone()
+$managedUserHashes.Remove((Join-Path $managedStorageRoot "Runtime\rvc\weights\preserve-runtime-model.pth"))
 
 $env:QT_QPA_PLATFORM = "offscreen"
 $installedExecutable = Join-Path $installDir "JJZero Audio.exe"
@@ -358,19 +359,31 @@ $preservedModel = @(
 $preservedLog = @(
     Get-ChildItem -LiteralPath $preservedRuntimeRoot -Recurse -Filter "preserve-runtime-log.txt" -File
 )
-if ($preservedModel.Count -ne 1 -or
-    (Get-Content -LiteralPath $preservedModel[0].FullName -Raw).Trim() -ne "preserve-runtime-model") {
+if ($preservedModel.Count -lt 1 -or @(
+    $preservedModel | Where-Object {
+        (Get-Content -LiteralPath $_.FullName -Raw).Trim() -ne "preserve-runtime-model"
+    }
+).Count -ne 0) {
     throw "Runtime model was not preserved during uninstall: $preservedRuntimeRoot"
 }
-if ($preservedLog.Count -ne 1 -or
-    (Get-Content -LiteralPath $preservedLog[0].FullName -Raw).Trim() -ne "preserve-runtime-log") {
+if ($preservedLog.Count -lt 1 -or @(
+    $preservedLog | Where-Object {
+        (Get-Content -LiteralPath $_.FullName -Raw).Trim() -ne "preserve-runtime-log"
+    }
+).Count -ne 0) {
     throw "Runtime logs were not preserved during uninstall: $preservedRuntimeRoot"
 }
 if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne "preserve-user-data") {
     throw "User data was removed during uninstall: $sentinel"
 }
 Assert-PreservedFiles $immutableSourceFiles "uninstall"
-Assert-PreservedFiles $managedHashes "uninstall"
+Assert-PreservedFiles $managedUserHashes "uninstall"
+if (Test-Path -LiteralPath (Join-Path $managedStorageRoot "Runtime")) {
+    throw "Configured audio engine remained after uninstall: $managedStorageRoot"
+}
+if (Test-Path -LiteralPath (Join-Path $managedStorageRoot "Cache")) {
+    throw "Configured cache remained after uninstall: $managedStorageRoot"
+}
 
     Write-Output "Verified installer upgrade $baselineVersion -> $targetVersion and uninstall: $installer"
     if ($KeepArtifacts) {

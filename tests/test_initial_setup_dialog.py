@@ -67,8 +67,30 @@ class InitialSetupDialogTests(unittest.TestCase):
             dialog.primary_button.click()
 
             self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
-            self.assertTrue(dialog.restart_required)
-            self.assertEqual(dialog.configured_paths.storage_version, 2)
+            self.assertFalse(dialog.restart_required)
+            self.assertEqual(dialog.configured_paths.storage_version, 3)
+            dialog.close()
+
+    def test_custom_storage_mode_keeps_runtime_while_output_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _paths(root)
+            dialog = InitialSetupDialog(
+                paths,
+                root / "logo.svg",
+                first_run=False,
+                diagnostics_worker_type=_ReadyWorker,
+                storage_worker_type=_ReadyStorageWorker,
+            )
+            output = root / "custom-output"
+            dialog._set_storage_mode("custom")
+            dialog.storage_path_edits["output"].setText(str(output))
+
+            dialog.primary_button.click()
+
+            self.assertEqual(dialog.configured_paths.output_root, output.resolve())
+            self.assertEqual(dialog.configured_paths.runtime_root, paths.runtime_root)
+            self.assertEqual(dialog.configured_paths.storage_mode, "custom")
             dialog.close()
 
     def test_diagnostic_row_keeps_wrapped_detail_visible(self) -> None:

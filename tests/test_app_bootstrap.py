@@ -93,6 +93,89 @@ class AppBootstrapTests(unittest.TestCase):
             self.assertTrue(adapter.is_file())
             self.assertIn("resolve_torch_device", adapter.read_text(encoding="utf-8"))
 
+    def test_bootstrap_promotes_v2_paths_to_v3_without_moving_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            package = source / "src" / "jang_app"
+            package.mkdir(parents=True)
+            data_root = root / "local"
+            storage_root = root / "storage"
+            settings = data_root / "settings"
+            settings.mkdir(parents=True)
+            storage_file = settings / "storage.json"
+            storage_file.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "storage_root": str(storage_root),
+                        "workspace_root": str(storage_root / "Data"),
+                        "workspace_anchor": str(storage_root),
+                        "output_root": str(storage_root / "Output"),
+                        "runtime_root": str(storage_root / "Runtime"),
+                        "cache_root": str(storage_root / "Cache"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            song = storage_root / "Data" / "song.wav"
+            song.parent.mkdir(parents=True)
+            song.write_bytes(b"audio")
+            paths = discover_app_paths(
+                package,
+                environ={"JJZERO_DATA_ROOT": str(data_root)},
+                frozen=True,
+                executable=root / "install" / "JJZero Audio.exe",
+                source_root=source,
+            )
+
+            prepare_app_environment(paths)
+            promoted = json.loads(storage_file.read_text(encoding="utf-8"))
+
+            self.assertEqual(promoted["version"], 3)
+            self.assertEqual(promoted["mode"], "linked")
+            self.assertTrue(song.is_file())
+
+    def test_bootstrap_promotes_v1_directly_to_v3_without_moving_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            package = source / "src" / "jang_app"
+            package.mkdir(parents=True)
+            data_root = root / "local"
+            workspace = root / "legacy" / "workspace"
+            settings = data_root / "settings"
+            settings.mkdir(parents=True)
+            storage_file = settings / "storage.json"
+            storage_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "workspace_root": str(workspace),
+                        "workspace_anchor": str(workspace.parent),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            song = workspace / "song.wav"
+            song.parent.mkdir(parents=True)
+            song.write_bytes(b"audio")
+            paths = discover_app_paths(
+                package,
+                environ={"JJZERO_DATA_ROOT": str(data_root)},
+                frozen=True,
+                executable=root / "install" / "JJZero Audio.exe",
+                source_root=source,
+            )
+
+            prepare_app_environment(paths)
+            promoted = json.loads(storage_file.read_text(encoding="utf-8"))
+
+            self.assertEqual(promoted["version"], 3)
+            self.assertEqual(Path(promoted["workspace_root"]), workspace.resolve())
+            self.assertEqual(promoted["mode"], "custom")
+            self.assertTrue(song.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

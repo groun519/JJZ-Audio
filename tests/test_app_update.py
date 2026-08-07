@@ -16,6 +16,7 @@ from jang_app.services.app_update import (
     ReleaseManifest,
     UpdateError,
     create_update_plan,
+    discard_cached_artifacts,
     download_artifact,
     fetch_release_manifest_if_changed,
     parse_release_manifest,
@@ -42,6 +43,24 @@ class _Response(io.BytesIO):
 
 
 class AppUpdateTests(unittest.TestCase):
+    def test_discards_only_cached_artifacts_inside_managed_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            package = cache / "updates" / "1" / "runtime.zip"
+            installer = cache / "updates" / "1" / "setup.exe"
+            external = root / "external.zip"
+            package.parent.mkdir(parents=True)
+            package.write_bytes(b"runtime")
+            installer.write_bytes(b"installer")
+            external.write_bytes(b"external")
+
+            discard_cached_artifacts((package, external), cache)
+
+            self.assertFalse(package.exists())
+            self.assertTrue(installer.exists())
+            self.assertTrue(external.exists())
+
     def test_parses_components_and_selects_changed_versions(self) -> None:
         payload = b"installer"
         runtime = b"runtime"
@@ -98,6 +117,49 @@ class AppUpdateTests(unittest.TestCase):
                             "name": "../app.exe",
                         }
                     ],
+                }
+            ],
+        }
+
+        with self.assertRaises(UpdateError):
+            parse_release_manifest(data, "https://example.test/latest.json")
+
+    def test_parses_remote_feature_kill_switches(self) -> None:
+        release = parse_release_manifest(
+            {
+                "schema_version": 2,
+                "product": "JJZero Audio",
+                "version": "0.2.6",
+                "disabled_features": ["google_drive_sharing"],
+                "components": [
+                    {
+                        "id": "application",
+                        "version": "0.2.6",
+                        "install_mode": "installer",
+                        "artifacts": [_artifact("app.exe", b"app")],
+                    }
+                ],
+            },
+            "https://example.test/latest.json",
+        )
+
+        self.assertEqual(
+            release.disabled_features,
+            frozenset({"google_drive_sharing"}),
+        )
+
+    def test_rejects_invalid_remote_feature_name(self) -> None:
+        data = {
+            "schema_version": 2,
+            "product": "JJZero Audio",
+            "version": "0.2.6",
+            "disabled_features": ["Google Drive"],
+            "components": [
+                {
+                    "id": "application",
+                    "version": "0.2.6",
+                    "install_mode": "installer",
+                    "artifacts": [_artifact("app.exe", b"app")],
                 }
             ],
         }

@@ -206,6 +206,39 @@ def background_command_args(args: Sequence[str]) -> list[str]:
     return command
 
 
+def start_detached_command(
+    args: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Start a long-lived child without creating or inheriting a console window."""
+    command_args = background_command_args(args)
+    logger = get_logger()
+    logger.info("Starting detached command: %s", " ".join(redact_command(command_args)))
+    options: dict[str, object]
+    if os.name == "nt":
+        options = hidden_subprocess_kwargs(new_process_group=True)
+    else:
+        options = {"start_new_session": True}
+    try:
+        process = subprocess.Popen(
+            command_args,
+            cwd=str(cwd) if cwd else None,
+            env=dict(env) if env is not None else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            **options,
+        )
+    except OSError as exc:
+        logger.warning("Detached command failed to start: %s", exc)
+        return False
+    logger.info("Detached command started: pid=%s executable=%s", process.pid, command_args[0])
+    return True
+
+
 def _run_streaming_command(
     args: Sequence[str],
     cwd: Path | None,

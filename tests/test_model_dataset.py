@@ -243,6 +243,65 @@ class ModelDatasetStoreTests(unittest.TestCase):
             self.assertNotIn(pending_id, [candidate.candidate_id for candidate in accepted.segment_candidates])
             self.assertTrue(accepted.clips[0].path.is_file())
 
+    def test_used_clip_can_move_back_to_review_and_be_used_again(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ModelDatasetStore(root / "workspace")
+            source = _wave_file(root / "voice.wav", duration_ms=2000)
+            item = store.add_sources("model", [source]).items[0]
+            used = store.add_clip("model", item.item_id, 300, 1200).items[0]
+            original_clip = used.clips[0]
+
+            held = store.move_clip_to_review_status(
+                "model",
+                item.item_id,
+                original_clip.clip_id,
+                SEGMENT_HELD,
+            ).items[0]
+
+            self.assertEqual(held.clips, ())
+            self.assertEqual(len(held.segment_candidates), 1)
+            self.assertEqual(held.segment_candidates[0].candidate_id, original_clip.clip_id)
+            self.assertEqual(held.segment_candidates[0].status, SEGMENT_HELD)
+            self.assertFalse(original_clip.path.exists())
+
+            reused = store.accept_segment_candidate(
+                "model",
+                item.item_id,
+                held.segment_candidates[0].candidate_id,
+                held.segment_candidates[0].start_ms,
+                held.segment_candidates[0].end_ms,
+            ).items[0]
+
+            self.assertEqual([(clip.start_ms, clip.end_ms) for clip in reused.clips], [(300, 1200)])
+            self.assertEqual(reused.segment_candidates, ())
+            self.assertTrue(reused.clips[0].path.is_file())
+
+    def test_clip_review_move_supports_undo_and_redo_without_duplicate_regions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ModelDatasetStore(root / "workspace")
+            source = _wave_file(root / "voice.wav", duration_ms=2000)
+            item = store.add_sources("model", [source]).items[0]
+            used = store.add_clip("model", item.item_id, 300, 1200).items[0]
+
+            store.move_clip_to_review_status(
+                "model",
+                item.item_id,
+                used.clips[0].clip_id,
+                SEGMENT_REJECTED,
+            )
+            restored = store.undo_edit("model", item.item_id).items[0]
+
+            self.assertEqual(len(restored.clips), 1)
+            self.assertEqual(restored.segment_candidates, ())
+
+            rejected = store.redo_edit("model", item.item_id).items[0]
+
+            self.assertEqual(rejected.clips, ())
+            self.assertEqual(len(rejected.segment_candidates), 1)
+            self.assertEqual(rejected.segment_candidates[0].status, SEGMENT_REJECTED)
+
     def test_denoise_rerenders_same_clip_ranges_and_can_be_removed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

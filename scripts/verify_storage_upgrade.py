@@ -91,7 +91,6 @@ def main() -> int:
         / "vocals.wav",
         target_root / "Output" / "exports" / "upgrade-mix.wav",
         target_root / "Runtime" / "rvc" / "weights" / "preserve-runtime-model.pth",
-        target_root / "Cache" / "upgrade-cache.bin",
         target_root / "Data" / "catalog.db",
     )
     missing = tuple(path for path in expected_files if not path.is_file())

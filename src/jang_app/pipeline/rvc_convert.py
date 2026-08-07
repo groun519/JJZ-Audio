@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 from dataclasses import dataclass
@@ -16,6 +17,11 @@ from jang_app.services.rvc_inference_runtime import (
 )
 from jang_app.services.settings import RvcSettings
 from jang_app.services.text_tail import combined_output, text_tail
+
+
+# The bundled SciPy runtime still opens WAV outputs through the legacy Windows
+# file API. Keep conversion paths below MAX_PATH with room for collision suffixes.
+_RVC_SAFE_OUTPUT_PATH_LENGTH = 240
 
 
 class RvcConversionError(RuntimeError):
@@ -44,7 +50,10 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
     infer_script = rvc_root / "infer_cli.py"
     model_path = _resolve_rvc_path(rvc_root, settings.voice_model)
     index_path = _resolve_optional_rvc_path(rvc_root, settings.index_file)
-    output_path = _next_output_path(output_dir.expanduser().resolve(), _build_rvc_output_stem(source, settings), ".wav")
+    resolved_output_dir = output_dir.expanduser().resolve()
+    descriptive_stem = _build_rvc_output_stem(source, settings)
+    output_stem = _safe_rvc_output_stem(resolved_output_dir, descriptive_stem, ".wav", settings.pitch)
+    output_path = _next_output_path(resolved_output_dir, output_stem, ".wav")
 
     _validate_conversion_input(source, rvc_root, runtime_python, infer_script, model_path, index_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,8 +61,22 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
         device = select_rvc_inference_device(rvc_root, settings.device)
     except RvcInferenceRuntimeError as exc:
         raise RvcConversionError(str(exc)) from exc
-    workspace = _prepare_rvc_workspace(rvc_root)
+    workspace = _prepare_rvc_workspace(
+        rvc_root,
+        require_directml_rmvpe=(
+            settings.f0_method.casefold() == "rmvpe"
+            and device.effective_device.casefold().startswith("privateuseone")
+        ),
+    )
     wrapper_script = workspace / "run_infer_cli.py"
+
+    if output_stem != descriptive_stem:
+        logger.info(
+            "RVC output path shortened for Windows compatibility: original_length=%s safe_length=%s output=%s",
+            _path_length(resolved_output_dir / f"{descriptive_stem}.wav"),
+            _path_length(output_path),
+            output_path,
+        )
 
     logger.info(
         "Starting RVC conversion: input=%s output=%s model=%s requested_device=%s effective_device=%s",
@@ -160,7 +183,11 @@ def _validate_conversion_input(
         raise RvcConversionError(f"RVC index file was not found: {index_path}")
 
 
-def _prepare_rvc_workspace(rvc_root: Path) -> Path:
+def _prepare_rvc_workspace(
+    rvc_root: Path,
+    *,
+    require_directml_rmvpe: bool = False,
+) -> Path:
     RVC_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     _copy_tree(rvc_root / "configs", RVC_WORKSPACE_DIR / "configs")
     _copy_file(rvc_root / "trainset_preprocess_pipeline_print.py", RVC_WORKSPACE_DIR / "trainset_preprocess_pipeline_print.py")
@@ -169,8 +196,25 @@ def _prepare_rvc_workspace(rvc_root: Path) -> Path:
         if not source.is_file():
             raise RvcConversionError(f"Required RVC file was not found: {source}")
         link_or_copy_file(source, RVC_WORKSPACE_DIR / name)
+    if require_directml_rmvpe:
+        source = _find_directml_rmvpe_model(rvc_root)
+        link_or_copy_file(source, RVC_WORKSPACE_DIR / "rmvpe.onnx")
     _write_cli_wrapper(RVC_WORKSPACE_DIR / "run_infer_cli.py")
     return RVC_WORKSPACE_DIR
+
+
+def _find_directml_rmvpe_model(rvc_root: Path) -> Path:
+    candidates = (
+        rvc_root / "runtime" / "rmvpe.onnx",
+        rvc_root / "rmvpe.onnx",
+    )
+    model = next((path for path in candidates if path.is_file()), None)
+    if model is None:
+        raise RvcConversionError(
+            "The installed DirectML runtime is missing rmvpe.onnx. "
+            "Repair or update the AMD runtime before converting."
+        )
+    return model
 
 
 def _write_cli_wrapper(target: Path) -> None:
@@ -219,9 +263,34 @@ def _next_output_path(output_dir: Path, stem: str, suffix: str) -> Path:
     index = 2
     while True:
         candidate = output_dir / f"{stem}_{index:03d}{suffix}"
+        if _path_length(candidate) > _RVC_SAFE_OUTPUT_PATH_LENGTH:
+            digest = hashlib.sha256(f"{stem}:{index}".encode("utf-8")).hexdigest()[:10]
+            candidate = output_dir / f"rvc_{digest}{suffix}"
         if not candidate.exists():
             return candidate
         index += 1
+
+
+def _safe_rvc_output_stem(output_dir: Path, stem: str, suffix: str, pitch: int) -> str:
+    candidate = output_dir / f"{stem}{suffix}"
+    if _path_length(candidate) <= _RVC_SAFE_OUTPUT_PATH_LENGTH:
+        return stem
+
+    digest = hashlib.sha256(stem.encode("utf-8")).hexdigest()[:10]
+    pitch_name = f"p{pitch}" if pitch >= 0 else f"m{abs(pitch)}"
+    compact_stem = f"rvc_{pitch_name}_{digest}"
+    compact_candidate = output_dir / f"{compact_stem}{suffix}"
+    if _path_length(compact_candidate) > _RVC_SAFE_OUTPUT_PATH_LENGTH:
+        raise RvcConversionError(
+            "RVC output folder path is too long for the bundled Windows audio runtime. "
+            f"Choose a shorter media storage location: {output_dir}"
+        )
+    return compact_stem
+
+
+def _path_length(path: Path) -> int:
+    # UTF-16 code units match the length Windows uses for legacy file paths.
+    return len(str(path).encode("utf-16-le")) // 2
 
 
 def _build_rvc_output_stem(source: Path, settings: RvcSettings) -> str:

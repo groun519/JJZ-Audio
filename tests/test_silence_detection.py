@@ -5,7 +5,11 @@ import unittest
 import wave
 from pathlib import Path
 
-from jang_app.services.silence_detection import detect_speech_regions
+from jang_app.services.silence_detection import (
+    SpeechRegion,
+    detect_speech_regions,
+    split_regions_at_low_energy,
+)
 
 
 class SilenceDetectionTests(unittest.TestCase):
@@ -43,6 +47,22 @@ class SilenceDetectionTests(unittest.TestCase):
             _write_levels(source, [(1000, 0)])
 
             self.assertEqual(detect_speech_regions(source, threshold_db=-50), ())
+
+    def test_long_region_splits_near_low_energy_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "long-phrase.wav"
+            _write_levels(source, [(9000, 12000), (2000, 300), (9000, 12000)])
+
+            ranges = split_regions_at_low_energy(
+                source,
+                (SpeechRegion(0, 20000),),
+                max_duration_ms=12000,
+            )
+
+            self.assertEqual(len(ranges), 2)
+            self.assertGreaterEqual(ranges[0][1], 8500)
+            self.assertLessEqual(ranges[0][1], 10500)
+            self.assertEqual(ranges[0][1], ranges[1][0])
 
 
 def _write_levels(path: Path, sections: list[tuple[int, int]]) -> None:

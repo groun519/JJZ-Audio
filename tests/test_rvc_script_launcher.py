@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from jang_app.services.command import background_command_args, hidden_subprocess_kwargs
 from jang_app.services.rvc_script_launcher import (
     _ROCM_SINGLE_PROCESS_TRAINING_BOOTSTRAP,
     RvcScriptLauncherError,
@@ -15,6 +16,26 @@ from jang_app.services.rvc_script_launcher import (
 
 
 class RvcScriptLauncherTests(unittest.TestCase):
+    def test_launcher_forces_spawned_children_to_pythonw(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "rvc"
+            script = runtime / "worker.py"
+            pythonw = runtime / "runtime" / "pythonw.exe"
+            pythonw.parent.mkdir(parents=True)
+            pythonw.write_bytes(b"pythonw")
+            script.write_text("print('ready')\n", encoding="utf-8")
+
+            launcher = prepare_rvc_script_launcher(
+                root / "workspace" / "launcher.py",
+                runtime,
+                script,
+            )
+
+            content = launcher.read_text(encoding="utf-8")
+            self.assertIn("multiprocessing.set_executable", content)
+            self.assertIn("pythonw.exe", content)
+
     def test_launcher_bootstraps_rvc_imports_in_spawned_children(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -32,15 +53,7 @@ class RvcScriptLauncherTests(unittest.TestCase):
                 script,
             )
 
-            completed = subprocess.run(
-                [sys.executable, str(launcher)],
-                cwd=workspace,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            completed = _run_python((str(launcher),), cwd=workspace)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout.strip(), "ready")
@@ -90,15 +103,7 @@ class RvcScriptLauncherTests(unittest.TestCase):
                 atomic_torch_saves=True,
             )
 
-            completed = subprocess.run(
-                [sys.executable, str(launcher)],
-                cwd=workspace,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            completed = _run_python((str(launcher),), cwd=workspace)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout.strip(), "ready")
@@ -129,15 +134,7 @@ class RvcScriptLauncherTests(unittest.TestCase):
                 legacy_i18n=True,
             )
 
-            completed = subprocess.run(
-                [sys.executable, str(launcher)],
-                cwd=workspace,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            completed = _run_python((str(launcher),), cwd=workspace)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout.strip(), "translated")
@@ -164,15 +161,7 @@ class RvcScriptLauncherTests(unittest.TestCase):
                 compact_rvc_checkpoints=True,
             )
 
-            completed = subprocess.run(
-                [sys.executable, str(launcher)],
-                cwd=workspace,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            completed = _run_python((str(launcher),), cwd=workspace)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout.strip(), "ready")
@@ -192,15 +181,7 @@ class RvcScriptLauncherTests(unittest.TestCase):
                 conservative_data_loading=True,
             )
 
-            completed = subprocess.run(
-                [sys.executable, str(launcher)],
-                cwd=workspace,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            completed = _run_python((str(launcher),), cwd=workspace)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout.strip(), "1 2 False")
@@ -212,17 +193,27 @@ class RvcScriptLauncherTests(unittest.TestCase):
             f"{_ROCM_SINGLE_PROCESS_TRAINING_BOOTSTRAP}\n"
             f"{_ROCM_SINGLE_PROCESS_PROBE}"
         )
-        completed = subprocess.run(
-            [sys.executable, "-c", probe],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        completed = _run_python(("-c", probe))
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), "ready")
+
+
+def _run_python(
+    args: tuple[str, ...],
+    *,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        background_command_args((sys.executable, *args)),
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **hidden_subprocess_kwargs(),
+    )
 
 
 _SPAWN_PROBE = """\

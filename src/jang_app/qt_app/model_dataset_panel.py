@@ -21,14 +21,14 @@ from PySide6.QtWidgets import (
 from jang_app.config import SUPPORTED_AUDIO_EXTENSIONS
 from jang_app.qt_app.model_clip_editor import ModelClipEditor
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
-from jang_app.qt_app.widgets import SvgIconButton
+from jang_app.qt_app.widgets import SvgIconButton, attach_list_item_widget
 from jang_app.qt_app.workers import TaskCallable, TaskWorker
 from jang_app.services.audio_metadata import format_duration
+from jang_app.services.audio_denoise import render_denoise_preview
 from jang_app.services.clip_edit_history import REVIEW_READY, TRAINING_MODE_CLIPS
 from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem, ModelDatasetStore
 from jang_app.services.i18n import tr
-from jang_app.services.segment_review import split_review_regions
-from jang_app.services.silence_detection import detect_speech_regions
+from jang_app.services.silence_detection import detect_speech_regions, split_regions_at_low_energy
 
 
 class ModelDatasetPanel(QWidget):
@@ -42,6 +42,7 @@ class ModelDatasetPanel(QWidget):
         self._dataset = ModelDataset("")
         self._worker: TaskWorker | None = None
         self._worker_success: Callable[[object], None] | None = None
+        self._worker_tool = ""
         self._externally_locked = False
         self._theme_mode = "white"
         self._build_ui()
@@ -123,6 +124,7 @@ class ModelDatasetPanel(QWidget):
         self.clip_editor.analyze_requested.connect(self._analyze_silence)
         self.clip_editor.use_candidate_requested.connect(self._use_candidate)
         self.clip_editor.candidate_status_requested.connect(self._set_candidate_status)
+        self.clip_editor.clip_status_requested.connect(self._set_clip_status)
         self.clip_editor.remove_clip_requested.connect(self._remove_clip)
         self.clip_editor.undo_requested.connect(self._undo_clip)
         self.clip_editor.redo_requested.connect(self._redo_clip)
@@ -131,6 +133,7 @@ class ModelDatasetPanel(QWidget):
         self.clip_editor.navigate_requested.connect(self._navigate_training_item)
         self.clip_editor.close_requested.connect(self._close_editor)
         self.clip_editor.denoise_requested.connect(self._apply_denoise)
+        self.clip_editor.denoise_preview_requested.connect(self._preview_denoise)
         self.clip_editor.remove_denoise_requested.connect(self._remove_denoise)
         self.clip_editor.playback_started.connect(self.preview_started.emit)
         self.clip_editor.playback_failed.connect(
@@ -145,9 +148,9 @@ class ModelDatasetPanel(QWidget):
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.status_label.hide()
 
-        footer = QFrame()
-        footer.setObjectName("DatasetFooter")
-        footer_layout = QHBoxLayout(footer)
+        self.footer = QFrame()
+        self.footer.setObjectName("DatasetFooter")
+        footer_layout = QHBoxLayout(self.footer)
         footer_layout.setContentsMargins(14, 8, 14, 8)
         footer_layout.addWidget(self.summary_label)
         footer_layout.addStretch(1)
@@ -163,7 +166,7 @@ class ModelDatasetPanel(QWidget):
         layout.setSpacing(10)
         layout.addWidget(columns_widget, 1)
         layout.addWidget(self.clip_editor, 0)
-        layout.addWidget(footer)
+        layout.addWidget(self.footer)
         layout.addWidget(self.progress_bar)
 
     def _build_column(
@@ -199,7 +202,7 @@ class ModelDatasetPanel(QWidget):
 
     def set_model(self, model_id: str | None) -> None:
         self.clip_editor.stop_preview()
-        self.clip_editor.hide()
+        self._set_editor_visible(False)
         self._model_id = model_id or ""
         if not self._model_id:
             self._dataset = ModelDataset("")
@@ -255,7 +258,14 @@ class ModelDatasetPanel(QWidget):
             lambda result: self._apply_worker_dataset(result, status="Source audio added"),
         )
 
-    def _start_worker(self, task: TaskCallable, status: str, on_success: Callable[[object], None]) -> None:
+    def _start_worker(
+        self,
+        task: TaskCallable,
+        status: str,
+        on_success: Callable[[object], None],
+        *,
+        tool: str = "",
+    ) -> None:
         if self._worker is not None:
             return
         self._set_busy(True)
@@ -263,13 +273,21 @@ class ModelDatasetPanel(QWidget):
         self._set_status(status)
         worker = TaskWorker(task)
         worker.setParent(self)
-        worker.progress_changed.connect(self.progress_bar.setValue)
+        self._worker_tool = tool
+        if tool:
+            self.clip_editor.set_tool_processing(tool, True, 0)
+        worker.progress_changed.connect(self._on_worker_progress)
         worker.succeeded.connect(self._on_worker_succeeded)
         worker.failed.connect(self._on_worker_failed)
         worker.finished.connect(self._on_worker_finished)
         self._worker_success = on_success
         self._worker = worker
         worker.start()
+
+    def _on_worker_progress(self, value: int) -> None:
+        self.progress_bar.setValue(value)
+        if self._worker_tool:
+            self.clip_editor.set_tool_progress(self._worker_tool, value)
 
     def _choose_files(self) -> None:
         extensions = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_AUDIO_EXTENSIONS))
@@ -291,8 +309,12 @@ class ModelDatasetPanel(QWidget):
 
     def _on_worker_finished(self) -> None:
         worker = self._worker
+        worker_tool = self._worker_tool
         self._worker = None
         self._worker_success = None
+        self._worker_tool = ""
+        if worker_tool:
+            self.clip_editor.set_tool_processing(worker_tool, False)
         self._set_busy(False)
         if worker is not None:
             worker.deleteLater()
@@ -322,7 +344,6 @@ class ModelDatasetPanel(QWidget):
         item = self._current_training_item()
         if item is None or self._worker is not None:
             return
-        self.clip_editor.stop_preview()
         self._start_worker(
             lambda progress: self._store.add_clip(self._model_id, item.item_id, start_ms, end_ms, progress),
             "Rendering clip",
@@ -397,7 +418,50 @@ class ModelDatasetPanel(QWidget):
             ),
             "Analyzing voice regions",
             lambda result: self._show_review_queue(result, item.item_id),
+            tool="analysis",
         )
+
+    def _preview_denoise(
+        self,
+        strength: int,
+        sample_start_ms: int,
+        sample_end_ms: int,
+        preview_start_ms: int,
+        preview_end_ms: int,
+    ) -> None:
+        item = self._current_training_item()
+        if item is None or self._worker is not None:
+            return
+        self.clip_editor.stop_preview()
+        self._start_worker(
+            lambda progress: render_denoise_preview(
+                item.working_path,
+                strength,
+                sample_start_ms,
+                sample_end_ms,
+                preview_start_ms,
+                preview_end_ms,
+                progress,
+            ),
+            "Preparing noise cleanup preview",
+            lambda result: self._show_denoise_preview(
+                result,
+                preview_start_ms,
+                preview_end_ms,
+            ),
+            tool="denoise",
+        )
+
+    def _show_denoise_preview(
+        self,
+        result: object,
+        start_ms: int,
+        end_ms: int,
+    ) -> None:
+        if not isinstance(result, Path):
+            return
+        self.clip_editor.set_denoise_preview(result, start_ms, end_ms)
+        self._set_status("Noise cleanup preview ready")
 
     def _apply_denoise(self, strength: int, sample_start_ms: int, sample_end_ms: int) -> None:
         item = self._current_training_item()
@@ -414,11 +478,16 @@ class ModelDatasetPanel(QWidget):
                 progress,
             ),
             "Removing noise",
-            lambda result: self._apply_worker_dataset(
-                result,
-                selected_training_id=item.item_id,
-                status="Denoised version ready",
-            ),
+            lambda result: self._apply_denoise_result(result, item.item_id),
+            tool="denoise",
+        )
+
+    def _apply_denoise_result(self, result: object, item_id: str) -> None:
+        self.clip_editor.set_analysis_stale(True)
+        self._apply_worker_dataset(
+            result,
+            selected_training_id=item_id,
+            status="Denoised version ready",
         )
 
     def _remove_denoise(self) -> None:
@@ -446,6 +515,7 @@ class ModelDatasetPanel(QWidget):
         item = next((candidate for candidate in result.items if candidate.item_id == item_id), None)
         count = len(item.segment_candidates) if item is not None else 0
         status = "{count} review segments found" if count else "No voice regions found"
+        self.clip_editor.set_analysis_stale(False)
         self._apply_worker_dataset(result, selected_training_id=item_id, status=tr(status, count=count))
 
     def _use_candidate(self, candidate_id: str, start_ms: int, end_ms: int) -> None:
@@ -479,6 +549,21 @@ class ModelDatasetPanel(QWidget):
                 self._model_id,
                 item.item_id,
                 candidate_id,
+                status,
+            ),
+            item.item_id,
+        )
+
+    def _set_clip_status(self, clip_id: str, status: str) -> None:
+        item = self._current_training_item()
+        if item is None or self._worker is not None:
+            return
+        self.clip_editor.stop_preview()
+        self._run_editor_change(
+            lambda: self._store.move_clip_to_review_status(
+                self._model_id,
+                item.item_id,
+                clip_id,
                 status,
             ),
             item.item_id,
@@ -618,11 +703,9 @@ class ModelDatasetPanel(QWidget):
         for dataset_item in items:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, dataset_item.item_id)
-            row = DatasetAudioRow(dataset_item, badge_text)
+            row = DatasetAudioRow(dataset_item, badge_text, list_widget.viewport())
             row.apply_language()
-            item.setSizeHint(row.sizeHint())
-            list_widget.addItem(item)
-            list_widget.setItemWidget(item, row)
+            attach_list_item_widget(list_widget, item, row)
 
     def _set_busy(self, is_busy: bool) -> None:
         self.progress_bar.setVisible(is_busy)
@@ -667,15 +750,17 @@ class ModelDatasetPanel(QWidget):
         item = self._current_training_item()
         if item is None:
             self.clip_editor.stop_preview()
-            self.clip_editor.hide()
+            self._set_editor_visible(False)
             return
         self.clip_editor.set_item(item)
         current_row = self.training_list.currentRow()
         self.clip_editor.set_navigation_state(
             current_row > 0,
             0 <= current_row < self.training_list.count() - 1,
+            current_row + 1,
+            self.training_list.count(),
         )
-        self.clip_editor.show()
+        self._set_editor_visible(True)
 
     def stop_preview(self) -> None:
         self.clip_editor.stop_preview()
@@ -697,12 +782,23 @@ class ModelDatasetPanel(QWidget):
         self.clip_editor.stop_preview()
         self.training_list.clearSelection()
         self.training_list.setCurrentRow(-1)
-        self.clip_editor.hide()
+        self._set_editor_visible(False)
         self._sync_action_state()
 
     def _set_status(self, text: str) -> None:
         set_translated_text(self.status_label, text)
         self.status_label.setVisible(bool(text))
+        self._sync_footer_visibility()
+
+    def _set_editor_visible(self, is_visible: bool) -> None:
+        self.clip_editor.setVisible(is_visible)
+        self._sync_footer_visibility()
+
+    def _sync_footer_visibility(self) -> None:
+        editor_open = not self.clip_editor.isHidden()
+        has_status = bool(self.status_label.text())
+        self.summary_label.setVisible(not editor_open)
+        self.footer.setVisible(not editor_open or has_status)
 
     def _refresh_summary(self) -> None:
         total_duration = sum(item.training_duration_ms for item in self._dataset.training_items)
@@ -778,8 +874,13 @@ class DatasetAudioList(QListWidget):
 
 
 class DatasetAudioRow(QWidget):
-    def __init__(self, item: ModelDatasetItem, badge_text: str) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        item: ModelDatasetItem,
+        badge_text: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self.setObjectName("DatasetAudioRow")
         self.setProperty("selected", False)
         self.setFixedHeight(62)
@@ -947,11 +1048,13 @@ def _build_review_queue(
         padding_ms=padding_ms,
         progress=lambda value: progress(round(value * 0.9)),
     )
-    ranges = split_review_regions(
-        ((region.start_ms, region.end_ms) for region in regions),
+    ranges = split_regions_at_low_energy(
+        path,
+        regions,
         max_duration_ms=max_clip_ms,
+        progress=lambda value: progress(90 + round(value * 0.08)),
     )
-    progress(95)
+    progress(98)
     dataset = store.replace_segment_candidates(model_id, item_id, ranges)
     progress(100)
     return dataset
