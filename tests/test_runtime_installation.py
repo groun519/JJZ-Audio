@@ -24,6 +24,9 @@ class RuntimeInstallationTests(unittest.TestCase):
             runtime = root / "runtime"
             (runtime / "rvc" / "weights").mkdir(parents=True)
             (runtime / "rvc" / "weights" / "voice.pth").write_bytes(b"voice")
+            checkpoint_root = runtime / "demucs" / "torch" / "hub" / "checkpoints"
+            checkpoint_root.mkdir(parents=True)
+            (checkpoint_root / "f7e0c4bc-ba3fe64a.th").write_bytes(b"fine-tuned")
             package = root / "runtime.zip"
             _write_runtime_package(package)
 
@@ -38,6 +41,10 @@ class RuntimeInstallationTests(unittest.TestCase):
             self.assertEqual(result.version, "9")
             self.assertEqual(installed_runtime_version(runtime), "9")
             self.assertEqual((runtime / "rvc" / "weights" / "voice.pth").read_bytes(), b"voice")
+            self.assertEqual(
+                (checkpoint_root / "f7e0c4bc-ba3fe64a.th").read_bytes(),
+                b"fine-tuned",
+            )
             self.assertEqual(progress[-1], 100)
             state = json.loads((runtime / "runtime-state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["version"], "9")

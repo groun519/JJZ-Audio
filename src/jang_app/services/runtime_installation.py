@@ -22,7 +22,11 @@ from jang_app.services.rvc_runtime_repair import repair_rvc_runtime_adapter
 
 RUNTIME_STATE_NAME = "runtime-state.json"
 RVC_PROFILE_STATE_NAME = "jjzero-runtime-profile.json"
-_PRESERVED_DIRECTORIES = (Path("rvc/weights"), Path("rvc/logs"))
+_PRESERVED_DIRECTORIES = (
+    Path("rvc/weights"),
+    Path("rvc/logs"),
+    Path("demucs/torch/hub/checkpoints"),
+)
 
 
 class RuntimeInstallationError(RuntimeError):
