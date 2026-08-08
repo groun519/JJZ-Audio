@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs
 from urllib.request import Request
 
@@ -14,6 +15,7 @@ from jang_app.services.google_oauth import (
     GoogleAccountStateStore,
     GoogleOAuthConfig,
     GoogleOAuthConfigurationError,
+    GoogleOAuthError,
     GoogleOAuthSession,
     HttpResponse,
     load_google_oauth_config,
@@ -34,7 +36,89 @@ class _MemoryCredentials:
         self.value = None
 
 
+class _OAuthCallback:
+    redirect_uri = "http://127.0.0.1:54321"
+
+    def __init__(self, _state: str) -> None:
+        pass
+
+    def wait(self, _timeout: float, _cancelled: object) -> str:
+        return "authorization-code"
+
+    def close(self) -> None:
+        pass
+
+
 class GoogleOAuthTests(unittest.TestCase):
+    def test_connect_accepts_omitted_scope_for_identical_authorization(self) -> None:
+        credentials = _MemoryCredentials()
+
+        def request(request: Request, _timeout: float) -> HttpResponse:
+            if request.full_url == "https://oauth2.googleapis.com/token":
+                payload = {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "expires_in": 3600,
+                }
+            else:
+                payload = {
+                    "sub": "account-id",
+                    "email": "user@example.com",
+                    "name": "User",
+                }
+            return HttpResponse(200, {}, json.dumps(payload).encode("utf-8"))
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "jang_app.services.google_oauth._OAuthCallbackServer",
+            _OAuthCallback,
+        ):
+            session = GoogleOAuthSession(
+                GoogleOAuthConfig("client-id"),
+                credentials,
+                GoogleAccountStateStore(Path(directory) / "account.json"),
+                requester=request,
+                browser_open=lambda _url: True,
+            )
+
+            account = session.connect()
+
+        self.assertEqual(account.email, "user@example.com")
+        self.assertEqual(credentials.value, "refresh-token")
+
+    def test_connect_rejects_explicitly_reduced_scope(self) -> None:
+        credentials = _MemoryCredentials()
+
+        def request(_request: Request, _timeout: float) -> HttpResponse:
+            return HttpResponse(
+                200,
+                {},
+                json.dumps(
+                    {
+                        "access_token": "access-token",
+                        "refresh_token": "refresh-token",
+                        "expires_in": 3600,
+                        "scope": "openid email profile",
+                    }
+                ).encode("utf-8"),
+            )
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "jang_app.services.google_oauth._OAuthCallbackServer",
+            _OAuthCallback,
+        ):
+            session = GoogleOAuthSession(
+                GoogleOAuthConfig("client-id"),
+                credentials,
+                GoogleAccountStateStore(Path(directory) / "account.json"),
+                requester=request,
+                browser_open=lambda _url: True,
+            )
+
+            with self.assertRaisesRegex(GoogleOAuthError, "file access"):
+                session.connect()
+
+        self.assertIsNone(credentials.value)
+
     def test_packaged_desktop_client_secret_is_sent_to_token_endpoint(self) -> None:
         requests: list[Request] = []
 

@@ -209,7 +209,10 @@ class GoogleOAuthSession:
         )
         refresh_token = str(token_data.get("refresh_token", "")).strip()
         access_token = str(token_data.get("access_token", "")).strip()
-        scopes = set(str(token_data.get("scope", "")).split())
+        scope_text = str(token_data.get("scope", "")).strip()
+        # OAuth 2.0 allows the token response to omit scope when it is
+        # identical to the scope requested by the authorization code.
+        scopes = set(scope_text.split()) if scope_text else set(OAUTH_SCOPES)
         if not refresh_token or not access_token:
             raise GoogleOAuthError("Google did not return reusable account credentials.")
         if DRIVE_FILE_SCOPE not in scopes:

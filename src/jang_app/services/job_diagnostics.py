@@ -63,6 +63,25 @@ def classify_error(error: str) -> ErrorClassification:
             "The installed RVC runtime is missing a JJZero compatibility component.",
         ),
         (
+            (
+                "google drive file access was not granted",
+                "google authorization was declined",
+                "google did not return reusable account credentials",
+                "google account connection timed out",
+            ),
+            "GOOGLE_OAUTH_AUTHORIZATION_FAILED",
+            "Google account authorization did not grant the required access.",
+        ),
+        (
+            (
+                "google drive oauth client is not configured",
+                "google drive oauth configuration is invalid",
+                "google authorization failed: invalid_client",
+            ),
+            "GOOGLE_OAUTH_CONFIGURATION_FAILED",
+            "The Google OAuth client configuration is unavailable or invalid.",
+        ),
+        (
             ("unicodeencodeerror", "codec can't encode character", "codec cannot encode character"),
             "RVC_CONSOLE_ENCODING_ERROR",
             "The RVC process could not write Unicode text using the Windows console encoding.",

@@ -84,6 +84,14 @@ class JobDiagnosticsTests(unittest.TestCase):
             "DIRECTML_RUNTIME_FAILED",
         )
         self.assertEqual(
+            classify_error("Google Drive file access was not granted.").code,
+            "GOOGLE_OAUTH_AUTHORIZATION_FAILED",
+        )
+        self.assertEqual(
+            classify_error("Google authorization failed: invalid_client").code,
+            "GOOGLE_OAUTH_CONFIGURATION_FAILED",
+        )
+        self.assertEqual(
             classify_error("UnicodeEncodeError: 'cp949' codec can't encode character").code,
             "RVC_CONSOLE_ENCODING_ERROR",
         )
