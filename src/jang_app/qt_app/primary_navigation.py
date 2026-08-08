@@ -13,6 +13,8 @@ _PAGE_ICONS = {
     "Library": "database",
     "Models": "model",
     "Vocal": "vocal",
+    "Separation": "split",
+    "Conversion": "vocal",
     "Studio": "studio",
     "Export": "download",
 }

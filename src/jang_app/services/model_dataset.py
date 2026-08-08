@@ -120,8 +120,16 @@ class ModelDatasetItem:
         return self.edit_history.can_redo
 
     @property
+    def pending_segment_count(self) -> int:
+        return sum(candidate.status == SEGMENT_PENDING for candidate in self.segment_candidates)
+
+    @property
+    def held_segment_count(self) -> int:
+        return sum(candidate.status == SEGMENT_HELD for candidate in self.segment_candidates)
+
+    @property
     def open_segment_count(self) -> int:
-        return sum(candidate.status in {SEGMENT_PENDING, SEGMENT_HELD} for candidate in self.segment_candidates)
+        return self.pending_segment_count + self.held_segment_count
 
 
 @dataclass(frozen=True)
@@ -391,7 +399,7 @@ class ModelDatasetStore:
         item = _require_item(dataset, item_id)
         if not item.training_paths:
             raise ModelDatasetError("Add at least one clip before marking this audio ready.")
-        if item.open_segment_count:
+        if item.pending_segment_count:
             raise ModelDatasetError("Review or exclude every queued segment before marking this audio ready.")
         if item.review_state == REVIEW_READY:
             return dataset
@@ -421,6 +429,7 @@ class ModelDatasetStore:
             replace(
                 item,
                 duration_ms=duration_ms,
+                training_mode=TRAINING_MODE_CLIPS if candidates else item.training_mode,
                 segment_candidates=candidates,
                 review_state=review_state,
                 edit_history=item.edit_history.record(_item_edit_state(item)),
@@ -873,7 +882,7 @@ class ModelDatasetStore:
             duration_ms=max(0, int(data.get("duration_ms", 0))),
             selected_order=selected_order,
             clips=clips,
-            training_mode=state.training_mode,
+            training_mode=TRAINING_MODE_CLIPS if segment_candidates else state.training_mode,
             review_state=state.review_state,
             edit_history=history_from_data(data.get("edit_history")),
             segment_candidates=segment_candidates,

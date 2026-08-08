@@ -12,6 +12,7 @@ class PlaybackQueue:
     paths: tuple[Path, ...]
     volumes: tuple[float, ...]
     duration_ms: int = 0
+    scope: str = ""
 
     def with_duration(self, duration_ms: int) -> PlaybackQueue:
         return PlaybackQueue(
@@ -21,6 +22,7 @@ class PlaybackQueue:
             paths=self.paths,
             volumes=self.volumes,
             duration_ms=max(0, duration_ms),
+            scope=self.scope,
         )
 
     def has_same_sources(self, other: PlaybackQueue | None) -> bool:

@@ -13,6 +13,7 @@ from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_s
 from jang_app.services.song_asset_removal import SongAssetRemovalResult, SongAssetRemovalService
 from jang_app.services.song_assets import SongAssetDetails, build_song_asset_details
 from jang_app.services.song_package import SongOutputReference, SongPackage, SongPackageStore, VOCAL_STAGE
+from jang_app.services.separation_recipe import load_separation_run
 from jang_app.services.song_video_export import (
     SongVideoExport,
     list_song_video_exports,
@@ -92,6 +93,10 @@ class SongVocalVersion:
     instrumental_path: Path
     converted_vocal_paths: tuple[Path, ...]
     active_converted_path: Path | None = None
+    separation_recipe_id: str = ""
+    separation_recipe_label: str = "Legacy"
+    separation_recipe_summary: str = ""
+    separation_postprocess_status: str = "not_requested"
 
 
 class SongLibrary:
@@ -137,6 +142,12 @@ class SongLibrary:
             source_url=url,
         )
         return _item_from_package(package)
+
+    def attach_source(self, item_id: str, path: Path) -> SongItem:
+        source = path.expanduser().resolve()
+        if not _is_supported_audio(source):
+            raise ValueError("Select a supported audio file")
+        return _item_from_package(self._store.attach_source(item_id, source))
 
     def add_output_sets(self, sound_sets: list[OutputSoundSet]) -> None:
         packages = self._store.packages(include_removed=True)
@@ -203,6 +214,12 @@ class SongLibrary:
 
     def video_source(self, item_id: str) -> VideoSource:
         return self._video_sources.resolve(self._store.require(item_id))
+
+    def managed_video_sources(self, item_id: str) -> tuple[VideoSource, ...]:
+        return self._video_sources.managed_sources(self._store.require(item_id))
+
+    def select_managed_video(self, item_id: str, path: Path) -> VideoSource:
+        return self._video_sources.select_managed(self._store.require(item_id), path)
 
     def set_video_file(
         self,
@@ -423,6 +440,7 @@ def _vocal_version_from_output(
     active_converted = output.active_converted_path
     if active_converted not in sound_set.converted_vocal_paths:
         active_converted = sound_set.converted_vocal_paths[0] if sound_set.converted_vocal_paths else None
+    run = load_separation_run(sound_set.job_dir)
     return SongVocalVersion(
         version_id=output.output_id,
         label=output.label or sound_set.label,
@@ -432,6 +450,10 @@ def _vocal_version_from_output(
         instrumental_path=sound_set.instrumental_path,
         converted_vocal_paths=sound_set.converted_vocal_paths,
         active_converted_path=active_converted,
+        separation_recipe_id=run.recipe.recipe_id,
+        separation_recipe_label=run.recipe.label,
+        separation_recipe_summary=run.recipe.summary,
+        separation_postprocess_status=run.postprocess_status,
     )
 
 

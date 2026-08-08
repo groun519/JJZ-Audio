@@ -124,7 +124,10 @@ class ClipWaveformView(QWidget):
         self._peaks_ready.emit(cache_key, peaks)
 
     def _apply_peaks(self, cache_key: tuple[str, int, int, int], peaks: list[float]) -> None:
-        _WAVEFORM_CACHE[cache_key] = peaks
+        if peaks:
+            _WAVEFORM_CACHE[cache_key] = peaks
+        else:
+            _WAVEFORM_CACHE.pop(cache_key, None)
         if cache_key == self._waveform_key:
             self._peaks = peaks
             self.update()

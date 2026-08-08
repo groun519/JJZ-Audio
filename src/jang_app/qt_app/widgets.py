@@ -853,14 +853,7 @@ class SvgIconButton(FeedbackButton):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        palette = _track_button_palette(
-            self._theme_mode,
-            self.isChecked(),
-            self.isEnabled(),
-            self._is_pointer_hovered(),
-            self._is_pointer_pressed() or self.isDown(),
-            self.objectName(),
-        )
+        palette = self._button_palette()
 
         inset = self._paint_inset
         rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
@@ -880,6 +873,16 @@ class SvgIconButton(FeedbackButton):
             palette["icon"],
         )
         self._draw_keyboard_focus(painter, rect, 9)
+
+    def _button_palette(self) -> dict[str, QColor]:
+        return _track_button_palette(
+            self._theme_mode,
+            self.isChecked(),
+            self.isEnabled(),
+            self._is_pointer_hovered(),
+            self._is_pointer_pressed() or self.isDown(),
+            self.objectName(),
+        )
 
     def _icon_key(self) -> str:
         if self._icon_name == "speaker":
@@ -940,6 +943,86 @@ class ThemeToggleButton(FeedbackButton):
         self._draw_keyboard_focus(painter, outer, 10)
 
 
+class TrackMixControl(QFrame):
+    settings_changed = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("TrackMixerStrip")
+        self.setFixedHeight(34)
+        self._is_loading = False
+
+        mixer_label = QLabel("LEVEL")
+        mixer_label.setObjectName("TrackMixerLabel")
+        mixer_label.setFixedWidth(42)
+
+        self.mute_button = SvgIconButton("speaker", size=26)
+        self.mute_button.setObjectName("TrackMuteButton")
+        self.mute_button.setCheckable(True)
+        set_translated_tooltip(self.mute_button, "Mute this track")
+        self.mute_button.clicked.connect(self._on_mute_changed)
+
+        self.volume_slider = VolumeSlider()
+        self.volume_slider.setRange(0, 200)
+        self.volume_slider.setValue(100)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        self.volume_label = QLabel("100%")
+        self.volume_label.setObjectName("VolumeValue")
+        self.volume_label.setFixedWidth(45)
+        self.volume_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(8)
+        layout.addStretch(1)
+        layout.addWidget(mixer_label, 0)
+        layout.addWidget(self.mute_button, 0)
+        layout.addWidget(self.volume_slider, 0)
+        layout.addWidget(self.volume_label, 0)
+
+    def set_theme_mode(self, theme_mode: str) -> None:
+        self.mute_button.set_theme_mode(theme_mode)
+        self.volume_slider.set_theme_mode(theme_mode)
+
+    def is_muted(self) -> bool:
+        return self.mute_button.isChecked()
+
+    def volume(self) -> float:
+        return self.volume_slider.value() / 100
+
+    def volume_percent(self) -> int:
+        return self.volume_slider.value()
+
+    def set_mix_state(self, *, muted: bool, volume_percent: int) -> None:
+        self._is_loading = True
+        self.mute_button.setChecked(muted)
+        set_translated_tooltip(
+            self.mute_button,
+            "Unmute this track" if muted else "Mute this track",
+        )
+        volume = max(0, min(200, volume_percent))
+        self.volume_slider.setValue(volume)
+        self.volume_label.setText(f"{volume}%")
+        self._is_loading = False
+
+    def set_controls_enabled(self, enabled: bool) -> None:
+        self.mute_button.setEnabled(enabled)
+        self.volume_slider.setEnabled(enabled)
+
+    def _on_mute_changed(self) -> None:
+        set_translated_tooltip(
+            self.mute_button,
+            "Unmute this track" if self.is_muted() else "Mute this track",
+        )
+        if not self._is_loading:
+            self.settings_changed.emit()
+
+    def _on_volume_changed(self, value: int) -> None:
+        self.volume_label.setText(f"{value}%")
+        if not self._is_loading:
+            self.settings_changed.emit()
+
+
 class TrackRow(QFrame):
     export_requested = Signal(object)
     open_location_requested = Signal(object)
@@ -962,7 +1045,8 @@ class TrackRow(QFrame):
         self.path_combo.setObjectName("TrackVersionCombo")
         self.path_combo.setMinimumWidth(220)
         self.path_combo.setMaximumWidth(440)
-        self.path_combo.setVisible(allow_selection)
+        if not allow_selection:
+            self.path_combo.hide()
         self.path_combo.currentIndexChanged.connect(self._on_combo_changed)
 
         self.open_location_button = SvgIconButton("folder", size=26)
@@ -975,20 +1059,8 @@ class TrackRow(QFrame):
         set_translated_tooltip(self.export_button, "Save a copy of this track")
         self.export_button.clicked.connect(self._emit_export_requested)
 
-        self.mute_button = SvgIconButton("speaker", size=26)
-        self.mute_button.setObjectName("TrackMuteButton")
-        self.mute_button.setCheckable(True)
-        set_translated_tooltip(self.mute_button, "Mute this track")
-        self.mute_button.clicked.connect(self._on_mute_changed)
-
-        self.volume_slider = VolumeSlider()
-        self.volume_slider.setRange(0, 200)
-        self.volume_slider.setValue(100)
-        self.volume_slider.valueChanged.connect(self._on_volume_changed)
-        self.volume_label = QLabel("100%")
-        self.volume_label.setObjectName("VolumeValue")
-        self.volume_label.setFixedWidth(45)
-        self.volume_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mix_control = TrackMixControl()
+        self.mix_control.settings_changed.connect(self._on_mix_settings_changed)
 
         self.waveform = WaveformView()
         self.waveform.seek_requested.connect(self.seek_requested.emit)
@@ -1011,28 +1083,12 @@ class TrackRow(QFrame):
         header.addStretch(1)
         header.addWidget(action_group, 0)
 
-        mixer_strip = QFrame()
-        mixer_strip.setObjectName("TrackMixerStrip")
-        mixer_strip.setFixedHeight(34)
-        mixer_layout = QHBoxLayout(mixer_strip)
-        mixer_layout.setContentsMargins(10, 4, 10, 4)
-        mixer_layout.setSpacing(8)
-
-        mixer_label = QLabel("LEVEL")
-        mixer_label.setObjectName("TrackMixerLabel")
-        mixer_label.setFixedWidth(42)
-        mixer_layout.addStretch(1)
-        mixer_layout.addWidget(mixer_label, 0)
-        mixer_layout.addWidget(self.mute_button, 0)
-        mixer_layout.addWidget(self.volume_slider, 0)
-        mixer_layout.addWidget(self.volume_label, 0)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
         layout.addLayout(header)
         layout.addWidget(self.waveform, 1)
-        layout.addWidget(mixer_strip, 0)
+        layout.addWidget(self.mix_control, 0)
 
         self.set_loaded(False)
 
@@ -1041,8 +1097,7 @@ class TrackRow(QFrame):
         self.waveform.set_theme_mode(theme_mode)
         self.open_location_button.set_theme_mode(theme_mode)
         self.export_button.set_theme_mode(theme_mode)
-        self.mute_button.set_theme_mode(theme_mode)
-        self.volume_slider.set_theme_mode(theme_mode)
+        self.mix_control.set_theme_mode(theme_mode)
 
     def set_single_path(self, path: Path | None) -> None:
         self._is_loading = True
@@ -1091,26 +1146,17 @@ class TrackRow(QFrame):
         return next(iter(self._paths_by_label.values()), None)
 
     def is_muted(self) -> bool:
-        return self.mute_button.isChecked()
+        return self.mix_control.is_muted()
 
     def volume(self) -> float:
-        return self.volume_slider.value() / 100
+        return self.mix_control.volume()
 
     def volume_percent(self) -> int:
-        return self.volume_slider.value()
+        return self.mix_control.volume_percent()
 
     def set_mix_state(self, *, muted: bool, volume_percent: int) -> None:
-        self._is_loading = True
-        self.mute_button.setChecked(muted)
+        self.mix_control.set_mix_state(muted=muted, volume_percent=volume_percent)
         self.waveform.set_muted(muted)
-        set_translated_tooltip(
-            self.mute_button,
-            "Unmute this track" if muted else "Mute this track",
-        )
-        volume = max(0, min(200, volume_percent))
-        self.volume_slider.setValue(volume)
-        self.volume_label.setText(f"{volume}%")
-        self._is_loading = False
 
     def set_playhead_ratio(self, ratio: float) -> None:
         self.waveform.set_playhead_ratio(ratio)
@@ -1118,8 +1164,7 @@ class TrackRow(QFrame):
     def set_loaded(self, is_loaded: bool) -> None:
         self.open_location_button.setEnabled(is_loaded)
         self.export_button.setEnabled(is_loaded)
-        self.mute_button.setEnabled(is_loaded)
-        self.volume_slider.setEnabled(is_loaded)
+        self.mix_control.set_controls_enabled(is_loaded)
 
     def _set_current_path(self, path: Path | None) -> None:
         if path is None:
@@ -1151,16 +1196,8 @@ class TrackRow(QFrame):
                 return index
         return -1
 
-    def _on_mute_changed(self) -> None:
+    def _on_mix_settings_changed(self) -> None:
         self.waveform.set_muted(self.is_muted())
-        set_translated_tooltip(
-            self.mute_button,
-            "Unmute this track" if self.is_muted() else "Mute this track",
-        )
-        self._emit_playback_settings_changed()
-
-    def _on_volume_changed(self, value: int) -> None:
-        self.volume_label.setText(f"{value}%")
         self._emit_playback_settings_changed()
 
     def _emit_export_requested(self) -> None:
@@ -1289,7 +1326,7 @@ def _track_button_palette(
         return _window_control_palette(theme_mode, object_name, is_enabled, is_hovered, is_pressed)
     if object_name == "DropFileButton":
         return _drop_file_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
-    if object_name == "EmbeddedActionButton":
+    if object_name in {"EmbeddedActionButton", "VideoOriginalUrlButton"}:
         return _embedded_action_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
     if object_name in {"TrackActionButton", "TrackMuteButton"}:
         return _track_icon_button_palette(theme_mode, is_checked, is_enabled, is_hovered, is_pressed)
@@ -1880,6 +1917,14 @@ _TRACK_ICON_SVGS = {
         '<path d="M3 12h18"/>'
         '<path d="M12 3a14 14 0 0 1 0 18"/>'
         '<path d="M12 3a14 14 0 0 0 0 18"/>'
+        "</svg>"
+    ),
+    "youtube": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<rect x="3" y="6" width="18" height="12" rx="4"/>'
+        '<path d="m10 9 5 3-5 3z" fill="{color}" stroke="none"/>'
         "</svg>"
     ),
     "link": (

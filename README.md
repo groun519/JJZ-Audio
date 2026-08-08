@@ -5,11 +5,12 @@ JJZero Audio is a local Windows desktop workspace for managing songs and RVC voi
 ## Features
 
 - Library: import local media or YouTube audio, search and sort songs, edit metadata, preview waveforms, and keep one working song available across pages.
-- Vocal: separate vocals and instrumental stems with Demucs, configure RVC conversion, and retain multiple converted vocal versions.
+- Separation: choose Standard, High Quality, or a sequential `htdemucs_ft + htdemucs` Maximum ensemble, retain multiple separation runs, and compare synchronized original-vocal and instrumental stems.
+- Conversion: select an active separation result, configure RVC conversion, choose a converted take by model, pitch, and creation time, and compare it directly with the original vocal.
 - Models: create managed model packages, link or copy existing RVC folders, prepare and review training clips, reduce noise and silence, train or resume RVC models, and register finished weights and indexes.
 - Studio: play synchronized original, instrumental, and converted tracks; adjust mute and volume from 0% to 200%; mix selected tracks; and attach local or YouTube video.
 - Export: review output media and create final audio or video files.
-- System: Korean and English UI, light and dark themes, persistent playback, processing queue, log drawer, first-run storage setup, and runtime diagnostics.
+- System: Korean and English UI, light and dark themes, a shared transport that preserves position while changing workspace playback scope, processing queue, log drawer, first-run storage setup, and runtime diagnostics.
 
 New installations keep large mutable content under one user-selected storage root: `Data`, `Output`, `Runtime`, and `Cache`. Small bootstrap settings and logs remain under `%LOCALAPPDATA%\JJZero Audio` so the app can locate that root.
 Existing 0.2.x layouts remain readable in place. Choosing a storage location in Settings copies and verifies the old data before switching paths, keeps the source files as a recovery copy, and rebuilds the SQLite search catalog from package manifests.
@@ -66,6 +67,12 @@ Run one source-separation smoke test with:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\smoke_separate.py "C:\path\to\audio.m4a"
+```
+
+Compare a separation result with known reference stems:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\benchmark_separation.py reference-vocals.wav reference-instrumental.wav estimated-vocals.wav estimated-instrumental.wav --output separation-quality.json
 ```
 
 ## Windows Release

@@ -140,20 +140,57 @@ class RvcTrainingPreprocessTests(unittest.TestCase):
             self.assertEqual(result.skipped_input_count, 1)
             self.assertEqual(result.failed_inputs[0].input_name, "0002_voice-1.wav")
             self.assertEqual(result.failed_inputs[0].reason, "ValueError: clip is too short")
+            self.assertTrue(result.failed_inputs[0].source_item_id)
             reloaded = load_rvc_preprocess_result(model_id, layout)
             self.assertEqual(reloaded.failed_inputs, result.failed_inputs)
             manifest = json.loads(
                 (layout.experiment_dir / "jjzero_preprocess.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(manifest["version"], 2)
+            self.assertEqual(manifest["version"], 4)
             self.assertEqual(manifest["successful_input_count"], 1)
             self.assertEqual(len(manifest["failed_inputs"]), 1)
+            self.assertEqual(
+                manifest["failed_inputs"][0]["source_item_id"],
+                result.failed_inputs[0].source_item_id,
+            )
             self.assertEqual(
                 RvcTrainingStateStore(model_id, layout).load().phase,
                 RvcTrainingPhase.PREPROCESSED,
             )
             leftovers = tuple((root / "model" / "training" / "preprocess").glob(".building-*"))
             self.assertEqual(leftovers, ())
+
+    def test_success_log_without_an_output_is_recorded_as_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _root, model_id, layout, runtime = _training_setup(
+                Path(temporary),
+                input_count=2,
+            )
+
+            def runner(args, cwd=None, env=None, output_callback=None):
+                staging = Path(args[5])
+                sources = sorted(Path(args[2]).iterdir())
+                _write_output_pair(staging, "0_0")
+                (staging / "preprocess.log").write_text(
+                    "\n".join(f"{source}->Suc." for source in sources),
+                    encoding="utf-8",
+                )
+                return CommandResult(args, 0, "", "")
+
+            result = preprocess_rvc_training_dataset(
+                model_id,
+                layout,
+                runtime,
+                command_runner=runner,
+            )
+
+            self.assertEqual(result.successful_input_count, 1)
+            self.assertEqual(result.skipped_input_count, 1)
+            self.assertEqual(
+                result.failed_inputs[0].reason,
+                "No usable audio segment was produced.",
+            )
+            self.assertEqual(result.failed_inputs[0].source_clip_id, "")
 
     def test_tester_case_continues_with_179_of_195_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -211,6 +248,8 @@ class RvcTrainingPreprocessTests(unittest.TestCase):
 
             self.assertEqual(result.successful_input_count, 179)
             self.assertEqual(result.skipped_input_count, 16)
+            self.assertEqual(result.failed_inputs[0].source_item_id, "item-180")
+            self.assertEqual(result.failed_inputs[0].source_clip_id, "clip-180")
             self.assertEqual(len(result.gt_wavs), 179)
             self.assertEqual(len(result.wavs_16k), 179)
             self.assertEqual(

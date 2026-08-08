@@ -76,6 +76,16 @@ class VideoPreviewPanelTests(unittest.TestCase):
         )
 
         self.assertEqual(panel.url_field.original_slot.objectName(), "VideoOriginalUrlSlot")
+        self.assertEqual(panel.url_field.original_button.objectName(), "VideoOriginalUrlButton")
+        self.assertEqual(panel.url_field.original_button.icon_name(), "youtube")
+        self.assertEqual(
+            (panel.url_field.original_slot.width(), panel.url_field.original_slot.height()),
+            (30, 30),
+        )
+        self.assertEqual(
+            (panel.url_field.original_button.width(), panel.url_field.original_button.height()),
+            (30, 30),
+        )
         self.assertFalse(panel.url_field.original_slot.isHidden())
         self.assertTrue(panel.url_field.original_button.isHidden())
         self.assertIn(
@@ -128,6 +138,27 @@ class VideoPreviewPanelTests(unittest.TestCase):
                 self.assertFalse(panel.download_button.isHidden())
                 panel.download_button.click()
                 self.assertEqual(requested.count(), 1)
+            panel.close()
+
+    def test_saved_video_selector_reuses_a_managed_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            video = Path(temporary) / "saved.mp4"
+            video.write_bytes(b"video")
+            panel = VideoPreviewPanel()
+            requested = QSignalSpy(panel.saved_source_requested)
+
+            panel.set_source(
+                VideoSource(kind=VIDEO_KIND_YOUTUBE, url="https://youtu.be/source"),
+                enabled=True,
+                saved_sources=(
+                    VideoSource(kind=VIDEO_KIND_FILE, path=video, original_name="saved.mp4"),
+                ),
+            )
+
+            self.assertFalse(panel.saved_source_combo.isHidden())
+            self.assertEqual(panel.saved_source_combo.count(), 2)
+            panel.saved_source_combo.activated.emit(1)
+            self.assertEqual(requested.at(0)[0], video.resolve())
             panel.close()
 
 

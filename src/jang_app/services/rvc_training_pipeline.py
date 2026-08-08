@@ -33,6 +33,7 @@ from jang_app.services.rvc_training_index import (
 )
 from jang_app.services.rvc_training_preprocess import (
     RvcTrainingPreprocessError,
+    RvcTrainingPreprocessResult,
     load_rvc_preprocess_result,
     preprocess_rvc_training_dataset,
 )
@@ -94,6 +95,7 @@ def run_rvc_training_pipeline(
     progress: Callable[[int], None] | None = None,
     epoch_callback: Callable[[int, int], None] | None = None,
     stage_callback: Callable[[RvcTrainingStage], None] | None = None,
+    preprocess_callback: Callable[[RvcTrainingPreprocessResult], None] | None = None,
     output_callback: Callable[[str], None] | None = None,
 ) -> RvcTrainingPipelineResult:
     token = cancellation or CommandCancellation()
@@ -115,7 +117,7 @@ def run_rvc_training_pipeline(
         _set_progress(progress, 5)
 
         _stage(stage_callback, RvcTrainingStage.PREPROCESS)
-        _resolve_stage(
+        preprocess_result = _resolve_stage(
             lambda: load_rvc_preprocess_result(model_id, layout),
             lambda: preprocess_rvc_training_dataset(
                 model_id,
@@ -130,6 +132,8 @@ def run_rvc_training_pipeline(
             executed,
             token,
         )
+        if preprocess_callback is not None:
+            preprocess_callback(preprocess_result)
         _set_progress(progress, 15)
 
         _stage(stage_callback, RvcTrainingStage.EXTRACT)

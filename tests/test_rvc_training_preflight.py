@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from jang_app.services.clip_edit_history import REVIEW_READY
 from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem
+from jang_app.services.model_dataset_analysis import DatasetAnalysisIssue
 from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_training_preflight import (
     RvcTrainingCheckLevel,
@@ -69,6 +70,55 @@ class RvcTrainingPreflightTests(unittest.TestCase):
                 {check.key for check in result.warnings},
                 {"analysis", "device"},
             )
+
+    def test_preflight_calls_out_clips_that_may_be_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime-root"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            _create_runtime(runtime)
+            analysis = SimpleNamespace(
+                selected_item_count=1,
+                ready_item_count=1,
+                attention_count=2,
+                issues=(
+                    DatasetAnalysisIssue(
+                        "clip_too_short",
+                        "attention",
+                        "This clip is shorter than 1 second.",
+                        item_id="voice",
+                        clip_id="clip-1",
+                    ),
+                    DatasetAnalysisIssue(
+                        "clipping",
+                        "attention",
+                        "Clipped samples were detected.",
+                        item_id="voice",
+                        clip_id="clip-1",
+                    ),
+                ),
+            )
+
+            result = inspect_rvc_training_preflight(
+                managed_model=True,
+                dataset=_dataset(root, ready=True),
+                analysis=analysis,
+                runtime_root=runtime,
+                workspace_root=workspace,
+                training_backend=RvcComputeBackend.CUDA,
+                adapter_name="NVIDIA GPU",
+                adapter_memory_bytes=8 * 1024**3,
+                disk_usage=lambda _path: SimpleNamespace(free=20 * 1024**3),
+            )
+
+            analysis_check = _check(result, "analysis")
+            self.assertEqual(analysis_check.level, RvcTrainingCheckLevel.WARNING)
+            self.assertEqual(
+                analysis_check.detail,
+                "{count} analysis findings need review.",
+            )
+            self.assertEqual(analysis_check.format_values["count"], 2)
 
     def test_missing_runtime_and_storage_are_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

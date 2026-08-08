@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
 from PySide6.QtCore import QEvent, QUrl, Qt, Signal
@@ -22,7 +23,8 @@ from jang_app.qt_app.localization import (
     set_translated_text,
     set_translated_tooltip,
 )
-from jang_app.qt_app.widgets import FileDropCard, SvgIconButton
+from jang_app.qt_app.widgets import FileDropCard, ScrollSafeComboBox, SvgIconButton
+from jang_app.services.i18n import tr
 from jang_app.services.video_source import VideoSource
 
 
@@ -61,6 +63,7 @@ class VideoPreviewPanel(QFrame):
     open_location_requested = Signal(object)
     clear_requested = Signal()
     download_requested = Signal()
+    saved_source_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -68,6 +71,7 @@ class VideoPreviewPanel(QFrame):
         self.setMinimumSize(440, 420)
         self._source = VideoSource()
         self._original_song_url = ""
+        self._saved_sources: tuple[VideoSource, ...] = ()
         self._active = False
         self._enabled = False
         self._running = False
@@ -78,6 +82,15 @@ class VideoPreviewPanel(QFrame):
         self.source_label.setObjectName("MutedText")
         self.source_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.source_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self.saved_source_combo = ScrollSafeComboBox()
+        self.saved_source_combo.setObjectName("VideoSourceCombo")
+        self.saved_source_combo.setMinimumWidth(170)
+        self.saved_source_combo.setMaximumWidth(260)
+        self.saved_source_combo.setMaxVisibleItems(8)
+        set_translated_tooltip(self.saved_source_combo, "Reuse saved video")
+        self.saved_source_combo.activated.connect(self._select_saved_source)
+        self.saved_source_combo.hide()
 
         self.edit_button = SvgIconButton("edit", size=30)
         self.edit_button.setObjectName("ControlIconButton")
@@ -90,6 +103,7 @@ class VideoPreviewPanel(QFrame):
         header.setSpacing(10)
         header.addWidget(self.title_label, 0)
         header.addWidget(self.source_label, 1)
+        header.addWidget(self.saved_source_combo, 0)
         header.addWidget(self.edit_button, 0)
 
         self.video_widget = QVideoWidget()
@@ -201,6 +215,7 @@ class VideoPreviewPanel(QFrame):
         *,
         enabled: bool,
         original_song_url: str = "",
+        saved_sources: tuple[VideoSource, ...] = (),
     ) -> None:
         self.media_player.stop()
         self.media_player.setSource(QUrl())
@@ -208,6 +223,7 @@ class VideoPreviewPanel(QFrame):
         self._enabled = enabled
         self._original_song_url = original_song_url.strip()
         self.url_field.set_original_url_available(bool(self._original_song_url))
+        self._populate_saved_sources(saved_sources)
 
         configured = source.is_configured
         self.source_card.setVisible(configured)
@@ -280,12 +296,14 @@ class VideoPreviewPanel(QFrame):
         apply_widget_language(self)
         set_translated_text(self.title_label, "Video")
         set_translated_tooltip(self.edit_button, "Change video source")
+        set_translated_tooltip(self.saved_source_combo, "Reuse saved video")
         set_translated_tooltip(self.open_button, "Open video location")
         set_translated_tooltip(self.clear_button, "Clear video source")
         set_translated_tooltip(self.download_button, "Download Video")
         set_translated_text(self.drop_card.title_label, "Drop Video")
         set_translated_tooltip(self.drop_card.file_button, "Add video file")
         self.url_field.apply_language()
+        self._populate_saved_sources(self._saved_sources)
         if self._source.is_configured:
             set_translated_text(self.source_badge, _source_badge(self._source))
 
@@ -293,6 +311,45 @@ class VideoPreviewPanel(QFrame):
         self.synchronizer.sync(self.media_player.position(), False)
         self.stack.setCurrentWidget(self.source_editor)
         self.edit_button.hide()
+
+    def _populate_saved_sources(self, sources: tuple[VideoSource, ...]) -> None:
+        self._saved_sources = sources
+        local_sources = tuple(
+            source
+            for source in sources
+            if source.path is not None and source.path.is_file()
+        )
+        self.saved_source_combo.blockSignals(True)
+        self.saved_source_combo.clear()
+        active_path = self._source.path.resolve() if self._source.path is not None else None
+        active_index = -1
+        if active_path is None:
+            self.saved_source_combo.addItem(
+                tr("Saved videos ({count})", count=len(local_sources)),
+                None,
+            )
+        for source in local_sources:
+            path = source.path.resolve()
+            self.saved_source_combo.addItem(source.display_name, path)
+            index = self.saved_source_combo.count() - 1
+            self.saved_source_combo.setItemData(index, str(path), Qt.ItemDataRole.ToolTipRole)
+            if path == active_path:
+                active_index = index
+        if active_index >= 0:
+            self.saved_source_combo.setCurrentIndex(active_index)
+        self.saved_source_combo.blockSignals(False)
+        has_alternative = any(
+            source.path is not None and source.path.resolve() != active_path
+            for source in local_sources
+        )
+        self.saved_source_combo.setVisible(
+            (active_path is None and bool(local_sources)) or has_alternative
+        )
+
+    def _select_saved_source(self, index: int) -> None:
+        path = self.saved_source_combo.itemData(index)
+        if isinstance(path, Path):
+            self.saved_source_requested.emit(path)
 
     def _use_original_song_url(self) -> None:
         if self._original_song_url:
@@ -338,8 +395,8 @@ class _VideoUrlField(QFrame):
         self.edit.textChanged.connect(self._sync_submit_button)
         self.edit.installEventFilter(self)
 
-        self.original_button = SvgIconButton("globe", size=28)
-        self.original_button.setObjectName("EmbeddedIconButton")
+        self.original_button = SvgIconButton("youtube", size=30)
+        self.original_button.setObjectName("VideoOriginalUrlButton")
         set_translated_tooltip(self.original_button, "Use song's YouTube URL")
         self.original_button.clicked.connect(self.original_requested.emit)
         self.original_button.hide()
@@ -351,7 +408,7 @@ class _VideoUrlField(QFrame):
 
         self.original_slot = QWidget()
         self.original_slot.setObjectName("VideoOriginalUrlSlot")
-        self.original_slot.setFixedSize(28, 28)
+        self.original_slot.setFixedSize(30, 30)
         original_layout = QVBoxLayout(self.original_slot)
         original_layout.setContentsMargins(0, 0, 0, 0)
         original_layout.addWidget(self.original_button)

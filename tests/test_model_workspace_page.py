@@ -25,6 +25,7 @@ from jang_app.services.processing_queue import ProcessingQueue, TASK_COMPLETED
 from jang_app.services.rvc_model_workspace import RvcModelWorkspace
 from jang_app.services.rvc_training_pipeline import RvcTrainingStage
 from jang_app.services.rvc_training_preflight import RvcTrainingPreflight
+from jang_app.services.rvc_training_preprocess import RvcTrainingPreprocessFailure
 from jang_app.services.rvc_training_runtime import required_rvc_training_paths
 from jang_app.services.rvc_training_state import RvcTrainingStateStore
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
@@ -63,6 +64,23 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual(changes, [True])
             page.training_section_button.click()
             self.assertEqual(page.workspace_content_stack.currentIndex(), 3)
+            page.close()
+
+    def test_excluded_preprocess_input_opens_its_original_clip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            page = ModelWorkspacePage(root / "rvc", RvcModelWorkspace(root / "models"))
+            failure = RvcTrainingPreprocessFailure(
+                "0016_voice.wav",
+                "ValueError: clip is too short",
+                "item-1",
+                "clip-16",
+            )
+
+            with patch.object(page, "_open_dataset_item") as opened:
+                page._open_excluded_training_clip(failure)
+
+            opened.assert_called_once_with("item-1", "clip-16")
             page.close()
 
     def test_opening_selected_model_does_not_reload_every_panel(self) -> None:

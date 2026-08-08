@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QAbstractSpinBox,
     QApplication,
     QComboBox,
@@ -413,6 +414,7 @@ class ModelClipEditor(QFrame):
         previous_candidate_id = self._selected_candidate_id() if same_item else ""
         previous_candidate_filter = self._candidate_filter
         previous_clip_id = self._selected_clip_id() if same_item else ""
+        previous_clip_row = self.clip_list.currentRow() if same_item else -1
         self.stop_preview()
         self._clear_temporary_denoise_preview()
         if not same_item:
@@ -469,6 +471,7 @@ class ModelClipEditor(QFrame):
             previous_candidate_id,
             previous_candidate_filter,
             previous_clip_id,
+            previous_clip_row,
         )
         if not selection_restored:
             if any(candidate.status == SEGMENT_PENDING for candidate in item.segment_candidates):
@@ -512,6 +515,40 @@ class ModelClipEditor(QFrame):
             total_count,
         )
         self._sync_action_state()
+
+    def focus_clip(self, clip_id: str, start_ms: int = 0, end_ms: int = 0) -> bool:
+        if self._item is None or not clip_id:
+            return False
+        clip = next((item for item in self._item.clips if item.clip_id == clip_id), None)
+        if clip is None:
+            return False
+
+        self._show_clips_page()
+        for index in range(self.clip_list.count()):
+            item = self.clip_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) != clip_id:
+                continue
+            self.clip_list.setCurrentRow(index)
+            self.clip_list.scrollToItem(
+                item,
+                QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
+            break
+
+        range_start = clip.start_ms if end_ms <= start_ms else max(clip.start_ms, start_ms)
+        range_end = clip.end_ms if end_ms <= start_ms else min(clip.end_ms, end_ms)
+        if range_end <= range_start:
+            range_start, range_end = clip.start_ms, clip.end_ms
+        target_window = max(5_000, (range_end - range_start) * 3)
+        zoom = max(
+            1,
+            min(12, (self._item.duration_ms + target_window - 1) // target_window),
+        )
+        self.zoom_slider.setValue(zoom)
+        center_ms = (range_start + range_end) // 2
+        self.waveform.restore_view_state(ClipWaveformViewState(zoom, center_ms))
+        self._set_selection_state(range_start, range_end, range_start)
+        return True
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
@@ -992,6 +1029,7 @@ class ModelClipEditor(QFrame):
         candidate_id: str,
         candidate_filter: str,
         clip_id: str,
+        clip_row: int,
     ) -> bool:
         candidate = self._candidate_by_id(candidate_id)
         if candidate is not None and candidate.status == candidate_filter:
@@ -1010,14 +1048,11 @@ class ModelClipEditor(QFrame):
                 if item.data(Qt.ItemDataRole.UserRole) == clip_id:
                     self.clip_list.setCurrentRow(index)
                     return True
-        restored_candidate = self._candidate_by_id(clip_id)
-        if restored_candidate is not None:
-            self._show_candidate_page(restored_candidate.status)
-            for index in range(self.candidate_list.count()):
-                item = self.candidate_list.item(index)
-                if item.data(Qt.ItemDataRole.UserRole) == clip_id:
-                    self.candidate_list.setCurrentRow(index)
-                    return True
+        if clip_id:
+            self._show_clips_page()
+            if self.clip_list.count():
+                self.clip_list.setCurrentRow(min(max(0, clip_row), self.clip_list.count() - 1))
+            return True
         return False
 
     def _populate_candidate_list(self) -> None:
@@ -1183,7 +1218,7 @@ class ModelClipEditor(QFrame):
             self.ready_button,
             "Done  T" if is_ready else "Finish  T",
         )
-        has_open_segments = bool(self._item and self._item.open_segment_count)
+        has_open_segments = bool(self._item and self._item.pending_segment_count)
         self.ready_button.setEnabled(available and has_training_audio and not has_open_segments and not is_ready)
         self.previous_button.setEnabled(available and self._has_previous)
         self.next_button.setEnabled(available and self._has_next)

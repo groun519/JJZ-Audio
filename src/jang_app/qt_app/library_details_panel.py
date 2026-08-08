@@ -58,7 +58,7 @@ class LibraryDetailsPanel(QFrame):
         set_translated_tooltip(self.open_package_button, "Open song data location")
         self.open_package_button.clicked.connect(self._open_package_location)
 
-        self.open_vocal_button = FeedbackButton("Open in Vocal")
+        self.open_vocal_button = FeedbackButton("Open in Separation")
         self.open_vocal_button.setObjectName("PrimaryButton")
         self.open_vocal_button.setFixedWidth(132)
         self.open_vocal_button.clicked.connect(self._open_in_vocal)

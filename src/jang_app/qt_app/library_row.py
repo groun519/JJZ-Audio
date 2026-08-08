@@ -70,7 +70,7 @@ class SongListRow(QWidget):
         self.waveform.set_path(metadata.waveform_path)
 
         self.use_button = SvgIconButton("arrow_right", size=30)
-        set_translated_tooltip(self.use_button, "Open in Vocal")
+        set_translated_tooltip(self.use_button, "Open in Separation")
         self.use_button.clicked.connect(lambda: self.use_requested.emit(self._item_id))
         self.details_button = SvgIconButton("database", size=30)
         set_translated_tooltip(self.details_button, "Open song details")
@@ -275,7 +275,10 @@ class MiniWaveformView(QFrame):
     def _apply_peaks(self, cache_key: tuple[str, int, int, int], peaks: list[float]) -> None:
         if cache_key != self._cache_key:
             return
-        _WAVEFORM_CACHE[cache_key] = peaks
+        if peaks:
+            _WAVEFORM_CACHE[cache_key] = peaks
+        else:
+            _WAVEFORM_CACHE.pop(cache_key, None)
         self._peaks = peaks
         self._is_available = bool(peaks)
         self._is_loading = False

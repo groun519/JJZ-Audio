@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import wave
 from pathlib import Path
 from typing import Sequence
 
@@ -95,11 +94,13 @@ class AudioPlayer:
     def duration_ms(self, path: Path) -> int:
         source = path.expanduser().resolve()
         self._validate_source(source)
-        with wave.open(str(source), "rb") as audio_file:
-            frame_rate = audio_file.getframerate()
-            if frame_rate <= 0:
-                return 0
-            return int(audio_file.getnframes() / frame_rate * 1000)
+        try:
+            info = sf.info(source)
+        except Exception as exc:
+            raise AudioPlaybackError(f"Could not read audio file: {source}") from exc
+        if info.samplerate <= 0:
+            return 0
+        return int(info.frames / info.samplerate * 1000)
 
     def _ensure_feed_timer(self) -> QTimer:
         if self._feed_timer is None:

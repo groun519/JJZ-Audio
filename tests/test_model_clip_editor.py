@@ -52,6 +52,25 @@ class ModelClipEditorTests(unittest.TestCase):
         self.assertEqual(list(spy.at(0)), ["clip-1", 250, 900])
         editor.close()
 
+    def test_focus_clip_selects_and_centers_an_analysis_finding(self) -> None:
+        editor = ModelClipEditor()
+        clip = ModelDatasetClip("clip-16", 41_200, 41_850, Path("clip-16.wav"), "now")
+        item = replace(_item_with_clip(), duration_ms=120_000, clips=(clip,))
+        with patch(
+            "jang_app.qt_app.clip_waveform_view.waveform_cache_key",
+            side_effect=OSError,
+        ):
+            editor.set_item(item)
+
+        focused = editor.focus_clip("clip-16", 41_200, 41_850)
+
+        self.assertTrue(focused)
+        self.assertEqual(editor._selected_clip_id(), "clip-16")
+        self.assertEqual(editor.result_stack.currentIndex(), 1)
+        self.assertGreater(editor.waveform.view_state().zoom, 1)
+        self.assertEqual(editor.waveform.view_state().center_ms, 41_525)
+        editor.close()
+
     def test_candidate_is_refined_and_emitted_one_at_a_time(self) -> None:
         editor = ModelClipEditor()
         editor.set_item(_item_with_clip())
@@ -91,6 +110,28 @@ class ModelClipEditorTests(unittest.TestCase):
         self.assertEqual(candidate_spy.count(), 0)
         self.assertTrue(editor.use_candidate_button.property("active"))
         self.assertFalse(editor.use_candidate_button.isEnabled())
+        editor.close()
+
+    def test_moving_used_clip_to_hold_keeps_the_clip_page_open(self) -> None:
+        editor = ModelClipEditor()
+        item = _item_with_clip()
+        editor.set_item(item)
+        editor._show_clips_page()
+        editor.clip_list.setCurrentRow(0)
+        moved = replace(
+            item,
+            clips=(),
+            segment_candidates=(
+                *item.segment_candidates,
+                SegmentCandidate("clip-1", 100, 900, SEGMENT_HELD),
+            ),
+        )
+
+        editor.set_item(moved)
+
+        self.assertEqual(editor.result_stack.currentIndex(), 1)
+        self.assertTrue(editor.clips_tab.isChecked())
+        self.assertEqual(editor.clip_list.count(), 0)
         editor.close()
 
     def test_editor_controls_are_grouped_by_navigation_editing_and_tools(self) -> None:

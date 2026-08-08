@@ -63,9 +63,9 @@ from jang_app.qt_app.localization import (
 )
 from jang_app.qt_app.log_drawer import LogDrawer
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
-from jang_app.qt_app.processing_queue_panel import ProcessingQueuePanel
+from jang_app.qt_app.processing_queue_panel import ProcessingQueueButton, ProcessingQueuePanel
 from jang_app.qt_app.primary_navigation import PrimaryNavigationBar
-from jang_app.qt_app.segmented_stack import SegmentedStack
+from jang_app.qt_app.separation_recipe_selector import SeparationRecipeSelector
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
 from jang_app.qt_app.task_attention import TaskAttentionController
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
@@ -139,6 +139,8 @@ from jang_app.services.runtime_installation import (
 )
 from jang_app.services.runtime_bootstrap import install_update_runtime_components
 from jang_app.services.rvc_runtime_profile import detect_rvc_runtime_profile
+from jang_app.services.separation_recipe import SeparationRecipe
+from jang_app.services.separation_assets import separation_recipe_asset_status
 from jang_app.services.settings import (
     RVC_DEVICE_OPTIONS,
     AppSettings,
@@ -158,6 +160,11 @@ from jang_app.services.update_polling import UpdateCheckOutcome, UpdatePollingPo
 from jang_app.services.video_source import VideoSource
 from jang_app.services.vocal_project import VocalConversionSettings, VocalProject
 from jang_app.services.vocal_project_store import VocalProjectStore
+from jang_app.services.workspace_playback import (
+    WorkspacePlaybackScope,
+    scope_label,
+    scope_track_ids,
+)
 from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
 from jang_app.services.work_song import WorkSongStore
 from jang_app.services.youtube_download import YouTubeDownloadResult, download_youtube_audio
@@ -166,9 +173,10 @@ from jang_app.version import __version__
 
 PAGE_LIBRARY = 0
 PAGE_MODELS = 1
-PAGE_VOCAL = 2
-PAGE_STUDIO = 3
-PAGE_EXPORT = 4
+PAGE_SEPARATION = 2
+PAGE_CONVERSION = 3
+PAGE_STUDIO = 4
+PAGE_EXPORT = 5
 GOOGLE_DRIVE_FEATURE = "google_drive_sharing"
 
 
@@ -207,6 +215,7 @@ class MainWindow(QMainWindow):
         self._playback_resume_positions: dict[tuple[str, str], int] = {}
         self._library_preview_song_id = ""
         self._export_song_id = ""
+        self._processing_queue_drawer_open = False
         self._is_loading_rvc_settings = False
         self._is_loading_studio_session = False
         self.vocal_project_store = VocalProjectStore()
@@ -338,7 +347,8 @@ class MainWindow(QMainWindow):
 
         self.page_stack.addWidget(self._build_library_page())
         self.page_stack.addWidget(self._build_models_page())
-        self.page_stack.addWidget(self._build_vocal_page())
+        self.page_stack.addWidget(self._build_separation_page())
+        self.page_stack.addWidget(self._build_conversion_page())
         self.page_stack.addWidget(self._build_studio_page())
         self.page_stack.addWidget(self._build_export_page())
 
@@ -363,6 +373,8 @@ class MainWindow(QMainWindow):
         self.processing_queue_panel = ProcessingQueuePanel(self.processing_queue, content_widget)
         self.processing_queue_panel.geometry_changed.connect(self._position_processing_queue)
         self.processing_queue_panel.log_requested.connect(self._open_log_drawer)
+        self.processing_queue_panel.close_requested.connect(self._close_processing_queue_drawer)
+        self.processing_queue_panel.hide()
 
         self.toast_stack = ToastStack(self.processing_queue, content_widget)
         self.toast_stack.geometry_changed.connect(self._position_processing_queue)
@@ -399,7 +411,8 @@ class MainWindow(QMainWindow):
                 ("Models", PAGE_MODELS),
             ),
             (
-                ("Vocal", PAGE_VOCAL),
+                ("Separation", PAGE_SEPARATION),
+                ("Conversion", PAGE_CONVERSION),
                 ("Studio", PAGE_STUDIO),
             ),
             ("Export", PAGE_EXPORT),
@@ -425,8 +438,14 @@ class MainWindow(QMainWindow):
             self.language_actions[language] = action
         self.language_button.setMenu(self.language_menu)
         self.google_account_button = GoogleAccountButton(GOOGLE_ICON_PATH)
+        self.processing_queue_button = ProcessingQueueButton(
+            self.processing_queue,
+            parent=self.title_bar.action_widget,
+        )
+        self.processing_queue_button.clicked.connect(self._toggle_processing_queue_drawer)
         self.settings_button = self.primary_navigation.settings_button
         set_translated_tooltip(self.settings_button, "System setup")
+        self.title_bar.add_action_widget(self.processing_queue_button)
         self.title_bar.add_action_widget(self.google_account_button)
         self.title_bar.add_action_widget(self.language_button)
         self.title_bar.add_action_widget(self.theme_button)
@@ -526,7 +545,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.library_content_stack, 3)
         return page
 
-    def _build_vocal_page(self) -> QWidget:
+    def _build_separation_page(self) -> QWidget:
         page = QWidget()
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -540,16 +559,40 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(16)
 
-        self.vocal_steps = SegmentedStack(
-            (
-                ("Separate", self._build_separate_step_page()),
-                ("Convert", self._build_convert_step_page()),
-            )
+        left_layout.addWidget(self._build_separate_step_page(), 1)
+
+        self.separation_results_panel = VocalResultsPanel(mode="separation")
+        self.separation_results_panel.result_selected.connect(
+            self._activate_separation_result
+        )
+        self.separation_results_panel.open_location_requested.connect(
+            self._open_vocal_output_location
+        )
+        self.separation_results_panel.seek_requested.connect(self._seek_output_playback)
+        self.separation_results_panel.playback_settings_changed.connect(
+            self._on_result_playback_settings_changed
         )
 
-        left_layout.addWidget(self.vocal_steps, 1)
+        layout.addWidget(left_panel, 0)
+        layout.addWidget(self.separation_results_panel, 1)
+        return page
 
-        self.vocal_results_panel = VocalResultsPanel()
+    def _build_conversion_page(self) -> QWidget:
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        left_panel = QFrame()
+        left_panel.setObjectName("Panel")
+        left_panel.setMinimumWidth(380)
+        left_panel.setMaximumWidth(460)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(20, 20, 20, 20)
+        left_layout.setSpacing(16)
+        left_layout.addWidget(self._build_convert_step_page(), 1)
+
+        self.vocal_results_panel = VocalResultsPanel(mode="conversion")
         self.vocal_results_panel.converted_selected.connect(self._activate_vocal_converted_version)
         self.vocal_results_panel.open_location_requested.connect(self._open_vocal_output_location)
         self.vocal_results_panel.open_take_requested.connect(self._open_vocal_take_location)
@@ -557,6 +600,9 @@ class MainWindow(QMainWindow):
         self.vocal_results_panel.remove_take_requested.connect(self._remove_vocal_take)
         self.vocal_results_panel.reconvert_take_requested.connect(self._reconvert_vocal_take)
         self.vocal_results_panel.seek_requested.connect(self._seek_output_playback)
+        self.vocal_results_panel.playback_settings_changed.connect(
+            self._on_result_playback_settings_changed
+        )
 
         layout.addWidget(left_panel, 0)
         layout.addWidget(self.vocal_results_panel, 1)
@@ -575,6 +621,7 @@ class MainWindow(QMainWindow):
         self.video_preview_panel.open_location_requested.connect(self._open_video_location)
         self.video_preview_panel.clear_requested.connect(self._clear_video_source)
         self.video_preview_panel.download_requested.connect(self._start_video_download)
+        self.video_preview_panel.saved_source_requested.connect(self._select_saved_video_source)
         self.studio_output_panel = self._build_output_panel()
         self.video_preview_panel.setSizePolicy(
             QSizePolicy.Policy.Ignored,
@@ -642,11 +689,14 @@ class MainWindow(QMainWindow):
         title = QLabel("Separate")
         title.setObjectName("SectionTitle")
 
+        self.separation_recipe_selector = SeparationRecipeSelector()
+
         self.separation_action = TaskActionWidget("Separation", "Separate")
         self.separation_action.triggered.connect(self._start_separation)
         self.separation_action.set_action_enabled(False)
 
         layout.addWidget(title)
+        layout.addWidget(self.separation_recipe_selector)
         layout.addWidget(self.separation_action)
         layout.addStretch(1)
         return page
@@ -781,6 +831,8 @@ class MainWindow(QMainWindow):
             self.update_status_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "processing_queue_panel"):
             self.processing_queue_panel.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "processing_queue_button"):
+            self.processing_queue_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "toast_stack"):
             self.toast_stack.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "log_drawer"):
@@ -793,6 +845,8 @@ class MainWindow(QMainWindow):
             self.drop_card.file_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "model_workspace_page"):
             self.model_workspace_page.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "separation_results_panel"):
+            self.separation_results_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "vocal_results_panel"):
             self.vocal_results_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "library_details_panel"):
@@ -820,14 +874,17 @@ class MainWindow(QMainWindow):
         self.workspace_dock.apply_language()
         self.update_status_button.apply_language()
         self.processing_queue_panel.apply_language()
+        self.processing_queue_button.apply_language()
         self.toast_stack.apply_language()
         self.log_drawer.apply_language()
         self.model_workspace_page.apply_language()
+        self.separation_results_panel.apply_language()
         self.vocal_results_panel.apply_language()
         self.library_details_panel.apply_language()
         self.export_page.apply_language()
         self.video_preview_panel.apply_language()
         self.library_source_filter.apply_language()
+        self.separation_recipe_selector.apply_language()
         self._populate_library_sort_combo()
         set_translated_tooltip(self.library_sort_combo, "Sort songs")
 
@@ -853,7 +910,9 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "workspace_dock"):
             return
         page_index = self.page_stack.currentIndex()
-        is_workspace_page = page_index in {PAGE_VOCAL, PAGE_STUDIO}
+        scope = self._workspace_scope_for_page(page_index)
+        is_workspace_page = scope is not None
+        self.workspace_dock.set_playback_scope(scope)
         self.workspace_dock.setVisible(is_workspace_page)
         position_update_status = getattr(self, "_position_update_status", None)
         if callable(position_update_status):
@@ -867,6 +926,11 @@ class MainWindow(QMainWindow):
         parent = self._content_widget
         player_top = self.workspace_dock.geometry().top() if self.workspace_dock.isVisible() else parent.height() - 16
         drawer_open = hasattr(self, "log_drawer") and self.log_drawer.isVisible()
+        queue_open = self._processing_queue_drawer_open and panel.has_tasks()
+        if self._processing_queue_drawer_open and not queue_open:
+            self._processing_queue_drawer_open = False
+            self.processing_queue_button.setChecked(False)
+            self.processing_queue_button.apply_language()
 
         if drawer_open:
             drawer = self.log_drawer
@@ -875,11 +939,12 @@ class MainWindow(QMainWindow):
             drawer.move(max(16, parent.width() - drawer.width() - 16), top_position)
             drawer.raise_()
             panel.hide()
-        elif panel.has_tasks():
+        elif queue_open:
             panel.show()
+            top_position = 16
+            panel.setFixedHeight(max(260, player_top - top_position - 10))
             x_position = max(16, parent.width() - panel.width() - 16)
-            y_position = max(16, player_top - panel.height() - 10)
-            panel.move(x_position, y_position)
+            panel.move(x_position, top_position)
             panel.raise_()
         else:
             panel.hide()
@@ -889,10 +954,12 @@ class MainWindow(QMainWindow):
             if drawer_open:
                 toast_x = max(16, self.log_drawer.x() - toast.width() - 10)
                 toast_y = max(16, player_top - toast.height() - 10)
+            elif queue_open:
+                toast_x = max(16, panel.x() - toast.width() - 10)
+                toast_y = max(16, player_top - toast.height() - 10)
             else:
                 toast_x = max(16, parent.width() - toast.width() - 16)
-                toast_anchor = panel.y() if panel.isVisible() else player_top
-                toast_y = max(16, toast_anchor - toast.height() - 10)
+                toast_y = max(16, player_top - toast.height() - 10)
             toast.move(toast_x, toast_y)
             toast.raise_()
 
@@ -911,6 +978,10 @@ class MainWindow(QMainWindow):
 
     def _open_log_drawer(self, task_id: str = "") -> None:
         self.toast_stack.dismiss_all()
+        self._processing_queue_drawer_open = False
+        self.processing_queue_button.setChecked(False)
+        self.processing_queue_button.apply_language()
+        self.processing_queue_panel.hide()
         self.log_drawer.show()
         self.log_drawer.refresh_content()
         if task_id:
@@ -919,7 +990,31 @@ class MainWindow(QMainWindow):
 
     def _close_log_drawer(self) -> None:
         self.log_drawer.hide()
+        self._position_processing_queue()
+
+    def _toggle_processing_queue_drawer(self, *_args) -> None:
+        if self._processing_queue_drawer_open:
+            self._close_processing_queue_drawer()
+        else:
+            self._open_processing_queue_drawer()
+
+    def _open_processing_queue_drawer(self) -> None:
+        if not self.processing_queue_panel.has_tasks():
+            self.processing_queue_button.setChecked(False)
+            self.processing_queue_button.apply_language()
+            return
+        self._processing_queue_drawer_open = True
+        self.log_drawer.hide()
+        self.processing_queue_button.setChecked(True)
+        self.processing_queue_button.apply_language()
         self.processing_queue_panel.show()
+        self._position_processing_queue()
+
+    def _close_processing_queue_drawer(self) -> None:
+        self._processing_queue_drawer_open = False
+        self.processing_queue_button.setChecked(False)
+        self.processing_queue_button.apply_language()
+        self.processing_queue_panel.hide()
         self._position_processing_queue()
 
     def _open_log_location(self, path: Path) -> None:
@@ -1225,7 +1320,7 @@ class MainWindow(QMainWindow):
         previous_index = self.page_stack.currentIndex()
         if previous_index == PAGE_STUDIO and index != PAGE_STUDIO:
             self.studio_session_autosave.flush()
-        workspace_pages = {PAGE_VOCAL, PAGE_STUDIO}
+        workspace_pages = {PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO}
         if previous_index != index and not ({previous_index, index} <= workspace_pages):
             self._suspend_playback()
         if index != PAGE_MODELS:
@@ -1243,7 +1338,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_playback_surfaces)
 
     def _navigate_to_vocal_step(self, index: int) -> None:
-        self.vocal_steps.set_current_index(index)
+        self._navigate_to_page(PAGE_SEPARATION if index == 0 else PAGE_CONVERSION)
 
     def _choose_audio_files(self, *_args) -> None:
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_AUDIO_EXTENSIONS))
@@ -1344,6 +1439,19 @@ class MainWindow(QMainWindow):
             return
         self._set_video_source(source, enabled=True)
         self.video_preview_panel.set_status("Video source cleared")
+        self._refresh_open_library_details(item.id)
+
+    def _select_saved_video_source(self, path: Path) -> None:
+        item = self.current_work_item
+        if item is None:
+            return
+        try:
+            source = self.library.select_managed_video(item.id, path)
+        except (KeyError, ValueError) as exc:
+            self.video_preview_panel.set_status(str(exc))
+            return
+        self._set_video_source(source, enabled=True)
+        self.video_preview_panel.set_status("Saved video selected")
         self._refresh_open_library_details(item.id)
 
     def _on_video_source_attached(self, scope: WorkTaskScope, result: object) -> None:
@@ -1866,7 +1974,14 @@ class MainWindow(QMainWindow):
             self.current_work_item,
             output_available=self._current_output_matches_work_song(),
         )
-        self.separation_action.set_action_enabled(capabilities.can_separate)
+        self.separation_action.set_button_text(
+            "Link Original" if capabilities.can_attach_source else "Separate"
+        )
+        self.separation_action.set_action_enabled(
+            capabilities.can_separate or capabilities.can_attach_source
+        )
+        if capabilities.can_attach_source:
+            self.separation_action.set_status("Link the original audio to separate it again.")
         self.rvc_action.set_action_enabled(capabilities.can_convert)
 
     def _current_output_matches_work_song(self) -> bool:
@@ -1897,10 +2012,17 @@ class MainWindow(QMainWindow):
             if item is not None and item.source_type == "youtube"
             else ""
         )
+        saved_sources = ()
+        if item is not None:
+            try:
+                saved_sources = self.library.managed_video_sources(item.id)
+            except KeyError:
+                pass
         self.video_preview_panel.set_source(
             source,
             enabled=enabled,
             original_song_url=original_url,
+            saved_sources=saved_sources,
         )
         self._sync_video_workspace()
 
@@ -1953,7 +2075,7 @@ class MainWindow(QMainWindow):
 
         self._select_work_song(song)
         _set_optional_label(self.library_status_label, "Loaded")
-        self._navigate_to_page(PAGE_VOCAL)
+        self._navigate_to_page(PAGE_SEPARATION)
         self._navigate_to_vocal_step(0)
 
     def _library_playback_queue(self, song: SongItem) -> PlaybackQueue | None:
@@ -2000,16 +2122,26 @@ class MainWindow(QMainWindow):
             auto_play=auto_play,
         )
 
+    def _selected_separation_recipe(self) -> SeparationRecipe:
+        return self.separation_recipe_selector.selected_recipe()
+
     def _start_separation(self, *_args) -> None:
-        if self.current_song is None:
+        song = self.current_work_item
+        if song is not None and (song.kind != "source" or not song.path.is_file()):
+            self._attach_separation_source(song)
+            return
+        if song is None:
             self.separation_action.set_status("Select song.")
             return
 
         self._stop_playback()
         self.separation_action.set_running(True)
         self.separation_action.set_progress(3)
-        self.separation_action.set_status("Separating")
-        song = self.current_song
+        recipe = self._selected_separation_recipe()
+        asset_status = separation_recipe_asset_status(recipe)
+        self.separation_action.set_status(
+            "Separating" if asset_status.ready else "Preparing separation model"
+        )
         scope = WorkTaskScope(song.id)
         output_root = self.library.create_vocal_separation_run(song.id)
         worker = TaskWorker(
@@ -2017,6 +2149,7 @@ class MainWindow(QMainWindow):
                 song.path,
                 output_root=output_root,
                 progress_callback=progress,
+                recipe=recipe,
             )
         )
         self._run_worker(
@@ -2029,7 +2162,30 @@ class MainWindow(QMainWindow):
             action_scope=lambda: scope.is_current(self.current_work_item),
         )
 
+    def _attach_separation_source(self, song: SongItem) -> None:
+        suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_AUDIO_EXTENSIONS))
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Select Original Audio"),
+            str(Path.home()),
+            f"{tr('Audio Files')} ({suffixes})",
+        )
+        if not filename:
+            return
+        try:
+            restored = self.library.attach_source(song.id, Path(filename))
+        except (KeyError, OSError, ValueError) as exc:
+            self.separation_action.set_status("Could not link the original audio.")
+            self.separation_action.status_label.setToolTip(_last_error_line(str(exc)))
+            return
+
+        self._song_items_by_id[restored.id] = restored
+        self._set_current_song(restored)
+        self._refresh_song_list()
+        self.separation_action.set_status("Original audio linked. Ready to separate.")
+
     def _on_separation_succeeded(self, scope: WorkTaskScope, result: object) -> None:
+        self.separation_recipe_selector.refresh_asset_status()
         separation_result = result if isinstance(result, SeparationResult) else None
         if separation_result is None:
             if scope.is_current(self.current_work_item):
@@ -2039,7 +2195,7 @@ class MainWindow(QMainWindow):
         self.library.register_output(
             scope.song_id,
             separation_result.job_dir,
-            separation_result.job_dir.parent.name,
+            separation_result.recipe.label,
         )
         self._refresh_output_sets_after_task(scope, separation_result.job_dir)
         if scope.is_current(self.current_work_item):
@@ -2047,6 +2203,7 @@ class MainWindow(QMainWindow):
             self.separation_action.set_status("Done")
 
     def _on_separation_failed(self, scope: WorkTaskScope, error: str) -> None:
+        self.separation_recipe_selector.refresh_asset_status()
         if not scope.is_current(self.current_work_item):
             return
         self.separation_action.set_status("Failed")
@@ -2152,6 +2309,17 @@ class MainWindow(QMainWindow):
         self.converted_track.select_path(path)
         self._refresh_output_playback_queue()
 
+    def _activate_separation_result(self, job_dir: Path) -> None:
+        song = self.library.activate_output(job_dir)
+        if song is None:
+            return
+        self._song_items_by_id[song.id] = song
+        if self.current_work_item is not None and self.current_work_item.id == song.id:
+            self._assign_work_item(song, persist=False)
+        sound_set = load_output_sound_set(job_dir, self.settings.output_root)
+        if sound_set is not None:
+            self._apply_output_set(sound_set)
+
     def _open_vocal_output_location(self, job_dir: Path) -> None:
         try:
             open_in_file_browser(job_dir)
@@ -2236,7 +2404,7 @@ class MainWindow(QMainWindow):
         self._refresh_rvc_choices()
         self.pitch_spin.setValue(rvc_settings.pitch)
         self.device_combo.setCurrentText(normalize_rvc_device(rvc_settings.device))
-        self.vocal_steps.set_current_index(1)
+        self._navigate_to_page(PAGE_CONVERSION)
         self._start_rvc_conversion()
 
     def _apply_output_set(self, sound_set: OutputSoundSet | None) -> None:
@@ -2248,6 +2416,8 @@ class MainWindow(QMainWindow):
             self.instrumental_track.set_single_path(None)
             self.converted_track.set_options([])
             self._apply_studio_session(StudioSession())
+            self.separation_results_panel.set_versions((), None)
+            self.separation_results_panel.set_result(None)
             self.vocal_results_panel.set_result(None)
             self.rvc_action.set_status("")
             _set_optional_label(self.output_status_label, "")
@@ -2263,6 +2433,8 @@ class MainWindow(QMainWindow):
         self.converted_track.set_options(list(sound_set.converted_vocal_paths), selected_converted)
         self._restore_current_studio_session()
         project = self._load_vocal_project(selected_version)
+        self._refresh_separation_versions(selected_version)
+        self.separation_results_panel.set_result(selected_version)
         self.vocal_results_panel.set_result(selected_version, project)
         self.rvc_action.set_progress(0)
         self.rvc_action.set_status("")
@@ -2302,10 +2474,27 @@ class MainWindow(QMainWindow):
 
     def _refresh_vocal_project_panel(self) -> None:
         if self.current_output_set is None:
+            self.separation_results_panel.set_result(None)
             self.vocal_results_panel.set_result(None)
             return
         result = self._current_vocal_result(self.current_output_set)
+        self._refresh_separation_versions(result)
+        self.separation_results_panel.set_result(result)
         self.vocal_results_panel.set_result(result, self._load_vocal_project(result))
+
+    def _refresh_separation_versions(self, selected: SongVocalVersion | None) -> None:
+        item = self.current_song or self.current_work_item
+        if item is None:
+            self.separation_results_panel.set_versions((), None)
+            return
+        try:
+            versions = self.library.vocal_versions(item.id)
+        except KeyError:
+            versions = ()
+        self.separation_results_panel.set_versions(
+            versions,
+            selected.job_dir if selected is not None else None,
+        )
 
     def _sync_current_work_output_item(self, sound_set: OutputSoundSet | None) -> None:
         if self.current_song is not None:
@@ -2574,6 +2763,13 @@ class MainWindow(QMainWindow):
         if self.current_playback_queue is None:
             self._sync_playback_queue_for_page(self.page_stack.currentIndex(), force=True)
         if self.current_playback_queue is None:
+            work_song_id = self.current_work_item.id if self.current_work_item is not None else "-"
+            self._logger.warning(
+                "Playback queue unavailable: page=%s work_song=%s output_set=%s",
+                self.page_stack.currentIndex(),
+                work_song_id,
+                self.current_output_set.job_dir if self.current_output_set is not None else "-",
+            )
             return
 
         start_ms = (
@@ -2599,6 +2795,14 @@ class MainWindow(QMainWindow):
             start_ms = max(0, min(start_ms, queue.duration_ms))
             if start_ms >= queue.duration_ms:
                 start_ms = 0
+            self._logger.info(
+                "Starting playback: context=%s scope=%s source=%s tracks=%s start_ms=%s",
+                queue.context,
+                queue.scope or "-",
+                queue.source_id,
+                len(preview_paths),
+                start_ms,
+            )
             self.player.play(preview_paths, start_ms=start_ms, volumes=queue.volumes)
         except Exception as exc:
             self._handle_playback_error(queue, exc)
@@ -2637,7 +2841,10 @@ class MainWindow(QMainWindow):
             self._play_current_queue(self._playback_position_ms)
 
     def _seek_output_playback(self, ratio: float) -> None:
-        queue = self._output_playback_queue()
+        scope = self._workspace_scope_for_page(self.page_stack.currentIndex())
+        if scope is None:
+            return
+        queue = self._workspace_playback_queue(scope)
         if queue is None:
             _set_optional_label(self.output_status_label, "No output.")
             return
@@ -2651,8 +2858,21 @@ class MainWindow(QMainWindow):
         self._seek_global_playback(position_ms)
 
     def _on_output_playback_settings_changed(self) -> None:
+        self._sync_result_playback_settings()
         self._queue_current_studio_session_save()
         self._refresh_output_playback_queue()
+
+    def _on_result_playback_settings_changed(
+        self,
+        track_id: str,
+        muted: bool,
+        volume_percent: int,
+    ) -> None:
+        track = self._output_track(track_id)
+        if track is None:
+            return
+        track.set_mix_state(muted=muted, volume_percent=volume_percent)
+        self._on_output_playback_settings_changed()
 
     def _on_output_track_source_changed(self) -> None:
         if self.current_output_set is not None:
@@ -2695,8 +2915,29 @@ class MainWindow(QMainWindow):
                 muted=session.converted_vocal.muted,
                 volume_percent=session.converted_vocal.volume_percent,
             )
+            self._sync_result_playback_settings()
         finally:
             self._is_loading_studio_session = False
+
+    def _sync_result_playback_settings(self) -> None:
+        for track_id, track in (
+            ("original", self.vocal_track),
+            ("instrumental", self.instrumental_track),
+            ("converted", self.converted_track),
+        ):
+            for panel in (self.separation_results_panel, self.vocal_results_panel):
+                panel.set_mix_state(
+                    track_id,
+                    muted=track.is_muted(),
+                    volume_percent=track.volume_percent(),
+                )
+
+    def _output_track(self, track_id: str) -> TrackRow | None:
+        return {
+            "original": self.vocal_track,
+            "instrumental": self.instrumental_track,
+            "converted": self.converted_track,
+        }.get(track_id)
 
     def _queue_current_studio_session_save(self) -> None:
         if self._is_loading_studio_session or self.current_output_set is None:
@@ -2822,8 +3063,14 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _refresh_output_playback_queue(self) -> None:
-        queue = self._output_playback_queue()
+    def _refresh_output_playback_queue(
+        self,
+        scope: WorkspacePlaybackScope | None = None,
+    ) -> None:
+        selected_scope = scope or self._workspace_scope_for_page(self.page_stack.currentIndex())
+        if selected_scope is None:
+            return
+        queue = self._workspace_playback_queue(selected_scope)
         if queue is None:
             if self._current_playback_context() == "output":
                 self._stop_playback(clear_queue=True)
@@ -2856,7 +3103,7 @@ class MainWindow(QMainWindow):
                     self._play_current_queue(self._playback_position_ms)
             return
 
-        if self.page_stack.currentIndex() in {PAGE_VOCAL, PAGE_STUDIO} and not self.player.is_playing():
+        if self.page_stack.currentIndex() in {PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO} and not self.player.is_playing():
             self._set_playback_queue(queue, position_ms=self._resume_position(queue))
             return
 
@@ -2869,8 +3116,10 @@ class MainWindow(QMainWindow):
             self._load_library_playback_queue(
                 self._song_items_by_id.get(self._library_preview_song_id)
             )
-        elif index in {PAGE_VOCAL, PAGE_STUDIO}:
-            self._refresh_output_playback_queue()
+        else:
+            scope = self._workspace_scope_for_page(index)
+            if scope is not None:
+                self._refresh_output_playback_queue(scope)
 
     def _refresh_playback_ui(self, *, is_playing: bool) -> None:
         queue = self.current_playback_queue
@@ -2900,46 +3149,120 @@ class MainWindow(QMainWindow):
         return self.player.is_playing() and self._current_playback_context() == context
 
     def _handle_playback_error(self, queue: PlaybackQueue, error: Exception) -> None:
+        self._logger.error(
+            "Playback failed: context=%s scope=%s source=%s paths=%s error=%s",
+            queue.context,
+            queue.scope or "-",
+            queue.source_id,
+            tuple(str(path) for path in queue.paths),
+            error,
+        )
         target_label = self.output_status_label if queue.context == "output" else self.library_status_label
         _set_optional_label(target_label, f"Playback failed: {_last_error_line(str(error))}")
         self._stop_playback()
 
-    def _playback_track_paths(self) -> list[tuple[Path, float]]:
+    def _playback_track_paths(
+        self,
+        scope: WorkspacePlaybackScope | None = None,
+    ) -> list[tuple[Path, float]]:
         tracks: list[tuple[Path, float]] = []
-        for track in self.output_tracks:
+        track_rows = (
+            tuple(
+                track
+                for track_id in scope_track_ids(scope)
+                for track in (self._output_track(track_id),)
+                if track is not None
+            )
+            if scope is not None
+            else self.output_tracks
+        )
+        for track in track_rows:
             path = track.current_path()
             if path is not None:
                 volume = 0.0 if track.is_muted() else track.volume()
                 tracks.append((path, volume))
         return tracks
 
-    def _loaded_track_paths(self) -> list[Path]:
-        return [path for track in self.output_tracks for path in [track.current_path()] if path is not None]
+    def _loaded_track_paths(
+        self,
+        scope: WorkspacePlaybackScope | None = None,
+    ) -> list[Path]:
+        return [path for path, _volume in self._playback_track_paths(scope)]
 
     def _output_playback_queue(self) -> PlaybackQueue | None:
-        tracks = self._playback_track_paths()
-        duration_ms = self._loaded_output_duration_ms()
+        return self._workspace_playback_queue(WorkspacePlaybackScope.STUDIO)
+
+    def _workspace_scope_for_page(self, page_index: int) -> WorkspacePlaybackScope | None:
+        return {
+            PAGE_SEPARATION: WorkspacePlaybackScope.SEPARATION,
+            PAGE_CONVERSION: WorkspacePlaybackScope.CONVERSION,
+            PAGE_STUDIO: WorkspacePlaybackScope.STUDIO,
+        }.get(page_index)
+
+    def _workspace_playback_queue(
+        self,
+        scope: WorkspacePlaybackScope,
+    ) -> PlaybackQueue | None:
+        tracks = self._playback_track_paths(scope)
+        duration_ms = self._duration_ms_for_paths([path for path, _volume in tracks])
         if not tracks or duration_ms <= 0:
-            return None
+            item = self.current_work_item
+            if item is None or item.kind != "source":
+                return None
+            duration_ms = self._duration_ms_for_paths([item.path])
+            if duration_ms <= 0:
+                return None
+            return PlaybackQueue(
+                context="output",
+                source_id=f"source:{item.id}",
+                title=item.title,
+                paths=(item.path,),
+                volumes=(1.0,),
+                duration_ms=duration_ms,
+                scope=scope.value,
+            )
         return PlaybackQueue(
             context="output",
             source_id=str(self.current_output_set.job_dir) if self.current_output_set is not None else "",
-            title=self.current_output_set.label if self.current_output_set is not None else "Output Sounds",
+            title=scope_label(scope),
             paths=tuple(path for path, _volume in tracks),
             volumes=tuple(volume for _path, volume in tracks),
             duration_ms=duration_ms,
+            scope=scope.value,
         )
 
     def _update_output_playheads(self, position_ms: int, duration_ms: int | None = None) -> None:
         queue = self.current_playback_queue if self._current_playback_context() == "output" else None
         duration = duration_ms if duration_ms is not None else (queue.duration_ms if queue is not None else 0)
         position = max(0, min(position_ms, duration)) if duration > 0 else 0
-        for track in self.output_tracks:
-            track.set_playhead_ratio(position / duration if duration > 0 else 0.0)
-        self.vocal_results_panel.set_playhead_ratio(position / duration if duration > 0 else 0.0)
+        ratio = position / duration if duration > 0 else 0.0
+        scope = self._workspace_scope_for_queue(queue)
+        if scope is None:
+            self.separation_results_panel.set_playhead_ratio(0.0)
+            self.vocal_results_panel.set_playhead_ratio(0.0)
+            for track in self.output_tracks:
+                track.set_playhead_ratio(0.0)
+        elif scope is WorkspacePlaybackScope.SEPARATION:
+            self.separation_results_panel.set_playhead_ratio(ratio)
+        elif scope is WorkspacePlaybackScope.CONVERSION:
+            self.vocal_results_panel.set_playhead_ratio(ratio)
+        elif scope is WorkspacePlaybackScope.STUDIO:
+            for track in self.output_tracks:
+                track.set_playhead_ratio(ratio)
+
+    @staticmethod
+    def _workspace_scope_for_queue(
+        queue: PlaybackQueue | None,
+    ) -> WorkspacePlaybackScope | None:
+        if queue is None or queue.context != "output":
+            return None
+        try:
+            return WorkspacePlaybackScope(queue.scope or WorkspacePlaybackScope.STUDIO.value)
+        except ValueError:
+            return None
 
     def _loaded_output_duration_ms(self) -> int:
-        return self._duration_ms_for_paths(self._loaded_track_paths())
+        return self._duration_ms_for_paths(self._loaded_track_paths(WorkspacePlaybackScope.STUDIO))
 
     def _duration_ms_for_paths(self, paths: list[Path]) -> int:
         durations = []
@@ -3162,6 +3485,7 @@ class MainWindow(QMainWindow):
         self._apply_rvc_model_choice(choice)
         self._refresh_rvc_choices()
         self.model_workspace_page.show_status(f"{record.title} is active in Convert.")
+        self._navigate_to_page(PAGE_CONVERSION)
 
     def _open_model_location(self, path: Path) -> None:
         try:

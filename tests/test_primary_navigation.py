@@ -20,8 +20,8 @@ class PrimaryNavigationBarTests(unittest.TestCase):
     def test_data_and_export_pages_are_separate_from_the_connected_workflow(self) -> None:
         navigation = PrimaryNavigationBar(
             (("Library", 0), ("Models", 1)),
-            (("Vocal", 2), ("Studio", 3)),
-            ("Export", 4),
+            (("Separation", 2), ("Conversion", 3), ("Studio", 4)),
+            ("Export", 5),
         )
         requested = QSignalSpy(navigation.page_requested)
         settings_requested = QSignalSpy(navigation.settings_requested)

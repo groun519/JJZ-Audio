@@ -264,6 +264,18 @@ def _stylesheet(
             background: {raised};
         }}
 
+        QLabel#PlaybackScopeLabel {{
+            min-height: 24px;
+            max-height: 24px;
+            padding: 0 10px;
+            color: {muted};
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 9px;
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
         QComboBox#ExportSongCombo {{
             min-height: 32px;
             max-height: 32px;
@@ -348,9 +360,21 @@ def _stylesheet(
             min-height: 28px;
         }}
 
+        QComboBox#VideoSourceCombo {{
+            min-height: 30px;
+            max-height: 30px;
+            padding: 0 30px 0 11px;
+            border-radius: 10px;
+        }}
+
         QWidget#VideoOriginalUrlSlot {{
             background: transparent;
             border: 0;
+            min-width: 30px;
+            max-width: 30px;
+            min-height: 30px;
+            max-height: 30px;
+            padding: 0;
         }}
 
         QScrollArea#StudioStepScroll {{
@@ -397,6 +421,50 @@ def _stylesheet(
             background: {danger_background};
             border: 1px solid {danger_border};
             border-radius: 14px;
+        }}
+
+        QFrame#TrainingInputNotice {{
+            background: {danger_background};
+            border: 1px solid {danger_border};
+            border-radius: 14px;
+        }}
+
+        QLabel#TrainingInputNoticeTitle {{
+            color: {danger_text};
+            background: transparent;
+            border: 0;
+            font-size: 12px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingInputNoticeDetail {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QLabel#TrainingInputNoticeBadge {{
+            min-width: 76px;
+            padding: 4px 9px;
+            color: {danger_text};
+            background: {surface};
+            border: 1px solid {danger_border};
+            border-radius: 9px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QComboBox#TrainingExcludedClipCombo {{
+            min-height: 32px;
+            max-height: 32px;
+        }}
+
+        QPushButton#TrainingExcludedClipButton {{
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0 14px;
         }}
 
         QLabel#TrainingRecoveryCode {{
@@ -2560,6 +2628,40 @@ def _stylesheet(
             border-color: transparent;
         }}
 
+        QLabel#SeparationRecipeField {{
+            color: {muted};
+            font-size: 11px;
+            font-weight: 650;
+        }}
+
+        QLabel#SeparationRecipeValue {{
+            color: {text};
+            font-size: 11px;
+            font-weight: 850;
+        }}
+
+        QLabel#SeparationAssetStatus {{
+            padding: 3px 8px;
+            border: 1px solid {border};
+            border-radius: 8px;
+            color: {muted};
+            background: {raised};
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QLabel#SeparationAssetStatus[availability="ready"] {{
+            color: {success_text};
+            background: {success_background};
+            border-color: {success_border};
+        }}
+
+        QLabel#SeparationAssetStatus[availability="download"] {{
+            color: {warning_text};
+            background: {warning_background};
+            border-color: {warning_border};
+        }}
+
         QPushButton#IconButton {{
             min-width: 34px;
             max-width: 34px;
@@ -2587,7 +2689,8 @@ def _stylesheet(
             background: transparent;
         }}
 
-        QPushButton#EmbeddedActionButton {{
+        QPushButton#EmbeddedActionButton,
+        QPushButton#VideoOriginalUrlButton {{
             min-width: 30px;
             max-width: 30px;
             min-height: 30px;

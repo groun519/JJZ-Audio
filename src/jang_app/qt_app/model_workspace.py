@@ -60,6 +60,7 @@ from jang_app.services.rvc_training_finalize import (
     RvcTrainingFinalizeResult,
     finalize_rvc_training_artifacts,
 )
+from jang_app.services.rvc_training_dataset import RvcTrainingDatasetError
 from jang_app.services.rvc_training_pipeline import (
     RvcTrainingPipelineResult,
     RvcTrainingStage,
@@ -76,6 +77,12 @@ from jang_app.services.rvc_runtime_profile import (
 from jang_app.services.rvc_training_preflight import (
     RvcTrainingPreflight,
     inspect_rvc_training_preflight,
+)
+from jang_app.services.rvc_training_preprocess import (
+    RvcTrainingPreprocessError,
+    RvcTrainingPreprocessFailure,
+    RvcTrainingPreprocessResult,
+    load_rvc_preprocess_result,
 )
 from jang_app.services.rvc_training_runtime import training_backend_for_profile
 
@@ -420,6 +427,9 @@ class ModelWorkspacePage(QWidget):
         )
         self.training_panel.preflight_requested.connect(
             lambda: self._refresh_training_panel(self._selected_record())
+        )
+        self.training_panel.excluded_clip_requested.connect(
+            self._open_excluded_training_clip
         )
         training_layout.addWidget(training_title)
         training_layout.addWidget(self.training_panel, 1)
@@ -775,9 +785,31 @@ class ModelWorkspacePage(QWidget):
         self.analysis_panel.mark_stale()
         self._refresh_training_panel(self._selected_record())
 
-    def _open_dataset_item(self, item_id: str) -> None:
+    def _open_dataset_item(
+        self,
+        item_id: str,
+        clip_id: str = "",
+        start_ms: int = 0,
+        end_ms: int = 0,
+    ) -> None:
         self._navigate_model_section(1)
-        self.dataset_panel.open_training_item(item_id)
+        self.dataset_panel.open_training_item(item_id, clip_id, start_ms, end_ms)
+
+    def _open_excluded_training_clip(self, failure: object) -> None:
+        if not isinstance(failure, RvcTrainingPreprocessFailure):
+            return
+        if not failure.source_item_id:
+            self.show_status("This excluded input is no longer linked to a training clip.")
+            return
+        self._open_dataset_item(failure.source_item_id, failure.source_clip_id)
+        self.show_status("Excluded clip opened for review.")
+
+    def _set_preprocess_summary(self, result: RvcTrainingPreprocessResult) -> None:
+        self.training_panel.set_preprocess_summary(
+            len(result.snapshot.inputs),
+            result.successful_input_count,
+            result.failed_inputs,
+        )
 
     def stop_preview(self) -> None:
         self.dataset_panel.stop_preview()
@@ -791,6 +823,7 @@ class ModelWorkspacePage(QWidget):
     def _refresh_training_panel(self, record: RvcModelRecord | None) -> None:
         if record is None or not record.is_managed:
             self.training_panel.set_model(record, None, 0, 0)
+            self.training_panel.clear_preprocess_summary()
             self.dataset_panel.set_training_locked(False)
             return
         layout = self._training_layout(record)
@@ -804,6 +837,7 @@ class ModelWorkspacePage(QWidget):
             dataset = ModelDatasetStore(self._workspace.root).load(record.model_id)
         except Exception as exc:
             self.training_panel.set_model(record, None, 0, 0)
+            self.training_panel.clear_preprocess_summary()
             self.training_panel.set_failure(str(exc))
             return
         training_items = dataset.training_items
@@ -819,6 +853,12 @@ class ModelWorkspacePage(QWidget):
             total_duration_ms,
             preflight,
         )
+        try:
+            preprocess_result = load_rvc_preprocess_result(record.model_id, layout)
+        except (RvcTrainingDatasetError, RvcTrainingPreprocessError):
+            self.training_panel.clear_preprocess_summary()
+        else:
+            self._set_preprocess_summary(preprocess_result)
         self.training_panel.set_running(is_running)
         self.dataset_panel.set_training_locked(is_running)
         if is_running:
@@ -862,6 +902,7 @@ class ModelWorkspacePage(QWidget):
             else ""
         )
         self.training_panel.set_running(True)
+        self.training_panel.clear_preprocess_summary()
         self.training_panel.set_progress(0)
         state = RvcTrainingStateStore(record.model_id, layout).refresh_checkpoint_pair()
         initial_epoch = state.current_epoch if settings.resume and state.can_resume else 0
@@ -870,7 +911,7 @@ class ModelWorkspacePage(QWidget):
         self.dataset_panel.set_training_locked(True)
 
         worker = ModelTrainingWorker(
-            lambda progress, stage, epoch, activity: self._run_training_job(
+            lambda progress, stage, epoch, activity, preprocess: self._run_training_job(
                 record,
                 layout,
                 dataset,
@@ -880,6 +921,7 @@ class ModelWorkspacePage(QWidget):
                 stage,
                 epoch,
                 activity,
+                preprocess,
             )
         )
         worker.set_diagnostic_task_id(self._training_task_id)
@@ -888,6 +930,7 @@ class ModelWorkspacePage(QWidget):
         worker.stage_changed.connect(self._on_training_stage)
         worker.epoch_changed.connect(self._on_training_epoch)
         worker.activity_changed.connect(self._on_training_activity)
+        worker.preprocess_changed.connect(self._on_training_preprocess)
         worker.succeeded.connect(self._on_training_succeeded)
         worker.failed.connect(self._on_training_failed)
         worker.finished.connect(self._on_training_finished)
@@ -907,6 +950,7 @@ class ModelWorkspacePage(QWidget):
         stage: Callable[[str], None],
         epoch: Callable[[int, int], None],
         activity: Callable[[], None],
+        preprocess: Callable[[object], None],
     ) -> _ModelTrainingJobResult:
         pipeline = run_rvc_training_pipeline(
             record.model_id,
@@ -918,6 +962,7 @@ class ModelWorkspacePage(QWidget):
             progress=progress,
             epoch_callback=epoch,
             stage_callback=lambda current: stage(_training_stage_label(current)),
+            preprocess_callback=preprocess,
             output_callback=lambda _line: activity(),
         )
         if pipeline.stopped:
@@ -971,6 +1016,21 @@ class ModelWorkspacePage(QWidget):
 
     def _on_training_activity(self) -> None:
         self._mark_training_activity()
+
+    def _on_training_preprocess(self, result: object) -> None:
+        if not isinstance(result, RvcTrainingPreprocessResult):
+            return
+        self._mark_training_activity()
+        if self._selected_model_id == self._training_model_id:
+            self._set_preprocess_summary(result)
+        if result.failed_inputs:
+            _LOGGER.warning(
+                "Training audio preparation excluded clips: model=%s used=%s total=%s excluded=%s",
+                self._training_model_id,
+                result.successful_input_count,
+                len(result.snapshot.inputs),
+                result.skipped_input_count,
+            )
 
     def _mark_training_activity(self) -> None:
         if self._training_worker is not None:

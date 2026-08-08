@@ -3,12 +3,15 @@ from __future__ import annotations
 import unittest
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMenu, QVBoxLayout, QWidget
 
+from jang_app.qt_app.share_progress_action import ShareProgressAction
+from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
 from jang_app.qt_app.window_lifecycle import (
     WindowLifecycleGuard,
     install_window_lifecycle_guard,
 )
+from jang_app.qt_app.widgets import TrackRow
 
 
 class WindowLifecycleGuardTests(unittest.TestCase):
@@ -68,3 +71,27 @@ class WindowLifecycleGuardTests(unittest.TestCase):
         second = install_window_lifecycle_guard(self.app)
 
         self.assertIs(first, second)
+
+    def test_composite_widgets_do_not_show_children_before_parenting(self) -> None:
+        guard = install_window_lifecycle_guard(self.app)
+        host = QWidget()
+        host.setProperty("allowTopLevelWindow", True)
+        layout = QVBoxLayout(host)
+
+        result_panel = VocalResultsPanel(mode="separation")
+        track_row = TrackRow("Converted Vocal", allow_selection=True)
+        share_action = ShareProgressAction(parent=host)
+        self.app.processEvents()
+
+        self.assertEqual(guard.blocked_count, 0)
+        layout.addWidget(result_panel)
+        layout.addWidget(track_row)
+        layout.addWidget(share_action)
+        host.show()
+        self.app.processEvents()
+
+        self.assertTrue(result_panel.result_combo.isVisible())
+        self.assertTrue(track_row.path_combo.isVisible())
+        self.assertTrue(share_action.isVisible())
+        self.assertEqual(guard.blocked_count, 0)
+        host.close()

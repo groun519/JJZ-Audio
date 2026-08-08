@@ -23,8 +23,15 @@ class WorkSongCapabilitiesTests(unittest.TestCase):
         capabilities = build_work_song_capabilities(_song("output", kind="output"), output_available=True)
 
         self.assertFalse(capabilities.can_separate)
+        self.assertTrue(capabilities.can_attach_source)
         self.assertTrue(capabilities.can_convert)
         self.assertTrue(capabilities.can_export)
+
+    def test_source_with_an_existing_output_can_be_separated_again(self) -> None:
+        capabilities = build_work_song_capabilities(_song("source"), output_available=True)
+
+        self.assertTrue(capabilities.can_separate)
+        self.assertFalse(capabilities.can_attach_source)
 
 
 class WorkTaskScopeTests(unittest.TestCase):

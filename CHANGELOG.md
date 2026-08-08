@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added a title-bar processing status button with task count and aggregate progress, plus an explicit right-side task drawer.
+- Split the former Vocal workspace into dedicated Separation and Conversion pages while preserving one active work song and shared playback.
+- Added Standard, High Quality, and Maximum Demucs recipes with explicit model, shift, overlap, float32, and post-processing settings.
+- Upgraded Maximum separation to a sequential `htdemucs_ft` plus `htdemucs` ensemble with reproducible weights, float32 stem blending, and final mixture correction.
+- Added persistent separation run metadata, active-run selection, legacy-result inference, optional model readiness and download-size feedback.
+- Added reference-stem quality measurement for SI-SDR, clipping, and mixture residual so future engines and ensembles can be selected by repeatable evidence.
+- Added synchronized per-track mute and 0-200% level controls to Separation and Conversion results using the same playback state as Studio.
+- Added page-scoped playback: Separation monitors original vocal plus instrumental, Conversion compares original plus the selected converted take, and Studio plays the full sound pool without losing position during page changes.
+- Added an always-visible converted-vocal selector with take, model, pitch, and creation-time context.
+- Replaced the separation preset dropdown with an equal-width three-method selector and a stable detail panel for quality behavior, model requirements, and first-use download size.
+
+### Fixed
+
+- Prevented the processing queue from opening automatically over workspace controls and kept it mutually exclusive with the log drawer.
+- Preserved float32 stems in quality modes and optionally projected vocal and instrumental outputs back to the source mixture without changing their alignment.
+- Moved Demucs execution, progress parsing, output discovery, and quality normalization behind a reusable separation-engine boundary.
+- Aggregated Demucs bag-model and shift progress monotonically, retained only the final ensemble stems, and kept model downloads in the project-owned cache.
+- Kept separation available after previous runs and let legacy output-only songs reconnect their original audio without losing existing results.
+- Kept the active separation result selectable in a dedicated row, including a fallback when older library metadata omits the currently loaded result.
+- Restored playback for 32-bit float separation stems, added assigned-source fallback playback, and removed premature child-widget shows that hid result selectors.
+
+### Quality
+
+- Added regression coverage for recipes, model assets, run manifests, quality metrics, stem consistency, float-WAV playback, result history, navigation, and legacy compatibility.
+
 ## 0.2.5 - 2026-08-07
 
 ### Added

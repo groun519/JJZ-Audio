@@ -30,6 +30,7 @@ class RvcTrainingPipelineTests(unittest.TestCase):
             dataset = ModelDatasetStore(root / "workspace").load(model_id)
             stages: list[RvcTrainingStage] = []
             progress: list[int] = []
+            preprocess_results: list[object] = []
 
             with (
                 patch("jang_app.services.rvc_training_pipeline.preprocess_rvc_training_dataset") as preprocess,
@@ -57,6 +58,7 @@ class RvcTrainingPipelineTests(unittest.TestCase):
                     RvcTrainingRunSettings(),
                     progress=progress.append,
                     stage_callback=stages.append,
+                    preprocess_callback=preprocess_results.append,
                 )
 
             preprocess.assert_not_called()
@@ -67,6 +69,7 @@ class RvcTrainingPipelineTests(unittest.TestCase):
             self.assertEqual(result.executed_stages, (RvcTrainingStage.TRAIN,))
             self.assertEqual(stages, list(RvcTrainingStage))
             self.assertEqual(progress, sorted(progress))
+            self.assertEqual(len(preprocess_results), 1)
             self.assertTrue(
                 all(boundary in progress for boundary in (5, 15, 25, 28, 32, 95, 100))
             )

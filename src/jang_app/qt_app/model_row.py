@@ -38,7 +38,11 @@ class ModelListRow(QWidget):
         text_layout.addWidget(self.name_label)
         text_layout.addWidget(self.detail_label)
 
-        self.share_action = ShareProgressAction(button_size=32, reveal_on_hover=True)
+        self.share_action = ShareProgressAction(
+            button_size=32,
+            reveal_on_hover=True,
+            parent=self,
+        )
         self.share_action.setObjectName("ModelRowActionSlot")
         self.share_action.requested.connect(
             lambda: self.share_requested.emit(self._model_id)

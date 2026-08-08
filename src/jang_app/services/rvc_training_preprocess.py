@@ -27,6 +27,7 @@ from jang_app.services.rvc_training_control import (
 )
 from jang_app.services.rvc_training_dataset import (
     RvcTrainingSnapshot,
+    RvcTrainingSnapshotInput,
     RvcTrainingSnapshotStore,
 )
 from jang_app.services.rvc_training_runtime import (
@@ -37,7 +38,7 @@ from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingSt
 
 
 PREPROCESS_MANIFEST_NAME = "jjzero_preprocess.json"
-PREPROCESS_MANIFEST_VERSION = 2
+PREPROCESS_MANIFEST_VERSION = 4
 _FAILED_LOG_NAME = "preprocess-failed.log"
 _PUBLISHED_OUTPUTS = (
     "0_gt_wavs",
@@ -65,6 +66,8 @@ class RvcTrainingPreprocessError(RuntimeError):
 class RvcTrainingPreprocessFailure:
     input_name: str
     reason: str
+    source_item_id: str = ""
+    source_clip_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -230,16 +233,16 @@ def _validate_preprocess_outputs(
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise RvcTrainingPreprocessError("RVC preprocessing did not create a readable log.") from exc
-    validation = _parse_preprocess_log(log_text, snapshot)
-    if validation.successful_input_count <= 0:
-        raise RvcTrainingPreprocessError("RVC preprocessing created no usable audio segments.")
-
     gt_wavs = _wav_files(root / "0_gt_wavs")
     wavs_16k = _wav_files(root / "1_16k_wavs")
     if not gt_wavs or not wavs_16k:
         raise RvcTrainingPreprocessError("RVC preprocessing created no usable audio segments.")
     if {path.stem for path in gt_wavs} != {path.stem for path in wavs_16k}:
         raise RvcTrainingPreprocessError("RVC preprocessing output pairs do not match.")
+    produced_indices = _produced_input_indices(gt_wavs, len(snapshot.inputs))
+    validation = _classify_preprocess_outputs(log_text, snapshot, produced_indices)
+    if validation.successful_input_count <= 0:
+        raise RvcTrainingPreprocessError("RVC preprocessing created no usable audio segments.")
     return validation
 
 
@@ -278,7 +281,12 @@ def _write_preprocess_manifest(
             "input_count": len(snapshot.inputs),
             "successful_input_count": validation.successful_input_count,
             "failed_inputs": [
-                {"input_name": failure.input_name, "reason": failure.reason}
+                {
+                    "input_name": failure.input_name,
+                    "reason": failure.reason,
+                    "source_item_id": failure.source_item_id,
+                    "source_clip_id": failure.source_clip_id,
+                }
                 for failure in validation.failed_inputs
             ],
             "segment_count": len(_wav_files(root / "0_gt_wavs")),
@@ -298,62 +306,100 @@ def _validate_preprocess_manifest(
         raise RvcTrainingPreprocessError("RVC preprocess manifest cannot be read.") from exc
     version = data.get("version")
     if (
-        version not in {1, PREPROCESS_MANIFEST_VERSION}
+        version not in {1, 2, 3, PREPROCESS_MANIFEST_VERSION}
         or data.get("dataset_fingerprint") != snapshot.fingerprint
         or data.get("input_count") != len(snapshot.inputs)
         or data.get("segment_count") != len(_wav_files(root / "0_gt_wavs"))
     ):
         raise RvcTrainingPreprocessError("RVC preprocess outputs belong to a different dataset.")
-    if version == 1:
-        if validation.failed_inputs or validation.successful_input_count != len(snapshot.inputs):
-            raise RvcTrainingPreprocessError("RVC preprocess manifest is missing partial-result data.")
+    if version in {1, 2, 3}:
+        # Legacy manifests used the RVC log rather than generated output pairs to count inputs.
+        # Their files remain usable; current results are reconstructed from the actual outputs.
         return
     expected_failures = [
-        {"input_name": failure.input_name, "reason": failure.reason}
+        {
+            "input_name": failure.input_name,
+            "reason": failure.reason,
+            "source_item_id": failure.source_item_id,
+            "source_clip_id": failure.source_clip_id,
+        }
         for failure in validation.failed_inputs
     ]
     if (
         data.get("successful_input_count") != validation.successful_input_count
         or data.get("failed_inputs") != expected_failures
     ):
-        raise RvcTrainingPreprocessError("RVC preprocess manifest does not match its log.")
+        raise RvcTrainingPreprocessError("RVC preprocess manifest does not match its outputs.")
 
 
-def _parse_preprocess_log(
+def _classify_preprocess_outputs(
     log_text: str,
     snapshot: RvcTrainingSnapshot,
+    produced_indices: frozenset[int],
 ) -> _PreprocessValidation:
-    records: list[tuple[int, int, str]] = []
-    missing: list[RvcTrainingPreprocessFailure] = []
+    records: list[tuple[int, int, RvcTrainingSnapshotInput]] = []
+    results: dict[int, str | None] = {item.order: None for item in snapshot.inputs}
     for item in snapshot.inputs:
         marker_match = _find_result_marker(log_text, item.path)
-        if marker_match is None:
-            missing.append(
-                RvcTrainingPreprocessFailure(
-                    item.path.name,
-                    "No preprocessing result was recorded.",
-                )
-            )
-            continue
-        position, marker_length = marker_match
-        records.append((position, marker_length, item.path.name))
+        if marker_match is not None:
+            position, marker_length = marker_match
+            records.append((position, marker_length, item))
 
-    successes = 0
-    failures: list[RvcTrainingPreprocessFailure] = []
     ordered = sorted(records, key=lambda record: record[0])
-    for index, (position, marker_length, input_name) in enumerate(ordered):
+    for index, (position, marker_length, snapshot_input) in enumerate(ordered):
         result_start = position + marker_length
         result_end = ordered[index + 1][0] if index + 1 < len(ordered) else len(log_text)
-        result = log_text[result_start:result_end].strip()
-        if result.startswith("Suc."):
-            successes += 1
+        results[snapshot_input.order] = log_text[result_start:result_end].strip()
+
+    failures: list[RvcTrainingPreprocessFailure] = []
+    runtime_inputs = tuple(sorted(snapshot.inputs, key=lambda item: item.path.name.casefold()))
+    for runtime_index, snapshot_input in enumerate(runtime_inputs):
+        if runtime_index in produced_indices:
             continue
+        result = results[snapshot_input.order]
+        if result is None:
+            reason = "No preprocessing result was recorded."
+        elif result.startswith("Suc."):
+            reason = "No usable audio segment was produced."
+        else:
+            reason = _preprocess_failure_reason(result)
         failures.append(
-            RvcTrainingPreprocessFailure(input_name, _preprocess_failure_reason(result))
+            _preprocess_failure(snapshot_input, reason)
         )
-    failures.extend(missing)
     failures.sort(key=lambda failure: failure.input_name.casefold())
-    return _PreprocessValidation(successes, tuple(failures))
+    return _PreprocessValidation(len(produced_indices), tuple(failures))
+
+
+def _produced_input_indices(
+    output_paths: tuple[Path, ...],
+    input_count: int,
+) -> frozenset[int]:
+    indices: set[int] = set()
+    for path in output_paths:
+        prefix, separator, _segment = path.stem.partition("_")
+        if not separator or not prefix.isdecimal():
+            raise RvcTrainingPreprocessError(
+                f"RVC preprocessing created an unrecognized output name: {path.name}"
+            )
+        index = int(prefix)
+        if index >= input_count:
+            raise RvcTrainingPreprocessError(
+                f"RVC preprocessing output does not match a training input: {path.name}"
+            )
+        indices.add(index)
+    return frozenset(indices)
+
+
+def _preprocess_failure(
+    snapshot_input: RvcTrainingSnapshotInput,
+    reason: str,
+) -> RvcTrainingPreprocessFailure:
+    return RvcTrainingPreprocessFailure(
+        input_name=snapshot_input.path.name,
+        reason=reason,
+        source_item_id=snapshot_input.source_item_id,
+        source_clip_id=snapshot_input.source_clip_id,
+    )
 
 
 def _find_result_marker(

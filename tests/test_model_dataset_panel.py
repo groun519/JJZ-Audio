@@ -9,6 +9,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
+from jang_app.services.i18n import tr
 from jang_app.services.model_dataset import ModelDatasetStore
 
 
@@ -87,6 +88,50 @@ class ModelDatasetPanelTests(unittest.TestCase):
                 dataset = store.load("model")
                 self.assertEqual(dataset.training_items[0].review_state, "ready")
                 self.assertEqual(panel.training_list.currentRow(), 1)
+                panel.close()
+
+    def test_held_clips_are_visible_but_do_not_block_ready_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ModelDatasetStore(root / "workspace")
+            source = _wave_file(root / "voice.wav")
+            item = store.add_sources("model", [source]).items[0]
+            store.select_items("model", [item.item_id])
+            queued = store.replace_segment_candidates(
+                "model",
+                item.item_id,
+                ((100, 400), (500, 800)),
+            ).items[0]
+            accepted = store.accept_segment_candidate(
+                "model",
+                item.item_id,
+                queued.segment_candidates[0].candidate_id,
+                100,
+                400,
+            ).items[0]
+            store.set_segment_candidate_status(
+                "model",
+                item.item_id,
+                accepted.segment_candidates[0].candidate_id,
+                "held",
+            )
+            panel = ModelDatasetPanel(store)
+            with patch(
+                "jang_app.qt_app.clip_waveform_view.waveform_cache_key",
+                side_effect=OSError,
+            ):
+                panel.set_model("model")
+                panel.training_list.setCurrentRow(0)
+
+                row = panel.training_list.itemWidget(panel.training_list.item(0))
+                self.assertIn(tr("{count} HELD", count=1), row.metadata_label.text())
+                self.assertTrue(panel.clip_editor.ready_button.isEnabled())
+
+                panel.clip_editor.ready_button.click()
+
+                ready = store.load("model").training_items[0]
+                self.assertEqual(ready.review_state, "ready")
+                self.assertEqual(ready.held_segment_count, 1)
                 panel.close()
 
 

@@ -13,8 +13,14 @@ class ShareProgressAction(QWidget):
     requested = Signal()
     delete_requested = Signal()
 
-    def __init__(self, *, button_size: int = 30, reveal_on_hover: bool = False) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        *,
+        button_size: int = 30,
+        reveal_on_hover: bool = False,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self.setObjectName("ShareProgressAction")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         button_extent = button_size + 4

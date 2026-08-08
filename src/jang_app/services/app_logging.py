@@ -10,6 +10,7 @@ from typing import TextIO
 
 from jang_app.config import LOG_DIR, LOG_FILE
 from jang_app.services.job_diagnostics import SESSION_ID, current_task_id
+from jang_app.version import __version__
 
 
 LOGGER_NAME = "jang_app"
@@ -44,6 +45,13 @@ def get_logger() -> logging.Logger:
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
         logger.propagate = False
+        logger.info(
+            "Application session started | version=%s | mode=%s | python=%s | executable=%s",
+            __version__,
+            "packaged" if getattr(sys, "frozen", False) else "source",
+            sys.version.split()[0],
+            Path(sys.executable).resolve(),
+        )
     return logger
 
 

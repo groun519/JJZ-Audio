@@ -8,6 +8,8 @@ from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.workspace_transport_dock import WorkspaceTransportDock
+from jang_app.services.i18n import tr
+from jang_app.services.workspace_playback import WorkspacePlaybackScope
 
 
 class WorkspaceTransportDockTests(unittest.TestCase):
@@ -29,6 +31,19 @@ class WorkspaceTransportDockTests(unittest.TestCase):
         self.assertEqual(changed.at(0)[0], "two")
         self.assertEqual(play_toggled.count(), 1)
         self.assertEqual(dock.transport.time_label.text(), "00:00 / 01:00")
+        dock.close()
+
+    def test_playback_scope_is_shown_beside_the_work_song(self) -> None:
+        dock = WorkspaceTransportDock()
+
+        dock.set_playback_scope(WorkspacePlaybackScope.CONVERSION)
+
+        self.assertEqual(dock.scope_label.text(), tr("Conversion Compare"))
+        self.assertFalse(dock.scope_label.isHidden())
+
+        dock.set_playback_scope(None)
+
+        self.assertTrue(dock.scope_label.isHidden())
         dock.close()
 
     def test_title_is_above_the_timeline(self) -> None:

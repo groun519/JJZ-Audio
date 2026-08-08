@@ -15,6 +15,7 @@ from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingStateStore
 from jang_app.services.rvc_training_presets import RvcTrainingPresetId
+from jang_app.services.rvc_training_preprocess import RvcTrainingPreprocessFailure
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 
 
@@ -122,6 +123,44 @@ class ModelTrainingPanelTests(unittest.TestCase):
                     detail.geometry().bottom(),
                     frame.contentsRect().bottom(),
                 )
+        panel.close()
+
+    def test_excluded_training_clips_are_visible_and_openable(self) -> None:
+        panel = ModelTrainingPanel()
+        failures = (
+            RvcTrainingPreprocessFailure(
+                input_name="0017_voice.wav",
+                reason="ValueError: clip is too short",
+                source_item_id="voice",
+                source_clip_id="clip-17",
+            ),
+            RvcTrainingPreprocessFailure(
+                input_name="0042_voice.wav",
+                reason="No preprocessing result was recorded.",
+                source_item_id="voice",
+                source_clip_id="clip-42",
+            ),
+        )
+        requested: list[RvcTrainingPreprocessFailure] = []
+        panel.excluded_clip_requested.connect(requested.append)
+
+        panel.set_preprocess_summary(195, 193, failures)
+
+        self.assertFalse(panel.preprocess_notice_card.isHidden())
+        self.assertIn("193 of 195", panel.preprocess_notice_detail.text())
+        self.assertIn("2 excluded", panel.preprocess_notice_detail.text())
+        self.assertEqual(panel.excluded_clip_combo.count(), 2)
+        self.assertIn("too short", panel.excluded_clip_combo.itemData(0, 3))
+        panel.excluded_clip_combo.setCurrentIndex(1)
+        panel.excluded_clip_button.click()
+        self.assertEqual(requested, [failures[1]])
+
+        set_language(LANGUAGE_KOREAN)
+        panel.apply_language()
+        self.assertIn("제외됨", panel.preprocess_notice_badge.text())
+
+        panel.clear_preprocess_summary()
+        self.assertTrue(panel.preprocess_notice_card.isHidden())
         panel.close()
 
     def test_presets_apply_settings_and_manual_edits_switch_to_custom(self) -> None:

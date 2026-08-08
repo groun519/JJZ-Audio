@@ -765,7 +765,13 @@ class ModelDatasetPanel(QWidget):
     def stop_preview(self) -> None:
         self.clip_editor.stop_preview()
 
-    def open_training_item(self, item_id: str) -> bool:
+    def open_training_item(
+        self,
+        item_id: str,
+        clip_id: str = "",
+        start_ms: int = 0,
+        end_ms: int = 0,
+    ) -> bool:
         if not item_id or not any(item.item_id == item_id for item in self._dataset.training_items):
             return False
         _select_item(self.training_list, item_id)
@@ -776,6 +782,8 @@ class ModelDatasetPanel(QWidget):
                 QAbstractItemView.ScrollHint.PositionAtCenter,
             )
         self._on_training_selection_changed()
+        if clip_id:
+            self.clip_editor.focus_clip(clip_id, start_ms, end_ms)
         return True
 
     def _close_editor(self) -> None:
@@ -1011,8 +1019,10 @@ def _item_metadata(item: ModelDatasetItem) -> str:
     parts = [mode_text]
     if item.has_denoised_audio:
         parts.append(tr("DENOISED"))
-    if item.open_segment_count:
-        parts.append(tr("{count} TO REVIEW", count=item.open_segment_count))
+    if item.pending_segment_count:
+        parts.append(tr("{count} TO REVIEW", count=item.pending_segment_count))
+    if item.held_segment_count:
+        parts.append(tr("{count} HELD", count=item.held_segment_count))
     parts.extend((duration, extension, _format_size(item.size_bytes)))
     return "  /  ".join(parts)
 

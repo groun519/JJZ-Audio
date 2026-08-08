@@ -135,6 +135,61 @@ class SongLibraryTests(unittest.TestCase):
             self.assertEqual(activated.output_job_dir, first.resolve())
             self.assertEqual(library.items()[0].output_job_dir, first.resolve())
 
+    def test_output_only_song_can_recover_its_original_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            sound_set = _sound_set(project, "Recovered Song")
+            source = project / "original.wav"
+            source.write_bytes(b"original")
+            library.add_output_sets([sound_set])
+            recovered = library.items()[0]
+
+            attached = library.attach_source(recovered.id, source)
+
+            self.assertEqual(attached.id, recovered.id)
+            self.assertEqual(attached.kind, "source")
+            self.assertNotEqual(attached.path, source.resolve())
+            self.assertEqual(attached.path.read_bytes(), source.read_bytes())
+            self.assertEqual(attached.output_job_dir, sound_set.job_dir.resolve())
+
+    def test_recovering_a_known_source_merges_outputs_without_a_duplicate_song(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            source = project / "original.wav"
+            source.write_bytes(b"original")
+            original = library.add_paths([source])[0]
+            sound_set = _sound_set(project, "Unmatched Output")
+            recovery = store.create_output_recovery(
+                "Unmatched Output",
+                sound_set.job_dir,
+                sound_set.label,
+            )
+
+            attached = library.attach_source(recovery.song_id, source)
+
+            self.assertEqual(attached.id, original.id)
+            self.assertEqual(attached.output_job_dir, sound_set.job_dir.resolve())
+            self.assertEqual([item.id for item in library.items()], [original.id])
+
+    def test_missing_managed_source_can_be_relinked(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            source = project / "original.wav"
+            source.write_bytes(b"original")
+            song = library.add_paths([source])[0]
+            song.path.unlink()
+
+            relinked = library.attach_source(song.id, source)
+
+            self.assertTrue(relinked.path.is_file())
+            self.assertEqual(relinked.path.read_bytes(), b"original")
+
     def test_converted_selection_and_output_detach_are_non_destructive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)

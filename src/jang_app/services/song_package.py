@@ -160,6 +160,66 @@ class SongPackageStore:
         self._save(package)
         return package
 
+    def attach_source(
+        self,
+        song_id: str,
+        source: Path,
+        *,
+        source_type: str = "local",
+        source_url: str = "",
+    ) -> SongPackage:
+        package = self.require(song_id)
+        source = source.expanduser().resolve()
+        if not source.is_file():
+            raise ValueError(f"Original audio does not exist: {source}")
+        if package.source_path is not None and package.source_path.is_file():
+            return package
+
+        content_hash = file_sha256(source)
+        existing = next(
+            (
+                item
+                for item in self.packages(include_removed=True)
+                if item.song_id != song_id and item.source_hash == content_hash
+            ),
+            None,
+        )
+        if existing is not None:
+            outputs_by_id = {
+                output.output_id: output
+                for output in (*existing.outputs, *package.outputs)
+            }
+            updated = replace(
+                existing,
+                outputs=tuple(outputs_by_id.values()),
+                active_output_id=package.active_output_id or existing.active_output_id,
+                detached_output_dirs=tuple(
+                    dict.fromkeys((*existing.detached_output_dirs, *package.detached_output_dirs))
+                ),
+                removed=False,
+            )
+            self._save(updated)
+            self._save(replace(package, removed=True))
+            return updated
+
+        managed_source = (
+            package.folder
+            / SOURCE_STAGE
+            / "audio"
+            / _managed_source_name(source, package.song_id)
+        )
+        copy_file_atomic(source, managed_source)
+        updated = replace(
+            package,
+            source_path=managed_source,
+            source_type=source_type if source_type in {"local", "youtube"} else "local",
+            source_url=source_url.strip(),
+            source_hash=content_hash,
+            original_name=source.name,
+        )
+        self._save(updated)
+        return updated
+
     def attach_output(self, song_id: str, job_dir: Path, label: str) -> SongPackage:
         package = self.require(song_id)
         resolved_job = job_dir.expanduser().resolve()

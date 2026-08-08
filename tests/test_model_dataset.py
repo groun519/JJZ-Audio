@@ -205,6 +205,23 @@ class ModelDatasetStoreTests(unittest.TestCase):
             self.assertEqual(migrated.training_mode, TRAINING_MODE_CLIPS)
             self.assertEqual(migrated.review_state, REVIEW_EDITING)
 
+    def test_legacy_review_candidates_cannot_fall_back_to_full_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ModelDatasetStore(root / "workspace")
+            source = _wave_file(root / "voice.wav", duration_ms=800)
+            item = store.add_sources("model", [source]).items[0]
+            store.replace_segment_candidates("model", item.item_id, ((100, 500),))
+            manifest = store.root / "model" / "dataset.json"
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            data["items"][0]["training_mode"] = "full"
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+
+            migrated = ModelDatasetStore(root / "workspace").load("model").items[0]
+
+            self.assertEqual(migrated.training_mode, TRAINING_MODE_CLIPS)
+            self.assertEqual(migrated.training_paths, ())
+
     def test_segment_review_queue_persists_and_accepts_refined_region(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -217,6 +234,8 @@ class ModelDatasetStoreTests(unittest.TestCase):
                 item.item_id,
                 ((100, 1000), (1400, 2600), (3000, 3800)),
             ).items[0]
+            self.assertEqual(queued.training_mode, TRAINING_MODE_CLIPS)
+            self.assertEqual(queued.training_paths, ())
             held_id = queued.segment_candidates[1].candidate_id
             rejected_id = queued.segment_candidates[2].candidate_id
             store.set_segment_candidate_status("model", item.item_id, held_id, SEGMENT_HELD)
@@ -242,6 +261,15 @@ class ModelDatasetStoreTests(unittest.TestCase):
             self.assertEqual([(clip.start_ms, clip.end_ms) for clip in accepted.clips], [(150, 950)])
             self.assertNotIn(pending_id, [candidate.candidate_id for candidate in accepted.segment_candidates])
             self.assertTrue(accepted.clips[0].path.is_file())
+            self.assertEqual(accepted.pending_segment_count, 0)
+            self.assertEqual(accepted.held_segment_count, 1)
+            self.assertEqual(accepted.open_segment_count, 1)
+
+            ready = store.mark_item_ready("model", item.item_id).items[0]
+
+            self.assertEqual(ready.review_state, REVIEW_READY)
+            self.assertEqual(ready.held_segment_count, 1)
+            self.assertEqual(ready.segment_candidates[0].status, SEGMENT_HELD)
 
     def test_used_clip_can_move_back_to_review_and_be_used_again(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -322,7 +322,7 @@ class _ExportRow(QFrame):
         self.open_button = SvgIconButton("folder", size=30)
         set_translated_tooltip(self.open_button, "Open file location")
         self.open_button.clicked.connect(lambda: self.open_location_requested.emit(exported.path))
-        self.share_action = ShareProgressAction(button_size=30)
+        self.share_action = ShareProgressAction(button_size=30, parent=self)
         self.share_action.requested.connect(lambda: self.share_requested.emit(exported.path))
         self.share_action.delete_requested.connect(
             lambda: self.delete_share_requested.emit(exported.path)

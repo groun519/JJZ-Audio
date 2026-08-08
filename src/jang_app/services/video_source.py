@@ -99,6 +99,67 @@ class VideoSourceStore:
             )
         return VideoSource()
 
+    def managed_sources(self, package: SongPackage) -> tuple[VideoSource, ...]:
+        video_dir = package.folder / SOURCE_STAGE / "video"
+        if not video_dir.is_dir():
+            return ()
+
+        active = self.load(package)
+        active_path = active.path.resolve() if active.path is not None else None
+        sources: list[VideoSource] = []
+        try:
+            paths = tuple(video_dir.iterdir())
+        except OSError:
+            return ()
+        for path in paths:
+            try:
+                if not path.is_file() or path.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
+                    continue
+                resolved = path.resolve()
+                resolved.relative_to(video_dir.resolve())
+                modified_at = path.stat().st_mtime
+            except (OSError, ValueError):
+                continue
+            if active_path == resolved:
+                sources.append(active)
+                continue
+            sources.append(
+                VideoSource(
+                    kind=VIDEO_KIND_FILE,
+                    path=resolved,
+                    original_name=_managed_display_name(path),
+                    updated_at=datetime.fromtimestamp(
+                        modified_at,
+                        tz=UTC,
+                    ).isoformat(),
+                )
+            )
+        sources.sort(key=lambda source: source.updated_at, reverse=True)
+        sources.sort(key=lambda source: source.path != active_path)
+        return tuple(sources)
+
+    def select_managed(self, package: SongPackage, path: Path) -> VideoSource:
+        selected = path.expanduser().resolve()
+        video_dir = (package.folder / SOURCE_STAGE / "video").resolve()
+        try:
+            selected.relative_to(video_dir)
+        except ValueError as exc:
+            raise ValueError("Select a video stored with this song.") from exc
+        if not selected.is_file() or selected.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
+            raise ValueError("Select a supported stored video.")
+
+        active = self.load(package)
+        if active.path is not None and active.path.resolve() == selected:
+            return active
+        video = VideoSource(
+            kind=VIDEO_KIND_FILE,
+            path=selected,
+            original_name=_managed_display_name(selected),
+            updated_at=_now(),
+        )
+        self._save(package, video)
+        return video
+
     def import_file(self, package: SongPackage, source: Path, progress=None) -> VideoSource:
         source = source.expanduser().resolve()
         if not source.is_file() or source.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
@@ -214,3 +275,10 @@ def _is_youtube_url(value: str) -> bool:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _managed_display_name(path: Path) -> str:
+    stem, separator, digest = path.stem.rpartition("__")
+    if separator and len(digest) == 12 and all(character in "0123456789abcdef" for character in digest):
+        return f"{stem}{path.suffix}"
+    return path.name

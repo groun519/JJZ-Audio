@@ -45,7 +45,7 @@ _FEMALE_VOCAL_REFERENCE = (53, 84)
 
 
 class ModelDatasetAnalysisPanel(QWidget):
-    edit_requested = Signal(str)
+    edit_requested = Signal(str, str, int, int)
 
     def __init__(self, store: ModelDatasetStore) -> None:
         super().__init__()
@@ -308,16 +308,21 @@ class ModelDatasetAnalysisPanel(QWidget):
             return
         for issue in issue_items:
             item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, issue.item_id)
+            item.setData(Qt.ItemDataRole.UserRole, issue)
             row = DatasetIssueRow(issue, self.issue_list.viewport())
             if not issue.item_id:
                 item.setFlags(Qt.ItemFlag.NoItemFlags)
             attach_list_item_widget(self.issue_list, item, row)
 
     def _open_issue(self, item: QListWidgetItem) -> None:
-        item_id = item.data(Qt.ItemDataRole.UserRole)
-        if isinstance(item_id, str) and item_id:
-            self.edit_requested.emit(item_id)
+        issue = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(issue, DatasetAnalysisIssue) and issue.item_id:
+            self.edit_requested.emit(
+                issue.item_id,
+                issue.clip_id,
+                issue.start_ms,
+                issue.end_ms,
+            )
 
     def _set_status(self, source: str, **values: object) -> None:
         set_translated_text(self.status_label, source, **values)

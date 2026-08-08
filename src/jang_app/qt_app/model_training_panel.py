@@ -4,9 +4,10 @@ import traceback
 from collections.abc import Callable
 from time import monotonic
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -39,6 +40,7 @@ from jang_app.services.rvc_training_preflight import (
     RvcTrainingPreflight,
     basic_rvc_training_preflight,
 )
+from jang_app.services.rvc_training_preprocess import RvcTrainingPreprocessFailure
 from jang_app.services.rvc_training_recovery import (
     RvcTrainingRecoveryAction,
     RvcTrainingRecoveryAdvice,
@@ -54,6 +56,7 @@ TrainingTask = Callable[
         Callable[[str], None],
         Callable[[int, int], None],
         Callable[[], None],
+        Callable[[object], None],
     ],
     object,
 ]
@@ -64,6 +67,7 @@ class ModelTrainingWorker(QThread):
     stage_changed = Signal(str)
     epoch_changed = Signal(int, int)
     activity_changed = Signal()
+    preprocess_changed = Signal(object)
     succeeded = Signal(object)
     failed = Signal(str)
 
@@ -84,6 +88,7 @@ class ModelTrainingWorker(QThread):
                     self.stage_changed.emit,
                     self.epoch_changed.emit,
                     self._emit_activity,
+                    self.preprocess_changed.emit,
                 )
                 self.succeeded.emit(result)
             except Exception:
@@ -103,6 +108,7 @@ class ModelTrainingPanel(QWidget):
     diagnostics_requested = Signal(str)
     system_setup_requested = Signal()
     preflight_requested = Signal()
+    excluded_clip_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -128,6 +134,9 @@ class ModelTrainingPanel(QWidget):
         self._seconds_per_epoch = 0.0
         self._active_preset = RvcTrainingPresetId.QUICK
         self._applying_preset = False
+        self._preprocess_total_inputs = 0
+        self._preprocess_used_inputs = 0
+        self._preprocess_failures: tuple[RvcTrainingPreprocessFailure, ...] = ()
         self._build_ui()
         self.set_model(None, None, 0, 0)
 
@@ -203,6 +212,43 @@ class ModelTrainingPanel(QWidget):
         runtime_layout.addWidget(self.runtime_label)
         self.runtime_row.hide()
         summary_layout.addWidget(self.runtime_row)
+
+        self.preprocess_notice_card = QFrame()
+        self.preprocess_notice_card.setObjectName("TrainingInputNotice")
+        preprocess_notice_layout = QVBoxLayout(self.preprocess_notice_card)
+        preprocess_notice_layout.setContentsMargins(16, 14, 16, 14)
+        preprocess_notice_layout.setSpacing(9)
+
+        preprocess_notice_header = QHBoxLayout()
+        preprocess_notice_header.setContentsMargins(0, 0, 0, 0)
+        preprocess_notice_header.setSpacing(10)
+        self.preprocess_notice_title = QLabel()
+        self.preprocess_notice_title.setObjectName("TrainingInputNoticeTitle")
+        self.preprocess_notice_badge = QLabel()
+        self.preprocess_notice_badge.setObjectName("TrainingInputNoticeBadge")
+        self.preprocess_notice_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preprocess_notice_header.addWidget(self.preprocess_notice_title)
+        preprocess_notice_header.addStretch(1)
+        preprocess_notice_header.addWidget(self.preprocess_notice_badge)
+        preprocess_notice_layout.addLayout(preprocess_notice_header)
+
+        self.preprocess_notice_detail = QLabel()
+        self.preprocess_notice_detail.setObjectName("TrainingInputNoticeDetail")
+        self.preprocess_notice_detail.setWordWrap(True)
+        preprocess_notice_layout.addWidget(self.preprocess_notice_detail)
+
+        preprocess_notice_actions = QHBoxLayout()
+        preprocess_notice_actions.setContentsMargins(0, 0, 0, 0)
+        preprocess_notice_actions.setSpacing(8)
+        self.excluded_clip_combo = QComboBox()
+        self.excluded_clip_combo.setObjectName("TrainingExcludedClipCombo")
+        self.excluded_clip_button = FeedbackButton("Review Clip")
+        self.excluded_clip_button.setObjectName("TrainingExcludedClipButton")
+        self.excluded_clip_button.clicked.connect(self._request_excluded_clip)
+        preprocess_notice_actions.addWidget(self.excluded_clip_combo, 1)
+        preprocess_notice_actions.addWidget(self.excluded_clip_button)
+        preprocess_notice_layout.addLayout(preprocess_notice_actions)
+        self.preprocess_notice_card.hide()
 
         self.recovery_card = QFrame()
         self.recovery_card.setObjectName("TrainingRecoveryCard")
@@ -434,6 +480,7 @@ class ModelTrainingPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
         layout.addWidget(summary)
+        layout.addWidget(self.preprocess_notice_card)
         layout.addWidget(self.recovery_card)
         layout.addWidget(readiness)
         layout.addWidget(settings)
@@ -455,6 +502,9 @@ class ModelTrainingPanel(QWidget):
         self._state = state
         self._ready_items = max(0, int(ready_items))
         self._total_items = max(0, int(total_items))
+        current_model_id = record.model_id if record is not None else ""
+        if current_model_id != previous_model_id:
+            self.clear_preprocess_summary()
         can_train = record is not None and record.is_managed
         self._preflight = preflight or basic_rvc_training_preflight(
             managed_model=can_train,
@@ -635,6 +685,33 @@ class ModelTrainingPanel(QWidget):
         self.progress_bar.setValue(progress)
         self.progress_percent_label.setText(f"{progress}%")
 
+    def set_preprocess_summary(
+        self,
+        total_inputs: int,
+        successful_inputs: int,
+        failed_inputs: tuple[RvcTrainingPreprocessFailure, ...],
+    ) -> None:
+        self._preprocess_total_inputs = max(0, int(total_inputs))
+        self._preprocess_used_inputs = max(0, int(successful_inputs))
+        self._preprocess_failures = tuple(failed_inputs)
+        self.excluded_clip_combo.clear()
+        for failure in self._preprocess_failures:
+            self.excluded_clip_combo.addItem(failure.input_name, failure)
+            index = self.excluded_clip_combo.count() - 1
+            self.excluded_clip_combo.setItemData(
+                index,
+                failure.reason,
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self._sync_preprocess_summary()
+
+    def clear_preprocess_summary(self) -> None:
+        self._preprocess_total_inputs = 0
+        self._preprocess_used_inputs = 0
+        self._preprocess_failures = ()
+        self.excluded_clip_combo.clear()
+        self.preprocess_notice_card.hide()
+
     def set_epoch_progress(self, current_epoch: int, target_epoch: int) -> None:
         current = max(0, int(current_epoch))
         target = max(1, int(target_epoch))
@@ -724,6 +801,41 @@ class ModelTrainingPanel(QWidget):
         self._sync_info_popovers()
         self._sync_preflight()
         self._sync_recovery()
+        self._sync_preprocess_summary()
+
+    def _request_excluded_clip(self) -> None:
+        failure = self.excluded_clip_combo.currentData()
+        if isinstance(failure, RvcTrainingPreprocessFailure):
+            self.excluded_clip_requested.emit(failure)
+
+    def _sync_preprocess_summary(self) -> None:
+        excluded = len(self._preprocess_failures)
+        self.preprocess_notice_card.setVisible(excluded > 0)
+        if not excluded:
+            return
+        set_translated_text(
+            self.preprocess_notice_title,
+            "Some Clips Were Excluded",
+        )
+        set_translated_text(
+            self.preprocess_notice_detail,
+            (
+                "{used} of {total} clips will be used for training. "
+                "The {excluded} excluded clips will not affect this model."
+            ),
+            used=self._preprocess_used_inputs,
+            total=self._preprocess_total_inputs,
+            excluded=excluded,
+        )
+        set_translated_text(
+            self.preprocess_notice_badge,
+            "Excluded {count}",
+            count=excluded,
+        )
+        set_translated_text(self.excluded_clip_button, "Review Clip")
+        self.excluded_clip_button.setEnabled(
+            isinstance(self.excluded_clip_combo.currentData(), RvcTrainingPreprocessFailure)
+        )
 
     def _request_start(self) -> None:
         self.start_requested.emit(

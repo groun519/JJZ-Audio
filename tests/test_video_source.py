@@ -100,6 +100,35 @@ class VideoSourceStoreTests(unittest.TestCase):
             self.assertEqual(store.load(package), materialized)
             self.assertEqual(materialized.url, package.source_url)
 
+    def test_reuses_a_previous_managed_video_without_copying_it_again(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package(root)
+            source = root / "first.mp4"
+            source.write_bytes(b"first video")
+            store = VideoSourceStore()
+
+            imported = store.import_file(package, source)
+            store.set_url(package, "https://youtu.be/replacement")
+
+            available = store.managed_sources(package)
+            selected = store.select_managed(package, imported.path)
+
+            self.assertEqual([item.path for item in available], [imported.path])
+            self.assertEqual(selected.path, imported.path)
+            self.assertEqual(selected.path.read_bytes(), b"first video")
+            self.assertEqual(store.load(package), selected)
+
+    def test_rejects_selecting_a_video_outside_the_song_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package(root)
+            outside = root / "outside.mp4"
+            outside.write_bytes(b"video")
+
+            with self.assertRaises(ValueError):
+                VideoSourceStore().select_managed(package, outside)
+
     def test_song_library_catalogs_the_active_managed_video(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

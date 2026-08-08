@@ -8,12 +8,13 @@ from unittest.mock import patch
 import numpy as np
 import soundfile as sf
 from PySide6.QtCore import QEvent, QObject
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from jang_app.qt_app.model_dataset_analysis_panel import (
     DatasetIssueRow,
     ModelDatasetAnalysisPanel,
 )
+from jang_app.services.i18n import tr
 from jang_app.services.model_dataset import ModelDatasetStore
 from jang_app.services.model_dataset_analysis import DatasetAnalysisIssue, analyze_model_dataset
 
@@ -31,8 +32,8 @@ class ModelDatasetAnalysisPanelTests(unittest.TestCase):
             store.select_items("voice", (item.item_id,))
             analyze_model_dataset(store, "voice")
             panel = ModelDatasetAnalysisPanel(store)
-            opened: list[str] = []
-            panel.edit_requested.connect(opened.append)
+            opened: list[tuple[str, str, int, int]] = []
+            panel.edit_requested.connect(lambda *values: opened.append(values))
 
             panel.set_model("voice")
             first_issue = panel.issue_list.item(0)
@@ -40,11 +41,74 @@ class ModelDatasetAnalysisPanelTests(unittest.TestCase):
 
             self.assertNotEqual(panel.duration_value.text(), "-")
             self.assertGreater(panel.issue_list.count(), 0)
-            self.assertEqual(opened, [item.item_id])
+            self.assertEqual(opened, [(item.item_id, "", 0, 500)])
             self.assertEqual(panel.pitch_value.text(), "A3")
             self.assertAlmostEqual(panel.pitch_chart._center_midi or 0, 57.0, delta=0.2)
             self.assertEqual(len(panel.pitch_chart._coverage_ranges), 1)
             self.assertIn("RVC Pitch", panel.pitch_reference.text())
+            panel.close()
+
+    def test_issue_navigation_preserves_the_exact_clip_and_range(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            panel = ModelDatasetAnalysisPanel(ModelDatasetStore(Path(temporary)))
+            opened: list[tuple[str, str, int, int]] = []
+            panel.edit_requested.connect(lambda *values: opened.append(values))
+            panel._populate_issues(
+                (
+                    DatasetAnalysisIssue(
+                        "clip_too_short",
+                        "attention",
+                        "This clip is shorter than 1 second.",
+                        item_id="item-1",
+                        clip_id="clip-16",
+                        start_ms=41_200,
+                        end_ms=41_850,
+                    ),
+                )
+            )
+
+            panel._open_issue(panel.issue_list.item(0))
+
+            self.assertEqual(opened, [("item-1", "clip-16", 41_200, 41_850)])
+            panel.close()
+
+    def test_quality_findings_use_attention_and_info_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            panel = ModelDatasetAnalysisPanel(ModelDatasetStore(Path(temporary)))
+            panel._populate_issues(
+                (
+                    DatasetAnalysisIssue(
+                        "clip_too_short",
+                        "attention",
+                        "This clip is shorter than 1 second.",
+                        item_id="item-1",
+                        clip_id="clip-1",
+                    ),
+                    DatasetAnalysisIssue(
+                        "clip_too_long",
+                        "info",
+                        "This clip is longer than 15 seconds.",
+                        item_id="item-1",
+                        clip_id="clip-2",
+                    ),
+                )
+            )
+
+            badges = tuple(
+                panel.issue_list.itemWidget(panel.issue_list.item(index)).findChild(
+                    QLabel,
+                    "DatasetIssueBadge",
+                )
+                for index in range(panel.issue_list.count())
+            )
+            self.assertEqual(
+                tuple(badge.text() for badge in badges),
+                (tr("Attention"), tr("Info")),
+            )
+            self.assertEqual(
+                tuple(badge.property("severity") for badge in badges),
+                ("attention", "info"),
+            )
             panel.close()
 
     def test_issue_rows_are_parented_before_size_measurement(self) -> None:
