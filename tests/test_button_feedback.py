@@ -9,6 +9,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
+from jang_app.qt_app.processing_queue_panel import ProcessingQueueButton
 from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.widgets import (
     FeedbackButton,
@@ -18,6 +19,7 @@ from jang_app.qt_app.widgets import (
     _track_button_palette,
     _window_control_palette,
 )
+from jang_app.services.processing_queue import ProcessingQueue
 
 
 class ButtonFeedbackTests(unittest.TestCase):
@@ -151,6 +153,31 @@ class ButtonFeedbackTests(unittest.TestCase):
                 self.assertEqual(title_bar.version_label.text(), "v0.2.5")
                 self.assertEqual(title_bar.version_label.objectName(), "AppVersion")
                 self.assertTrue(title_bar.version_label.isVisible())
+
+            title_bar.close()
+
+    def test_title_bar_contains_processing_queue_button(self) -> None:
+        for theme_mode in ("dark", "white"):
+            title_bar = WindowTitleBar(
+                "JJZero Audio",
+                Path(),
+                version_text="v0.2.8",
+            )
+            title_bar.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            queue = ProcessingQueue()
+            queue_button = ProcessingQueueButton(queue, parent=title_bar.action_widget)
+            title_bar.add_action_widget(queue_button)
+            queue.start("Test task", progress=25)
+            title_bar.setStyleSheet(build_stylesheet(theme_mode))
+            title_bar.resize(900, title_bar.height())
+            title_bar.show()
+            self.app.processEvents()
+
+            button_rect = queue_button.geometry()
+            action_rect = title_bar.action_widget.rect()
+            with self.subTest(theme_mode=theme_mode):
+                self.assertEqual(queue_button.size().toTuple(), (48, 26))
+                self.assertTrue(action_rect.contains(button_rect))
 
             title_bar.close()
 

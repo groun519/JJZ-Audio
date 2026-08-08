@@ -2745,6 +2745,16 @@ def _stylesheet(
             background: {raised};
         }}
 
+        QPushButton#ProcessingQueueButton {{
+            min-width: 48px;
+            max-width: 48px;
+            min-height: 26px;
+            max-height: 26px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+        }}
+
         QPushButton#GoogleAccountButton[connected="true"] {{
             border-color: {success_border};
             background: {success_background};

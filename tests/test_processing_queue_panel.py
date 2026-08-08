@@ -39,7 +39,7 @@ class ProcessingTaskRowTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertTrue(button.isHidden())
-        self.assertEqual((button.width(), button.height()), (48, 30))
+        self.assertEqual((button.width(), button.height()), (48, 26))
         task_id = queue.start("Separate Audio", progress=20)
         self.app.processEvents()
 
