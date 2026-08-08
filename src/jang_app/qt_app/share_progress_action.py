@@ -27,6 +27,7 @@ class ShareProgressAction(QWidget):
         self.setFixedSize(120, max(38, button_extent + 4))
         self._feature_enabled = True
         self._idle_visible = not reveal_on_hover
+        self._reserve_idle_space = reveal_on_hover
         self._running = False
         self._shared = False
         self._actions_expanded = False
@@ -149,7 +150,7 @@ class ShareProgressAction(QWidget):
         is_visible = self._running or self._copied_visible or (
             self._feature_enabled and (self._idle_visible or self._shared)
         )
-        self.setVisible(is_visible)
+        self.setVisible(is_visible or self._reserve_idle_space)
         self.progress_bar.setVisible(self._running)
         self.progress_label.setVisible(self._running)
         self.copied_label.setVisible(self._copied_visible)

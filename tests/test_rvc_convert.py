@@ -213,6 +213,13 @@ class RvcConvertTests(unittest.TestCase):
                 pitch=-12,
                 device="auto",
             )
+            compact_probe = long_job_dir / "rvc_m12_0000000000.wav"
+            safe_path_length = rvc_convert._path_length(compact_probe)
+            descriptive_stem = rvc_convert._build_rvc_output_stem(source, settings)
+            self.assertGreater(
+                rvc_convert._path_length(long_job_dir / f"{descriptive_stem}.wav"),
+                safe_path_length,
+            )
 
             def complete_conversion(args, **_kwargs):
                 Path(args[5]).write_bytes(b"converted")
@@ -221,6 +228,7 @@ class RvcConvertTests(unittest.TestCase):
             with (
                 patch.object(rvc_convert, "select_rvc_inference_device", return_value=selection),
                 patch.object(rvc_convert, "_prepare_rvc_workspace", return_value=workspace),
+                patch.object(rvc_convert, "_RVC_SAFE_OUTPUT_PATH_LENGTH", safe_path_length),
                 patch.object(rvc_convert, "run_command", side_effect=complete_conversion) as command,
             ):
                 result = rvc_convert.convert_vocal_with_rvc(source, long_job_dir, settings)
@@ -228,7 +236,7 @@ class RvcConvertTests(unittest.TestCase):
             command_output = Path(command.call_args.args[0][5])
             self.assertEqual(command_output, result.output_path)
             self.assertTrue(result.output_path.name.startswith("rvc_m12_"))
-            self.assertLessEqual(rvc_convert._path_length(result.output_path), 240)
+            self.assertLessEqual(rvc_convert._path_length(result.output_path), safe_path_length)
             self.assertTrue(result.output_path.is_file())
 
     def test_conversion_rejects_output_folder_that_cannot_fit_compact_name(self) -> None:

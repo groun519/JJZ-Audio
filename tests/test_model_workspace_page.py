@@ -318,7 +318,8 @@ class ModelWorkspacePageTests(unittest.TestCase):
             page.set_share_deleted(record.model_id)
             row.leaveEvent(QEvent(QEvent.Type.Leave))
             self.assertEqual(row.share_button.icon_name(), "link")
-            self.assertTrue(row.share_action.isHidden())
+            self.assertFalse(row.share_action.isHidden())
+            self.assertTrue(row.share_button.isHidden())
             page.close()
 
     def test_model_share_action_stays_hidden_when_feature_is_unavailable(self) -> None:
