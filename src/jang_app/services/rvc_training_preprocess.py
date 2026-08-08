@@ -14,7 +14,7 @@ from jang_app.services.command import (
     run_cancellable_command,
     run_command,
 )
-from jang_app.services.managed_files import write_json_atomic
+from jang_app.services.managed_files import copy_file_atomic, write_json_atomic
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_training_artifacts import (
@@ -37,6 +37,8 @@ from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingSt
 
 
 PREPROCESS_MANIFEST_NAME = "jjzero_preprocess.json"
+PREPROCESS_MANIFEST_VERSION = 2
+_FAILED_LOG_NAME = "preprocess-failed.log"
 _PUBLISHED_OUTPUTS = (
     "0_gt_wavs",
     "1_16k_wavs",
@@ -60,12 +62,30 @@ class RvcTrainingPreprocessError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RvcTrainingPreprocessFailure:
+    input_name: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class RvcTrainingPreprocessResult:
     snapshot: RvcTrainingSnapshot
     experiment_dir: Path
     gt_wavs: tuple[Path, ...]
     wavs_16k: tuple[Path, ...]
     log_path: Path
+    successful_input_count: int
+    failed_inputs: tuple[RvcTrainingPreprocessFailure, ...]
+
+    @property
+    def skipped_input_count(self) -> int:
+        return len(self.failed_inputs)
+
+
+@dataclass(frozen=True)
+class _PreprocessValidation:
+    successful_input_count: int
+    failed_inputs: tuple[RvcTrainingPreprocessFailure, ...]
 
 
 def preprocess_rvc_training_dataset(
@@ -142,8 +162,8 @@ def preprocess_rvc_training_dataset(
             raise RvcTrainingPreprocessError(
                 f"RVC preprocessing failed with exit code {completed.returncode}: {completed.output}"
             )
-        _validate_preprocess_outputs(staging, len(snapshot.inputs))
-        _write_preprocess_manifest(staging, snapshot)
+        validation = _validate_preprocess_outputs(staging, snapshot)
+        _write_preprocess_manifest(staging, snapshot, validation)
         publish_training_outputs(
             staging,
             layout.experiment_dir,
@@ -155,20 +175,38 @@ def preprocess_rvc_training_dataset(
         state_store.update_phase(RvcTrainingPhase.PREPROCESSED)
         _report(progress, 100)
         logger.info(
-            "RVC training preprocessing complete: model=%s segments=%s",
+            "RVC training preprocessing complete: model=%s inputs=%s skipped=%s segments=%s",
             model_id,
+            result.successful_input_count,
+            result.skipped_input_count,
             len(result.gt_wavs),
         )
+        if result.failed_inputs:
+            logger.warning(
+                "RVC preprocessing skipped invalid training inputs: model=%s skipped=%s log=%s",
+                model_id,
+                result.skipped_input_count,
+                result.log_path,
+            )
+            for failure in result.failed_inputs:
+                logger.warning(
+                    "RVC preprocessing skipped input: model=%s input=%s reason=%s",
+                    model_id,
+                    failure.input_name,
+                    failure.reason,
+                )
         return result
     except RvcTrainingCancelled:
         state_store.update_phase(RvcTrainingPhase.STOPPED)
         raise
     except Exception as exc:
-        logger.error("RVC training preprocessing failed: model=%s error=%s", model_id, exc)
-        state_store.update_phase(RvcTrainingPhase.FAILED, last_error=str(exc))
-        if isinstance(exc, RvcTrainingPreprocessError):
-            raise
-        raise RvcTrainingPreprocessError(str(exc)) from exc
+        diagnostic_log = _preserve_failed_preprocess_log(staging, layout)
+        detail = str(exc)
+        if diagnostic_log is not None:
+            detail = f"{detail} Diagnostic log: {diagnostic_log}"
+        logger.error("RVC training preprocessing failed: model=%s error=%s", model_id, detail)
+        state_store.update_phase(RvcTrainingPhase.FAILED, last_error=detail)
+        raise RvcTrainingPreprocessError(detail) from exc
     finally:
         remove_training_staging(staging, layout.model_dir)
 
@@ -183,37 +221,42 @@ def load_rvc_preprocess_result(
     return _preprocess_result(snapshot, layout.experiment_dir)
 
 
-def _validate_preprocess_outputs(root: Path, expected_inputs: int) -> None:
+def _validate_preprocess_outputs(
+    root: Path,
+    snapshot: RvcTrainingSnapshot,
+) -> _PreprocessValidation:
+    log_path = root / "preprocess.log"
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise RvcTrainingPreprocessError("RVC preprocessing did not create a readable log.") from exc
+    validation = _parse_preprocess_log(log_text, snapshot)
+    if validation.successful_input_count <= 0:
+        raise RvcTrainingPreprocessError("RVC preprocessing created no usable audio segments.")
+
     gt_wavs = _wav_files(root / "0_gt_wavs")
     wavs_16k = _wav_files(root / "1_16k_wavs")
     if not gt_wavs or not wavs_16k:
         raise RvcTrainingPreprocessError("RVC preprocessing created no usable audio segments.")
     if {path.stem for path in gt_wavs} != {path.stem for path in wavs_16k}:
         raise RvcTrainingPreprocessError("RVC preprocessing output pairs do not match.")
-    log_path = root / "preprocess.log"
-    try:
-        log_text = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise RvcTrainingPreprocessError("RVC preprocessing did not create a readable log.") from exc
-    success_count = sum(line.rstrip().endswith("->Suc.") for line in log_text.splitlines())
-    if success_count != expected_inputs:
-        raise RvcTrainingPreprocessError(
-            f"RVC preprocessing completed {success_count} of {expected_inputs} input files."
-        )
+    return validation
 
 
 def _preprocess_result(
     snapshot: RvcTrainingSnapshot,
     experiment_dir: Path,
 ) -> RvcTrainingPreprocessResult:
-    _validate_preprocess_outputs(experiment_dir, len(snapshot.inputs))
-    _validate_preprocess_manifest(experiment_dir, snapshot)
+    validation = _validate_preprocess_outputs(experiment_dir, snapshot)
+    _validate_preprocess_manifest(experiment_dir, snapshot, validation)
     return RvcTrainingPreprocessResult(
         snapshot=snapshot,
         experiment_dir=experiment_dir,
         gt_wavs=_wav_files(experiment_dir / "0_gt_wavs"),
         wavs_16k=_wav_files(experiment_dir / "1_16k_wavs"),
         log_path=experiment_dir / "preprocess.log",
+        successful_input_count=validation.successful_input_count,
+        failed_inputs=validation.failed_inputs,
     )
 
 
@@ -222,31 +265,131 @@ def _staging_dir(layout: RvcModelPackageLayout) -> Path:
     return root / f".building-{uuid.uuid4().hex}"
 
 
-def _write_preprocess_manifest(root: Path, snapshot: RvcTrainingSnapshot) -> None:
+def _write_preprocess_manifest(
+    root: Path,
+    snapshot: RvcTrainingSnapshot,
+    validation: _PreprocessValidation,
+) -> None:
     write_json_atomic(
         root / PREPROCESS_MANIFEST_NAME,
         {
-            "version": 1,
+            "version": PREPROCESS_MANIFEST_VERSION,
             "dataset_fingerprint": snapshot.fingerprint,
             "input_count": len(snapshot.inputs),
+            "successful_input_count": validation.successful_input_count,
+            "failed_inputs": [
+                {"input_name": failure.input_name, "reason": failure.reason}
+                for failure in validation.failed_inputs
+            ],
             "segment_count": len(_wav_files(root / "0_gt_wavs")),
         },
     )
 
 
-def _validate_preprocess_manifest(root: Path, snapshot: RvcTrainingSnapshot) -> None:
+def _validate_preprocess_manifest(
+    root: Path,
+    snapshot: RvcTrainingSnapshot,
+    validation: _PreprocessValidation,
+) -> None:
     path = root / PREPROCESS_MANIFEST_NAME
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RvcTrainingPreprocessError("RVC preprocess manifest cannot be read.") from exc
+    version = data.get("version")
     if (
-        data.get("version") != 1
+        version not in {1, PREPROCESS_MANIFEST_VERSION}
         or data.get("dataset_fingerprint") != snapshot.fingerprint
         or data.get("input_count") != len(snapshot.inputs)
         or data.get("segment_count") != len(_wav_files(root / "0_gt_wavs"))
     ):
         raise RvcTrainingPreprocessError("RVC preprocess outputs belong to a different dataset.")
+    if version == 1:
+        if validation.failed_inputs or validation.successful_input_count != len(snapshot.inputs):
+            raise RvcTrainingPreprocessError("RVC preprocess manifest is missing partial-result data.")
+        return
+    expected_failures = [
+        {"input_name": failure.input_name, "reason": failure.reason}
+        for failure in validation.failed_inputs
+    ]
+    if (
+        data.get("successful_input_count") != validation.successful_input_count
+        or data.get("failed_inputs") != expected_failures
+    ):
+        raise RvcTrainingPreprocessError("RVC preprocess manifest does not match its log.")
+
+
+def _parse_preprocess_log(
+    log_text: str,
+    snapshot: RvcTrainingSnapshot,
+) -> _PreprocessValidation:
+    records: list[tuple[int, int, str]] = []
+    missing: list[RvcTrainingPreprocessFailure] = []
+    for item in snapshot.inputs:
+        marker_match = _find_result_marker(log_text, item.path)
+        if marker_match is None:
+            missing.append(
+                RvcTrainingPreprocessFailure(
+                    item.path.name,
+                    "No preprocessing result was recorded.",
+                )
+            )
+            continue
+        position, marker_length = marker_match
+        records.append((position, marker_length, item.path.name))
+
+    successes = 0
+    failures: list[RvcTrainingPreprocessFailure] = []
+    ordered = sorted(records, key=lambda record: record[0])
+    for index, (position, marker_length, input_name) in enumerate(ordered):
+        result_start = position + marker_length
+        result_end = ordered[index + 1][0] if index + 1 < len(ordered) else len(log_text)
+        result = log_text[result_start:result_end].strip()
+        if result.startswith("Suc."):
+            successes += 1
+            continue
+        failures.append(
+            RvcTrainingPreprocessFailure(input_name, _preprocess_failure_reason(result))
+        )
+    failures.extend(missing)
+    failures.sort(key=lambda failure: failure.input_name.casefold())
+    return _PreprocessValidation(successes, tuple(failures))
+
+
+def _find_result_marker(
+    log_text: str,
+    input_path: Path,
+) -> tuple[int, int] | None:
+    candidates = (str(input_path), input_path.as_posix(), input_path.name)
+    matches: list[tuple[int, int]] = []
+    for candidate in dict.fromkeys(candidates):
+        marker = f"{candidate}->"
+        position = log_text.find(marker)
+        if position >= 0:
+            matches.append((position, len(marker)))
+    return min(matches, default=None, key=lambda match: match[0])
+
+
+def _preprocess_failure_reason(result: str) -> str:
+    lines = [line.strip() for line in result.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.casefold() not in {"start preprocess", "end preprocess"}:
+            return line[:1000]
+    return "RVC rejected this training input without an error message."
+
+
+def _preserve_failed_preprocess_log(
+    staging: Path,
+    layout: RvcModelPackageLayout,
+) -> Path | None:
+    source = staging / "preprocess.log"
+    if not source.is_file():
+        return None
+    target = layout.model_dir / "training" / "diagnostics" / _FAILED_LOG_NAME
+    try:
+        return copy_file_atomic(source, target)
+    except OSError:
+        return None
 
 
 def _wav_files(directory: Path) -> tuple[Path, ...]:
