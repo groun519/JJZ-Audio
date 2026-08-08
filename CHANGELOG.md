@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.8 - 2026-08-09
+
 ### Added
 
 - Added a title-bar processing status button with task count and aggregate progress, plus an explicit right-side task drawer.
@@ -14,6 +16,7 @@
 - Added page-scoped playback: Separation monitors original vocal plus instrumental, Conversion compares original plus the selected converted take, and Studio plays the full sound pool without losing position during page changes.
 - Added an always-visible converted-vocal selector with take, model, pitch, and creation-time context.
 - Replaced the separation preset dropdown with an equal-width three-method selector and a stable detail panel for quality behavior, model requirements, and first-use download size.
+- Added reusable saved-video selection in Studio and versioned application-session headers in diagnostic logs.
 
 ### Fixed
 
@@ -24,10 +27,32 @@
 - Kept separation available after previous runs and let legacy output-only songs reconnect their original audio without losing existing results.
 - Kept the active separation result selectable in a dedicated row, including a fallback when older library metadata omits the currently loaded result.
 - Restored playback for 32-bit float separation stems, added assigned-source fallback playback, and removed premature child-widget shows that hid result selectors.
+- Recovered RVC preprocessing when only a valid subset of training clips completes and recorded rejected inputs for diagnosis.
+- Added compressed-audio waveform fallback decoding and stabilized hidden model-share slots and title-bar action sizing.
 
 ### Quality
 
 - Added regression coverage for recipes, model assets, run manifests, quality metrics, stem consistency, float-WAV playback, result history, navigation, and legacy compatibility.
+
+## 0.2.7 - 2026-08-08
+
+### Fixed
+
+- Improved Google OAuth compatibility and surfaced actionable authorization diagnostics in user job reports.
+- Added application version, runtime profile, and hardware context to diagnostic bundles for remote issue analysis.
+
+## 0.2.6 - 2026-08-07
+
+### Added
+
+- Added Google Drive account connection, model sharing, export sharing, shared-model import, and managed share deletion.
+- Added NVIDIA CUDA, AMD ROCm/DirectML, and CPU runtime profiles with update-aware accelerator selection.
+- Expanded model-material review with clip editing, denoising, keyboard decisions, and persistent review state.
+
+### Fixed
+
+- Hardened managed-storage migration, installer upgrades, uninstallation, path-length handling, and windowless helper execution.
+- Removed stale playback surfaces and aligned Library, Model, Vocal, Studio, and Export workflow state.
 
 ## 0.2.5 - 2026-08-07
 
