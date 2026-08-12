@@ -9,6 +9,33 @@ from pathlib import Path
 from scripts.build_runtime_packages import build_component_packages, build_runtime_packages
 
 
+V028_RUNTIME_REQUIRED_PATHS = (
+    "ffmpeg/bin/ffmpeg.exe",
+    "ffmpeg/bin/ffprobe.exe",
+    "demucs/torch/hub/checkpoints/955717e8-8726e21a.th",
+    "rvc/infer_cli.py",
+    "rvc/runtime/python.exe",
+    "rvc/hubert_base.pt",
+    "rvc/rmvpe.pt",
+    "rvc/configs/40k.json",
+    "rvc/trainset_preprocess_pipeline_print.py",
+    "rvc/extract_f0_rmvpe.py",
+    "rvc/extract_feature_print.py",
+    "rvc/train_nsf_sim_cache_sid_load_pretrain.py",
+    "rvc/lib/jjzero_device.py",
+    "rvc/lib/i18n/en_US.json",
+    "rvc/lib/train/utils.py",
+    "rvc/lib/infer_pack/models.py",
+    "rvc/pretrained_v2/f0G40k.pth",
+    "rvc/pretrained_v2/f0D40k.pth",
+    "rvc/logs/mute/0_gt_wavs/mute40k.wav",
+    "rvc/logs/mute/0_gt_wavs/mute40k.spec.pt",
+    "rvc/logs/mute/2a_f0/mute.wav.npy",
+    "rvc/logs/mute/2b-f0nsf/mute.wav.npy",
+    "rvc/logs/mute/3_feature768/mute.npy",
+)
+
+
 class RuntimePackagesTests(unittest.TestCase):
     def test_builds_bounded_deterministic_runtime_parts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -43,6 +70,34 @@ class RuntimePackagesTests(unittest.TestCase):
             self.assertNotIn("rvc/runtime/python.exe", archived)
             self.assertNotIn("rvc/__pycache__/infer_cli.pyc", archived)
             self.assertNotIn("rvc/web.js.map", archived)
+
+    def test_builds_legacy_compatible_runtime_with_base_rvc_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            release = root / "release"
+            for relative in V028_RUNTIME_REQUIRED_PATHS:
+                path = runtime / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"runtime")
+
+            index = build_runtime_packages(
+                runtime,
+                release,
+                "3",
+                part_limit=100,
+                include_base_rvc_profile=True,
+            )
+
+            data = json.loads(index.read_text(encoding="utf-8"))
+            self.assertFalse(data["requires_rvc_profile"])
+            extracted = root / "extracted"
+            for artifact in data["artifacts"]:
+                with zipfile.ZipFile(release / artifact["name"]) as package:
+                    package.extractall(extracted)
+            self.assertTrue(
+                all((extracted / relative).is_file() for relative in V028_RUNTIME_REQUIRED_PATHS)
+            )
 
     def test_builds_named_rvc_profile_component(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

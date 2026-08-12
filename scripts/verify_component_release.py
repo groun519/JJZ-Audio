@@ -55,6 +55,7 @@ def verify_component_release(
                 raise RuntimeError(f"Release signature verification failed: {path.name}")
     _verify_cu128_package_layout(manifest, release_root)
     _verify_split_runtime_package_layout(manifest, release_root)
+    _verify_legacy_runtime_package_layout(manifest, release_root)
     _verify_accelerator_package_layouts(manifest, release_root)
     if not install_runtime:
         return
@@ -242,6 +243,35 @@ def _verify_split_runtime_package_layout(manifest, release_root: Path) -> None:
     }
     if profile_names.isdisjoint(separator_candidates):
         raise RuntimeError("RVC cu118 package is incomplete: audio_separator")
+
+
+def _verify_legacy_runtime_package_layout(manifest, release_root: Path) -> None:
+    runtime = manifest.ai_runtime
+    if runtime is None or manifest.rvc_runtime_profile("cu118") is not None:
+        return
+
+    names = _archive_names(runtime, release_root)
+    required = {
+        "ffmpeg/bin/ffmpeg.exe",
+        "ffmpeg/bin/ffprobe.exe",
+        "demucs/torch/hub/checkpoints/955717e8-8726e21a.th",
+        "rvc/infer_cli.py",
+        "rvc/hubert_base.pt",
+        "rvc/rmvpe.pt",
+        *(f"rvc/{path.as_posix()}" for path in required_rvc_training_paths()),
+        "rvc/runtime/python3.dll",
+        "rvc/runtime/Lib/site-packages/torch/__init__.py",
+        "rvc/runtime/Lib/site-packages/torchaudio/__init__.py",
+    }
+    missing = sorted(required - names)
+    if missing:
+        raise RuntimeError(f"Legacy-compatible audio engine is incomplete: {missing[0]}")
+    separator_candidates = {
+        "rvc/runtime/jjzero-roformer-packages/audio_separator/__init__.py",
+        "rvc/runtime/Lib/site-packages/audio_separator/__init__.py",
+    }
+    if names.isdisjoint(separator_candidates):
+        raise RuntimeError("Legacy-compatible audio engine is incomplete: audio_separator")
 
 
 def _archive_names(component, release_root: Path) -> set[str]:

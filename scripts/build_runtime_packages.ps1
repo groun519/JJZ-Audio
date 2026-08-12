@@ -34,7 +34,9 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "RVC runtime patching failed with exit code $LASTEXITCODE"
     }
-    & $python scripts\build_runtime_packages.py $runtimeRoot $releaseDir $runtimeVersion --part-limit $PartLimit
+    & $python scripts\build_runtime_packages.py $runtimeRoot $releaseDir $runtimeVersion `
+        --part-limit $PartLimit `
+        --include-base-rvc-profile
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime package build failed with exit code $LASTEXITCODE"
     }
@@ -49,13 +51,15 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "RVC precision runtime synchronization failed with exit code $LASTEXITCODE"
     }
-    foreach ($profile in $profileVersions.PSObject.Properties.Name) {
-        $profileRoot = if ($profile -eq "cu118") {
-            Join-Path $runtimeRoot "rvc\runtime"
-        }
-        else {
-            Join-Path $runtimeRoot "rvc_profiles\$profile"
-        }
+    $baseProfile = "cu118"
+    $baseProfileVersion = [string]$profileVersions.$baseProfile
+    Get-ChildItem -LiteralPath $releaseDir -Filter "JJZero-RVC-$baseProfile-$baseProfileVersion-part*.zip" -File |
+        Remove-Item -Force
+    Remove-Item -LiteralPath (Join-Path $releaseDir "rvc-runtime-$baseProfile-packages.json") `
+        -Force -ErrorAction SilentlyContinue
+
+    foreach ($profile in $profileVersions.PSObject.Properties.Name | Where-Object { $_ -ne $baseProfile }) {
+        $profileRoot = Join-Path $runtimeRoot "rvc_profiles\$profile"
         if (-not (Test-Path -LiteralPath $profileRoot -PathType Container)) {
             throw "Required RVC $profile runtime profile was not found: $profileRoot"
         }

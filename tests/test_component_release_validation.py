@@ -10,6 +10,7 @@ from jang_app.services.app_update import ReleaseArtifact, ReleaseComponent, Rele
 from scripts.verify_component_release import (
     _accelerator_metadata_matches,
     _verify_cu128_package_layout,
+    _verify_legacy_runtime_package_layout,
     _verify_split_runtime_package_layout,
 )
 from jang_app.services.rvc_training_runtime import required_rvc_training_paths
@@ -99,6 +100,21 @@ class ComponentReleaseValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "RVC profile file"):
                 _verify_split_runtime_package_layout(manifest, root)
 
+    def test_accepts_runtime_compatible_with_legacy_updater(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = _legacy_compatible_manifest(root)
+
+            _verify_legacy_runtime_package_layout(manifest, root)
+
+    def test_rejects_legacy_compatible_runtime_without_base_python(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = _legacy_compatible_manifest(root, omit_runtime_python=True)
+
+            with self.assertRaisesRegex(RuntimeError, "rvc/runtime/python.exe"):
+                _verify_legacy_runtime_package_layout(manifest, root)
+
 
 def _write_profile_package(path: Path, *, omitted: str = "") -> None:
     entries = {
@@ -173,6 +189,45 @@ def _split_manifest(root: Path, *, embedded_runtime: bool = False) -> ReleaseMan
             ReleaseComponent("application", "0.3.0", "installer", ()),
             ReleaseComponent("ai-runtime", "3", "extract", (artifact(shared),)),
             ReleaseComponent("rvc-runtime-cu118", "2", "extract", (artifact(profile),)),
+        ),
+    )
+
+
+def _legacy_compatible_manifest(
+    root: Path,
+    *,
+    omit_runtime_python: bool = False,
+) -> ReleaseManifest:
+    package = root / "legacy-compatible.zip"
+    entries = {
+        "ffmpeg/bin/ffmpeg.exe",
+        "ffmpeg/bin/ffprobe.exe",
+        "demucs/torch/hub/checkpoints/955717e8-8726e21a.th",
+        "rvc/infer_cli.py",
+        "rvc/hubert_base.pt",
+        "rvc/rmvpe.pt",
+        *(f"rvc/{path.as_posix()}" for path in required_rvc_training_paths()),
+        "rvc/runtime/python3.dll",
+        "rvc/runtime/Lib/site-packages/torch/__init__.py",
+        "rvc/runtime/Lib/site-packages/torchaudio/__init__.py",
+        "rvc/runtime/jjzero-roformer-packages/audio_separator/__init__.py",
+    }
+    if omit_runtime_python:
+        entries.discard("rvc/runtime/python.exe")
+    with zipfile.ZipFile(package, "w") as archive:
+        for name in entries:
+            archive.writestr(name, b"runtime")
+    artifact = ReleaseArtifact(
+        package.name,
+        package.stat().st_size,
+        "0" * 64,
+        "https://example.invalid",
+    )
+    return ReleaseManifest(
+        "0.3.0",
+        (
+            ReleaseComponent("application", "0.3.0", "installer", ()),
+            ReleaseComponent("ai-runtime", "3", "extract", (artifact,)),
         ),
     )
 

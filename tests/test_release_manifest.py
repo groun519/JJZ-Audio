@@ -231,6 +231,58 @@ class ReleaseManifestTests(unittest.TestCase):
             self.assertIn("ai-runtime", component_ids)
             self.assertIn("rvc-runtime-cu118", component_ids)
 
+    def test_embedded_base_runtime_omits_duplicate_cu118_component(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.3.0-Setup.exe").write_bytes(b"installer")
+            runtime = release / "JJZero-Runtime-3-part01.zip"
+            runtime.write_bytes(b"runtime-with-cu118")
+            profile_version = RVC_RUNTIME_PROFILE_VERSIONS["cu118"]
+            profile = release / f"JJZero-RVC-cu118-{profile_version}-part01.zip"
+            profile.write_bytes(b"duplicate-cu118")
+            (release / "runtime-packages.json").write_text(
+                json.dumps(
+                    {
+                        "component": "ai-runtime",
+                        "version": "3",
+                        "requires_rvc_profile": False,
+                        "artifacts": [
+                            {
+                                "name": runtime.name,
+                                "size": runtime.stat().st_size,
+                                "sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (release / "rvc-runtime-cu118-packages.json").write_text(
+                json.dumps(
+                    {
+                        "component": "rvc-runtime-cu118",
+                        "version": profile_version,
+                        "artifacts": [
+                            {
+                                "name": profile.name,
+                                "size": profile.stat().st_size,
+                                "sha256": hashlib.sha256(profile.read_bytes()).hexdigest(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = create_release_manifest(release, "0.3.0", "3")
+
+            component_ids = {
+                component["id"]
+                for component in json.loads(manifest.read_text(encoding="utf-8"))["components"]
+            }
+            self.assertIn("ai-runtime", component_ids)
+            self.assertNotIn("rvc-runtime-cu118", component_ids)
+
     def test_manifest_includes_optional_amd_runtime_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             release = Path(temporary)

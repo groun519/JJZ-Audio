@@ -30,6 +30,7 @@ def build_runtime_packages(
     runtime_version: str,
     *,
     part_limit: int = DEFAULT_PART_LIMIT,
+    include_base_rvc_profile: bool = False,
 ) -> Path:
     return build_component_packages(
         runtime_root,
@@ -40,10 +41,12 @@ def build_runtime_packages(
         index_name=INDEX_NAME,
         part_limit=part_limit,
         excluded_top_level=DEFAULT_EXCLUDED_TOP_LEVEL,
-        excluded_prefixes=DEFAULT_EXCLUDED_PREFIXES,
+        excluded_prefixes=(
+            set() if include_base_rvc_profile else DEFAULT_EXCLUDED_PREFIXES
+        ),
         excluded_directory_names=DEFAULT_EXCLUDED_DIRECTORY_NAMES,
         excluded_suffixes=DEFAULT_EXCLUDED_SUFFIXES,
-        metadata={"requires_rvc_profile": True},
+        metadata={"requires_rvc_profile": not include_base_rvc_profile},
     )
 
 
@@ -187,6 +190,7 @@ def main() -> int:
     parser.add_argument("--exclude-prefix", action="append", default=[])
     parser.add_argument("--exclude-directory", action="append", default=[])
     parser.add_argument("--exclude-suffix", action="append", default=[])
+    parser.add_argument("--include-base-rvc-profile", action="store_true")
     arguments = parser.parse_args()
     if arguments.component == "ai-runtime" and not arguments.package_prefix:
         index = build_runtime_packages(
@@ -194,6 +198,7 @@ def main() -> int:
             arguments.release_dir,
             arguments.runtime_version,
             part_limit=arguments.part_limit,
+            include_base_rvc_profile=arguments.include_base_rvc_profile,
         )
     else:
         prefix = arguments.package_prefix or f"JJZero-{arguments.component}-{arguments.runtime_version}"
