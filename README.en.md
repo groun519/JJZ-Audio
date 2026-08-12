@@ -20,7 +20,9 @@
 </p>
 
 > [!NOTE]
-> This document describes the upcoming **JJZero Audio 0.3.0** release. See [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest) for the version currently available to install.
+> This document describes the released **JJZero Audio 0.3.0**. Download the installer from [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest).
+
+See the [0.3.0 release notes](docs/releases/0.3.0.md) for the updated workflow and interface.
 
 ## One Connected Workflow
 

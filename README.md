@@ -20,9 +20,9 @@
 </p>
 
 > [!NOTE]
-> 이 문서는 곧 배포할 **JJZero Audio 0.3.0** 기준으로 작성되어 있습니다. 현재 설치 가능한 버전은 [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest)에서 확인할 수 있습니다.
+> 이 문서는 정식 배포된 **JJZero Audio 0.3.0** 기준으로 작성되어 있습니다. 설치 파일은 [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest)에서 받을 수 있습니다.
 
-0.3.0에서 달라지는 제작 흐름과 화면은 [0.3.0 패치노트 미리보기](docs/releases/0.3.0.md)에서 확인할 수 있습니다.
+0.3.0에서 달라진 제작 흐름과 화면은 [0.3.0 패치노트](docs/releases/0.3.0.md)에서 확인할 수 있습니다.
 
 <p align="center">
   <img src="docs/assets/releases/0.3.0/separation-pools.png" width="920" alt="JJZero Audio 0.3.0 보컬·반주 결과 선택 화면">
