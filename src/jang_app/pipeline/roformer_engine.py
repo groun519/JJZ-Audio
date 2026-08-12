@@ -262,12 +262,10 @@ def require_roformer_tools() -> None:
                     f"Packaged AI runtime was not found: {RVC_PYTHON_EXE}"
                 )
             package = ROFORMER_PACKAGE_DIR / "audio_separator"
-            development_package = (
+            bundled_site_package = (
                 RVC_PYTHON_EXE.parent / "Lib" / "site-packages" / "audio_separator"
             )
-            if not package.is_dir() and not (
-                not APP_PATHS.is_frozen and development_package.is_dir()
-            ):
+            if not package.is_dir() and not bundled_site_package.is_dir():
                 raise MissingExecutableError(
                     "The precision separation component is not installed. "
                     "Update the JJZero Audio AI runtime."

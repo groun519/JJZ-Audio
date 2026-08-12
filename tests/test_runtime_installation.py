@@ -126,6 +126,19 @@ class RuntimeInstallationTests(unittest.TestCase):
             self.assertEqual(adapter.read_bytes(), bundled_device_adapter().read_bytes())
             self.assertEqual(installed_runtime_version(runtime), "9")
 
+    def test_rejects_runtime_without_precision_separation_component(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            package = root / "runtime.zip"
+            _write_runtime_package(package, include_precision_separation=False)
+
+            with self.assertRaisesRegex(
+                RuntimeInstallationError,
+                "audio engine is incomplete",
+            ):
+                install_runtime_packages((package,), runtime, "9")
+
     def test_split_shared_runtime_preserves_the_installed_rvc_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -195,6 +208,7 @@ def _write_runtime_package(
     *,
     include_adapter: bool = True,
     include_runtime: bool = True,
+    include_precision_separation: bool = True,
 ) -> None:
     files = {
         "ffmpeg/bin/ffmpeg.exe": b"ffmpeg",
@@ -211,9 +225,12 @@ def _write_runtime_package(
                 "rvc/runtime/python3.dll": b"dll",
                 "rvc/runtime/Lib/site-packages/torch/__init__.py": b"torch",
                 "rvc/runtime/Lib/site-packages/torchaudio/__init__.py": b"torchaudio",
-                "rvc/runtime/jjzero-roformer-packages/audio_separator/__init__.py": b"package",
             }
         )
+        if include_precision_separation:
+            files[
+                "rvc/runtime/jjzero-roformer-packages/audio_separator/__init__.py"
+            ] = b"package"
     training_paths = required_rvc_training_paths()
     if not include_runtime:
         training_paths = tuple(

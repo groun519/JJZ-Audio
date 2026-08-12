@@ -399,7 +399,9 @@ def _runtime_ready(root: Path) -> bool:
             if path.parts[0] != "runtime"
         ),
     )
-    return all(path.is_file() for path in required)
+    return all(path.is_file() for path in required) and _precision_separation_ready(
+        rvc_root / "runtime"
+    )
 
 
 def _rvc_profile_ready(root: Path) -> bool:
@@ -413,14 +415,17 @@ def _rvc_profile_ready(root: Path) -> bool:
             root / RVC_PROFILE_STATE_NAME,
         )
     )
-    separator_ready = any(
+    return required_ready and _precision_separation_ready(root)
+
+
+def _precision_separation_ready(root: Path) -> bool:
+    return any(
         path.is_file()
         for path in (
             root / "jjzero-roformer-packages" / "audio_separator" / "__init__.py",
             root / "Lib" / "site-packages" / "audio_separator" / "__init__.py",
         )
     )
-    return required_ready and separator_ready
 
 
 def _prune_profile_packaging_artifacts(runtime_root: Path) -> None:

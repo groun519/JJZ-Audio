@@ -84,6 +84,35 @@ class RoFormerEngineTests(unittest.TestCase):
             [str(package_dir), r"C:\existing"],
         )
 
+    def test_frozen_runtime_accepts_precision_package_in_site_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime_python = root / "runtime" / "python.exe"
+            runtime_python.parent.mkdir(parents=True)
+            runtime_python.write_bytes(b"python")
+            package = (
+                runtime_python.parent
+                / "Lib"
+                / "site-packages"
+                / "audio_separator"
+                / "__init__.py"
+            )
+            package.parent.mkdir(parents=True)
+            package.write_bytes(b"package")
+            frozen_paths = replace(roformer_engine.APP_PATHS, is_frozen=True)
+
+            with (
+                patch.object(roformer_engine, "APP_PATHS", frozen_paths),
+                patch.object(roformer_engine, "RVC_PYTHON_EXE", runtime_python),
+                patch.object(
+                    roformer_engine,
+                    "ROFORMER_PACKAGE_DIR",
+                    runtime_python.parent / "jjzero-roformer-packages",
+                ),
+                patch.object(roformer_engine, "require_executable"),
+            ):
+                roformer_engine.require_roformer_tools()
+
     def test_outputs_are_normalized_to_application_stem_names(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
