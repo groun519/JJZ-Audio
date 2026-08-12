@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from jang_app.qt_app.initial_setup_dialog import DiagnosticRow, InitialSetupDialog
 from jang_app.services.app_paths import discover_app_paths
+from jang_app.services.i18n import current_language, set_language
 from jang_app.services.initial_setup import is_initial_setup_complete
 from jang_app.services.storage_migration import migrate_storage, plan_storage_migration
 from jang_app.services.system_diagnostics import (
@@ -92,6 +93,40 @@ class InitialSetupDialogTests(unittest.TestCase):
             self.assertEqual(dialog.configured_paths.runtime_root, paths.runtime_root)
             self.assertEqual(dialog.configured_paths.storage_mode, "custom")
             dialog.close()
+
+    def test_storage_mode_uses_localized_segmented_control(self) -> None:
+        previous_language = current_language()
+        set_language("ko")
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                dialog = InitialSetupDialog(
+                    _paths(root),
+                    root / "logo.svg",
+                    diagnostics_worker_type=_ReadyWorker,
+                    storage_worker_type=_ReadyStorageWorker,
+                )
+
+                self.assertEqual(dialog.storage_mode_control.objectName(), "SegmentedControl")
+                self.assertTrue(dialog.storage_mode_button_group.exclusive())
+                self.assertEqual(dialog.linked_storage_button.objectName(), "SegmentButton")
+                self.assertEqual(dialog.custom_storage_button.objectName(), "SegmentButton")
+                self.assertEqual(dialog.linked_storage_button.text(), "한곳에 저장")
+                self.assertEqual(dialog.custom_storage_button.text(), "위치별 설정")
+                self.assertEqual(
+                    dialog.storage_page_description.text(),
+                    "하나의 저장 위치를 사용하거나 저장 항목별 위치를 따로 설정할 수 있습니다.",
+                )
+                self.assertTrue(dialog.linked_storage_button.isChecked())
+
+                dialog.custom_storage_button.click()
+
+                self.assertFalse(dialog.linked_storage_button.isChecked())
+                self.assertTrue(dialog.custom_storage_button.isChecked())
+                self.assertEqual(dialog._storage_mode, "custom")
+                dialog.close()
+        finally:
+            set_language(previous_language)
 
     def test_diagnostic_row_keeps_wrapped_detail_visible(self) -> None:
         row = DiagnosticRow("RVC Assets")

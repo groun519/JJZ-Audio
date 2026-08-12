@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from jang_app.qt_app.localization import set_translated_tooltip
+from jang_app.qt_app.studio_reverb_editor import StudioReverbEditor
 from jang_app.qt_app.widgets import (
     COMPACT_ICON_BUTTON_SIZE,
     FeedbackButton,
@@ -169,6 +170,8 @@ class StudioInspector(QFrame):
     track_mix_changed = Signal(str, bool, bool, int, int)
     track_name_changed = Signal(str, str)
     open_location_requested = Signal(object)
+    effect_changed = Signal(str, object)
+    effect_remove_requested = Signal(str, str)
 
     EMPTY_PAGE = 0
     CLIP_PAGE = 1
@@ -183,6 +186,9 @@ class StudioInspector(QFrame):
         self._clip: StudioClip | None = None
         self._asset: StudioSoundAsset | None = None
         self._loading = False
+        self._active_effect_id = ""
+        self.effect_tab_buttons: dict[str, FeedbackButton] = {}
+        self.effect_editors: dict[str, StudioReverbEditor] = {}
 
         self.title_label = QLabel()
         self.title_label.setObjectName("SectionTitle")
@@ -309,16 +315,39 @@ class StudioInspector(QFrame):
         actions.addWidget(self.open_button, 0)
         actions.addStretch(1)
 
+        self.clip_properties_page = QWidget()
+        properties_layout = QVBoxLayout(self.clip_properties_page)
+        properties_layout.setContentsMargins(0, 0, 0, 0)
+        properties_layout.setSpacing(10)
+        properties_layout.addWidget(self.clip_section)
+        properties_layout.addWidget(self.time_section)
+        properties_layout.addWidget(self.source_section)
+        properties_layout.addWidget(self.fade_section)
+        properties_layout.addLayout(actions)
+        properties_layout.addStretch(1)
+
+        self.clip_tabs = QFrame()
+        self.clip_tabs.setObjectName("StudioInspectorTabs")
+        self.clip_tabs_layout = QHBoxLayout(self.clip_tabs)
+        self.clip_tabs_layout.setContentsMargins(3, 3, 3, 3)
+        self.clip_tabs_layout.setSpacing(2)
+        self.clip_tab_button = FeedbackButton()
+        self.clip_tab_button.setObjectName("StudioInspectorTab")
+        self.clip_tab_button.setCheckable(True)
+        self.clip_tab_button.clicked.connect(lambda: self.open_effect_tab(""))
+        self.clip_tabs_layout.addWidget(self.clip_tab_button)
+        self.clip_tabs_layout.addStretch(1)
+
+        self.clip_detail_stack = QStackedWidget()
+        self.clip_detail_stack.setObjectName("StudioInspectorDetailStack")
+        self.clip_detail_stack.addWidget(self.clip_properties_page)
+
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
         layout.addWidget(self.clip_header)
-        layout.addWidget(self.clip_section)
-        layout.addWidget(self.time_section)
-        layout.addWidget(self.source_section)
-        layout.addWidget(self.fade_section)
-        layout.addLayout(actions)
-        layout.addStretch(1)
+        layout.addWidget(self.clip_tabs)
+        layout.addWidget(self.clip_detail_stack, 1)
         return page
 
     def _build_track_page(self) -> QWidget:
@@ -382,13 +411,18 @@ class StudioInspector(QFrame):
         asset: StudioSoundAsset | None,
     ) -> None:
         self._loading = True
+        previous_clip_id = self._clip.clip_id if self._clip is not None else ""
         self._track = track
         self._clip = clip
         self._asset = asset
         if clip is not None and track is not None:
+            if previous_clip_id != clip.clip_id:
+                self._active_effect_id = ""
             self._load_clip(track, clip, asset)
+            self._sync_effect_tabs(clip)
             self.stack.setCurrentIndex(self.CLIP_PAGE)
         elif track is not None:
+            self._active_effect_id = ""
             self._load_track(track)
             self.stack.setCurrentIndex(self.TRACK_PAGE)
         else:
@@ -404,6 +438,7 @@ class StudioInspector(QFrame):
 
     def apply_language(self) -> None:
         self.title_label.setText(tr("Inspector"))
+        self.clip_tab_button.setText(tr("Clip"))
         self.empty_title.setText(tr("Nothing selected"))
         self.empty_detail.setText(tr("Select a clip or track on the timeline to edit its properties."))
         for section in (
@@ -430,7 +465,78 @@ class StudioInspector(QFrame):
         self.pan_label.setText(tr("Pan"))
         self.track_name_label.setText(tr("Track Name"))
         set_translated_tooltip(self.open_button, "Open file location")
+        for editor in self.effect_editors.values():
+            editor.apply_language()
         self._refresh_selection_text()
+
+    def effect_tab_ids(self) -> tuple[str, ...]:
+        return tuple(self.effect_tab_buttons)
+
+    def open_effect_tab(self, effect_id: str) -> None:
+        if effect_id and effect_id not in self.effect_editors:
+            return
+        self._active_effect_id = effect_id
+        self.clip_detail_stack.setCurrentIndex(
+            0 if not effect_id else list(self.effect_editors).index(effect_id) + 1
+        )
+        self.clip_tab_button.setChecked(not effect_id)
+        for current_id, button in self.effect_tab_buttons.items():
+            button.setChecked(current_id == effect_id)
+
+    def _sync_effect_tabs(self, clip: StudioClip) -> None:
+        effects = {
+            effect.effect_id: effect
+            for effect in clip.effects
+            if effect.kind == "reverb"
+        }
+        for effect_id in tuple(self.effect_tab_buttons):
+            if effect_id in effects:
+                continue
+            button = self.effect_tab_buttons.pop(effect_id)
+            editor = self.effect_editors.pop(effect_id)
+            self.clip_tabs_layout.removeWidget(button)
+            self.clip_detail_stack.removeWidget(editor)
+            button.hide()
+            editor.hide()
+            button.deleteLater()
+            editor.deleteLater()
+
+        for effect_id, effect in effects.items():
+            editor = self.effect_editors.get(effect_id)
+            if editor is not None:
+                editor.set_effect(effect)
+                continue
+            button = FeedbackButton(tr("Reverb"))
+            button.setObjectName("StudioInspectorTab")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, effect_id=effect_id: self.open_effect_tab(effect_id)
+            )
+            self.clip_tabs_layout.insertWidget(
+                max(1, self.clip_tabs_layout.count() - 1),
+                button,
+            )
+            editor = StudioReverbEditor()
+            editor.set_effect(effect)
+            editor.effect_changed.connect(self._forward_effect_changed)
+            editor.remove_requested.connect(self._forward_effect_remove)
+            self.clip_detail_stack.addWidget(editor)
+            self.effect_tab_buttons[effect_id] = button
+            self.effect_editors[effect_id] = editor
+        if self._active_effect_id not in self.effect_editors:
+            self._active_effect_id = ""
+        self.open_effect_tab(self._active_effect_id)
+
+    def _forward_effect_changed(self, effect) -> None:
+        if self._clip is None:
+            return
+        self._active_effect_id = effect.effect_id
+        self.effect_changed.emit(self._clip.clip_id, effect)
+
+    def _forward_effect_remove(self, effect_id: str) -> None:
+        if self._clip is None:
+            return
+        self.effect_remove_requested.emit(self._clip.clip_id, effect_id)
 
     def _load_clip(
         self,

@@ -51,8 +51,11 @@ Reuse runtime components from an existing release for an application-only update
 
 ```powershell
 .\scripts\build_release.ps1 -SkipRuntimeBuild -RequireCodeSigning `
-  -RuntimeReleaseTag vX.Y.Z
+  -RuntimeReleaseTag vX.Y.Z `
+  -RuntimeManifestPath release\vX.Y.Z-latest.json
 ```
+
+The reused manifest must be the published `latest.json` from the referenced release. Its component versions, artifact names, sizes, hashes, and release URLs are validated without downloading the multi-gigabyte archives again.
 
 ## Verify
 

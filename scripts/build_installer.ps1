@@ -5,7 +5,8 @@ param(
     [string]$SigningPublisher = $env:JJZERO_SIGNING_PUBLISHER,
     [string]$CertificateThumbprint = $env:JJZERO_SIGN_CERT_THUMBPRINT,
     [string]$CertificatePath = $env:JJZERO_SIGN_CERT_PATH,
-    [string]$RuntimeReleaseTag = $env:JJZERO_RUNTIME_RELEASE_TAG
+    [string]$RuntimeReleaseTag = $env:JJZERO_RUNTIME_RELEASE_TAG,
+    [string]$RuntimeManifestPath = $env:JJZERO_RUNTIME_MANIFEST_PATH
 )
 
 $ErrorActionPreference = "Stop"
@@ -82,6 +83,9 @@ if ($signingConfigured) {
 }
 if ($RuntimeReleaseTag) {
     $manifestArguments += @("--runtime-release-tag", $RuntimeReleaseTag)
+}
+if ($RuntimeManifestPath) {
+    $manifestArguments += @("--runtime-manifest", $RuntimeManifestPath)
 }
 & $python @manifestArguments
 if ($LASTEXITCODE -ne 0) {

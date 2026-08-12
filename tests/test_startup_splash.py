@@ -25,6 +25,10 @@ class StartupSplashTests(unittest.TestCase):
         self.assertEqual(splash.descriptor_label.text(), "AUDIO WORKSPACE")
         self.assertEqual(splash.version_label.text(), f"v{__version__}")
         self.assertEqual(splash.version_label.objectName(), "SplashVersion")
+        self.assertEqual(splash.version_label.x(), splash.subtitle_label.x())
+        self.assertGreater(splash.version_label.y(), splash.subtitle_label.geometry().bottom())
+        self.assertNotIn("border", splash.version_label.styleSheet())
+        self.assertNotIn("background: #", splash.version_label.styleSheet())
 
         splash.show_error("Broken runtime")
 

@@ -22,6 +22,7 @@ from jang_app.services.studio_session import (
     TRACK_VIDEO,
     StudioAssetRef,
     StudioClip,
+    StudioEffect,
     StudioSession,
     StudioTrack,
     StudioTrackState,
@@ -33,6 +34,35 @@ from jang_app.services.studio_timeline import move_studio_clip, set_studio_track
 
 
 class SongExportTests(unittest.TestCase):
+    def test_timeline_mix_source_keeps_clip_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            output_id = package.active_output.output_id
+            effect = StudioEffect("fx-reverb", "reverb")
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "track-vocal",
+                        "Original Vocal",
+                        role=TRACK_ORIGINAL_VOCAL,
+                        clips=(
+                            StudioClip(
+                                "vocal",
+                                StudioAssetRef(output_id, TRACK_ORIGINAL_VOCAL),
+                                0,
+                                0,
+                                1_000,
+                                effects=(effect,),
+                            ),
+                        ),
+                    ),
+                )
+            )
+
+            sources = build_song_mix_sources(package, session)
+
+            self.assertEqual(sources[0].effects, (effect,))
+
     def test_mix_sources_use_active_output_converted_version_and_studio_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             package = _package_with_output(Path(temporary))

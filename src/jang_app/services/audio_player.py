@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -8,6 +9,10 @@ import soundfile as sf
 from PySide6.QtCore import QElapsedTimer, QTimer
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink
 
+from jang_app.services.realtime_effects import RealtimeEffectChain
+from jang_app.services.studio_session import StudioEffect
+
+
 class AudioPlaybackError(RuntimeError):
     """Raised when an audio preview cannot be played."""
 
@@ -15,7 +20,28 @@ class AudioPlaybackError(RuntimeError):
 _SAMPLE_RATE = 44100
 _CHANNELS = 2
 _CHUNK_FRAMES = 1024
-_BUFFER_MS = 90
+_BUFFER_MS = 60
+_REPLACE_CROSSFADE_MS = 45
+
+
+@dataclass(frozen=True)
+class PreparedPlaybackAudio:
+    tracks: tuple[np.ndarray, ...]
+    duration_frames: int
+    effect_chains: tuple[tuple[StudioEffect, ...], ...] = ()
+
+    @property
+    def duration_ms(self) -> int:
+        return int(self.duration_frames / _SAMPLE_RATE * 1000)
+
+
+@dataclass
+class _BufferTransition:
+    tracks: tuple[np.ndarray, ...]
+    volumes: tuple[float, ...]
+    effect_chains: tuple[RealtimeEffectChain, ...]
+    start_frame: int
+    end_frame: int
 
 
 class AudioPlayer:
@@ -26,29 +52,72 @@ class AudioPlayer:
         self._elapsed_timer = QElapsedTimer()
         self._tracks: list[np.ndarray] = []
         self._volumes: list[float] = []
+        self._effect_chains: list[RealtimeEffectChain] = []
         self._frame_index = 0
         self._duration_frames = 0
         self._duration_ms = 0
         self._start_ms = 0
         self._last_position_ms = 0
+        self._transition: _BufferTransition | None = None
 
     def play(self, paths: Sequence[Path], start_ms: int = 0, volumes: Sequence[float] | None = None) -> None:
-        sources = [path.expanduser().resolve() for path in paths]
-        for source in sources:
-            self._validate_source(source)
-        resolved_volumes = _resolve_volumes(len(sources), volumes)
+        self.play_prepared(prepare_playback_audio(paths), start_ms=start_ms, volumes=volumes)
 
+    def play_prepared(
+        self,
+        prepared: PreparedPlaybackAudio,
+        start_ms: int = 0,
+        volumes: Sequence[float] | None = None,
+    ) -> None:
         self.stop()
-        if not sources:
+        if not self.set_prepared(prepared, volumes):
             return
-
-        self._tracks = [_read_playback_audio(source) for source in sources]
-        self._volumes = resolved_volumes
-        self._duration_frames = max((track.shape[0] for track in self._tracks), default=0)
-        self._duration_ms = int(self._duration_frames / _SAMPLE_RATE * 1000)
         self._start_ms = max(0, min(start_ms, self._duration_ms))
         self._last_position_ms = self._start_ms
         self._frame_index = int(self._start_ms * _SAMPLE_RATE / 1000)
+        self._start_output()
+
+    def set_prepared(
+        self,
+        prepared: PreparedPlaybackAudio,
+        volumes: Sequence[float] | None = None,
+    ) -> bool:
+        if self.is_playing() or not prepared.tracks:
+            return False
+        self._stop_sink()
+        self._tracks = list(prepared.tracks)
+        self._volumes = _resolve_volumes(len(prepared.tracks), volumes)
+        self._effect_chains = _build_effect_chains(prepared)
+        self._duration_frames = prepared.duration_frames
+        self._duration_ms = prepared.duration_ms
+        self._frame_index = 0
+        self._transition = None
+        return True
+
+    def resume(
+        self,
+        start_ms: int,
+        volumes: Sequence[float] | None = None,
+    ) -> bool:
+        if not self._tracks:
+            return False
+        self._volumes = _resolve_volumes(len(self._tracks), volumes)
+        self._effect_chains = [
+            RealtimeEffectChain(_SAMPLE_RATE, chain.effects)
+            for chain in self._effect_chains
+        ]
+        self._start_ms = max(0, min(start_ms, self._duration_ms))
+        self._last_position_ms = self._start_ms
+        self._frame_index = int(self._start_ms * _SAMPLE_RATE / 1000)
+        self._transition = None
+        self._start_output()
+        return True
+
+    def has_prepared_audio(self) -> bool:
+        return bool(self._tracks)
+
+    def _start_output(self) -> None:
+        self._stop_sink()
 
         self._audio_sink = QAudioSink(_audio_format())
         self._audio_sink.setBufferSize(_frames_to_bytes(int(_SAMPLE_RATE * _BUFFER_MS / 1000)))
@@ -60,6 +129,40 @@ class AudioPlayer:
         self._elapsed_timer.restart()
         self._feed_audio()
         self._ensure_feed_timer().start()
+
+    def replace_prepared(
+        self,
+        prepared: PreparedPlaybackAudio,
+        volumes: Sequence[float] | None = None,
+        *,
+        crossfade_ms: int = _REPLACE_CROSSFADE_MS,
+    ) -> bool:
+        if not self.is_playing() or not prepared.tracks:
+            return False
+        transition_frames = max(1, int(max(0, crossfade_ms) * _SAMPLE_RATE / 1000))
+        self._transition = _BufferTransition(
+            tracks=tuple(self._tracks),
+            volumes=tuple(self._volumes),
+            effect_chains=tuple(self._effect_chains),
+            start_frame=self._frame_index,
+            end_frame=self._frame_index + transition_frames,
+        )
+        self._tracks = list(prepared.tracks)
+        self._volumes = _resolve_volumes(len(prepared.tracks), volumes)
+        self._effect_chains = _build_effect_chains(prepared)
+        self._duration_frames = prepared.duration_frames
+        self._duration_ms = prepared.duration_ms
+        return True
+
+    def set_effect_chains(self, effects: tuple[tuple[StudioEffect, ...], ...]) -> bool:
+        if len(effects) != len(self._tracks):
+            return False
+        if len(self._effect_chains) != len(effects):
+            self._effect_chains = [RealtimeEffectChain(_SAMPLE_RATE, chain) for chain in effects]
+            return True
+        for processor, chain in zip(self._effect_chains, effects, strict=True):
+            processor.update(chain)
+        return True
 
     def set_volumes(self, volumes: Sequence[float]) -> None:
         if not self._tracks:
@@ -77,11 +180,13 @@ class AudioPlayer:
         self._stop_sink()
         self._tracks.clear()
         self._volumes.clear()
+        self._effect_chains.clear()
         self._frame_index = 0
         self._duration_frames = 0
         self._duration_ms = 0
         self._start_ms = 0
         self._last_position_ms = 0
+        self._transition = None
 
     def is_playing(self) -> bool:
         return self._audio_sink is not None and self.position_ms() < self._duration_ms
@@ -123,9 +228,47 @@ class AudioPlayer:
             frame_count = min(_CHUNK_FRAMES, available_frames, self._duration_frames - self._frame_index)
             if frame_count <= 0:
                 return
-            chunk = _mix_chunk(self._tracks, self._volumes, self._frame_index, frame_count)
+            chunk = self._mix_live_chunk(self._frame_index, frame_count)
+            chunk = self._crossfade_replacement(chunk, self._frame_index, frame_count)
             self._audio_device.write(_float_to_pcm16(chunk))
             self._frame_index += frame_count
+
+    def _mix_live_chunk(self, frame_index: int, frame_count: int) -> np.ndarray:
+        return _mix_effected_chunk(
+            self._tracks,
+            self._volumes,
+            self._effect_chains,
+            frame_index,
+            frame_count,
+        )
+
+    def _crossfade_replacement(
+        self,
+        new_chunk: np.ndarray,
+        frame_index: int,
+        frame_count: int,
+    ) -> np.ndarray:
+        transition = self._transition
+        if transition is None or frame_index >= transition.end_frame:
+            self._transition = None
+            return new_chunk
+        old_chunk = _mix_effected_chunk(
+            transition.tracks,
+            transition.volumes,
+            transition.effect_chains,
+            frame_index,
+            frame_count,
+        )
+        denominator = max(1, transition.end_frame - transition.start_frame)
+        fade = np.clip(
+            (np.arange(frame_count, dtype=np.float32) + frame_index - transition.start_frame)
+            / denominator,
+            0.0,
+            1.0,
+        )[:, None]
+        if frame_index + frame_count >= transition.end_frame:
+            self._transition = None
+        return old_chunk * (1.0 - fade) + new_chunk * fade
 
     def _stop_sink(self) -> None:
         if self._feed_timer is not None:
@@ -137,10 +280,7 @@ class AudioPlayer:
         self._audio_device = None
 
     def _validate_source(self, source: Path) -> None:
-        if not source.exists():
-            raise AudioPlaybackError(f"Audio file does not exist: {source}")
-        if source.suffix.lower() != ".wav":
-            raise AudioPlaybackError("Audio preview currently supports WAV files only.")
+        _validate_playback_source(source)
 
 
 def _audio_format() -> QAudioFormat:
@@ -151,7 +291,25 @@ def _audio_format() -> QAudioFormat:
     return audio_format
 
 
-def _read_playback_audio(path: Path) -> np.ndarray:
+def prepare_playback_audio(paths: Sequence[Path]) -> PreparedPlaybackAudio:
+    sources = tuple(path.expanduser().resolve() for path in paths)
+    for source in sources:
+        _validate_playback_source(source)
+    tracks = tuple(read_playback_audio(source) for source in sources)
+    return PreparedPlaybackAudio(
+        tracks=tracks,
+        duration_frames=max((track.shape[0] for track in tracks), default=0),
+    )
+
+
+def _validate_playback_source(source: Path) -> None:
+    if not source.exists():
+        raise AudioPlaybackError(f"Audio file does not exist: {source}")
+    if source.suffix.lower() != ".wav":
+        raise AudioPlaybackError("Audio preview currently supports WAV files only.")
+
+
+def read_playback_audio(path: Path) -> np.ndarray:
     try:
         audio, sample_rate = sf.read(path, always_2d=True, dtype="float32")
     except Exception as exc:
@@ -161,14 +319,38 @@ def _read_playback_audio(path: Path) -> np.ndarray:
     return _match_channels(audio, _CHANNELS)
 
 
-def _mix_chunk(tracks: Sequence[np.ndarray], volumes: Sequence[float], frame_index: int, frame_count: int) -> np.ndarray:
+def _track_chunk(track: np.ndarray, frame_index: int, frame_count: int) -> np.ndarray:
+    chunk = np.zeros((frame_count, _CHANNELS), dtype=np.float32)
+    if frame_index >= track.shape[0]:
+        return chunk
+    end_index = min(frame_index + frame_count, track.shape[0])
+    chunk[: end_index - frame_index] = track[frame_index:end_index]
+    return chunk
+
+
+def _mix_effected_chunk(
+    tracks: Sequence[np.ndarray],
+    volumes: Sequence[float],
+    effect_chains: Sequence[RealtimeEffectChain],
+    frame_index: int,
+    frame_count: int,
+) -> np.ndarray:
     mix = np.zeros((frame_count, _CHANNELS), dtype=np.float32)
-    for track, volume in zip(tracks, volumes, strict=True):
-        if frame_index >= track.shape[0] or volume <= 0:
-            continue
-        end_index = min(frame_index + frame_count, track.shape[0])
-        mix[: end_index - frame_index] += track[frame_index:end_index] * volume
+    for index, (track, volume) in enumerate(zip(tracks, volumes, strict=True)):
+        chunk = _track_chunk(track, frame_index, frame_count)
+        if index < len(effect_chains):
+            chunk = effect_chains[index].process(chunk)
+        if volume > 0.0:
+            mix += chunk * volume
     return mix
+
+
+def _build_effect_chains(prepared: PreparedPlaybackAudio) -> list[RealtimeEffectChain]:
+    chains = prepared.effect_chains
+    return [
+        RealtimeEffectChain(_SAMPLE_RATE, chains[index] if index < len(chains) else ())
+        for index in range(len(prepared.tracks))
+    ]
 
 
 def _float_to_pcm16(audio: np.ndarray) -> bytes:

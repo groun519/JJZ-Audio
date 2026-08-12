@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from jang_app.qt_app.horizontal_reveal import HorizontalReveal
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
@@ -192,12 +200,23 @@ class SongListRow(QWidget):
         text_layout.addWidget(self.title_edit)
         text_layout.addWidget(self.metadata_label)
 
+        identity_container = QWidget()
+        identity_container.setObjectName("LibraryRowIdentity")
+        identity_container.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        identity_layout = QHBoxLayout(identity_container)
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        identity_layout.setSpacing(14)
+        identity_layout.addWidget(self.work_song_reveal, 0)
+        identity_layout.addWidget(self.source_badge, 0)
+        identity_layout.addLayout(text_layout, 1)
+
         body_layout = QHBoxLayout()
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(14)
-        body_layout.addWidget(self.work_song_reveal, 0)
-        body_layout.addWidget(self.source_badge, 0)
-        body_layout.addLayout(text_layout, 2)
+        body_layout.addWidget(identity_container, 2)
         body_layout.addWidget(self.waveform, 3)
         body_layout.addWidget(action_container, 0)
 

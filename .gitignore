@@ -16,6 +16,7 @@ venv/
 /logs/
 /settings/
 /third_party/
+/tmp/
 
 .DS_Store
 Thumbs.db

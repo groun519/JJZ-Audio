@@ -483,6 +483,57 @@ def _stylesheet(
             padding-right: 26px;
         }}
 
+        QFrame#StudioInspectorTabs {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 11px;
+        }}
+
+        QPushButton#StudioInspectorTab {{
+            min-height: 28px;
+            max-height: 28px;
+            padding: 0 11px;
+            color: {muted};
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
+        QPushButton#StudioInspectorTab:hover,
+        QPushButton#StudioInspectorTab[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#StudioInspectorTab:checked {{
+            color: {text};
+            background: {surface};
+            border-color: {button_border};
+        }}
+
+        QStackedWidget#StudioInspectorDetailStack,
+        QWidget#StudioReverbEditor {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QFrame#StudioReverbSection {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QSpinBox#StudioReverbControl,
+        QDoubleSpinBox#StudioReverbControl {{
+            min-height: 30px;
+            max-height: 30px;
+            padding-left: 8px;
+            padding-right: 26px;
+            font-size: 10px;
+        }}
+
         QFrame#VideoPreviewPanel {{
             background: {surface};
             border: 1px solid {border};
@@ -589,11 +640,63 @@ def _stylesheet(
             border-radius: 18px;
         }}
 
+        QFrame#StudioFxPool {{
+            background: {card};
+            border: 1px solid {border};
+            border-radius: 18px;
+        }}
+
         QScrollArea#StudioSoundPoolScroll,
         QScrollArea#StudioSoundPoolScroll > QWidget > QWidget,
-        QWidget#StudioSoundPoolContent {{
+        QWidget#StudioSoundPoolContent,
+        QScrollArea#StudioFxPoolScroll,
+        QScrollArea#StudioFxPoolScroll > QWidget > QWidget,
+        QWidget#StudioFxPoolContent {{
             background: transparent;
             border: 0;
+        }}
+
+        QFrame#StudioFxCard {{
+            min-height: 48px;
+            max-height: 48px;
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QFrame#StudioFxCard:hover {{
+            background: {hover};
+            border-color: {focus};
+        }}
+
+        QLabel#StudioFxCardIcon {{
+            min-width: 28px;
+            max-width: 28px;
+            min-height: 28px;
+            max-height: 28px;
+            color: {text};
+            background: {surface};
+            border: 1px solid {button_border};
+            border-radius: 8px;
+            qproperty-alignment: AlignCenter;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#StudioFxCardName {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 11px;
+            font-weight: 900;
+        }}
+
+        QLabel#StudioFxCardDetail {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 9px;
+            font-weight: 700;
         }}
 
         QLineEdit#StudioSoundSearch {{

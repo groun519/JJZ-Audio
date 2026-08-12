@@ -9,9 +9,32 @@ import soundfile as sf
 
 from jang_app.services.audio_export import AudioMixSource, export_audio_file, export_mix
 from jang_app.services.audio_mix_processing import process_mix_source
+from jang_app.services.studio_session import StudioEffect, StudioReverbSettings
 
 
 class AudioExportTests(unittest.TestCase):
+    def test_exported_reverb_keeps_the_effect_tail(self) -> None:
+        self.assertIn("effects", AudioMixSource.__dataclass_fields__)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "impulse.wav"
+            output = root / "reverb.wav"
+            impulse = np.zeros(800, dtype=np.float32)
+            impulse[0] = 0.5
+            sf.write(source, impulse, 8_000, subtype="FLOAT")
+            effect = StudioEffect(
+                "fx-reverb",
+                "reverb",
+                reverb=StudioReverbSettings(decay_ms=300, dry_wet_percent=60),
+            )
+
+            export_mix((AudioMixSource("Reverb", source, effects=(effect,)),), output)
+            rendered, sample_rate = sf.read(output, dtype="float32")
+
+            self.assertEqual(sample_rate, 8_000)
+            self.assertGreater(len(rendered), len(impulse))
+            self.assertGreater(float(np.max(np.abs(rendered[len(impulse) :]))), 0.0)
+
     def test_mix_processing_applies_fades_and_constant_power_pan(self) -> None:
         source = np.ones((1_000, 1), dtype=np.float32)
 

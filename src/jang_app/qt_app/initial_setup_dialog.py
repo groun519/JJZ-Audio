@@ -6,6 +6,7 @@ from threading import Event
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from jang_app.qt_app.app_dialog import AppDialog
 from jang_app.qt_app.theme import theme_tokens
-from jang_app.qt_app.widgets import configure_two_line_status_text
+from jang_app.qt_app.widgets import FeedbackButton, configure_two_line_status_text
 from jang_app.services.app_paths import AppPaths
 from jang_app.services.app_update import DEFAULT_MANIFEST_URL
 from jang_app.services.i18n import tr
@@ -301,6 +302,7 @@ class InitialSetupDialog(AppDialog):
         title.setObjectName("SetupTitle")
         description = QLabel(tr("Choose one location or configure each storage category separately."))
         description.setObjectName("SetupDescription")
+        self.storage_page_description = description
         self.storage_layout_status = QLabel("")
         self.storage_layout_status.setObjectName("SetupDescription")
         self.storage_layout_status.setWordWrap(True)
@@ -322,18 +324,28 @@ class InitialSetupDialog(AppDialog):
         media_layout = QVBoxLayout(media_card)
         media_layout.setContentsMargins(18, 16, 18, 16)
         media_layout.setSpacing(9)
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(6)
-        self.linked_storage_button = QPushButton(tr("Keep Together"))
-        self.custom_storage_button = QPushButton(tr("Separate Locations"))
-        for button in (self.linked_storage_button, self.custom_storage_button):
+        self.storage_mode_control = QFrame()
+        self.storage_mode_control.setObjectName("SegmentedControl")
+        mode_row = QHBoxLayout(self.storage_mode_control)
+        mode_row.setContentsMargins(4, 4, 4, 4)
+        mode_row.setSpacing(4)
+        self.storage_mode_button_group = QButtonGroup(self)
+        self.storage_mode_button_group.setExclusive(True)
+        self.linked_storage_button = FeedbackButton(tr("Keep Together"))
+        self.custom_storage_button = FeedbackButton(tr("Separate Locations"))
+        for index, button in enumerate(
+            (self.linked_storage_button, self.custom_storage_button)
+        ):
             button.setCheckable(True)
-            button.setObjectName("SetupModeButton")
-            mode_row.addWidget(button)
-        mode_row.addStretch(1)
-        self.linked_storage_button.clicked.connect(lambda: self._set_storage_mode("linked"))
-        self.custom_storage_button.clicked.connect(lambda: self._set_storage_mode("custom"))
-        media_layout.addLayout(mode_row)
+            button.setObjectName("SegmentButton")
+            self.storage_mode_button_group.addButton(button, index)
+            mode_row.addWidget(button, 1)
+        self.storage_mode_button_group.idClicked.connect(
+            lambda button_id: self._set_storage_mode(
+                "linked" if button_id == 0 else "custom"
+            )
+        )
+        media_layout.addWidget(self.storage_mode_control)
         self.storage_mode_detail = QLabel("")
         self.storage_mode_detail.setObjectName("SetupDescription")
         self.storage_mode_detail.setWordWrap(True)

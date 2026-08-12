@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+import jang_app.services.studio_session as studio_session
 from jang_app.services.song_package import SongPackageStore
 from jang_app.services.studio_assets import resolve_studio_asset, studio_sound_pool
 from jang_app.services.studio_session import (
@@ -37,6 +38,72 @@ from jang_app.services.vocal_project_store import VocalProjectStore
 
 
 class StudioSessionTests(unittest.TestCase):
+    def test_version_five_reverb_effect_round_trips_and_version_four_defaults_empty(self) -> None:
+        self.assertTrue(hasattr(studio_session, "StudioEffect"))
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            session = load_studio_session(package)
+            track = session.tracks[0]
+            clip = track.clips[0]
+            effect = studio_session.StudioEffect(
+                effect_id="fx-reverb",
+                kind="reverb",
+                reverb=studio_session.StudioReverbSettings(
+                    room_width_m=8.5,
+                    pre_delay_ms=42,
+                    dry_wet_percent=37,
+                ),
+            )
+            edited = replace(
+                session,
+                tracks=(replace(track, clips=(replace(clip, effects=(effect,)),)), *session.tracks[1:]),
+            )
+
+            save_studio_session(package, edited)
+            restored = load_studio_session(package)
+
+            self.assertEqual(restored.tracks[0].clips[0].effects, (effect,))
+            saved = json.loads(studio_session_path(package).read_text(encoding="utf-8"))
+            self.assertEqual(saved["version"], 5)
+            self.assertEqual(saved["tracks"][0]["clips"][0]["effects"][0]["kind"], "reverb")
+
+            saved["version"] = 4
+            saved["tracks"][0]["clips"][0].pop("effects")
+            studio_session_path(package).write_text(json.dumps(saved), encoding="utf-8")
+            migrated = load_studio_session(package)
+            self.assertEqual(migrated.tracks[0].clips[0].effects, ())
+
+    def test_invalid_reverb_values_are_clamped_when_loading(self) -> None:
+        self.assertTrue(hasattr(studio_session, "StudioReverbSettings"))
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            session = load_studio_session(package)
+            save_studio_session(package, session)
+            data = json.loads(studio_session_path(package).read_text(encoding="utf-8"))
+            data["tracks"][0]["clips"][0]["effects"] = [
+                {
+                    "effect_id": "fx-reverb",
+                    "kind": "reverb",
+                    "enabled": True,
+                    "settings": {
+                        "room_height_m": -10,
+                        "pre_delay_ms": -120,
+                        "decay_ms": 99_999,
+                        "dry_wet_percent": 250,
+                        "early_high_hz": 3,
+                    },
+                }
+            ]
+            studio_session_path(package).write_text(json.dumps(data), encoding="utf-8")
+
+            settings = load_studio_session(package).tracks[0].clips[0].effects[0].reverb
+
+            self.assertEqual(settings.room_height_m, 1.0)
+            self.assertEqual(settings.pre_delay_ms, -120)
+            self.assertEqual(settings.decay_ms, 4_000)
+            self.assertEqual(settings.dry_wet_percent, 100)
+            self.assertEqual(settings.early_high_hz, 1_000)
+
     def test_legacy_mix_state_migrates_to_non_destructive_full_length_clips(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             package = _package_with_audio_output(Path(temporary))

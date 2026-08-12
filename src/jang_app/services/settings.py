@@ -28,6 +28,7 @@ class RvcSettings:
 class StudioLayoutSettings:
     workspace_sizes: tuple[int, int, int] = (250, 900, 320)
     center_sizes: tuple[int, int] = (340, 460)
+    left_sizes: tuple[int, int] = (650, 350)
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,10 @@ def load_app_settings() -> AppSettings:
             studio_layout_data.get("center_sizes"),
             default_settings.studio_layout.center_sizes,
         ),
+        left_sizes=_size_tuple_from_data(
+            studio_layout_data.get("left_sizes"),
+            default_settings.studio_layout.left_sizes,
+        ),
     )
     rvc_data = data.get("rvc") if isinstance(data.get("rvc"), dict) else {}
     rvc = RvcSettings(
@@ -95,6 +100,7 @@ def save_app_settings(settings: AppSettings) -> None:
         "studio_layout": {
             "workspace_sizes": list(settings.studio_layout.workspace_sizes),
             "center_sizes": list(settings.studio_layout.center_sizes),
+            "left_sizes": list(settings.studio_layout.left_sizes),
         },
         "rvc": {
             "root": str(settings.rvc.root.expanduser()),

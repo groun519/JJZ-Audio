@@ -49,13 +49,12 @@ class StartupSplash(QWidget):
 
         self.version_label = QLabel(f"v{__version__}", self)
         self.version_label.setObjectName("SplashVersion")
-        self.version_label.setGeometry(222, 40, 66, 22)
-        self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.version_label.setFont(_font(9, QFont.Weight.DemiBold))
-        self.version_label.setStyleSheet(
-            "color: #aaa8a1; background: #292927; border: 1px solid #3d3c38; "
-            "border-radius: 10px; padding-bottom: 1px;"
+        self.version_label.setGeometry(48, 207, 100, 18)
+        self.version_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
+        self.version_label.setFont(_font(9, QFont.Weight.DemiBold, 1))
+        self.version_label.setStyleSheet("color: #6f6e68; background: transparent;")
 
         self.title_label = QLabel("JJZero Audio", self)
         self.title_label.setGeometry(46, 116, 300, 48)

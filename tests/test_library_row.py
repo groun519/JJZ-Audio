@@ -59,19 +59,20 @@ class SongListRowTests(unittest.TestCase):
         self.assertEqual(row.work_song_reveal.maximumWidth(), 0)
 
         row.resize(960, row.sizeHint().height())
+        row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         row.show()
-        QTest.qWait(30)
         self.app.processEvents()
+        row.work_song_reveal._animation.setDuration(0)
         row._is_hovered = False
         row._sync_action_visibility()
-        QTest.qWait(220)
+        self.app.processEvents()
         initial_badge_x = row.source_badge.mapTo(row, row.source_badge.rect().topLeft()).x()
+        initial_waveform_geometry = row.waveform.geometry()
 
         self.assertFalse(row.work_song_button.isVisible())
 
         row._is_hovered = True
         row._sync_action_visibility()
-        QTest.qWait(220)
         self.app.processEvents()
 
         revealed_badge_x = row.source_badge.mapTo(row, row.source_badge.rect().topLeft()).x()
@@ -85,22 +86,23 @@ class SongListRowTests(unittest.TestCase):
             row.work_song_button.mapTo(row, row.work_song_button.rect().topLeft()).x(),
             revealed_badge_x,
         )
+        self.assertEqual(row.waveform.geometry(), initial_waveform_geometry)
 
         row.set_work_song_active(True)
+        self.app.processEvents()
         self.assertTrue(row.work_song_button.isChecked())
         self.assertTrue(row.work_song_button.isVisible())
         self.assertTrue(row.property("workSong"))
+        self.assertEqual(row.waveform.geometry(), initial_waveform_geometry)
 
         row._is_hovered = False
         row._sync_action_visibility()
-        QTest.qWait(220)
         self.assertFalse(row.work_song_button.isHidden())
 
         row.work_song_button.click()
         self.assertEqual(requested.at(0)[0], "song-1")
 
         row.set_work_song_active(False)
-        QTest.qWait(220)
         self.assertFalse(row.work_song_button.isChecked())
         self.assertFalse(row.work_song_button.isVisible())
         self.assertEqual(row.work_song_reveal.maximumWidth(), 0)

@@ -118,7 +118,11 @@ from jang_app.services.app_update import (
 )
 from jang_app.services.audio_export import AudioExportError, AudioMixSource, export_audio_file
 from jang_app.services.audio_metadata import read_audio_metadata
-from jang_app.services.audio_player import AudioPlaybackError, AudioPlayer
+from jang_app.services.audio_player import (
+    AudioPlaybackError,
+    AudioPlayer,
+    PreparedPlaybackAudio,
+)
 from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.command import start_detached_command
 from jang_app.services.distribution_channel import application_updates_enabled
@@ -145,6 +149,12 @@ from jang_app.services.rvc_model_workspace import (
 from jang_app.services.runtime_installation import (
     installed_rvc_runtime_profile,
     installed_runtime_version,
+)
+from jang_app.services.studio_realtime_audio import (
+    prepare_studio_playback_audio,
+    studio_effect_chains,
+    studio_playback_duration_ms,
+    studio_source_layout_signature,
 )
 from jang_app.services.runtime_bootstrap import install_update_runtime_components
 from jang_app.services.rvc_runtime_profile import detect_rvc_runtime_profile
@@ -241,6 +251,13 @@ class MainWindow(QMainWindow):
         self._processing_queue_drawer_open = False
         self._is_loading_rvc_settings = False
         self._is_loading_studio_session = False
+        self._studio_playback_queue_dirty = False
+        self._studio_playback_sources: tuple[AudioMixSource, ...] = ()
+        self._studio_playback_prepare_worker: TaskWorker | None = None
+        self._studio_playback_prepare_generation = 0
+        self._studio_playback_prepare_request: (
+            tuple[int, str, StudioSession, tuple[AudioMixSource, ...]] | None
+        ) = None
         self.vocal_project_store = VocalProjectStore()
         self.model_workspace = RvcModelWorkspace()
         self.studio_session_autosave = StudioSessionAutosave(self.library.save_studio_session, parent=self)
@@ -256,6 +273,11 @@ class MainWindow(QMainWindow):
         self.playback_timer = QTimer(self)
         self.playback_timer.setInterval(120)
         self.playback_timer.timeout.connect(self._sync_global_playback_state)
+
+        self._studio_playback_prepare_timer = QTimer(self)
+        self._studio_playback_prepare_timer.setSingleShot(True)
+        self._studio_playback_prepare_timer.setInterval(50)
+        self._studio_playback_prepare_timer.timeout.connect(self._start_studio_playback_prepare)
 
         self.update_poll_timer = QTimer(self)
         self.update_poll_timer.setSingleShot(True)
@@ -319,6 +341,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.update_poll_timer.stop()
+        self._studio_playback_prepare_timer.stop()
         if hasattr(self, "studio_layout_save_timer"):
             self.studio_layout_save_timer.stop()
             self._save_studio_layout()
@@ -813,7 +836,7 @@ class MainWindow(QMainWindow):
         self.video_preview_panel.saved_source_requested.connect(self._select_saved_video_source)
         self.video_preview_panel.set_compact_mode(True)
         self.studio_editor = StudioEditor(include_sidebars=False)
-        self.studio_editor.session_changed.connect(self._on_studio_editor_session_changed)
+        self.studio_editor.session_committed.connect(self._on_studio_editor_session_changed)
         self.studio_editor.seek_requested.connect(self._seek_studio_timeline)
         self.studio_editor.open_location_requested.connect(self._open_track_location)
         self.studio_transport_bar = StudioTransportBar()
@@ -853,7 +876,7 @@ class MainWindow(QMainWindow):
 
         self.studio_workspace_splitter = create_workspace_splitter(
             (
-                self.studio_editor.sound_pool,
+                self.studio_editor.left_sidebar,
                 self.studio_center_splitter,
                 self.studio_editor.inspector_scroll,
             ),
@@ -864,6 +887,8 @@ class MainWindow(QMainWindow):
         )
 
         self.studio_layout_save_timer = QTimer(self)
+        self.studio_left_splitter = self.studio_editor.left_sidebar
+        self.studio_left_splitter.setSizes(list(self.settings.studio_layout.left_sizes))
         self.studio_layout_save_timer.setSingleShot(True)
         self.studio_layout_save_timer.setInterval(350)
         self.studio_layout_save_timer.timeout.connect(self._save_studio_layout)
@@ -871,6 +896,9 @@ class MainWindow(QMainWindow):
             self._queue_studio_layout_save
         )
         self.studio_center_splitter.splitterMoved.connect(
+            self._queue_studio_layout_save
+        )
+        self.studio_left_splitter.splitterMoved.connect(
             self._queue_studio_layout_save
         )
 
@@ -889,13 +917,15 @@ class MainWindow(QMainWindow):
     def _save_studio_layout(self) -> None:
         workspace_sizes = tuple(self.studio_workspace_splitter.sizes())
         center_sizes = tuple(self.studio_center_splitter.sizes())
-        if len(workspace_sizes) != 3 or len(center_sizes) != 2:
+        left_sizes = tuple(self.studio_left_splitter.sizes())
+        if len(workspace_sizes) != 3 or len(center_sizes) != 2 or len(left_sizes) != 2:
             return
-        if sum(workspace_sizes) <= 0 or sum(center_sizes) <= 0:
+        if sum(workspace_sizes) <= 0 or sum(center_sizes) <= 0 or sum(left_sizes) <= 0:
             return
         studio_layout = StudioLayoutSettings(
             workspace_sizes=workspace_sizes,
             center_sizes=center_sizes,
+            left_sizes=left_sizes,
         )
         if studio_layout == self.settings.studio_layout:
             return
@@ -3486,6 +3516,13 @@ class MainWindow(QMainWindow):
             self._pause_playback()
             return
 
+        if (
+            self._studio_playback_queue_dirty
+            and self.page_stack.currentIndex() == PAGE_STUDIO
+        ):
+            self._refresh_output_playback_queue(WorkspacePlaybackScope.STUDIO)
+            self._studio_playback_queue_dirty = False
+
         if self.current_playback_queue is None:
             self._sync_playback_queue_for_page(self.page_stack.currentIndex(), force=True)
         if self.current_playback_queue is None:
@@ -3515,9 +3552,23 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            preview_paths = [prepare_preview_audio(path) for path in queue.paths]
-            duration_ms = max(self.player.duration_ms(path) for path in preview_paths)
-            queue = queue.with_duration(duration_ms)
+            is_studio = (
+                queue.scope == WorkspacePlaybackScope.STUDIO.value
+                and bool(self._studio_playback_sources)
+            )
+            prepared: PreparedPlaybackAudio | None = None
+            if is_studio:
+                preview_paths = queue.paths
+                if self.player.has_prepared_audio():
+                    duration_ms = queue.duration_ms
+                else:
+                    prepared = prepare_studio_playback_audio(self._studio_playback_sources)
+                    duration_ms = prepared.duration_ms
+                    queue = queue.with_duration(duration_ms)
+            else:
+                preview_paths = tuple(prepare_preview_audio(path) for path in queue.paths)
+                duration_ms = max(self.player.duration_ms(path) for path in preview_paths)
+                queue = queue.with_duration(duration_ms)
             start_ms = max(0, min(start_ms, queue.duration_ms))
             if start_ms >= queue.duration_ms:
                 start_ms = 0
@@ -3529,7 +3580,12 @@ class MainWindow(QMainWindow):
                 len(preview_paths),
                 start_ms,
             )
-            self.player.play(preview_paths, start_ms=start_ms, volumes=queue.volumes)
+            if is_studio and prepared is None:
+                self.player.resume(start_ms, queue.volumes)
+            elif is_studio:
+                self.player.play_prepared(prepared, start_ms=start_ms, volumes=queue.volumes)
+            else:
+                self.player.play(preview_paths, start_ms=start_ms, volumes=queue.volumes)
         except Exception as exc:
             self._handle_playback_error(queue, exc)
             return
@@ -3651,6 +3707,8 @@ class MainWindow(QMainWindow):
             except KeyError:
                 assets = ()
             self.studio_editor.set_context(session, assets)
+            self._studio_playback_queue_dirty = False
+            self._studio_playback_sources = ()
             if self.page_stack.currentIndex() == PAGE_STUDIO:
                 self._sync_idle_studio_transport()
         finally:
@@ -3714,7 +3772,11 @@ class MainWindow(QMainWindow):
                 )
         return session
 
-    def _on_studio_editor_session_changed(self, session: StudioSession) -> None:
+    def _on_studio_editor_session_changed(
+        self,
+        session: StudioSession,
+        requires_render: bool,
+    ) -> None:
         if self._is_loading_studio_session:
             return
         self._is_loading_studio_session = True
@@ -3738,8 +3800,187 @@ class MainWindow(QMainWindow):
         if item is not None:
             self.studio_session_autosave.queue(item.id, session)
         queue = self.current_playback_queue
-        if queue is not None and queue.scope == WorkspacePlaybackScope.STUDIO.value:
-            self._refresh_output_playback_queue(WorkspacePlaybackScope.STUDIO)
+        if (
+            item is None
+            or queue is None
+            or queue.scope != WorkspacePlaybackScope.STUDIO.value
+            or queue.source_id != f"studio:{item.id}"
+        ):
+            return
+
+        try:
+            sources = self.library.studio_mix_sources(item.id, session)
+        except (AudioExportError, KeyError, OSError, ValueError) as exc:
+            self.studio_editor.set_status(_last_error_line(str(exc)))
+            return
+        if not sources:
+            self._studio_playback_sources = ()
+            self._studio_playback_queue_dirty = False
+            self._stop_playback(clear_queue=True)
+            self.studio_editor.set_status(tr("Add at least one audible clip to the Studio timeline."))
+            return
+        previous_sources = self._studio_playback_sources
+        same_layout = bool(previous_sources) and (
+            studio_source_layout_signature(previous_sources)
+            == studio_source_layout_signature(sources)
+        )
+        was_playing = self.player.is_playing()
+        position_ms = self.player.position_ms() if was_playing else self._playback_position_ms
+        refreshed_queue = self._studio_playback_queue(item.id, session, sources)
+        self._studio_playback_sources = sources
+        self.current_playback_queue = refreshed_queue
+        self._playback_position_ms = max(0, min(position_ms, refreshed_queue.duration_ms))
+
+        live_updated = False
+        if same_layout:
+            live_updated = self.player.set_effect_chains(studio_effect_chains(sources))
+            if live_updated:
+                self.player.set_volumes(refreshed_queue.volumes)
+
+        needs_prepare = (
+            self._studio_playback_queue_dirty
+            or requires_render
+            or not same_layout
+            or (was_playing and not live_updated)
+        )
+        if was_playing and needs_prepare:
+            self._studio_playback_queue_dirty = True
+            self._queue_studio_playback_prepare(item.id, session, sources)
+        else:
+            self._studio_playback_queue_dirty = False
+            if needs_prepare:
+                self.player.stop()
+        self.studio_editor.set_status("")
+        self._refresh_playback_ui(is_playing=was_playing)
+        self._update_output_playheads(self._playback_position_ms, refreshed_queue.duration_ms)
+
+    def _queue_studio_playback_prepare(
+        self,
+        song_id: str,
+        session: StudioSession,
+        sources: tuple[AudioMixSource, ...],
+    ) -> None:
+        self._studio_playback_prepare_generation += 1
+        self._studio_playback_prepare_request = (
+            self._studio_playback_prepare_generation,
+            song_id,
+            session,
+            sources,
+        )
+        self._studio_playback_prepare_timer.start()
+
+    def _start_studio_playback_prepare(self) -> None:
+        if self._studio_playback_prepare_worker is not None:
+            return
+        request = self._studio_playback_prepare_request
+        if request is None:
+            return
+        self._studio_playback_prepare_request = None
+        generation, song_id, session, sources = request
+
+        def prepare(_progress) -> PreparedPlaybackAudio:
+            return prepare_studio_playback_audio(sources)
+
+        worker = TaskWorker(prepare)
+        self._studio_playback_prepare_worker = worker
+        self._workers.append(worker)
+
+        def complete(result: object) -> None:
+            if (
+                generation != self._studio_playback_prepare_generation
+                or self._studio_playback_prepare_request is not None
+            ):
+                return
+            if not isinstance(result, PreparedPlaybackAudio):
+                return
+            self._apply_studio_playback_prepare(
+                song_id,
+                session,
+                sources,
+                result,
+            )
+
+        def failed(error: str) -> None:
+            if generation != self._studio_playback_prepare_generation:
+                return
+            self._logger.warning("Studio playback preparation failed: %s", _last_error_line(error))
+            self.studio_editor.set_status(_last_error_line(error))
+
+        def cleanup() -> None:
+            if self._studio_playback_prepare_worker is worker:
+                self._studio_playback_prepare_worker = None
+            if worker in self._workers:
+                self._workers.remove(worker)
+            worker.deleteLater()
+            if self._studio_playback_prepare_request is not None:
+                self._studio_playback_prepare_timer.start(0)
+
+        worker.succeeded.connect(complete)
+        worker.failed.connect(failed)
+        worker.finished.connect(cleanup)
+        worker.start()
+
+    def _apply_studio_playback_prepare(
+        self,
+        song_id: str,
+        session: StudioSession,
+        sources: tuple[AudioMixSource, ...],
+        prepared: PreparedPlaybackAudio,
+    ) -> bool:
+        item = self.current_song or self.current_work_item
+        queue = self.current_playback_queue
+        if (
+            item is None
+            or item.id != song_id
+            or self.studio_editor.session() != session
+            or queue is None
+            or queue.scope != WorkspacePlaybackScope.STUDIO.value
+            or queue.source_id != f"studio:{song_id}"
+        ):
+            return False
+
+        duration_ms = prepared.duration_ms
+        was_playing = self.player.is_playing()
+        position_ms = self.player.position_ms() if was_playing else self._playback_position_ms
+        refreshed_queue = self._studio_playback_queue(song_id, session, sources).with_duration(
+            duration_ms
+        )
+        self._studio_playback_sources = sources
+        self.current_playback_queue = refreshed_queue
+        self._playback_position_ms = max(0, min(position_ms, duration_ms))
+        self._studio_playback_queue_dirty = False
+        self.studio_editor.set_status("")
+        if was_playing:
+            if not self.player.replace_prepared(prepared, refreshed_queue.volumes):
+                self._play_current_queue(self._playback_position_ms)
+            else:
+                self._refresh_playback_ui(is_playing=True)
+                self._update_output_playheads(self._playback_position_ms, duration_ms)
+        else:
+            self.player.set_prepared(prepared, refreshed_queue.volumes)
+            self._refresh_playback_ui(is_playing=False)
+            self._update_output_playheads(self._playback_position_ms, duration_ms)
+        return True
+
+    @staticmethod
+    def _studio_playback_queue(
+        song_id: str,
+        session: StudioSession,
+        sources: tuple[AudioMixSource, ...],
+    ) -> PlaybackQueue:
+        duration_ms = studio_playback_duration_ms(
+            sources,
+            minimum_ms=session_duration_ms(session),
+        )
+        return PlaybackQueue(
+            context="output",
+            source_id=f"studio:{song_id}",
+            title=scope_label(WorkspacePlaybackScope.STUDIO),
+            paths=tuple(source.path for source in sources),
+            volumes=tuple(source.volume for source in sources),
+            duration_ms=duration_ms,
+            scope=WorkspacePlaybackScope.STUDIO.value,
+        )
 
     def _seek_studio_timeline(self, position_ms: int) -> None:
         if (
@@ -4124,34 +4365,15 @@ class MainWindow(QMainWindow):
             return None
         try:
             sources = self.library.studio_mix_sources(item.id, session)
-            direct_duration = self._direct_studio_preview_duration(sources)
-            if direct_duration > 0:
-                self.studio_editor.set_status("")
-                return PlaybackQueue(
-                    context="output",
-                    source_id=f"studio:{item.id}",
-                    title=scope_label(WorkspacePlaybackScope.STUDIO),
-                    paths=tuple(source.path for source in sources),
-                    volumes=tuple(source.volume for source in sources),
-                    duration_ms=direct_duration,
-                    scope=WorkspacePlaybackScope.STUDIO.value,
-                )
-            preview_path = self.library.render_studio_preview(item.id, session)
-            duration_ms = read_audio_metadata(preview_path).duration_ms
         except (AudioExportError, KeyError, OSError, ValueError) as exc:
             self.studio_editor.set_status(_last_error_line(str(exc)))
             return None
+        if not sources:
+            self.studio_editor.set_status(tr("Add at least one audible clip to the Studio timeline."))
+            return None
+        self._studio_playback_sources = sources
         self.studio_editor.set_status("")
-        return PlaybackQueue(
-            context="output",
-            source_id=f"studio:{item.id}",
-            title=scope_label(WorkspacePlaybackScope.STUDIO),
-            paths=(preview_path,),
-            volumes=(1.0,),
-            duration_ms=duration_ms,
-            scope=WorkspacePlaybackScope.STUDIO.value,
-            reload_on_refresh=True,
-        )
+        return self._studio_playback_queue(item.id, session, sources)
 
     @staticmethod
     def _direct_studio_preview_duration(sources: tuple[AudioMixSource, ...]) -> int:
@@ -4159,6 +4381,8 @@ class MainWindow(QMainWindow):
             return 0
         duration_ms = 0
         for source in sources:
+            if source.effects:
+                return 0
             if source.timeline_start_ms != 0 or source.source_start_ms != 0:
                 return 0
             if not 0.0 <= source.volume <= 2.0:

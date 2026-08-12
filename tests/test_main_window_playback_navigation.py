@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton
 
 from jang_app.qt_app.main_window import (
@@ -17,6 +18,7 @@ from jang_app.qt_app.main_window import (
     PAGE_SEPARATION,
 )
 from jang_app.services.audio_export import AudioMixSource
+from jang_app.services.audio_player import PreparedPlaybackAudio
 from jang_app.services.playback_queue import PlaybackQueue
 from jang_app.services.settings import AppSettings, StudioLayoutSettings
 from jang_app.services.song_assets import SongAsset
@@ -483,6 +485,7 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         window = SimpleNamespace(
             studio_workspace_splitter=SimpleNamespace(sizes=lambda: [220, 1_050, 310]),
             studio_center_splitter=SimpleNamespace(sizes=lambda: [410, 590]),
+            studio_left_splitter=SimpleNamespace(sizes=lambda: [650, 350]),
             settings=AppSettings(),
         )
         with patch("jang_app.qt_app.main_window.save_app_settings") as save:
@@ -491,6 +494,7 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         expected = StudioLayoutSettings(
             workspace_sizes=(220, 1_050, 310),
             center_sizes=(410, 590),
+            left_sizes=(650, 350),
         )
         self.assertEqual(window.settings.studio_layout, expected)
         save.assert_called_once_with(window.settings)
@@ -907,6 +911,21 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         self.assertEqual(MainWindow._direct_studio_preview_duration(moved), 0)
         self.assertEqual(MainWindow._direct_studio_preview_duration(trimmed), 0)
 
+    def test_effected_studio_sources_require_a_rendered_preview(self) -> None:
+        from jang_app.services.studio_session import StudioEffect
+
+        self.assertIn("effects", AudioMixSource.__dataclass_fields__)
+        sources = (
+            AudioMixSource(
+                "Vocal",
+                Path("vocal.wav"),
+                source_end_ms=12_000,
+                effects=(StudioEffect("fx-reverb", "reverb"),),
+            ),
+        )
+
+        self.assertEqual(MainWindow._direct_studio_preview_duration(sources), 0)
+
     def test_playing_workspace_switch_replaces_only_the_page_sound_pool(self) -> None:
         separation_queue = PlaybackQueue(
             context="output",
@@ -1022,6 +1041,251 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
 
         self.assertEqual(calls, [("play", 4_500)])
         self.assertTrue(window.current_playback_queue.reload_on_refresh)
+
+    def test_structural_studio_edit_prepares_a_new_live_buffer_while_playing(self) -> None:
+        from jang_app.services.studio_session import StudioSession
+
+        queue = PlaybackQueue(
+            context="output",
+            source_id="studio:song-1",
+            title="Studio Mix",
+            paths=(Path("vocal.wav"),),
+            volumes=(1.0,),
+            duration_ms=12_000,
+            scope="studio",
+        )
+        refreshes: list[WorkspacePlaybackScope] = []
+        playback_prepares: list[tuple[str, StudioSession]] = []
+        queued: list[tuple[str, StudioSession]] = []
+        source = AudioMixSource("Vocal", Path("vocal.wav"), source_end_ms=12_000)
+        mix_track = SimpleNamespace(set_mix_state=lambda **_kwargs: None)
+        window = SimpleNamespace(
+            _is_loading_studio_session=False,
+            _studio_playback_queue_dirty=False,
+            vocal_track=mix_track,
+            instrumental_track=mix_track,
+            converted_track=mix_track,
+            _sync_result_playback_settings=lambda: None,
+            current_song=SimpleNamespace(id="song-1"),
+            current_work_item=None,
+            studio_session_autosave=SimpleNamespace(
+                queue=lambda song_id, session: queued.append((song_id, session))
+            ),
+            current_playback_queue=queue,
+            library=SimpleNamespace(studio_mix_sources=lambda _song_id, _session: (source,)),
+            _studio_playback_sources=(source,),
+            player=SimpleNamespace(
+                is_playing=lambda: True,
+                position_ms=lambda: 4_000,
+                set_effect_chains=lambda _effects: True,
+                set_volumes=lambda _volumes: None,
+            ),
+            _playback_position_ms=0,
+            studio_editor=SimpleNamespace(set_status=lambda _status: None),
+            _refresh_output_playback_queue=lambda scope: refreshes.append(scope),
+            _studio_playback_queue=lambda song_id, _session, _sources: PlaybackQueue(
+                context="output",
+                source_id=f"studio:{song_id}",
+                title="Studio Mix",
+                paths=(Path("vocal.wav"),),
+                volumes=(1.0,),
+                duration_ms=12_000,
+                scope="studio",
+            ),
+            _queue_studio_playback_prepare=lambda song_id, session, _sources: playback_prepares.append(
+                (song_id, session)
+            ),
+            _refresh_playback_ui=lambda **_kwargs: None,
+            _update_output_playheads=lambda _position, _duration: None,
+        )
+        session = StudioSession()
+
+        MainWindow._on_studio_editor_session_changed(window, session, True)
+        MainWindow._on_studio_editor_session_changed(window, session, False)
+
+        self.assertEqual(refreshes, [])
+        self.assertTrue(window._studio_playback_queue_dirty)
+        self.assertEqual(playback_prepares, [("song-1", session), ("song-1", session)])
+        self.assertEqual(queued, [("song-1", session), ("song-1", session)])
+
+    def test_reverb_change_updates_the_live_chain_without_restarting_playback(self) -> None:
+        from dataclasses import replace
+
+        from jang_app.services.studio_session import (
+            StudioEffect,
+            StudioReverbSettings,
+            StudioSession,
+        )
+
+        old_effect = StudioEffect("fx-1", "reverb")
+        new_effect = replace(
+            old_effect,
+            reverb=StudioReverbSettings(dry_wet_percent=72),
+        )
+        old_source = AudioMixSource(
+            "Vocal",
+            Path("vocal.wav"),
+            source_end_ms=12_000,
+            effects=(old_effect,),
+        )
+        new_source = replace(old_source, effects=(new_effect,))
+        queue = PlaybackQueue(
+            context="output",
+            source_id="studio:song-1",
+            title="Studio Mix",
+            paths=(old_source.path,),
+            volumes=(1.0,),
+            duration_ms=12_000,
+            scope="studio",
+        )
+        calls: list[tuple[str, object]] = []
+        mix_track = SimpleNamespace(set_mix_state=lambda **_kwargs: None)
+        window = SimpleNamespace(
+            _is_loading_studio_session=False,
+            _studio_playback_queue_dirty=False,
+            _studio_playback_sources=(old_source,),
+            vocal_track=mix_track,
+            instrumental_track=mix_track,
+            converted_track=mix_track,
+            _sync_result_playback_settings=lambda: None,
+            current_song=SimpleNamespace(id="song-1"),
+            current_work_item=None,
+            studio_session_autosave=SimpleNamespace(queue=lambda _song_id, _session: None),
+            current_playback_queue=queue,
+            library=SimpleNamespace(
+                studio_mix_sources=lambda _song_id, _session: (new_source,)
+            ),
+            player=SimpleNamespace(
+                is_playing=lambda: True,
+                position_ms=lambda: 4_500,
+                set_effect_chains=lambda effects: calls.append(("effects", effects)) or True,
+                set_volumes=lambda volumes: calls.append(("volumes", volumes)),
+            ),
+            _playback_position_ms=0,
+            studio_editor=SimpleNamespace(set_status=lambda _status: None),
+            _studio_playback_queue=lambda song_id, _session, sources: PlaybackQueue(
+                context="output",
+                source_id=f"studio:{song_id}",
+                title="Studio Mix",
+                paths=tuple(source.path for source in sources),
+                volumes=tuple(source.volume for source in sources),
+                duration_ms=12_000,
+                scope="studio",
+            ),
+            _queue_studio_playback_prepare=lambda *_args: self.fail(
+                "effect settings must not rebuild the playback buffer"
+            ),
+            _refresh_playback_ui=lambda **_kwargs: None,
+            _update_output_playheads=lambda _position, _duration: None,
+        )
+
+        MainWindow._on_studio_editor_session_changed(window, StudioSession(), False)
+
+        self.assertFalse(window._studio_playback_queue_dirty)
+        self.assertEqual(window._playback_position_ms, 4_500)
+        self.assertEqual(calls[0], ("effects", ((new_effect,),)))
+        self.assertEqual(calls[1], ("volumes", (1.0,)))
+
+    def test_prepared_studio_buffer_reloads_at_the_live_playback_position(self) -> None:
+        from jang_app.services.studio_session import StudioSession
+
+        session = StudioSession()
+        sources = (AudioMixSource("Vocal", Path("new-vocal.wav")),)
+        queue = PlaybackQueue(
+            context="output",
+            source_id="studio:song-1",
+            title="Studio Mix",
+            paths=(Path("old-preview.wav"),),
+            volumes=(1.0,),
+            duration_ms=12_000,
+            scope="studio",
+            reload_on_refresh=True,
+        )
+        calls: list[tuple[str, object]] = []
+        window = SimpleNamespace(
+            current_song=SimpleNamespace(id="song-1"),
+            current_work_item=None,
+            current_playback_queue=queue,
+            studio_editor=SimpleNamespace(
+                session=lambda: session,
+                set_status=lambda status: calls.append(("status", status)),
+            ),
+            player=SimpleNamespace(
+                is_playing=lambda: True,
+                position_ms=lambda: 4_250,
+                replace_prepared=lambda prepared, _volumes: calls.append(
+                    ("replace", prepared.duration_ms)
+                )
+                or True,
+            ),
+            _playback_position_ms=0,
+            _studio_playback_queue_dirty=True,
+            _studio_playback_sources=(),
+            _studio_playback_queue=lambda song_id, _session, resolved_sources: PlaybackQueue(
+                context="output",
+                source_id=f"studio:{song_id}",
+                title="Studio Mix",
+                paths=tuple(source.path for source in resolved_sources),
+                volumes=tuple(source.volume for source in resolved_sources),
+                duration_ms=0,
+                scope="studio",
+            ),
+            _play_current_queue=lambda position: calls.append(("play", position)),
+            _refresh_playback_ui=lambda **_kwargs: None,
+            _update_output_playheads=lambda _position, _duration: None,
+        )
+
+        applied = MainWindow._apply_studio_playback_prepare(
+            window,
+            "song-1",
+            session,
+            sources,
+            PreparedPlaybackAudio(
+                (np.zeros((551_250, 2), dtype=np.float32),),
+                551_250,
+            ),
+        )
+
+        self.assertTrue(applied)
+        self.assertEqual(window.current_playback_queue.paths, (Path("new-vocal.wav"),))
+        self.assertEqual(window._studio_playback_sources, sources)
+        self.assertEqual(window._playback_position_ms, 4_250)
+        self.assertFalse(window._studio_playback_queue_dirty)
+        self.assertEqual(calls, [("status", ""), ("replace", 12_500)])
+
+    def test_dirty_studio_queue_rebuilds_when_playback_resumes(self) -> None:
+        queue = PlaybackQueue(
+            context="output",
+            source_id="studio:song-1",
+            title="Studio Mix",
+            paths=(Path("vocal.wav"),),
+            volumes=(1.0,),
+            duration_ms=12_000,
+            scope="studio",
+        )
+        calls: list[object] = []
+        window = SimpleNamespace(
+            model_workspace_page=SimpleNamespace(stop_preview=lambda: None),
+            player=SimpleNamespace(is_playing=lambda: False),
+            page_stack=_PageStack(PAGE_STUDIO),
+            _studio_playback_queue_dirty=True,
+            current_playback_queue=queue,
+            _playback_position_ms=3_000,
+            _refresh_output_playback_queue=lambda scope: calls.append(("refresh", scope)),
+            _sync_playback_queue_for_page=lambda _index, force=False: None,
+            _play_current_queue=lambda position: calls.append(("play", position)),
+            current_work_item=None,
+        )
+
+        MainWindow._toggle_global_playback(window)
+
+        self.assertEqual(
+            calls,
+            [
+                ("refresh", WorkspacePlaybackScope.STUDIO),
+                ("play", 3_000),
+            ],
+        )
 
     def test_output_playheads_update_only_the_active_workspace_surface(self) -> None:
         separation = _PlayheadTarget()

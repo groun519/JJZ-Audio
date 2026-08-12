@@ -10,6 +10,7 @@ import soundfile as sf
 
 from jang_app.services.file_names import safe_display_filename_stem, unique_display_path
 from jang_app.services.audio_mix_processing import process_mix_source
+from jang_app.services.studio_session import StudioEffect
 
 class AudioExportError(RuntimeError):
     """Raised when preview audio cannot be exported."""
@@ -29,6 +30,7 @@ class AudioMixSource:
     fade_in_ms: int = 0
     fade_out_ms: int = 0
     pan_percent: int = 0
+    effects: tuple[StudioEffect, ...] = ()
 
 
 def export_mix(
@@ -68,9 +70,10 @@ def export_mix(
             fade_in_ms=source.fade_in_ms,
             fade_out_ms=source.fade_out_ms,
             pan_percent=source.pan_percent,
+            effects=source.effects,
         )
         audio_arrays.append((timeline_start_frame, processed))
-        max_frames = max(max_frames, timeline_start_frame + trimmed.shape[0])
+        max_frames = max(max_frames, timeline_start_frame + processed.shape[0])
         max_channels = max(max_channels, processed.shape[1])
 
     if not audio_arrays:

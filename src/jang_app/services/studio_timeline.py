@@ -8,6 +8,7 @@ from jang_app.services.studio_session import (
     TRACK_VIDEO,
     StudioAssetRef,
     StudioClip,
+    StudioEffect,
     StudioSession,
     StudioTrack,
 )
@@ -171,6 +172,65 @@ def remove_studio_clip(session: StudioSession, clip_id: str) -> StudioSession:
     )
 
 
+def add_studio_clip_effect(
+    session: StudioSession,
+    clip_id: str,
+    effect: StudioEffect,
+) -> StudioSession:
+    track, clip = _find_clip(session, clip_id)
+    if any(candidate.effect_id == effect.effect_id for candidate in clip.effects):
+        raise StudioTimelineError(f"Studio effect already exists: {effect.effect_id}")
+    return _replace_clip(
+        session,
+        track.track_id,
+        clip_id,
+        lambda candidate: replace(candidate, effects=(*candidate.effects, effect)),
+    )
+
+
+def update_studio_clip_effect(
+    session: StudioSession,
+    clip_id: str,
+    effect: StudioEffect,
+) -> StudioSession:
+    track, clip = _find_clip(session, clip_id)
+    if not any(candidate.effect_id == effect.effect_id for candidate in clip.effects):
+        raise StudioTimelineError(f"Unknown Studio effect: {effect.effect_id}")
+    return _replace_clip(
+        session,
+        track.track_id,
+        clip_id,
+        lambda candidate: replace(
+            candidate,
+            effects=tuple(
+                effect if current.effect_id == effect.effect_id else current
+                for current in candidate.effects
+            ),
+        ),
+    )
+
+
+def remove_studio_clip_effect(
+    session: StudioSession,
+    clip_id: str,
+    effect_id: str,
+) -> StudioSession:
+    track, clip = _find_clip(session, clip_id)
+    if not any(candidate.effect_id == effect_id for candidate in clip.effects):
+        raise StudioTimelineError(f"Unknown Studio effect: {effect_id}")
+    return _replace_clip(
+        session,
+        track.track_id,
+        clip_id,
+        lambda candidate: replace(
+            candidate,
+            effects=tuple(
+                current for current in candidate.effects if current.effect_id != effect_id
+            ),
+        ),
+    )
+
+
 def remove_studio_track(session: StudioSession, track_id: str) -> StudioSession:
     _find_track(session, track_id)
     return replace(
@@ -296,6 +356,19 @@ def _replace_track(session: StudioSession, track_id: str, update) -> StudioSessi
     return replace(
         session,
         tracks=tuple(update(track) if track.track_id == track_id else track for track in session.tracks),
+    )
+
+
+def _replace_clip(session: StudioSession, track_id: str, clip_id: str, update) -> StudioSession:
+    return _replace_track(
+        session,
+        track_id,
+        lambda track: replace(
+            track,
+            clips=tuple(
+                update(clip) if clip.clip_id == clip_id else clip for clip in track.clips
+            ),
+        ),
     )
 
 

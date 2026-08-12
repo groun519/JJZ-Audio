@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,7 @@ from jang_app.services.studio_session import (
     TRACK_ORIGINAL_VOCAL,
     StudioAssetRef,
     StudioClip,
+    StudioEffect,
     StudioTrack,
 )
 
@@ -104,6 +106,93 @@ class StudioInspectorTests(unittest.TestCase):
             inspector.clear_selection()
             self.assertEqual(inspector.stack.currentIndex(), inspector.EMPTY_PAGE)
             inspector.close()
+
+    def test_clip_effects_add_reverb_tabs_and_forward_changes(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        effect = StudioEffect("fx-reverb", "reverb")
+        clip = StudioClip("clip-1", reference, 0, 0, 2_000, effects=(effect,))
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(clip,),
+        )
+        inspector = StudioInspector()
+        changed = QSignalSpy(inspector.effect_changed)
+        removed = QSignalSpy(inspector.effect_remove_requested)
+
+        inspector.set_selection(track, clip, None)
+
+        self.assertEqual(inspector.effect_tab_ids(), (effect.effect_id,))
+        inspector.open_effect_tab(effect.effect_id)
+        self.assertEqual(inspector.clip_detail_stack.currentIndex(), 1)
+        editor = inspector.effect_editors[effect.effect_id]
+        editor.controls["dry_wet_percent"].setValue(44)
+        editor._emit_changed()
+        editor.remove_button.click()
+
+        self.assertEqual(changed.at(0)[0], clip.clip_id)
+        self.assertEqual(changed.at(0)[1].reverb.dry_wet_percent, 44)
+        self.assertEqual(tuple(removed.at(0)), (clip.clip_id, effect.effect_id))
+        inspector.close()
+
+    def test_selecting_another_clip_resets_the_active_effect_tab(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        effect = StudioEffect("fx-reverb", "reverb")
+        first_clip = StudioClip("clip-1", reference, 0, 0, 1_000, effects=(effect,))
+        second_clip = StudioClip("clip-2", reference, 1_000, 1_000, 2_000, effects=(effect,))
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(first_clip, second_clip),
+        )
+        inspector = StudioInspector()
+
+        inspector.set_selection(track, first_clip, None)
+        inspector.open_effect_tab(effect.effect_id)
+        self.assertEqual(inspector.clip_detail_stack.currentIndex(), 1)
+
+        inspector.set_selection(track, second_clip, None)
+
+        self.assertEqual(inspector.clip_detail_stack.currentIndex(), 0)
+        self.assertTrue(inspector.clip_tab_button.isChecked())
+        inspector.close()
+
+    def test_repeated_effect_refresh_reuses_the_existing_tab_and_editor(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        effect = StudioEffect("fx-reverb", "reverb")
+        clip = StudioClip("clip-1", reference, 0, 0, 2_000, effects=(effect,))
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(clip,),
+        )
+        inspector = StudioInspector()
+        changed = QSignalSpy(inspector.effect_changed)
+
+        inspector.set_selection(track, clip, None)
+        button = inspector.effect_tab_buttons[effect.effect_id]
+        editor = inspector.effect_editors[effect.effect_id]
+        updated_effect = replace(
+            effect,
+            reverb=replace(effect.reverb, dry_wet_percent=61),
+        )
+        updated_clip = replace(clip, effects=(updated_effect,))
+
+        for _ in range(3):
+            inspector.set_selection(track, updated_clip, None)
+
+        self.assertIs(inspector.effect_tab_buttons[effect.effect_id], button)
+        self.assertIs(inspector.effect_editors[effect.effect_id], editor)
+        self.assertEqual(inspector.clip_tabs_layout.count(), 3)
+        self.assertEqual(inspector.clip_detail_stack.count(), 2)
+        self.assertEqual(editor.controls["dry_wet_percent"].value(), 61)
+
+        editor._emit_changed()
+        self.assertEqual(changed.count(), 1)
+        inspector.close()
 
 
 if __name__ == "__main__":

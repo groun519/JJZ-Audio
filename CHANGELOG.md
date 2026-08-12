@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-08-12
+
+### Added
+
+- Added clip-level Studio reverb with drag-and-drop assignment, reusable effect cards, non-destructive settings, and export rendering.
+- Added real-time Studio effect processing so reverb, clip levels, and track levels can be heard immediately during playback.
+- Added an update-center flow with release-note access, staged status feedback, and safe cleanup of completed update downloads.
+
+### Changed
+
+- Prepared Studio playback in the background and crossfaded structural timeline changes without resetting the playhead.
+- Kept Library waveforms fixed while the work-song action reveals, and clarified first-run storage-location choices.
+- Embedded the base RVC profile in the shared audio engine package to keep upgrades from older installations compatible.
+
+### Fixed
+
+- Repaired 0.2.x-to-0.3.x runtime upgrades that could fail while replacing the managed audio engine.
+- Restored Precision Separation readiness checks when `audio_separator` is installed in either supported runtime location.
+- Prevented repeated reverb editor tabs and removed playback stalls when effect parameters or clip positions change.
+- Preserved reverb tails in exported mixes and kept Studio effect state compatible with existing project files.
+
+### Quality
+
+- Added regression coverage for real-time reverb, Studio playback preparation, effect persistence, update cleanup, runtime compatibility, and Library layout stability.
+
+## 0.3.0 - 2026-08-12
+
 ### Added
 
 - Added Fast, Precision, and Custom vocal-separation workflows, including independent vocal and instrumental model selection.

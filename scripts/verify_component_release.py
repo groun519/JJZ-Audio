@@ -44,6 +44,8 @@ def verify_component_release(
     for component in manifest.components:
         for artifact in component.artifacts:
             path = release_root / artifact.name
+            if artifact.url and not path.is_file():
+                continue
             if path.stat().st_size >= GITHUB_ASSET_LIMIT:
                 raise RuntimeError(f"Release asset exceeds 2 GiB: {path.name}")
             if not verify_artifact(path, artifact):
@@ -160,7 +162,7 @@ def _verify_cu128_profile(manifest, release_root: Path, runtime_root: Path) -> N
 
 def _verify_cu128_package_layout(manifest, release_root: Path) -> None:
     component = manifest.rvc_runtime_profile("cu128")
-    if component is None:
+    if component is None or _component_is_remote_only(component, release_root):
         return
     required = {
         "python.exe",
@@ -201,6 +203,10 @@ def _verify_split_runtime_package_layout(manifest, release_root: Path) -> None:
     runtime = manifest.ai_runtime
     cu118 = manifest.rvc_runtime_profile("cu118")
     if runtime is None or cu118 is None:
+        return
+    if _component_is_remote_only(runtime, release_root) or _component_is_remote_only(
+        cu118, release_root
+    ):
         return
 
     shared_names = _archive_names(runtime, release_root)
@@ -249,6 +255,8 @@ def _verify_legacy_runtime_package_layout(manifest, release_root: Path) -> None:
     runtime = manifest.ai_runtime
     if runtime is None or manifest.rvc_runtime_profile("cu118") is not None:
         return
+    if _component_is_remote_only(runtime, release_root):
+        return
 
     names = _archive_names(runtime, release_root)
     required = {
@@ -282,10 +290,19 @@ def _archive_names(component, release_root: Path) -> set[str]:
     return names
 
 
+def _component_is_remote_only(component, release_root: Path) -> bool:
+    return bool(component.artifacts) and all(
+        artifact.url and not (release_root / artifact.name).is_file()
+        for artifact in component.artifacts
+    )
+
+
 def _verify_accelerator_package_layouts(manifest, release_root: Path) -> None:
     for profile in ("directml", "rocm-win"):
         component = manifest.rvc_runtime_profile(profile)
         if component is None:
+            continue
+        if _component_is_remote_only(component, release_root):
             continue
         required = {
             "python.exe",

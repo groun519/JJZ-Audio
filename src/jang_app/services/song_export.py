@@ -122,6 +122,7 @@ def _timeline_mix_sources(
                     fade_in_ms=clip.fade_in_ms,
                     fade_out_ms=clip.fade_out_ms,
                     pan_percent=track.pan_percent,
+                    effects=clip.effects,
                 )
             )
     return tuple(sources)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,6 +22,7 @@ from jang_app.services.studio_session import (
     TRACK_ORIGINAL_VOCAL,
     StudioAssetRef,
     StudioClip,
+    StudioEffect,
     StudioSession,
     StudioTrack,
 )
@@ -46,6 +48,128 @@ class StudioEditorTests(unittest.TestCase):
             self.assertEqual(len(clips), 2)
             self.assertEqual(clips[-1].timeline_start_ms, 2_500)
             self.assertEqual(asset.path.read_bytes(), source_before)
+
+    def test_committed_session_marks_only_rendering_changes_as_structural(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            editor = StudioEditor()
+            editor.set_context(_session(), (asset,))
+            committed = QSignalSpy(editor.session_committed)
+
+            editor._set_track_mix("track-original-vocal", False, False, 72)
+            editor._move_clip("clip-1", "track-original-vocal", 500)
+
+            self.assertEqual(committed.count(), 2)
+            self.assertFalse(committed.at(0)[1])
+            self.assertTrue(committed.at(1)[1])
+            editor.close()
+
+    def test_reverb_changes_use_the_realtime_playback_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            editor = StudioEditor()
+            editor.set_context(_session(), (asset,))
+            editor._drop_effect("reverb", "clip-1")
+            committed = QSignalSpy(editor.session_committed)
+            effect = editor.session().tracks[0].clips[0].effects[0]
+
+            editor._update_effect(
+                "clip-1",
+                replace(
+                    effect,
+                    reverb=replace(effect.reverb, dry_wet_percent=64),
+                ),
+            )
+
+            self.assertEqual(committed.count(), 1)
+            self.assertFalse(committed.at(0)[1])
+            editor.close()
+
+    def test_reverb_drop_targets_one_clip_and_is_undoable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            editor = StudioEditor()
+            editor.set_context(_session(), (asset,))
+            changed = QSignalSpy(editor.session_changed)
+
+            editor._drop_effect("reverb", "clip-1")
+
+            effect = editor.session().tracks[0].clips[0].effects[0]
+            self.assertEqual(effect.kind, "reverb")
+            self.assertEqual(changed.count(), 1)
+            self.assertTrue(editor.undo())
+            self.assertEqual(editor.session().tracks[0].clips[0].effects, ())
+            self.assertTrue(editor.redo())
+            self.assertEqual(editor.session().tracks[0].clips[0].effects, (effect,))
+            editor.close()
+
+    def test_inspector_updates_and_removes_reverb_as_undoable_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            editor = StudioEditor()
+            editor.set_context(_session(), (asset,))
+            editor._drop_effect("reverb", "clip-1")
+            effect = editor.session().tracks[0].clips[0].effects[0]
+            updated = replace(
+                effect,
+                reverb=replace(effect.reverb, dry_wet_percent=62),
+            )
+
+            editor._update_effect("clip-1", updated)
+            editor._remove_effect("clip-1", updated.effect_id)
+
+            self.assertEqual(editor.session().tracks[0].clips[0].effects, ())
+            self.assertTrue(editor.undo())
+            self.assertEqual(editor.session().tracks[0].clips[0].effects, (updated,))
+            self.assertTrue(editor.undo())
+            self.assertEqual(editor.session().tracks[0].clips[0].effects, (effect,))
+            editor.close()
+
+    def test_studio_left_sidebar_contains_sound_and_fx_pools(self) -> None:
+        editor = StudioEditor(include_sidebars=False)
+
+        self.assertEqual(editor.left_sidebar.count(), 2)
+        self.assertIs(editor.left_sidebar.widget(0), editor.sound_pool)
+        self.assertIs(editor.left_sidebar.widget(1), editor.fx_pool)
+        self.assertFalse(editor.fx_pool.isHidden())
+        editor.close()
+
+    def test_timeline_effect_chip_remains_addressable_on_short_clips(self) -> None:
+        effect = StudioEffect("fx-reverb", "reverb")
+        clip = StudioClip(
+            "clip-short",
+            StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL),
+            0,
+            0,
+            100,
+            effects=(effect,),
+        )
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(clip,),
+        )
+        timeline = StudioTimelineView()
+        timeline.set_context(StudioSession(tracks=(track,)), ())
+
+        regions = timeline._effect_chip_rects(clip, 0)
+
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0][0].effect_id, effect.effect_id)
+        self.assertTrue(timeline._clip_rect(clip, 0).contains(regions[0][1].center()))
+
+    def test_effect_drop_target_is_the_exact_audio_clip_under_pointer(self) -> None:
+        timeline = StudioTimelineView()
+        session = _session()
+        timeline.set_context(session, ())
+        clip = session.tracks[0].clips[0]
+        clip_center = timeline._clip_rect(clip, 0).center().toPoint()
+
+        target = timeline._effect_drop_target(clip_center)
+
+        self.assertEqual(target.clip_id, clip.clip_id)
+        self.assertIsNone(timeline._effect_drop_target(QPoint(4, 4)))
 
     def test_inspector_values_update_clip_without_rendering_a_new_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -413,7 +537,9 @@ class StudioEditorTests(unittest.TestCase):
     def test_detached_sidebar_mode_keeps_panels_parented_until_workspace_mounts_them(self) -> None:
         editor = StudioEditor(include_sidebars=False)
 
-        self.assertIs(editor.sound_pool.parentWidget(), editor)
+        self.assertIs(editor.left_sidebar.parentWidget(), editor)
+        self.assertIs(editor.sound_pool.parentWidget(), editor.left_sidebar)
+        self.assertIs(editor.fx_pool.parentWidget(), editor.left_sidebar)
         self.assertIs(editor.inspector_scroll.parentWidget(), editor)
         self.assertIs(editor.timeline_panel.parentWidget(), editor)
         self.assertIsNone(editor.workspace_splitter)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,8 +10,8 @@ from jang_app.services.managed_files import write_json_atomic
 from jang_app.services.song_package import STUDIO_STAGE, SongPackage
 
 
-STUDIO_SESSION_VERSION = 4
-STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3}
+STUDIO_SESSION_VERSION = 5
+STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4}
 STUDIO_SESSION_LEGACY_VERSION = 1
 STUDIO_SESSION_NAME = "session.json"
 TRACK_ORIGINAL_VOCAL = "original_vocal"
@@ -18,6 +19,7 @@ TRACK_INSTRUMENTAL = "instrumental"
 TRACK_CONVERTED_VOCAL = "converted_vocal"
 TRACK_AUDIO = "audio"
 TRACK_VIDEO = "video"
+STUDIO_EFFECT_REVERB = "reverb"
 SUPPORTED_TRACK_ROLES = {
     TRACK_ORIGINAL_VOCAL,
     TRACK_INSTRUMENTAL,
@@ -46,6 +48,38 @@ class StudioAssetRef:
 
 
 @dataclass(frozen=True)
+class StudioReverbSettings:
+    room_height_m: float = 2.5
+    room_length_m: float = 4.0
+    room_width_m: float = 5.0
+    pre_delay_ms: int = 0
+    decay_ms: int = 950
+    distance_m: float = 1.75
+    brightness_percent: int = 50
+    modulation_percent: int = 2
+    early_low_hz: int = 300
+    early_high_hz: int = 10_000
+    early_low_gain_db: float = 0.0
+    early_high_gain_db: float = 0.0
+    reverb_low_hz: int = 300
+    reverb_high_hz: int = 10_000
+    reverb_low_gain_db: float = 0.0
+    reverb_high_gain_db: float = 0.0
+    dry_wet_percent: int = 30
+    direct_gain_db: float = 0.0
+    early_gain_db: float = 0.0
+    reverb_gain_db: float = 0.0
+
+
+@dataclass(frozen=True)
+class StudioEffect:
+    effect_id: str
+    kind: str
+    enabled: bool = True
+    reverb: StudioReverbSettings = field(default_factory=StudioReverbSettings)
+
+
+@dataclass(frozen=True)
 class StudioClip:
     clip_id: str
     asset: StudioAssetRef
@@ -56,6 +90,7 @@ class StudioClip:
     muted: bool = False
     fade_in_ms: int = 0
     fade_out_ms: int = 0
+    effects: tuple[StudioEffect, ...] = ()
 
     @property
     def duration_ms(self) -> int:
@@ -296,6 +331,7 @@ def _clip_from_data(value: object) -> StudioClip | None:
         muted=value.get("muted") is True,
         fade_in_ms=fade_in,
         fade_out_ms=fade_out,
+        effects=_effects_from_data(value.get("effects")),
     )
 
 
@@ -343,6 +379,7 @@ def _normalize_clip(clip: StudioClip) -> StudioClip | None:
         muted=bool(clip.muted),
         fade_in_ms=fade_in,
         fade_out_ms=fade_out,
+        effects=_normalize_effects(clip.effects),
     )
 
 
@@ -375,7 +412,161 @@ def _clip_to_data(clip: StudioClip) -> dict[str, object]:
         "muted": clip.muted,
         "fade_in_ms": clip.fade_in_ms,
         "fade_out_ms": clip.fade_out_ms,
+        "effects": [_effect_to_data(effect) for effect in clip.effects],
     }
+
+
+def _effects_from_data(value: object) -> tuple[StudioEffect, ...]:
+    if not isinstance(value, list):
+        return ()
+    effects: list[StudioEffect] = []
+    seen: set[str] = set()
+    for raw in value:
+        effect = _effect_from_data(raw)
+        if effect is None or effect.effect_id in seen:
+            continue
+        seen.add(effect.effect_id)
+        effects.append(effect)
+    return tuple(effects)
+
+
+def _effect_from_data(value: object) -> StudioEffect | None:
+    if not isinstance(value, dict):
+        return None
+    effect_id = str(value.get("effect_id", "")).strip()
+    kind = str(value.get("kind", "")).strip()
+    if not effect_id or kind != STUDIO_EFFECT_REVERB:
+        return None
+    settings = value.get("settings")
+    return StudioEffect(
+        effect_id=effect_id,
+        kind=kind,
+        enabled=value.get("enabled") is not False,
+        reverb=_reverb_settings_from_data(settings),
+    )
+
+
+def _normalize_effects(effects: tuple[StudioEffect, ...]) -> tuple[StudioEffect, ...]:
+    normalized: list[StudioEffect] = []
+    seen: set[str] = set()
+    for effect in effects:
+        effect_id = str(effect.effect_id).strip()
+        if not effect_id or effect_id in seen or effect.kind != STUDIO_EFFECT_REVERB:
+            continue
+        seen.add(effect_id)
+        normalized.append(
+            StudioEffect(
+                effect_id=effect_id,
+                kind=STUDIO_EFFECT_REVERB,
+                enabled=bool(effect.enabled),
+                reverb=_normalized_reverb_settings(effect.reverb),
+            )
+        )
+    return tuple(normalized)
+
+
+def _effect_to_data(effect: StudioEffect) -> dict[str, object]:
+    return {
+        "effect_id": effect.effect_id,
+        "kind": effect.kind,
+        "enabled": effect.enabled,
+        "settings": _reverb_settings_to_data(effect.reverb),
+    }
+
+
+def _reverb_settings_from_data(value: object) -> StudioReverbSettings:
+    data = value if isinstance(value, dict) else {}
+    defaults = StudioReverbSettings()
+    return _normalized_reverb_settings(
+        StudioReverbSettings(
+            room_height_m=_number(data.get("room_height_m"), defaults.room_height_m),
+            room_length_m=_number(data.get("room_length_m"), defaults.room_length_m),
+            room_width_m=_number(data.get("room_width_m"), defaults.room_width_m),
+            pre_delay_ms=_integer(data.get("pre_delay_ms"), defaults.pre_delay_ms),
+            decay_ms=_integer(data.get("decay_ms"), defaults.decay_ms),
+            distance_m=_number(data.get("distance_m"), defaults.distance_m),
+            brightness_percent=_integer(
+                data.get("brightness_percent"), defaults.brightness_percent
+            ),
+            modulation_percent=_integer(
+                data.get("modulation_percent"), defaults.modulation_percent
+            ),
+            early_low_hz=_integer(data.get("early_low_hz"), defaults.early_low_hz),
+            early_high_hz=_integer(data.get("early_high_hz"), defaults.early_high_hz),
+            early_low_gain_db=_number(
+                data.get("early_low_gain_db"), defaults.early_low_gain_db
+            ),
+            early_high_gain_db=_number(
+                data.get("early_high_gain_db"), defaults.early_high_gain_db
+            ),
+            reverb_low_hz=_integer(data.get("reverb_low_hz"), defaults.reverb_low_hz),
+            reverb_high_hz=_integer(data.get("reverb_high_hz"), defaults.reverb_high_hz),
+            reverb_low_gain_db=_number(
+                data.get("reverb_low_gain_db"), defaults.reverb_low_gain_db
+            ),
+            reverb_high_gain_db=_number(
+                data.get("reverb_high_gain_db"), defaults.reverb_high_gain_db
+            ),
+            dry_wet_percent=_integer(
+                data.get("dry_wet_percent"), defaults.dry_wet_percent
+            ),
+            direct_gain_db=_number(data.get("direct_gain_db"), defaults.direct_gain_db),
+            early_gain_db=_number(data.get("early_gain_db"), defaults.early_gain_db),
+            reverb_gain_db=_number(data.get("reverb_gain_db"), defaults.reverb_gain_db),
+        )
+    )
+
+
+def _normalized_reverb_settings(settings: StudioReverbSettings) -> StudioReverbSettings:
+    return StudioReverbSettings(
+        room_height_m=_clamp(settings.room_height_m, 1.0, 30.0),
+        room_length_m=_clamp(settings.room_length_m, 1.0, 30.0),
+        room_width_m=_clamp(settings.room_width_m, 1.0, 30.0),
+        pre_delay_ms=int(_clamp(settings.pre_delay_ms, -200, 200)),
+        decay_ms=int(_clamp(settings.decay_ms, 100, 4_000)),
+        distance_m=_clamp(settings.distance_m, 0.0, 30.0),
+        brightness_percent=int(_clamp(settings.brightness_percent, 0, 100)),
+        modulation_percent=int(_clamp(settings.modulation_percent, 0, 100)),
+        early_low_hz=int(_clamp(settings.early_low_hz, 50, 500)),
+        early_high_hz=int(_clamp(settings.early_high_hz, 1_000, 16_000)),
+        early_low_gain_db=_clamp(settings.early_low_gain_db, -18.0, 6.0),
+        early_high_gain_db=_clamp(settings.early_high_gain_db, -18.0, 6.0),
+        reverb_low_hz=int(_clamp(settings.reverb_low_hz, 50, 500)),
+        reverb_high_hz=int(_clamp(settings.reverb_high_hz, 1_000, 16_000)),
+        reverb_low_gain_db=_clamp(settings.reverb_low_gain_db, -18.0, 6.0),
+        reverb_high_gain_db=_clamp(settings.reverb_high_gain_db, -18.0, 6.0),
+        dry_wet_percent=int(_clamp(settings.dry_wet_percent, 0, 100)),
+        direct_gain_db=_clamp(settings.direct_gain_db, -60.0, 6.0),
+        early_gain_db=_clamp(settings.early_gain_db, -60.0, 6.0),
+        reverb_gain_db=_clamp(settings.reverb_gain_db, -60.0, 6.0),
+    )
+
+
+def _reverb_settings_to_data(settings: StudioReverbSettings) -> dict[str, object]:
+    normalized = _normalized_reverb_settings(settings)
+    return {
+        name: getattr(normalized, name)
+        for name in StudioReverbSettings.__dataclass_fields__
+    }
+
+
+def _number(value: object, default: float) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if math.isfinite(result) else default
+
+
+def _integer(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _clamp(value: object, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, _number(value, minimum)))
 
 
 def _track_state_from_data(value: object) -> StudioTrackState:

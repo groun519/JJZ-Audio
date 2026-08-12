@@ -4,6 +4,9 @@ import math
 
 import numpy as np
 
+from jang_app.services.audio_reverb import apply_reverb
+from jang_app.services.studio_session import STUDIO_EFFECT_REVERB, StudioEffect
+
 
 def process_mix_source(
     audio: np.ndarray,
@@ -13,11 +16,15 @@ def process_mix_source(
     fade_in_ms: int = 0,
     fade_out_ms: int = 0,
     pan_percent: int = 0,
+    effects: tuple[StudioEffect, ...] = (),
 ) -> np.ndarray:
     """Apply non-destructive clip and track processing before timeline mixing."""
     processed = np.asarray(audio, dtype=np.float32).copy()
     processed *= max(0.0, min(8.0, float(volume)))
     _apply_fades(processed, sample_rate, fade_in_ms, fade_out_ms)
+    for effect in effects:
+        if effect.enabled and effect.kind == STUDIO_EFFECT_REVERB:
+            processed = apply_reverb(processed, sample_rate, effect.reverb)
     return _apply_pan(processed, pan_percent)
 
 

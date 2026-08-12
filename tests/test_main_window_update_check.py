@@ -112,8 +112,8 @@ class MainWindowUpdateCheckTests(unittest.TestCase):
             "https://example.test/app.exe",
         )
         release = ReleaseManifest(
-            "0.3.1",
-            (ReleaseComponent("application", "0.3.1", "installer", (artifact,)),),
+            "99.0.0",
+            (ReleaseComponent("application", "99.0.0", "installer", (artifact,)),),
         )
         progress: list[int] = []
 

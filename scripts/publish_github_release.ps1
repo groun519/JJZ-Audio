@@ -65,9 +65,15 @@ try {
     $arguments = @(
         "release", "create", $tag,
         "--title", "JJZero Audio $version",
-        "--generate-notes",
         "--latest"
     )
+    $releaseNotes = Join-Path $projectRoot "docs\releases\$version.md"
+    if (Test-Path -LiteralPath $releaseNotes -PathType Leaf) {
+        $arguments += @("--notes-file", $releaseNotes)
+    }
+    else {
+        $arguments += "--generate-notes"
+    }
     if ($Draft) {
         $arguments += "--draft"
     }

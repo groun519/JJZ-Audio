@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
+import jang_app.services.studio_session as studio_session
+import jang_app.services.studio_timeline as studio_timeline
 from jang_app.services.studio_session import (
     TRACK_AUDIO,
     TRACK_VIDEO,
@@ -23,6 +26,44 @@ from jang_app.services.studio_timeline import (
 
 
 class StudioTimelineTests(unittest.TestCase):
+    def test_clip_effect_add_update_remove_targets_one_clip(self) -> None:
+        self.assertTrue(hasattr(studio_timeline, "add_studio_clip_effect"))
+        first = StudioClip("first", _asset("first"), 0, 0, 1_000)
+        second = StudioClip("second", _asset("second"), 1_000, 0, 1_000)
+        effect = studio_session.StudioEffect("fx-reverb", "reverb")
+
+        added = studio_timeline.add_studio_clip_effect(_session(first, second), "first", effect)
+        changed = replace(
+            effect,
+            reverb=replace(effect.reverb, dry_wet_percent=55),
+        )
+        updated = studio_timeline.update_studio_clip_effect(added, "first", changed)
+        removed = studio_timeline.remove_studio_clip_effect(updated, "first", effect.effect_id)
+
+        self.assertEqual(added.tracks[0].clips[0].effects, (effect,))
+        self.assertEqual(added.tracks[0].clips[1].effects, ())
+        self.assertEqual(updated.tracks[0].clips[0].effects, (changed,))
+        self.assertEqual(removed.tracks[0].clips[0].effects, ())
+
+    def test_clip_effect_errors_and_split_inherits_effects(self) -> None:
+        self.assertTrue(hasattr(studio_session, "StudioEffect"))
+        effect = studio_session.StudioEffect("fx-reverb", "reverb")
+        clip = StudioClip("first", _asset("first"), 0, 0, 4_000, effects=(effect,))
+
+        split = split_studio_clip(_session(clip), clip.clip_id, timeline_position_ms=2_000)
+
+        self.assertEqual(tuple(part.effects for part in split.tracks[0].clips), ((effect,), (effect,)))
+        with self.assertRaises(StudioTimelineError):
+            studio_timeline.add_studio_clip_effect(_session(clip), clip.clip_id, effect)
+        with self.assertRaises(StudioTimelineError):
+            studio_timeline.update_studio_clip_effect(
+                _session(clip),
+                clip.clip_id,
+                replace(effect, effect_id="missing"),
+            )
+        with self.assertRaises(StudioTimelineError):
+            studio_timeline.remove_studio_clip_effect(_session(clip), clip.clip_id, "missing")
+
     def test_add_track_appends_an_empty_audio_track(self) -> None:
         session = _session(StudioClip("first", _asset("first"), 0, 0, 1_000))
 
