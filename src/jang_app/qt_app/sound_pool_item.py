@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QMouseEvent, QPixmap, QResizeEvent
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
 
 from jang_app.qt_app.overflow_title_label import OverflowTextLabel
@@ -52,17 +52,16 @@ class SoundPoolItemCard(QFrame):
 
         self.waveform = WaveformThumbnail(point_count=180, height=40)
         self.waveform.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.video_thumbnail = QLabel("VIDEO")
+        self.video_thumbnail = _MediaThumbnail(path, media_kind)
         self.video_thumbnail.setObjectName("StudioVideoThumbnail")
-        self.video_thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_thumbnail.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents,
             True,
         )
         self.preview_widget = (
-            self.video_thumbnail if media_kind == "video" else self.waveform
+            self.video_thumbnail if media_kind in {"video", "image"} else self.waveform
         )
-        if media_kind != "video":
+        if media_kind == "audio":
             self.waveform.set_path(path)
 
         self.title_label = OverflowTextLabel(
@@ -166,6 +165,30 @@ class SoundPoolItemCard(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.activated.emit(self.card_id)
         super().mousePressEvent(event)
+
+
+class _MediaThumbnail(QLabel):
+    def __init__(self, path: Path, media_kind: str) -> None:
+        super().__init__("VIDEO" if media_kind == "video" else "IMAGE")
+        self._source = QPixmap(str(path)) if media_kind == "image" else QPixmap()
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumHeight(40)
+        self._refresh_pixmap()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._refresh_pixmap()
+
+    def _refresh_pixmap(self) -> None:
+        if self._source.isNull() or self.width() <= 0 or self.height() <= 0:
+            return
+        self.setPixmap(
+            self._source.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
 
 def _format_time(duration_ms: int) -> str:

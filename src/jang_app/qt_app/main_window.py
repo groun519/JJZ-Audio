@@ -42,7 +42,7 @@ from jang_app.config import (
     LOG_FILE,
     RVC_RUNTIME_DIR,
     SUPPORTED_AUDIO_EXTENSIONS,
-    SUPPORTED_VIDEO_EXTENSIONS,
+    SUPPORTED_MEDIA_EXTENSIONS,
 )
 from jang_app.pipeline.rvc_convert import (
     RvcConversionResult,
@@ -858,16 +858,16 @@ class MainWindow(QMainWindow):
             self.studio_transport_bar.set_history_available
         )
 
-        studio_timeline_area = QWidget()
-        studio_timeline_area.setObjectName("StudioTimelineArea")
-        studio_timeline_layout = QVBoxLayout(studio_timeline_area)
-        studio_timeline_layout.setContentsMargins(0, 0, 0, 0)
-        studio_timeline_layout.setSpacing(8)
-        studio_timeline_layout.addWidget(self.studio_transport_bar, 0)
-        studio_timeline_layout.addWidget(self.studio_editor, 1)
+        studio_preview_area = QWidget()
+        studio_preview_area.setObjectName("StudioPreviewArea")
+        studio_preview_layout = QVBoxLayout(studio_preview_area)
+        studio_preview_layout.setContentsMargins(0, 0, 0, 0)
+        studio_preview_layout.setSpacing(8)
+        studio_preview_layout.addWidget(self.video_preview_panel, 1)
+        studio_preview_layout.addWidget(self.studio_transport_bar, 0)
 
         self.studio_center_splitter = create_workspace_splitter(
-            (self.video_preview_panel, studio_timeline_area),
+            (studio_preview_area, self.studio_editor),
             object_name="StudioCenterSplitter",
             orientation=Qt.Orientation.Vertical,
             sizes=self.settings.studio_layout.center_sizes,
@@ -1731,12 +1731,12 @@ class MainWindow(QMainWindow):
             self._add_songs([Path(filename) for filename in filenames])
 
     def _choose_video_file(self, *_args) -> None:
-        suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_VIDEO_EXTENSIONS))
+        suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_MEDIA_EXTENSIONS))
         filename, _ = QFileDialog.getOpenFileName(
             self,
-            tr("Select Video"),
+            tr("Select Media"),
             str(Path.home()),
-            f"{tr('Video Files')} ({suffixes})",
+            f"{tr('Media Files')} ({suffixes})",
         )
         if not filename:
             return
@@ -1746,10 +1746,10 @@ class MainWindow(QMainWindow):
         candidates = [
             Path(path)
             for path in paths
-            if Path(path).suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+            if Path(path).suffix.lower() in SUPPORTED_MEDIA_EXTENSIONS
         ] if isinstance(paths, (list, tuple)) else []
         if not candidates:
-            self.video_preview_panel.set_status("Select a supported video file.")
+            self.video_preview_panel.set_status("Select a supported video or image file.")
             return
         self._start_video_file_import(candidates[0])
 
@@ -1762,14 +1762,14 @@ class MainWindow(QMainWindow):
         source = source.expanduser().resolve()
         self.video_preview_panel.set_running(True)
         self.video_preview_panel.set_progress(1)
-        self.video_preview_panel.set_status("Importing video")
+        self.video_preview_panel.set_status("Importing media")
         worker = TaskWorker(lambda progress: self.library.set_video_file(scope.song_id, source, progress))
         self._run_worker(
             worker,
             lambda result: self._on_video_source_attached(scope, result),
             lambda error: self._on_video_source_failed(scope, error),
             self.video_preview_panel,
-            task_title="Import Video",
+            task_title="Import Media",
             task_detail=source.name,
             action_scope=lambda: scope.is_current(self.current_work_item),
         )
@@ -1785,7 +1785,7 @@ class MainWindow(QMainWindow):
             self.video_preview_panel.set_status(str(exc))
             return
         self._set_video_source(source, enabled=True)
-        self.video_preview_panel.set_status("Video attached")
+        self.video_preview_panel.set_status("Media attached")
         self._refresh_open_library_details(item.id)
 
     def _start_video_download(self) -> None:
@@ -1817,7 +1817,7 @@ class MainWindow(QMainWindow):
         except KeyError:
             return
         self._set_video_source(source, enabled=True)
-        self.video_preview_panel.set_status("Video source cleared")
+        self.video_preview_panel.set_status("Media source cleared")
         self._refresh_open_library_details(item.id)
 
     def _select_saved_video_source(self, path: Path) -> None:
@@ -1830,7 +1830,7 @@ class MainWindow(QMainWindow):
             self.video_preview_panel.set_status(str(exc))
             return
         self._set_video_source(source, enabled=True)
-        self.video_preview_panel.set_status("Saved video selected")
+        self.video_preview_panel.set_status("Saved media selected")
         self._refresh_open_library_details(item.id)
 
     def _on_video_source_attached(self, scope: WorkTaskScope, result: object) -> None:
@@ -1838,7 +1838,7 @@ class MainWindow(QMainWindow):
         if not scope.is_current(self.current_work_item) or not isinstance(result, VideoSource):
             return
         self._set_video_source(result, enabled=True)
-        self.video_preview_panel.set_status("Video attached")
+        self.video_preview_panel.set_status("Media attached")
 
     def _on_video_downloaded(self, scope: WorkTaskScope, result: object) -> None:
         self._refresh_open_library_details(scope.song_id)
@@ -1850,7 +1850,7 @@ class MainWindow(QMainWindow):
 
     def _on_video_source_failed(self, scope: WorkTaskScope, error: str) -> None:
         if scope.is_current(self.current_work_item):
-            self.video_preview_panel.set_status(f"Video failed: {_last_error_line(error)}", error)
+            self.video_preview_panel.set_status(f"Media failed: {_last_error_line(error)}", error)
 
     def _open_video_location(self, path: Path) -> None:
         try:
@@ -2592,6 +2592,19 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "video_preview_panel"):
             return
         video_active = self.page_stack.currentIndex() == PAGE_STUDIO
+        if video_active and self.studio_editor.has_media_track():
+            media = self.studio_editor.media_at(self._playback_position_ms)
+            if media is None:
+                self.video_preview_panel.sync_timeline_media(None, "", 0, False)
+            else:
+                asset, source_position_ms = media
+                self.video_preview_panel.sync_timeline_media(
+                    asset.path,
+                    asset.media_kind,
+                    source_position_ms,
+                    is_playing and self._current_playback_context() == "output",
+                )
+            return
         self.video_preview_panel.sync_playback(
             self._playback_position_ms,
             video_active and is_playing and self._current_playback_context() == "output",
@@ -4481,12 +4494,12 @@ class MainWindow(QMainWindow):
                 and load_output_sound_set(song.output_job_dir, self.settings.output_root) is not None
             ),
         )
-        has_local_video = video_source.path is not None and video_source.path.is_file()
+        has_local_media = video_source.path is not None and video_source.path.is_file()
         self.export_page.set_exports(audio_exports, video_exports, export_dir)
         self.export_page.set_target_song(
             song.id,
             audio_enabled=capabilities.can_export,
-            video_enabled=capabilities.can_export and has_local_video,
+            video_enabled=capabilities.can_export and has_local_media,
         )
 
     def _on_export_song_changed(self, song_id: str) -> None:

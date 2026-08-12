@@ -69,7 +69,7 @@ def build_song_asset_details(package: SongPackage) -> SongAssetDetails:
             _asset(
                 package,
                 STAGE_SOURCE,
-                "Source Video",
+                "Source Media",
                 video_source.path,
                 is_active=True,
                 removal_scope=REMOVAL_VIDEO,

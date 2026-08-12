@@ -18,6 +18,7 @@ from jang_app.services.studio_session import (
     StudioTrack,
     StudioTrackState,
 )
+from jang_app.config import SUPPORTED_IMAGE_EXTENSIONS
 from jang_app.services.video_source import VideoSourceStore
 from jang_app.services.vocal_project import VocalProjectValidationError, VocalTake
 from jang_app.services.vocal_project_store import VocalProjectStore
@@ -31,10 +32,17 @@ class StudioSoundAsset:
     duration_ms: int
     take: VocalTake | None = None
     media_kind: str = "audio"
+    default_clip_duration_ms: int | None = None
 
     @property
     def asset_id(self) -> str:
         return self.reference.asset_id
+
+    @property
+    def clip_duration_ms(self) -> int:
+        if self.default_clip_duration_ms is None:
+            return self.duration_ms
+        return max(1, min(self.duration_ms, self.default_clip_duration_ms))
 
 
 def studio_sound_pool(package: SongPackage) -> tuple[StudioSoundAsset, ...]:
@@ -75,7 +83,7 @@ def sync_studio_video_track(
     session: StudioSession,
     assets: tuple[StudioSoundAsset, ...],
 ) -> StudioSession:
-    """Keep one timeline video track aligned with the song's active local video."""
+    """Keep one timeline media track aligned with the song's active local media."""
     source = VideoSourceStore().resolve(package)
     active_path = (
         source.path.expanduser().resolve()
@@ -86,7 +94,7 @@ def sync_studio_video_track(
         (
             asset
             for asset in assets
-            if asset.media_kind == "video"
+            if asset.media_kind in {"video", "image"}
             and active_path is not None
             and asset.path == active_path
         ),
@@ -98,7 +106,7 @@ def sync_studio_video_track(
     available_references = {
         asset.reference
         for asset in assets
-        if asset.media_kind == "video" and asset.duration_ms > 0
+        if asset.media_kind in {"video", "image"} and asset.duration_ms > 0
     }
     if (
         existing is not None
@@ -111,7 +119,7 @@ def sync_studio_video_track(
 
     video_track = StudioTrack(
         track_id="track-video",
-        name="Video",
+        name="Media",
         role=TRACK_VIDEO,
         collapsed=existing.collapsed if existing is not None else False,
         clips=(_full_asset_clip(active_asset, TRACK_VIDEO),),
@@ -203,7 +211,12 @@ def _video_assets(
         if resolved in seen or not resolved.is_file():
             continue
         seen.add(resolved)
-        duration_ms = _media_duration_ms(resolved) or fallback_duration
+        media_kind = _media_kind(resolved)
+        duration_ms = (
+            max(5_000, fallback_duration)
+            if media_kind == "image"
+            else _media_duration_ms(resolved) or fallback_duration
+        )
         reference = StudioAssetRef(_video_output_id(resolved), TRACK_VIDEO, resolved.name)
         assets.append(
             StudioSoundAsset(
@@ -211,7 +224,8 @@ def _video_assets(
                 source.display_name or resolved.name,
                 resolved,
                 duration_ms,
-                media_kind="video",
+                media_kind=media_kind,
+                default_clip_duration_ms=5_000 if media_kind == "image" else None,
             )
         )
     return assets
@@ -249,6 +263,10 @@ def _media_duration_ms(path: Path) -> int:
         return max(0, read_audio_metadata(path).duration_ms)
     except Exception:
         return 0
+
+
+def _media_kind(path: Path) -> str:
+    return "image" if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS else "video"
 
 
 def _sound_asset(
@@ -313,5 +331,5 @@ def _full_asset_clip(asset: StudioSoundAsset, role: str) -> StudioClip:
         asset=asset.reference,
         timeline_start_ms=0,
         source_start_ms=0,
-        source_end_ms=asset.duration_ms,
+        source_end_ms=asset.clip_duration_ms,
     )

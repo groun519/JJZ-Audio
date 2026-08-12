@@ -314,7 +314,7 @@ def _stylesheet(
             border-radius: 12px;
         }}
 
-        QWidget#StudioTimelineArea {{
+        QWidget#StudioPreviewArea {{
             background: transparent;
             border: 0;
         }}

@@ -141,7 +141,7 @@ class SongAssetRemovalTests(unittest.TestCase):
             details = library.asset_details(song.id)
             source_assets = details.assets_for(STAGE_SOURCE)
             primary = next(asset for asset in source_assets if asset.role == "Source")
-            video_asset = next(asset for asset in source_assets if asset.role == "Source Video")
+            video_asset = next(asset for asset in source_assets if asset.role == "Source Media")
             export_asset = details.assets_for(STAGE_EXPORT)[0]
 
             self.assertFalse(primary.can_remove)

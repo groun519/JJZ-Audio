@@ -122,6 +122,9 @@ class StudioTimelineView(QWidget):
         self._selected_track_id = ""
         self._drag_mode = ""
         self._drag_origin = QPoint()
+        self._drag_origin_track_id = ""
+        self._drag_origin_clip: StudioClip | None = None
+        self._drag_pointer_offset_ms = 0
         self._drag_track_id = ""
         self._drag_clip: StudioClip | None = None
         self._drag_volume_value: int | None = None
@@ -317,6 +320,12 @@ class StudioTimelineView(QWidget):
         self._selected_track_id = track.track_id
         self._selected_clip_id = clip.clip_id
         self._drag_origin = event.position().toPoint()
+        self._drag_origin_track_id = track.track_id
+        self._drag_origin_clip = clip
+        self._drag_pointer_offset_ms = max(
+            0,
+            self._x_to_ms(event.position().x()) - clip.timeline_start_ms,
+        )
         self._drag_track_id = track.track_id
         self._drag_clip = clip
         if abs(event.position().x() - rect.left()) <= self.HANDLE_WIDTH:
@@ -325,6 +334,7 @@ class StudioTimelineView(QWidget):
             self._drag_mode = "trim-right"
         else:
             self._drag_mode = "move"
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
         self.clip_selected.emit(clip.clip_id)
         self.update()
 
@@ -338,17 +348,20 @@ class StudioTimelineView(QWidget):
         if self._drag_clip is None or not self._drag_mode:
             self._update_cursor(event.position().toPoint())
             return super().mouseMoveEvent(event)
+        original = self._drag_origin_clip or self._original_clip()
         delta_ms = round((event.position().x() - self._drag_origin.x()) * 1000 / self._pixels_per_second)
         if self._drag_mode == "move":
             target = self._track_at_y(event.position().y())
             if target is not None and self._track_accepts_asset(target, self._drag_clip.asset.asset_id):
                 self._drag_track_id = target.track_id
             self._drag_clip = replace(
-                self._drag_clip,
-                timeline_start_ms=max(0, self._original_clip().timeline_start_ms + delta_ms),
+                original,
+                timeline_start_ms=max(
+                    0,
+                    self._x_to_ms(event.position().x()) - self._drag_pointer_offset_ms,
+                ),
             )
         elif self._drag_mode == "trim-left":
-            original = self._original_clip()
             start = max(0, min(original.source_end_ms - 100, original.source_start_ms + delta_ms))
             self._drag_clip = replace(
                 original,
@@ -356,7 +369,6 @@ class StudioTimelineView(QWidget):
                 timeline_start_ms=max(0, original.timeline_start_ms + start - original.source_start_ms),
             )
         elif self._drag_mode == "trim-right":
-            original = self._original_clip()
             asset = self._assets.get(original.asset.asset_id)
             source_limit = asset.duration_ms if asset is not None else original.source_end_ms
             end = max(original.source_start_ms + 100, min(source_limit, original.source_end_ms + delta_ms))
@@ -384,13 +396,23 @@ class StudioTimelineView(QWidget):
         clip = self._drag_clip
         mode = self._drag_mode
         target_track = self._drag_track_id
+        original = self._drag_origin_clip
+        original_track = self._drag_origin_track_id
         self._clear_drag()
         if mode == "move":
-            self.clip_moved.emit(clip.clip_id, target_track, clip.timeline_start_ms)
+            if (
+                original is None
+                or target_track != original_track
+                or clip.timeline_start_ms != original.timeline_start_ms
+            ):
+                self.clip_moved.emit(clip.clip_id, target_track, clip.timeline_start_ms)
         elif mode == "trim-left":
-            self.clip_trimmed.emit(clip.clip_id, clip.source_start_ms, clip.source_end_ms, True)
+            if original is None or clip != original:
+                self.clip_trimmed.emit(clip.clip_id, clip.source_start_ms, clip.source_end_ms, True)
         elif mode == "trim-right":
-            self.clip_trimmed.emit(clip.clip_id, clip.source_start_ms, clip.source_end_ms, False)
+            if original is None or clip != original:
+                self.clip_trimmed.emit(clip.clip_id, clip.source_start_ms, clip.source_end_ms, False)
+        self._update_cursor(event.position().toPoint())
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasFormat(STUDIO_ASSET_MIME) or event.mimeData().hasFormat(
@@ -914,7 +936,7 @@ class StudioTimelineView(QWidget):
         asset = self._assets.get(asset_id)
         if asset is None:
             return False
-        return (track.role == TRACK_VIDEO) == (asset.media_kind == "video")
+        return (track.role == TRACK_VIDEO) == (asset.media_kind in {"video", "image"})
 
     def _track(self, track_id: str) -> StudioTrack | None:
         return next((track for track in self._session.tracks if track.track_id == track_id), None)
@@ -971,6 +993,9 @@ class StudioTimelineView(QWidget):
 
     def _clear_drag(self) -> None:
         self._drag_mode = ""
+        self._drag_origin_track_id = ""
+        self._drag_origin_clip = None
+        self._drag_pointer_offset_ms = 0
         self._drag_clip = None
         self._drag_track_id = ""
         self.update()
@@ -1072,7 +1097,7 @@ class StudioTimelineView(QWidget):
         }
         for asset_id in referenced_ids:
             asset = self._assets.get(asset_id)
-            if asset is None or asset.media_kind == "video":
+            if asset is None or asset.media_kind in {"video", "image"}:
                 continue
             try:
                 key = waveform_cache_key(asset.path, _WAVEFORM_POINTS)
@@ -1257,6 +1282,24 @@ class StudioEditor(QWidget):
     def session(self) -> StudioSession:
         return self._session
 
+    def has_media_track(self) -> bool:
+        return any(track.role == TRACK_VIDEO for track in self._session.tracks)
+
+    def media_at(self, position_ms: int) -> tuple[StudioSoundAsset, int] | None:
+        position = max(0, int(position_ms))
+        track = next((item for item in self._session.tracks if item.role == TRACK_VIDEO), None)
+        if track is None:
+            return None
+        for clip in reversed(track.clips):
+            if not clip.timeline_start_ms <= position < clip.timeline_end_ms:
+                continue
+            asset = self._assets_by_id.get(clip.asset.asset_id)
+            if asset is None or asset.media_kind not in {"video", "image"}:
+                continue
+            source_position = clip.source_start_ms + position - clip.timeline_start_ms
+            return asset, source_position
+        return None
+
     def set_playhead(self, position_ms: int) -> None:
         self._playhead_ms = max(0, int(position_ms))
         self.timeline.set_playhead(self._playhead_ms)
@@ -1312,8 +1355,8 @@ class StudioEditor(QWidget):
             self.set_status(tr("The sound duration could not be read."))
             return
         target = next((track for track in self._session.tracks if track.track_id == track_id), None)
-        if target is None or (target.role == TRACK_VIDEO) != (asset.media_kind == "video"):
-            self.set_status(tr("Video can only be placed on the video track."))
+        if target is None or (target.role == TRACK_VIDEO) != (asset.media_kind in {"video", "image"}):
+            self.set_status(tr("Media can only be placed on the media track."))
             return
         try:
             self._commit(self._add_clip(track_id, asset, position_ms))
@@ -1357,7 +1400,7 @@ class StudioEditor(QWidget):
             self._session,
             track_id,
             asset.reference,
-            asset.duration_ms,
+            asset.clip_duration_ms,
             timeline_start_ms=position_ms,
         )
 

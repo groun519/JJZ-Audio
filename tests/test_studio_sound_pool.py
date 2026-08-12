@@ -152,6 +152,24 @@ class StudioSoundPoolTests(unittest.TestCase):
         self.assertEqual(pool.visible_asset_ids(), (video.asset_id,))
         self.assertIs(pool._cards[video.asset_id].preview_widget, pool._cards[video.asset_id].video_thumbnail)
 
+    def test_image_asset_uses_media_preview_and_filter(self) -> None:
+        image = StudioSoundAsset(
+            StudioAssetRef("image-source", TRACK_VIDEO, "cover.png"),
+            "Cover Image",
+            Path("cover.png"),
+            151_000,
+            media_kind="image",
+            default_clip_duration_ms=5_000,
+        )
+        pool = StudioSoundPool()
+        pool.set_assets((*_assets(), image))
+
+        pool.role_buttons[TRACK_VIDEO].click()
+
+        self.assertEqual(pool.visible_asset_ids(), (image.asset_id,))
+        self.assertEqual(pool._cards[image.asset_id].duration_label.text(), "00:05")
+        self.assertIs(pool._cards[image.asset_id].preview_widget, pool._cards[image.asset_id].video_thumbnail)
+
 
 def _assets() -> tuple[StudioSoundAsset, ...]:
     return (

@@ -39,6 +39,19 @@ class VideoSourceStoreTests(unittest.TestCase):
             self.assertEqual(imported.path.parent, package.folder / "01_source" / "video")
             self.assertEqual(progress[-1], 100)
 
+    def test_imports_an_image_as_managed_media(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package(root)
+            source = root / "cover.png"
+            source.write_bytes(b"image")
+
+            imported = VideoSourceStore().import_file(package, source)
+
+            self.assertEqual(imported.media_kind, "image")
+            self.assertEqual(imported.path.parent, package.folder / "01_source" / "video")
+            self.assertIn(imported, VideoSourceStore().managed_sources(package))
+
     def test_explicit_url_overrides_inherited_youtube_source_and_clear_restores_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -144,7 +157,7 @@ class VideoSourceStoreTests(unittest.TestCase):
             source_assets = library.asset_details(song.id).assets_for(STAGE_SOURCE)
 
             self.assertEqual(library.video_source(song.id), attached)
-            video_assets = [asset for asset in source_assets if asset.role == "Source Video"]
+            video_assets = [asset for asset in source_assets if asset.role == "Source Media"]
             self.assertEqual([asset.path for asset in video_assets], [attached.path])
             self.assertTrue(video_assets[0].is_active)
 

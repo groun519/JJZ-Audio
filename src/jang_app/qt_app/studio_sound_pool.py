@@ -55,7 +55,7 @@ class StudioSoundCard(SoundPoolItemCard):
             title=title,
             badge=_short_role_label(role),
             detail=_studio_card_detail(asset, source, detail),
-            duration_ms=asset.duration_ms,
+            duration_ms=asset.clip_duration_ms,
             media_kind=asset.media_kind,
             object_name="StudioSoundCard",
             parent=parent,
@@ -71,7 +71,7 @@ class StudioSoundCard(SoundPoolItemCard):
             title=_studio_card_title(self.asset, source),
             badge=_short_role_label(role),
             detail=_studio_card_detail(self.asset, source, detail),
-            duration_ms=self.asset.duration_ms,
+            duration_ms=self.asset.clip_duration_ms,
         )
         self.setToolTip(_asset_tooltip(self.asset))
 
@@ -230,7 +230,7 @@ class StudioSoundPool(QFrame):
             "original_vocal": tr("Vocal"),
             "instrumental": tr("Inst."),
             "converted_vocal": tr("RVC"),
-            TRACK_VIDEO: tr("Video"),
+            TRACK_VIDEO: tr("Media"),
         }
         for role, button in self.role_buttons.items():
             button.setText(labels[role])
@@ -340,7 +340,7 @@ def _role_label(role: str) -> str:
         "original_vocal": "Original Vocal",
         "instrumental": "Instrumental",
         "converted_vocal": "Converted Vocal",
-        TRACK_VIDEO: "Video",
+        TRACK_VIDEO: "Media",
     }.get(role, "Audio")
 
 
@@ -357,7 +357,7 @@ def _asset_description(asset: StudioSoundAsset) -> tuple[str, str]:
 def _studio_card_title(asset: StudioSoundAsset, source: str) -> str:
     if asset.reference.role == "converted_vocal":
         return vocal_take_label(asset.take, asset.path)
-    if asset.media_kind == "video":
+    if asset.media_kind in {"video", "image"}:
         return tr(source)
     return tr(source)
 
@@ -384,7 +384,7 @@ def _short_role_label(role: str) -> str:
         "original_vocal": tr("Vocal"),
         "instrumental": tr("Inst."),
         "converted_vocal": tr("RVC"),
-        TRACK_VIDEO: tr("Video"),
+        TRACK_VIDEO: tr("Media"),
     }.get(role, tr("Audio"))
 
 

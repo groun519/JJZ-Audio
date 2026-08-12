@@ -64,6 +64,38 @@ class VideoPreviewPanelTests(unittest.TestCase):
             self.assertIs(panel.stack.currentWidget(), panel.source_editor)
             panel.close()
 
+    def test_local_image_uses_the_static_media_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "cover.png"
+            image.write_bytes(b"image")
+            panel = VideoPreviewPanel()
+
+            panel.set_source(
+                VideoSource(kind=VIDEO_KIND_FILE, path=image, original_name="cover.png"),
+                enabled=True,
+            )
+
+            self.assertEqual(panel._source.media_kind, "image")
+            self.assertIs(panel.stack.currentWidget(), panel.image_widget)
+            panel.close()
+
+    def test_timeline_media_switches_between_image_and_empty_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "cover.png"
+            image.write_bytes(b"image")
+            panel = VideoPreviewPanel()
+            panel.set_source(VideoSource(), enabled=True)
+            panel.set_active(True)
+
+            panel.sync_timeline_media(image, "image", 0, True)
+            self.assertIs(panel.stack.currentWidget(), panel.image_widget)
+            self.assertEqual(panel._preview_path, image.resolve())
+
+            panel.sync_timeline_media(None, "", 0, False)
+            self.assertIs(panel.stack.currentWidget(), panel.image_widget)
+            self.assertIsNone(panel._preview_path)
+            panel.close()
+
     def test_original_youtube_url_action_attaches_the_work_song_source(self) -> None:
         panel = VideoPreviewPanel()
         requested = QSignalSpy(panel.url_requested)

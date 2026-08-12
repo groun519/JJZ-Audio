@@ -348,6 +348,24 @@ class StudioSessionTests(unittest.TestCase):
             self.assertEqual(restored.tracks[0].role, TRACK_VIDEO)
             self.assertEqual(len(restored.tracks[0].clips), 2)
 
+    def test_local_image_uses_a_five_second_default_media_clip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_audio_output(root)
+            source_image = root / "cover.png"
+            source_image.write_bytes(b"image")
+            VideoSourceStore().import_file(package, source_image)
+
+            session = load_studio_session(package)
+            assets = studio_sound_pool(package)
+            image_asset = next(asset for asset in assets if asset.media_kind == "image")
+            media_track = next(track for track in session.tracks if track.role == TRACK_VIDEO)
+
+            self.assertEqual(image_asset.clip_duration_ms, 5_000)
+            self.assertGreaterEqual(image_asset.duration_ms, image_asset.clip_duration_ms)
+            self.assertEqual(media_track.name, "Media")
+            self.assertEqual(media_track.clips[0].duration_ms, 5_000)
+
     def test_video_only_session_restores_required_audio_tracks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -4,9 +4,10 @@ import os
 import tempfile
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-from jang_app.config import FFMPEG_BIN_DIR
+from jang_app.config import FFMPEG_BIN_DIR, SUPPORTED_IMAGE_EXTENSIONS
 from jang_app.services.audio_export import export_mix
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.command import run_command
@@ -19,7 +20,8 @@ from jang_app.services.export_names import (
 from jang_app.services.export_catalog import ExportedFile, list_exported_files
 from jang_app.services.song_export import build_song_mix_sources
 from jang_app.services.song_package import EXPORT_STAGE, SongPackage
-from jang_app.services.studio_session import StudioSession
+from jang_app.services.studio_assets import resolve_studio_asset
+from jang_app.services.studio_session import TRACK_VIDEO, StudioSession
 from jang_app.services.video_source import VideoSource
 
 
@@ -31,15 +33,21 @@ SongVideoExport = ExportedFile
 _LEGACY_VIDEO_PATTERN = timestamp_export_pattern("video", ".mp4")
 
 
+@dataclass(frozen=True)
+class _VisualClip:
+    path: Path
+    media_kind: str
+    timeline_start_ms: int
+    source_start_ms: int
+    duration_ms: int
+
+
 def render_song_video(
     package: SongPackage,
     source: VideoSource,
     session: StudioSession,
     progress: Callable[[int], None] | None = None,
 ) -> Path:
-    video_path = source.path.expanduser().resolve() if source.path is not None else None
-    if video_path is None or not video_path.is_file():
-        raise SongVideoExportError("Download or add a local video before rendering.")
     try:
         executable = require_executable(
             "ffmpeg",
@@ -70,10 +78,13 @@ def render_song_video(
             if progress is not None:
                 progress(12)
             duration_ms = max(1, read_audio_metadata(mix_path).duration_ms)
+            visual_clips = _visual_clips(package, source, session, duration_ms)
+            if not visual_clips:
+                raise SongVideoExportError("Download or add local media before rendering.")
             completed = run_command(
                 _render_command(
                     executable,
-                    video_path,
+                    visual_clips,
                     mix_path,
                     temporary_output,
                     duration_ms,
@@ -109,27 +120,42 @@ def list_song_video_exports(package: SongPackage) -> tuple[SongVideoExport, ...]
 
 def _render_command(
     executable: str,
-    video_path: Path,
+    visual_clips: tuple[_VisualClip, ...],
     mix_path: Path,
     output_path: Path,
     duration_ms: int,
 ) -> list[str]:
-    return [
+    command = [
         executable,
         "-y",
         "-hide_banner",
         "-loglevel",
         "error",
-        "-i",
-        str(video_path),
-        "-i",
-        str(mix_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
+    ]
+    for clip in visual_clips:
+        duration = _seconds(clip.duration_ms)
+        if clip.media_kind == "image":
+            command.extend(("-loop", "1", "-framerate", "30", "-t", duration))
+        else:
+            if clip.source_start_ms > 0:
+                command.extend(("-ss", _seconds(clip.source_start_ms)))
+            command.extend(("-t", duration))
+        command.extend(("-i", str(clip.path)))
+    audio_index = len(visual_clips)
+    command.extend(("-i", str(mix_path)))
+    command.extend(
+        (
+            "-filter_complex",
+            _visual_filter(visual_clips, duration_ms),
+            "-map",
+            f"[visual{len(visual_clips)}]",
+            "-map",
+            f"{audio_index}:a:0",
+        )
+    )
+    command.extend([
         "-t",
-        f"{duration_ms / 1000:.3f}",
+        _seconds(duration_ms),
         "-c:v",
         "libx264",
         "-preset",
@@ -144,12 +170,81 @@ def _render_command(
         "320k",
         "-movflags",
         "+faststart",
-        "-shortest",
         "-progress",
         "pipe:1",
         "-nostats",
         str(output_path),
+    ])
+    return command
+
+
+def _visual_clips(
+    package: SongPackage,
+    source: VideoSource,
+    session: StudioSession,
+    output_duration_ms: int,
+) -> tuple[_VisualClip, ...]:
+    clips: list[_VisualClip] = []
+    media_track = next((track for track in session.tracks if track.role == TRACK_VIDEO), None)
+    if media_track is not None:
+        for clip in media_track.clips:
+            path = resolve_studio_asset(package, clip.asset)
+            remaining = output_duration_ms - clip.timeline_start_ms
+            duration_ms = min(clip.duration_ms, remaining)
+            if path is None or duration_ms <= 0:
+                continue
+            clips.append(
+                _VisualClip(
+                    path,
+                    _media_kind(path),
+                    clip.timeline_start_ms,
+                    clip.source_start_ms,
+                    duration_ms,
+                )
+            )
+    if clips:
+        return tuple(sorted(clips, key=lambda clip: clip.timeline_start_ms))
+
+    fallback = source.path.expanduser().resolve() if source.path is not None else None
+    if fallback is None or not fallback.is_file():
+        return ()
+    return (
+        _VisualClip(
+            fallback,
+            _media_kind(fallback),
+            0,
+            0,
+            output_duration_ms,
+        ),
+    )
+
+
+def _visual_filter(clips: tuple[_VisualClip, ...], duration_ms: int) -> str:
+    filters = [
+        f"color=c=black:s=1920x1080:r=30:d={_seconds(duration_ms)}[visual0]"
     ]
+    for index, clip in enumerate(clips):
+        start = _seconds(clip.timeline_start_ms)
+        end = _seconds(clip.timeline_start_ms + clip.duration_ms)
+        duration = _seconds(clip.duration_ms)
+        filters.append(
+            f"[{index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30,"
+            f"trim=duration={duration},setpts=PTS-STARTPTS+{start}/TB[media{index}]"
+        )
+        filters.append(
+            f"[visual{index}][media{index}]overlay=eof_action=pass:shortest=0:"
+            f"enable='between(t\\,{start}\\,{end})'[visual{index + 1}]"
+        )
+    return ";".join(filters)
+
+
+def _media_kind(path: Path) -> str:
+    return "image" if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS else "video"
+
+
+def _seconds(milliseconds: int) -> str:
+    return f"{max(0, milliseconds) / 1000:.3f}"
 
 
 def _ffmpeg_progress(

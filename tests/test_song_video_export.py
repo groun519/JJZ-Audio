@@ -58,10 +58,39 @@ class SongVideoExportTests(unittest.TestCase):
             self.assertNotIn("end_ms", captured["mix_options"])
             self.assertNotIn("-ss", command)
             self.assertEqual(command[command.index("-t") + 1], "1.000")
-            self.assertIn("0:v:0", command)
+            self.assertIn("[visual1]", command)
             self.assertIn("1:a:0", command)
             self.assertEqual(progress[-1], 100)
             self.assertEqual(list_song_video_exports(package)[0].path, rendered)
+
+    def test_image_source_is_looped_and_composited_into_the_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_output(root)
+            image = package.folder / "01_source" / "video" / "cover.png"
+            image.parent.mkdir(parents=True, exist_ok=True)
+            image.write_bytes(b"image")
+            source = VideoSource(kind=VIDEO_KIND_FILE, path=image, original_name=image.name)
+            captured: dict[str, object] = {}
+
+            def fake_export(_sources, output: Path, **_options) -> Path:
+                sf.write(output, np.zeros(16_000, dtype=np.float32), 16_000)
+                return output
+
+            def fake_command(args, **_options):
+                captured["command"] = list(args)
+                Path(args[-1]).write_bytes(b"rendered")
+                return CommandResult(args, 0, "", "")
+
+            with patch("jang_app.services.song_video_export.require_executable", return_value="ffmpeg"):
+                with patch("jang_app.services.song_video_export.export_mix", side_effect=fake_export):
+                    with patch("jang_app.services.song_video_export.run_command", side_effect=fake_command):
+                        render_song_video(package, source, StudioSession())
+
+            command = captured["command"]
+            self.assertIn("-loop", command)
+            self.assertIn(str(image), command)
+            self.assertIn("color=c=black:s=1920x1080", command[command.index("-filter_complex") + 1])
 
     def test_rejects_a_source_without_a_local_video(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

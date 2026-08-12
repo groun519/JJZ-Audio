@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from jang_app.config import SUPPORTED_VIDEO_EXTENSIONS
+from jang_app.config import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_MEDIA_EXTENSIONS
 from jang_app.services.file_names import safe_filename_stem
 from jang_app.services.managed_files import copy_file_atomic, write_json_atomic
 from jang_app.services.song_package import SOURCE_STAGE, STUDIO_STAGE, SongPackage
@@ -41,6 +41,12 @@ class VideoSource:
         if self.path is not None:
             return self.path.name
         return self.url
+
+    @property
+    def media_kind(self) -> str:
+        if self.path is not None and self.path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
+            return "image"
+        return "video"
 
 
 class VideoSourceStore:
@@ -113,7 +119,7 @@ class VideoSourceStore:
             return ()
         for path in paths:
             try:
-                if not path.is_file() or path.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
+                if not path.is_file() or path.suffix.lower() not in SUPPORTED_MEDIA_EXTENSIONS:
                     continue
                 resolved = path.resolve()
                 resolved.relative_to(video_dir.resolve())
@@ -144,9 +150,9 @@ class VideoSourceStore:
         try:
             selected.relative_to(video_dir)
         except ValueError as exc:
-            raise ValueError("Select a video stored with this song.") from exc
-        if not selected.is_file() or selected.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
-            raise ValueError("Select a supported stored video.")
+            raise ValueError("Select media stored with this song.") from exc
+        if not selected.is_file() or selected.suffix.lower() not in SUPPORTED_MEDIA_EXTENSIONS:
+            raise ValueError("Select a supported stored media file.")
 
         active = self.load(package)
         if active.path is not None and active.path.resolve() == selected:
@@ -162,13 +168,13 @@ class VideoSourceStore:
 
     def import_file(self, package: SongPackage, source: Path, progress=None) -> VideoSource:
         source = source.expanduser().resolve()
-        if not source.is_file() or source.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
-            raise ValueError("Select a supported video file.")
+        if not source.is_file() or source.suffix.lower() not in SUPPORTED_MEDIA_EXTENSIONS:
+            raise ValueError("Select a supported video or image file.")
 
         stat = source.stat()
         digest_input = f"{source}|{stat.st_size}|{stat.st_mtime_ns}".casefold().encode("utf-8")
         digest = hashlib.sha256(digest_input).hexdigest()[:12]
-        stem = safe_filename_stem(source.stem, fallback="video", max_length=56)
+        stem = safe_filename_stem(source.stem, fallback="media", max_length=56)
         target = package.folder / SOURCE_STAGE / "video" / f"{stem}__{digest}{source.suffix.lower()}"
         total_bytes = max(1, stat.st_size)
         copy_file_atomic(
@@ -233,7 +239,7 @@ class VideoSourceStore:
             try:
                 managed_path = resolved.relative_to(package.folder.resolve()).as_posix()
             except ValueError as exc:
-                raise ValueError("Video source must stay inside its song package.") from exc
+                raise ValueError("Media source must stay inside its song package.") from exc
         write_json_atomic(
             video_source_state_path(package),
             {

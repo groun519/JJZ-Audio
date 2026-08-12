@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Protocol
 
 from PySide6.QtCore import QEvent, QUrl, Qt, Signal
+from PySide6.QtGui import QPixmap, QResizeEvent
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -75,8 +76,10 @@ class VideoPreviewPanel(QFrame):
         self._active = False
         self._enabled = False
         self._running = False
+        self._preview_path: Path | None = None
+        self._preview_kind = ""
 
-        self.title_label = QLabel("Video")
+        self.title_label = QLabel("Media")
         self.title_label.setObjectName("SectionTitle")
         self.source_label = QLabel("")
         self.source_label.setObjectName("MutedText")
@@ -88,13 +91,13 @@ class VideoPreviewPanel(QFrame):
         self.saved_source_combo.setMinimumWidth(170)
         self.saved_source_combo.setMaximumWidth(260)
         self.saved_source_combo.setMaxVisibleItems(8)
-        set_translated_tooltip(self.saved_source_combo, "Reuse saved video")
+        set_translated_tooltip(self.saved_source_combo, "Reuse saved media")
         self.saved_source_combo.activated.connect(self._select_saved_source)
         self.saved_source_combo.hide()
 
         self.edit_button = SvgIconButton("edit", size=30)
         self.edit_button.setObjectName("ControlIconButton")
-        set_translated_tooltip(self.edit_button, "Change video source")
+        set_translated_tooltip(self.edit_button, "Change media source")
         self.edit_button.clicked.connect(self._show_source_editor)
         self.edit_button.hide()
 
@@ -109,6 +112,7 @@ class VideoPreviewPanel(QFrame):
         self.video_widget = QVideoWidget()
         self.video_widget.setObjectName("VideoCanvas")
         self.video_widget.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
+        self.image_widget = _ImageCanvas()
 
         self.source_editor = QFrame()
         self.source_editor.setObjectName("VideoSourceCanvas")
@@ -142,10 +146,10 @@ class VideoPreviewPanel(QFrame):
         self.download_button.clicked.connect(self.download_requested.emit)
         self.open_button = SvgIconButton("folder", size=30)
         self.open_button.setObjectName("VideoSourceActionButton")
-        set_translated_tooltip(self.open_button, "Open video location")
+        set_translated_tooltip(self.open_button, "Open media location")
         self.open_button.clicked.connect(self._open_location)
         self.clear_button = DangerIconButton(size=30)
-        set_translated_tooltip(self.clear_button, "Clear video source")
+        set_translated_tooltip(self.clear_button, "Clear media source")
         self.clear_button.clicked.connect(self.clear_requested.emit)
 
         source_card_layout = QHBoxLayout(self.source_card)
@@ -163,8 +167,8 @@ class VideoPreviewPanel(QFrame):
 
         self.drop_card = FileDropCard()
         self.drop_card.setMinimumHeight(124)
-        set_translated_text(self.drop_card.title_label, "Drop Video")
-        set_translated_tooltip(self.drop_card.file_button, "Add video file")
+        set_translated_text(self.drop_card.title_label, "Drop Media")
+        set_translated_tooltip(self.drop_card.file_button, "Add media file")
         self.drop_card.browse_requested.connect(self.browse_requested.emit)
         self.drop_card.files_dropped.connect(self.files_dropped.emit)
 
@@ -186,6 +190,7 @@ class VideoPreviewPanel(QFrame):
         self.stack = QStackedWidget()
         self.stack.addWidget(self.source_editor)
         self.stack.addWidget(self.video_widget)
+        self.stack.addWidget(self.image_widget)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 18)
@@ -217,6 +222,8 @@ class VideoPreviewPanel(QFrame):
     ) -> None:
         self.media_player.stop()
         self.media_player.setSource(QUrl())
+        self._preview_path = None
+        self._preview_kind = ""
         self._source = source
         self._enabled = enabled
         self._original_song_url = original_song_url.strip()
@@ -241,8 +248,7 @@ class VideoPreviewPanel(QFrame):
 
         if self.has_local_source:
             path = source.path.expanduser().resolve()
-            self.media_player.setSource(QUrl.fromLocalFile(str(path)))
-            self.stack.setCurrentWidget(self.video_widget)
+            self._activate_preview_path(path, source.media_kind)
             self.edit_button.show()
         else:
             self.stack.setCurrentWidget(self.source_editor)
@@ -295,9 +301,31 @@ class VideoPreviewPanel(QFrame):
             self.synchronizer.sync(self.media_player.position(), False)
 
     def sync_playback(self, position_ms: int, is_playing: bool) -> None:
-        if not self._active or not self.has_local_source:
+        if not self._active or not self.has_local_source or self._source.media_kind != "video":
             return
+        self._activate_preview_path(self._source.path, "video")
         self.synchronizer.sync(position_ms, is_playing)
+
+    def sync_timeline_media(
+        self,
+        path: Path | None,
+        media_kind: str,
+        source_position_ms: int,
+        is_playing: bool,
+    ) -> None:
+        if not self._active:
+            return
+        if path is None or not path.is_file():
+            self.synchronizer.sync(self.media_player.position(), False)
+            self._preview_path = None
+            self._preview_kind = ""
+            self.image_widget.clear_source()
+            self.stack.setCurrentWidget(self.image_widget)
+            return
+        resolved = path.expanduser().resolve()
+        self._activate_preview_path(resolved, media_kind)
+        if media_kind == "video":
+            self.synchronizer.sync(source_position_ms, is_playing)
 
     def stop(self) -> None:
         self.media_player.stop()
@@ -315,14 +343,14 @@ class VideoPreviewPanel(QFrame):
 
     def apply_language(self) -> None:
         apply_widget_language(self)
-        set_translated_text(self.title_label, "Video")
-        set_translated_tooltip(self.edit_button, "Change video source")
-        set_translated_tooltip(self.saved_source_combo, "Reuse saved video")
-        set_translated_tooltip(self.open_button, "Open video location")
-        set_translated_tooltip(self.clear_button, "Clear video source")
+        set_translated_text(self.title_label, "Media")
+        set_translated_tooltip(self.edit_button, "Change media source")
+        set_translated_tooltip(self.saved_source_combo, "Reuse saved media")
+        set_translated_tooltip(self.open_button, "Open media location")
+        set_translated_tooltip(self.clear_button, "Clear media source")
         set_translated_tooltip(self.download_button, "Download Video")
-        set_translated_text(self.drop_card.title_label, "Drop Video")
-        set_translated_tooltip(self.drop_card.file_button, "Add video file")
+        set_translated_text(self.drop_card.title_label, "Drop Media")
+        set_translated_tooltip(self.drop_card.file_button, "Add media file")
         self.url_field.apply_language()
         self._populate_saved_sources(self._saved_sources)
         if self._source.is_configured:
@@ -346,7 +374,7 @@ class VideoPreviewPanel(QFrame):
         active_index = -1
         if active_path is None:
             self.saved_source_combo.addItem(
-                tr("Saved videos ({count})", count=len(local_sources)),
+                tr("Saved media ({count})", count=len(local_sources)),
                 None,
             )
         for source in local_sources:
@@ -396,6 +424,53 @@ class VideoPreviewPanel(QFrame):
     def _on_media_error(self, _error, error_text: str) -> None:
         if error_text:
             self.source_label.setToolTip(error_text)
+
+    def _activate_preview_path(self, path: Path, media_kind: str) -> None:
+        resolved = path.expanduser().resolve()
+        if self._preview_path == resolved and self._preview_kind == media_kind:
+            return
+        self.media_player.stop()
+        self.media_player.setSource(QUrl())
+        self._preview_path = resolved
+        self._preview_kind = media_kind
+        if media_kind == "image":
+            self.image_widget.set_path(resolved)
+            self.stack.setCurrentWidget(self.image_widget)
+            return
+        self.media_player.setSource(QUrl.fromLocalFile(str(resolved)))
+        self.stack.setCurrentWidget(self.video_widget)
+
+
+class _ImageCanvas(QLabel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("VideoCanvas")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._source = QPixmap()
+
+    def set_path(self, path: Path) -> None:
+        self._source = QPixmap(str(path))
+        self._refresh_pixmap()
+
+    def clear_source(self) -> None:
+        self._source = QPixmap()
+        self.clear()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._refresh_pixmap()
+
+    def _refresh_pixmap(self) -> None:
+        if self._source.isNull() or self.width() <= 0 or self.height() <= 0:
+            self.clear()
+            return
+        self.setPixmap(
+            self._source.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
 
 class _VideoUrlField(QFrame):

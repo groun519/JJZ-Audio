@@ -37,7 +37,7 @@ def add_studio_clip(
         raise StudioTimelineError("The source duration must be greater than zero.")
     target_track = _find_track(session, track_id)
     if not _track_accepts_asset(target_track, asset):
-        raise StudioTimelineError("Video can only be placed on the video track.")
+        raise StudioTimelineError("Media can only be placed on the media track.")
     clip = StudioClip(
         clip_id=f"clip-{uuid.uuid4().hex}",
         asset=asset,
@@ -72,7 +72,7 @@ def move_studio_clip(
     source_track, clip = _find_clip(session, clip_id)
     target_track = _find_track(session, track_id)
     if not _track_accepts_asset(target_track, clip.asset):
-        raise StudioTimelineError("Video can only be placed on the video track.")
+        raise StudioTimelineError("Media can only be placed on the media track.")
     updated_clip = replace(clip, timeline_start_ms=max(0, int(timeline_start_ms)))
     tracks: list[StudioTrack] = []
     for track in session.tracks:

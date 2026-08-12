@@ -20,6 +20,7 @@ from jang_app.qt_app.waveform_thumbnail import (
 from jang_app.services.studio_assets import StudioSoundAsset
 from jang_app.services.studio_session import (
     TRACK_ORIGINAL_VOCAL,
+    TRACK_VIDEO,
     StudioAssetRef,
     StudioClip,
     StudioEffect,
@@ -158,6 +159,85 @@ class StudioEditorTests(unittest.TestCase):
         self.assertEqual(len(regions), 1)
         self.assertEqual(regions[0][0].effect_id, effect.effect_id)
         self.assertTrue(timeline._clip_rect(clip, 0).contains(regions[0][1].center()))
+
+    def test_clip_follows_pointer_before_release_and_commits_once(self) -> None:
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(_session(), ())
+        moved = QSignalSpy(timeline.clip_moved)
+        clip = _session().tracks[0].clips[0]
+        start = timeline._clip_rect(clip, 0).center()
+        destination = QPointF(start.x() + 48, start.y())
+
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                start,
+                start,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        timeline.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                destination,
+                destination,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertIsNotNone(timeline._drag_clip)
+        self.assertEqual(timeline._drag_clip.timeline_start_ms, 2_000)
+        self.assertEqual(timeline._session.tracks[0].clips[0].timeline_start_ms, 0)
+        self.assertEqual(moved.count(), 0)
+
+        timeline.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                destination,
+                destination,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(moved.count(), 1)
+        self.assertEqual(moved.at(0), ["clip-1", "track-original-vocal", 2_000])
+
+    def test_click_without_drag_does_not_commit_a_clip_move(self) -> None:
+        timeline = StudioTimelineView()
+        timeline.set_context(_session(), ())
+        moved = QSignalSpy(timeline.clip_moved)
+        clip = _session().tracks[0].clips[0]
+        position = timeline._clip_rect(clip, 0).center()
+
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                position,
+                position,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        timeline.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                position,
+                position,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(moved.count(), 0)
 
     def test_effect_drop_target_is_the_exact_audio_clip_under_pointer(self) -> None:
         timeline = StudioTimelineView()
@@ -611,6 +691,27 @@ class StudioEditorTests(unittest.TestCase):
             self.assertGreaterEqual(track.volume_percent, 145)
             self.assertLessEqual(track.volume_percent, 155)
             self.assertGreaterEqual(changed.count(), 2)
+
+    def test_media_lookup_uses_the_clip_under_the_playhead(self) -> None:
+        image = StudioSoundAsset(
+            StudioAssetRef("image", TRACK_VIDEO, "cover.png"),
+            "Cover",
+            Path("cover.png"),
+            20_000,
+            media_kind="image",
+            default_clip_duration_ms=5_000,
+        )
+        clip = StudioClip("clip-image", image.reference, 3_000, 1_000, 6_000)
+        editor = StudioEditor(include_sidebars=False)
+        editor.set_context(
+            StudioSession(tracks=(StudioTrack("track-video", "Media", TRACK_VIDEO, clips=(clip,)),)),
+            (image,),
+        )
+
+        self.assertTrue(editor.has_media_track())
+        self.assertIsNone(editor.media_at(2_999))
+        self.assertEqual(editor.media_at(4_500), (image, 2_500))
+        self.assertIsNone(editor.media_at(8_000))
 
 
 def _asset(root: Path) -> StudioSoundAsset:
