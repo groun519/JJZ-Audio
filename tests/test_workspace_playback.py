@@ -17,7 +17,7 @@ class WorkspacePlaybackTests(unittest.TestCase):
         )
         self.assertEqual(
             scope_track_ids(WorkspacePlaybackScope.CONVERSION),
-            ("original", "converted"),
+            ("original", "instrumental", "converted"),
         )
         self.assertEqual(
             scope_track_ids(WorkspacePlaybackScope.STUDIO),

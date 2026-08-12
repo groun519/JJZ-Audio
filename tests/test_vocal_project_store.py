@@ -20,6 +20,15 @@ from jang_app.services.vocal_project_store import VOCAL_PROJECT_MANIFEST, VocalP
 
 
 class VocalProjectStoreTests(unittest.TestCase):
+    def test_compact_windows_safe_output_is_imported_as_a_take(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = _job_dir(Path(temporary) / "run")
+            converted = _write_wave(job_dir / "rvc_p0_0123456789.wav")
+
+            project = VocalProjectStore().open_or_create(job_dir)
+
+            self.assertEqual(tuple(take.output_path for take in project.takes), (converted,))
+
     def test_existing_output_becomes_portable_project_with_one_full_segment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             job_dir = _job_dir(Path(temporary) / "run")

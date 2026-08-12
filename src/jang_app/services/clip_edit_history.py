@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from jang_app.services.segment_review import SegmentCandidate, normalize_segment_status
+from jang_app.services.snapshot_history import SnapshotHistory
 
 
 TRAINING_MODE_FULL = "full"
@@ -23,35 +24,8 @@ class ClipEditState:
     segment_candidates: tuple[SegmentCandidate, ...] | None = None
 
 
-@dataclass(frozen=True)
-class ClipEditHistory:
-    undo_states: tuple[ClipEditState, ...] = ()
-    redo_states: tuple[ClipEditState, ...] = ()
-
-    @property
-    def can_undo(self) -> bool:
-        return bool(self.undo_states)
-
-    @property
-    def can_redo(self) -> bool:
-        return bool(self.redo_states)
-
-    def record(self, current: ClipEditState) -> "ClipEditHistory":
-        return ClipEditHistory(_bounded(self.undo_states + (current,)), ())
-
-    def undo(self, current: ClipEditState) -> tuple[ClipEditState | None, "ClipEditHistory"]:
-        if not self.undo_states:
-            return None, self
-        target = self.undo_states[-1]
-        history = ClipEditHistory(self.undo_states[:-1], _bounded(self.redo_states + (current,)))
-        return target, history
-
-    def redo(self, current: ClipEditState) -> tuple[ClipEditState | None, "ClipEditHistory"]:
-        if not self.redo_states:
-            return None, self
-        target = self.redo_states[-1]
-        history = ClipEditHistory(_bounded(self.undo_states + (current,)), self.redo_states[:-1])
-        return target, history
+class ClipEditHistory(SnapshotHistory[ClipEditState]):
+    history_limit = HISTORY_LIMIT
 
 
 def state_from_values(

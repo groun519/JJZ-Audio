@@ -152,6 +152,85 @@ class ReleaseManifestTests(unittest.TestCase):
             )
             self.assertEqual(profile["version"], "1")
 
+    def test_split_runtime_requires_cu118_profile_component(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.3.0-Setup.exe").write_bytes(b"installer")
+            package = release / "JJZero-Runtime-3-part01.zip"
+            package.write_bytes(b"runtime")
+            (release / "runtime-packages.json").write_text(
+                json.dumps(
+                    {
+                        "component": "ai-runtime",
+                        "version": "3",
+                        "requires_rvc_profile": True,
+                        "artifacts": [
+                            {
+                                "name": package.name,
+                                "size": package.stat().st_size,
+                                "sha256": hashlib.sha256(b"runtime").hexdigest(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "cu118"):
+                create_release_manifest(release, "0.3.0", "3")
+
+    def test_manifest_accepts_shared_runtime_with_cu118_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.3.0-Setup.exe").write_bytes(b"installer")
+            runtime = release / "JJZero-Runtime-3-part01.zip"
+            runtime.write_bytes(b"runtime")
+            profile_version = RVC_RUNTIME_PROFILE_VERSIONS["cu118"]
+            profile = release / f"JJZero-RVC-cu118-{profile_version}-part01.zip"
+            profile.write_bytes(b"cu118")
+            (release / "runtime-packages.json").write_text(
+                json.dumps(
+                    {
+                        "component": "ai-runtime",
+                        "version": "3",
+                        "requires_rvc_profile": True,
+                        "artifacts": [
+                            {
+                                "name": runtime.name,
+                                "size": runtime.stat().st_size,
+                                "sha256": hashlib.sha256(b"runtime").hexdigest(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (release / "rvc-runtime-cu118-packages.json").write_text(
+                json.dumps(
+                    {
+                        "component": "rvc-runtime-cu118",
+                        "version": profile_version,
+                        "artifacts": [
+                            {
+                                "name": profile.name,
+                                "size": profile.stat().st_size,
+                                "sha256": hashlib.sha256(b"cu118").hexdigest(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = create_release_manifest(release, "0.3.0", "3")
+
+            component_ids = {
+                component["id"]
+                for component in json.loads(manifest.read_text(encoding="utf-8"))["components"]
+            }
+            self.assertIn("ai-runtime", component_ids)
+            self.assertIn("rvc-runtime-cu118", component_ids)
+
     def test_manifest_includes_optional_amd_runtime_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             release = Path(temporary)

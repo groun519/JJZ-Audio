@@ -333,6 +333,15 @@ def _create_runtime(runtime: Path) -> None:
         runtime / "demucs" / "torch" / "hub" / "checkpoints" / "955717e8-8726e21a.th",
         runtime / "rvc" / "infer_cli.py",
         runtime / "rvc" / "vc_infer_pipeline.py",
+        runtime / "rvc" / "runtime" / "python3.dll",
+        runtime / "rvc" / "runtime" / "Lib" / "site-packages" / "torch" / "__init__.py",
+        runtime / "rvc" / "runtime" / "Lib" / "site-packages" / "torchaudio" / "__init__.py",
+        runtime
+        / "rvc"
+        / "runtime"
+        / "jjzero-roformer-packages"
+        / "audio_separator"
+        / "__init__.py",
         *(runtime / "rvc" / path for path in required_rvc_training_paths()),
     ):
         path.parent.mkdir(parents=True, exist_ok=True)

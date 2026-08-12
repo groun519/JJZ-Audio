@@ -76,7 +76,9 @@ def rvc_profile_candidates(profile: object) -> tuple[str, ...]:
         return (RVC_PROFILE_CU128, RVC_PROFILE_CPU)
     if preferred == RVC_PROFILE_CU118:
         return (RVC_PROFILE_CU118, RVC_PROFILE_CPU)
-    return (RVC_PROFILE_CPU,)
+    # The cu118 build is also the validated CPU fallback. New releases package
+    # it separately, while legacy releases continue to fall back to the base runtime.
+    return (RVC_PROFILE_CU118, RVC_PROFILE_CPU)
 
 
 def normalize_rvc_profile(profile: object) -> str:

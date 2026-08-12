@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from jang_app.config import SEPARATION_OUTPUT_DIR, SUPPORTED_AUDIO_EXTENSIONS
+from jang_app.pipeline.composite_separation_engine import CompositeSeparationEngine
 from jang_app.pipeline.demucs_engine import DemucsEngine
 from jang_app.pipeline.demucs_ensemble_engine import DemucsEnsembleEngine
+from jang_app.pipeline.roformer_engine import RoFormerEngine
 from jang_app.pipeline.separation_engine import (
     ProgressCallback,
     SeparationEngine,
@@ -27,9 +29,7 @@ def separate_audio(
     source = input_path.expanduser().resolve()
     _validate_input_audio(source)
     selected_recipe = recipe or _legacy_recipe(model_name)
-    selected_engine = engine or (
-        DemucsEnsembleEngine() if selected_recipe.is_ensemble else DemucsEngine()
-    )
+    selected_engine = engine or _engine_for_recipe(selected_recipe)
     if selected_engine.engine_id != selected_recipe.engine:
         raise SeparationError(
             f"Separation engine '{selected_engine.engine_id}' cannot run recipe "
@@ -39,6 +39,14 @@ def separate_audio(
         SeparationRequest(source, output_root, selected_recipe),
         progress_callback,
     )
+
+
+def _engine_for_recipe(recipe: SeparationRecipe) -> SeparationEngine:
+    if recipe.engine == "composite":
+        return CompositeSeparationEngine(_engine_for_recipe)
+    if recipe.engine == "roformer":
+        return RoFormerEngine()
+    return DemucsEnsembleEngine() if recipe.is_ensemble else DemucsEngine()
 
 
 def _validate_input_audio(source: Path) -> None:

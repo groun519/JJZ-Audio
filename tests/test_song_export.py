@@ -18,9 +18,18 @@ from jang_app.services.song_export import (
 from jang_app.services.song_package import SongPackageStore
 from jang_app.services.song_library import SongLibrary
 from jang_app.services.studio_session import (
+    TRACK_ORIGINAL_VOCAL,
+    TRACK_VIDEO,
+    StudioAssetRef,
+    StudioClip,
     StudioSession,
+    StudioTrack,
     StudioTrackState,
+    load_studio_session,
 )
+from jang_app.services.studio_assets import studio_sound_pool
+from jang_app.services.video_source import VideoSourceStore
+from jang_app.services.studio_timeline import move_studio_clip, set_studio_track_mix, trim_studio_clip
 
 
 class SongExportTests(unittest.TestCase):
@@ -108,6 +117,86 @@ class SongExportTests(unittest.TestCase):
             self.assertEqual(sample_rate, 16000)
             self.assertEqual(len(audio), 1600)
             self.assertAlmostEqual(float(np.max(audio)), 0.05, places=2)
+
+    def test_timeline_export_applies_clip_trim_and_timeline_position(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.wav"
+            sf.write(source, np.full(16_000, 0.1, dtype=np.float32), 8_000)
+            store = SongPackageStore(root / "workspace" / "library" / "songs", root)
+            package, _created = store.import_audio(source, title="Song")
+            output_dir = root / "vocal-output"
+            output_dir.mkdir()
+            sf.write(output_dir / "vocals.wav", np.full(16_000, 0.5, dtype=np.float32), 8_000)
+            sf.write(output_dir / "no_vocals.wav", np.full(16_000, 0.1, dtype=np.float32), 8_000)
+            package = store.attach_output(package.song_id, output_dir, "Run 01")
+            session = load_studio_session(package)
+            vocal_track = session.tracks[0]
+            clip = vocal_track.clips[0]
+            session = trim_studio_clip(
+                session,
+                clip.clip_id,
+                source_start_ms=250,
+                source_end_ms=1_250,
+            )
+            session = move_studio_clip(
+                session,
+                clip.clip_id,
+                track_id=vocal_track.track_id,
+                timeline_start_ms=500,
+            )
+            session = set_studio_track_mix(session, session.tracks[1].track_id, muted=True)
+
+            output_path = root / "timeline.wav"
+            from jang_app.services.audio_export import export_mix
+
+            export_mix(build_song_mix_sources(package, session), output_path)
+            audio, sample_rate = sf.read(output_path, dtype="float32")
+
+            self.assertEqual(sample_rate, 8_000)
+            self.assertEqual(len(audio), 12_000)
+            self.assertAlmostEqual(float(np.max(np.abs(audio[:4_000]))), 0.0, places=3)
+            self.assertAlmostEqual(float(np.max(audio[4_000:])), 0.5, places=2)
+
+    def test_timeline_audio_mix_ignores_video_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_output(root)
+            source_video = root / "reference.mp4"
+            source_video.write_bytes(b"video")
+            VideoSourceStore().import_file(package, source_video)
+            video_asset = next(
+                asset for asset in studio_sound_pool(package) if asset.reference.role == TRACK_VIDEO
+            )
+            output_id = package.active_output.output_id
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "track-video",
+                        "Video",
+                        role=TRACK_VIDEO,
+                        clips=(StudioClip("video", video_asset.reference, 0, 0, 1_000),),
+                    ),
+                    StudioTrack(
+                        "track-vocal",
+                        "Original Vocal",
+                        role=TRACK_ORIGINAL_VOCAL,
+                        clips=(
+                            StudioClip(
+                                "vocal",
+                                StudioAssetRef(output_id, TRACK_ORIGINAL_VOCAL),
+                                0,
+                                0,
+                                1_000,
+                            ),
+                        ),
+                    ),
+                )
+            )
+
+            sources = build_song_mix_sources(package, session)
+
+            self.assertEqual([source.path.name for source in sources], ["vocals.wav"])
 
 
 def _package_with_output(root: Path):

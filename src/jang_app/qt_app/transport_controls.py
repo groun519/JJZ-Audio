@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
 from jang_app.qt_app.localization import apply_widget_language, set_translated_tooltip
 from jang_app.qt_app.widgets import ScrollSafeSlider, SvgIconButton
 from jang_app.services.audio_metadata import format_duration
+from jang_app.services.i18n import tr
 
 
 TRANSPORT_BUTTON_SIZE = 34
@@ -20,6 +21,8 @@ class TransportControls(QWidget):
         self.setObjectName("TransportControls")
         self._duration_ms = 0
         self._is_syncing = False
+        self._shortcut_hint = ""
+        self._is_playing = False
 
         self.play_button = SvgIconButton("play", size=TRANSPORT_BUTTON_SIZE)
         self.play_button.setObjectName("TransportPlayButton")
@@ -63,8 +66,13 @@ class TransportControls(QWidget):
         self.set_position(0)
 
     def set_playing(self, is_playing: bool) -> None:
+        self._is_playing = is_playing
         self.play_button.set_icon_name("stop" if is_playing else "play")
-        set_translated_tooltip(self.play_button, "Stop" if is_playing else "Play")
+        self._refresh_play_tooltip()
+
+    def set_shortcut_hint(self, shortcut: str) -> None:
+        self._shortcut_hint = shortcut.strip()
+        self._refresh_play_tooltip()
 
     def set_position(self, position_ms: int, duration_ms: int | None = None) -> None:
         if duration_ms is not None:
@@ -82,6 +90,13 @@ class TransportControls(QWidget):
 
     def apply_language(self) -> None:
         apply_widget_language(self)
+        self._refresh_play_tooltip()
+
+    def _refresh_play_tooltip(self) -> None:
+        label = tr("Stop" if self._is_playing else "Play")
+        self.play_button.setToolTip(
+            f"{label} ({self._shortcut_hint})" if self._shortcut_hint else label
+        )
 
     def _emit_seek_requested(self, value: int) -> None:
         if self._is_syncing or self._duration_ms <= 0:

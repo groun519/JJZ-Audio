@@ -8,7 +8,12 @@ from jang_app.services.separation_assets import (
     separation_asset_status,
     separation_recipe_asset_status,
 )
-from jang_app.services.separation_recipe import MAXIMUM_RECIPE
+from jang_app.services.separation_recipe import (
+    EFFECT_REMOVAL_RECIPE,
+    MAXIMUM_RECIPE,
+    PRECISION_RECIPE,
+    VOCAL_MELBAND_RECIPE,
+)
 
 
 class SeparationAssetStatusTests(unittest.TestCase):
@@ -54,6 +59,44 @@ class SeparationAssetStatusTests(unittest.TestCase):
             self.assertEqual(status.present_files, 4)
             self.assertEqual(status.required_files, 5)
             self.assertGreater(status.missing_bytes, 0)
+
+    def test_precision_recipe_tracks_roformer_checkpoint_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_root = root / "models"
+            model_root.mkdir(parents=True)
+            (model_root / "model_bs_roformer_ep_317_sdr_12.9755.ckpt").write_bytes(
+                b"model"
+            )
+
+            status = separation_recipe_asset_status(PRECISION_RECIPE, root)
+
+            self.assertFalse(status.ready)
+            self.assertEqual(status.present_files, 1)
+            self.assertEqual(status.required_files, 2)
+            self.assertEqual(status.missing_bytes, 2_273)
+
+    def test_vocal_melband_recipe_reports_its_first_use_download(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            status = separation_recipe_asset_status(
+                VOCAL_MELBAND_RECIPE,
+                Path(temporary),
+            )
+
+            self.assertFalse(status.ready)
+            self.assertEqual(status.required_files, 2)
+            self.assertEqual(status.missing_bytes, 913_107_868)
+
+    def test_effect_removal_recipe_requires_both_roformer_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            status = separation_recipe_asset_status(
+                EFFECT_REMOVAL_RECIPE,
+                Path(temporary),
+            )
+
+            self.assertFalse(status.ready)
+            self.assertEqual(status.required_files, 4)
+            self.assertEqual(status.missing_bytes, 1_083_881_045)
 
 
 if __name__ == "__main__":

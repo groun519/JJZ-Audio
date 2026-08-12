@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "benchmark_id": "vocal-separation-v1",
+  "title": "JJZero Audio hybrid stem comparison v1",
+  "clips": [
+    {
+      "clip_id": "dracula-easy",
+      "candidates": [
+        {
+          "candidate_id": "incumbent",
+          "label": "Current Kim pairing",
+          "vocal_candidate_id": "kim-melband",
+          "instrumental_candidate_id": "kim-melband"
+        },
+        {
+          "candidate_id": "recommended-hybrid",
+          "label": "Recommended hybrid pairing",
+          "vocal_candidate_id": "kim-melband",
+          "instrumental_candidate_id": "htdemucs"
+        }
+      ]
+    },
+    {
+      "clip_id": "popin2-artifact",
+      "candidates": [
+        {
+          "candidate_id": "incumbent",
+          "label": "Current Kim pairing",
+          "vocal_candidate_id": "kim-melband",
+          "instrumental_candidate_id": "kim-melband"
+        },
+        {
+          "candidate_id": "recommended-hybrid",
+          "label": "Recommended hybrid pairing",
+          "vocal_candidate_id": "kim-melband",
+          "instrumental_candidate_id": "bs-roformer-317"
+        }
+      ]
+    },
+    {
+      "clip_id": "o3ohn-effects",
+      "candidates": [
+        {
+          "candidate_id": "incumbent",
+          "label": "Current Kim pairing",
+          "vocal_candidate_id": "kim-melband",
+          "instrumental_candidate_id": "kim-melband"
+        },
+        {
+          "candidate_id": "recommended-hybrid",
+          "label": "Recommended hybrid pairing",
+          "vocal_candidate_id": "kim-melband",
+          "instrumental_candidate_id": "htdemucs"
+        }
+      ]
+    }
+  ]
+}

@@ -23,7 +23,7 @@ from jang_app.qt_app.localization import (
     set_translated_text,
     set_translated_tooltip,
 )
-from jang_app.qt_app.widgets import FileDropCard, ScrollSafeComboBox, SvgIconButton
+from jang_app.qt_app.widgets import DangerIconButton, FileDropCard, ScrollSafeComboBox, SvgIconButton
 from jang_app.services.i18n import tr
 from jang_app.services.video_source import VideoSource
 
@@ -115,7 +115,7 @@ class VideoPreviewPanel(QFrame):
         source_layout = QVBoxLayout(self.source_editor)
         source_layout.setContentsMargins(28, 28, 28, 28)
         source_layout.setSpacing(12)
-        source_layout.addStretch(1)
+        source_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.source_card = QFrame()
         self.source_card.setObjectName("VideoSourceCard")
@@ -144,8 +144,7 @@ class VideoPreviewPanel(QFrame):
         self.open_button.setObjectName("VideoSourceActionButton")
         set_translated_tooltip(self.open_button, "Open video location")
         self.open_button.clicked.connect(self._open_location)
-        self.clear_button = SvgIconButton("trash", size=30)
-        self.clear_button.setObjectName("VideoSourceActionButton")
+        self.clear_button = DangerIconButton(size=30)
         set_translated_tooltip(self.clear_button, "Clear video source")
         self.clear_button.clicked.connect(self.clear_requested.emit)
 
@@ -180,10 +179,9 @@ class VideoPreviewPanel(QFrame):
 
         source_layout.addWidget(self.source_card, 0)
         source_layout.addWidget(self.url_field, 0)
-        source_layout.addWidget(self.drop_card, 0)
+        source_layout.addWidget(self.drop_card, 1)
         source_layout.addWidget(self.progress_bar, 0)
         source_layout.addWidget(self.status_label, 0)
-        source_layout.addStretch(1)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.source_editor)
@@ -256,6 +254,29 @@ class VideoPreviewPanel(QFrame):
     def set_running(self, running: bool) -> None:
         self._running = running
         self._sync_controls()
+
+    def set_compact_mode(self, compact: bool) -> None:
+        """Fit the source editor above a timeline without hiding its controls."""
+        if compact:
+            self.setMinimumSize(320, 190)
+            self.setMaximumHeight(16_777_215)
+            self.layout().setContentsMargins(14, 12, 14, 14)
+            self.layout().setSpacing(8)
+            self.source_editor.layout().setContentsMargins(12, 8, 12, 8)
+            self.source_editor.layout().setSpacing(7)
+            self.drop_card.setMinimumHeight(96)
+            self.drop_card.setMaximumHeight(16_777_215)
+            self.drop_card.set_compact_mode(True)
+            return
+        self.setMinimumSize(440, 420)
+        self.setMaximumHeight(16_777_215)
+        self.layout().setContentsMargins(18, 16, 18, 18)
+        self.layout().setSpacing(12)
+        self.source_editor.layout().setContentsMargins(28, 28, 28, 28)
+        self.source_editor.layout().setSpacing(12)
+        self.drop_card.setMinimumHeight(124)
+        self.drop_card.setMaximumHeight(16_777_215)
+        self.drop_card.set_compact_mode(False)
 
     def set_progress(self, value: int) -> None:
         progress = max(0, min(100, int(value)))

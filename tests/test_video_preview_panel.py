@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.video_preview_panel import VideoPlaybackSynchronizer, VideoPreviewPanel
+from jang_app.qt_app.widgets import DangerIconButton
 from jang_app.services.video_source import VIDEO_KIND_FILE, VIDEO_KIND_YOUTUBE, VideoSource
 
 
@@ -17,6 +18,16 @@ class VideoPreviewPanelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_compact_mode_fits_above_studio_timeline(self) -> None:
+        panel = VideoPreviewPanel()
+
+        panel.set_compact_mode(True)
+
+        self.assertGreater(panel.maximumHeight(), 250)
+        self.assertLessEqual(panel.minimumHeight(), 190)
+        self.assertGreater(panel.drop_card.maximumHeight(), 250)
+        self.assertGreaterEqual(panel.drop_card.minimumHeight(), 96)
 
     def test_sync_corrects_drift_and_mirrors_playback_state(self) -> None:
         player = _FakePlayer(position=900)
@@ -128,6 +139,7 @@ class VideoPreviewPanelTests(unittest.TestCase):
 
             with self.subTest(theme_mode=theme_mode):
                 self.assertEqual(panel.download_button.icon_name(), "download")
+                self.assertIsInstance(panel.clear_button, DangerIconButton)
                 self.assertEqual(
                     {
                         (button.width(), button.height())

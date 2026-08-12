@@ -10,6 +10,7 @@ from time import monotonic
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QIcon
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QComboBox,
     QApplication,
     QFileDialog,
@@ -22,10 +23,12 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QPlainTextEdit,
     QScrollArea,
     QSizeGrip,
     QSizePolicy,
     QStackedWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -48,13 +51,13 @@ from jang_app.pipeline.rvc_convert import (
 )
 from jang_app.pipeline.separate import SeparationResult, separate_audio
 from jang_app.qt_app.confirmation_dialog import ConfirmationDialog
+from jang_app.qt_app.conversion_result_browser import ConversionResultBrowser
 from jang_app.qt_app.export_page import ExportPage
 from jang_app.qt_app.google_account_button import GoogleAccountButton
 from jang_app.qt_app.google_drive_controller import GoogleDriveController
 from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
 from jang_app.qt_app.library_details_panel import LibraryDetailsPanel
 from jang_app.qt_app.library_row import SongListRow
-from jang_app.qt_app.library_source_filter import LibrarySourceFilter
 from jang_app.qt_app.localization import (
     apply_widget_language,
     set_translated_placeholder,
@@ -65,8 +68,12 @@ from jang_app.qt_app.log_drawer import LogDrawer
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.processing_queue_panel import ProcessingQueueButton, ProcessingQueuePanel
 from jang_app.qt_app.primary_navigation import PrimaryNavigationBar
+from jang_app.qt_app.result_transport_bar import ResultTransportBar
 from jang_app.qt_app.separation_recipe_selector import SeparationRecipeSelector
+from jang_app.qt_app.separation_stem_pool import SeparationStemPoolPanel
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
+from jang_app.qt_app.studio_editor import StudioEditor
+from jang_app.qt_app.studio_transport_bar import StudioTransportBar
 from jang_app.qt_app.task_attention import TaskAttentionController
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
 from jang_app.qt_app.text_input_dialog import TextInputDialog
@@ -79,9 +86,10 @@ from jang_app.qt_app.update_status_button import (
     update_button_position,
 )
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
+from jang_app.qt_app.vocal_version_pool import VocalVersionPool
 from jang_app.qt_app.video_preview_panel import VideoPreviewPanel
 from jang_app.qt_app.window_chrome import apply_window_corner_style
-from jang_app.qt_app.workspace_transport_dock import WorkspaceTransportDock
+from jang_app.qt_app.workspace_splitter import create_workspace_splitter
 from jang_app.qt_app.widgets import (
     FileDropCard,
     FeedbackButton,
@@ -108,11 +116,12 @@ from jang_app.services.app_update import (
     download_artifact,
     fetch_release_manifest_if_changed,
 )
-from jang_app.services.audio_export import export_audio_file
+from jang_app.services.audio_export import AudioExportError, AudioMixSource, export_audio_file
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.audio_player import AudioPlaybackError, AudioPlayer
 from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.command import start_detached_command
+from jang_app.services.distribution_channel import application_updates_enabled
 from jang_app.services.file_browser import open_in_file_browser
 from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language, tr
 from jang_app.services.job_diagnostics import get_job_diagnostics
@@ -145,17 +154,21 @@ from jang_app.services.settings import (
     RVC_DEVICE_OPTIONS,
     AppSettings,
     RvcSettings,
+    StudioLayoutSettings,
     normalize_rvc_device,
     save_app_settings,
 )
 from jang_app.services.song_assets import (
+    REMOVAL_STUDIO_SESSION,
     REMOVAL_VOCAL_OUTPUT,
     REMOVAL_VOCAL_TAKE,
+    STAGE_STUDIO,
     SongAsset,
 )
 from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion, sort_song_items
 from jang_app.services.song_metadata import build_song_display_metadata
 from jang_app.services.studio_session import StudioSession, StudioTrackState
+from jang_app.services.studio_timeline import session_duration_ms, set_studio_track_mix
 from jang_app.services.update_polling import UpdateCheckOutcome, UpdatePollingPolicy
 from jang_app.services.video_source import VideoSource
 from jang_app.services.vocal_project import VocalConversionSettings, VocalProject
@@ -177,6 +190,9 @@ PAGE_SEPARATION = 2
 PAGE_CONVERSION = 3
 PAGE_STUDIO = 4
 PAGE_EXPORT = 5
+WORK_SONG_REQUIRED_PAGES = frozenset(
+    (PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO)
+)
 GOOGLE_DRIVE_FEATURE = "google_drive_sharing"
 
 
@@ -184,10 +200,13 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: AppSettings, work_song_store: WorkSongStore | None = None) -> None:
         super().__init__()
         self.settings = settings
+        self._workspace_shortcut_filter_installed = False
         set_language(settings.language)
         self.library = SongLibrary()
         self.work_song_store = work_song_store or WorkSongStore()
         self._work_song_ready = False
+        self._work_song_load_worker: TaskWorker | None = None
+        self._work_song_loading_id = ""
         self.player = AudioPlayer()
         self.processing_queue = ProcessingQueue(diagnostics=get_job_diagnostics())
         self._workers: list[TaskWorker] = []
@@ -201,7 +220,7 @@ class MainWindow(QMainWindow):
         self._update_manifest_etag = ""
         self._update_manifest_last_modified = ""
         self._update_polling_policy = UpdatePollingPolicy()
-        self._update_polling_enabled = bool(
+        self._update_polling_enabled = application_updates_enabled() and bool(
             getattr(sys, "frozen", False)
             or os.environ.get("JJZERO_UPDATE_MANIFEST_URL")
         )
@@ -239,6 +258,7 @@ class MainWindow(QMainWindow):
         self.update_poll_timer.timeout.connect(self._start_update_check)
 
         self._build_ui()
+        self._sync_work_song_navigation()
         self.google_drive = GoogleDriveController(
             self,
             paths=APP_PATHS,
@@ -288,11 +308,16 @@ class MainWindow(QMainWindow):
         application = QApplication.instance()
         if application is not None:
             application.applicationStateChanged.connect(self._on_application_state_changed)
+            application.installEventFilter(self)
+            self._workspace_shortcut_filter_installed = True
         if self._update_polling_enabled:
             self.update_poll_timer.start(2500)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.update_poll_timer.stop()
+        if hasattr(self, "studio_layout_save_timer"):
+            self.studio_layout_save_timer.stop()
+            self._save_studio_layout()
         self.google_drive.shutdown()
         self.task_attention.close()
         self.studio_session_autosave.flush()
@@ -300,7 +325,101 @@ class MainWindow(QMainWindow):
         self.model_workspace_page.shutdown_training()
         self.player.stop()
         self.video_preview_panel.stop()
+        application = QApplication.instance()
+        if application is not None and self._workspace_shortcut_filter_installed:
+            application.removeEventFilter(self)
+            self._workspace_shortcut_filter_installed = False
         super().closeEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and not event.isAutoRepeat()
+            and self.isVisible()
+        ):
+            application = QApplication.instance()
+            active_window = application.activeWindow() if application is not None else None
+            if active_window is None or active_window is self:
+                focus = application.focusWidget() if application is not None else None
+                page_index = self.page_stack.currentIndex()
+                has_modal = bool(application and application.activeModalWidget())
+                has_popup = bool(application and application.activePopupWidget())
+                if (
+                    event.key() == Qt.Key.Key_Space
+                    and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                    and self._workspace_space_shortcut_allowed(
+                        page_index,
+                        focus,
+                        has_modal=has_modal,
+                        has_popup=has_popup,
+                    )
+                ):
+                    self._toggle_global_playback()
+                    event.accept()
+                    return True
+                if (
+                    event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                    and event.key() in {Qt.Key.Key_Z, Qt.Key.Key_Y}
+                    and self._studio_history_shortcut_allowed(
+                        page_index,
+                        focus,
+                        has_modal=has_modal,
+                        has_popup=has_popup,
+                    )
+                ):
+                    if event.key() == Qt.Key.Key_Z:
+                        self.studio_editor.undo()
+                    else:
+                        self.studio_editor.redo()
+                    event.accept()
+                    return True
+        return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _workspace_space_shortcut_allowed(
+        page_index: int,
+        focus_widget: QWidget | None,
+        *,
+        has_modal: bool,
+        has_popup: bool,
+    ) -> bool:
+        if page_index not in {PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO}:
+            return False
+        return MainWindow._workspace_shortcut_focus_allowed(
+            focus_widget,
+            has_modal=has_modal,
+            has_popup=has_popup,
+        )
+
+    @staticmethod
+    def _studio_history_shortcut_allowed(
+        page_index: int,
+        focus_widget: QWidget | None,
+        *,
+        has_modal: bool,
+        has_popup: bool,
+    ) -> bool:
+        if page_index != PAGE_STUDIO:
+            return False
+        return MainWindow._workspace_shortcut_focus_allowed(
+            focus_widget,
+            has_modal=has_modal,
+            has_popup=has_popup,
+        )
+
+    @staticmethod
+    def _workspace_shortcut_focus_allowed(
+        focus_widget: QWidget | None,
+        *,
+        has_modal: bool,
+        has_popup: bool,
+    ) -> bool:
+        if has_modal or has_popup:
+            return False
+        return not isinstance(
+            focus_widget,
+            (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox),
+        )
 
     def changeEvent(self, event) -> None:  # noqa: N802
         if event.type() == QEvent.Type.WindowStateChange:
@@ -360,13 +479,6 @@ class MainWindow(QMainWindow):
         content_layout.setSpacing(12)
         content_layout.addWidget(self.page_stack, 1)
 
-        self.workspace_dock = WorkspaceTransportDock()
-        self.workspace_dock.song_changed.connect(self._on_global_work_song_changed)
-        self.workspace_dock.play_toggled.connect(self._toggle_global_playback)
-        self.workspace_dock.seek_requested.connect(self._seek_global_playback)
-        self.workspace_dock.hide()
-        content_layout.addWidget(self.workspace_dock, 0)
-
         self.update_status_button = UpdateStatusButton(content_widget)
         self.update_status_button.clicked.connect(self._open_available_update)
 
@@ -419,6 +531,9 @@ class MainWindow(QMainWindow):
         )
         self.primary_navigation.page_requested.connect(self._navigate_to_page)
         self.primary_navigation.settings_requested.connect(self._open_system_setup)
+        self.primary_navigation.work_song_changed.connect(
+            self._on_navigation_work_song_changed
+        )
 
         self.theme_button = ThemeToggleButton()
         self.theme_button.clicked.connect(self._toggle_theme)
@@ -456,12 +571,11 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
+        layout.setSpacing(0)
 
         import_panel = QFrame()
         import_panel.setObjectName("Panel")
         import_panel.setMinimumWidth(360)
-        import_panel.setMaximumWidth(430)
         import_layout = QVBoxLayout(import_panel)
         import_layout.setContentsMargins(20, 20, 20, 20)
         import_layout.setSpacing(16)
@@ -511,19 +625,15 @@ class MainWindow(QMainWindow):
         self.library_search_edit = QLineEdit()
         set_translated_placeholder(self.library_search_edit, "Search songs")
         self.library_search_edit.textChanged.connect(self._apply_library_filters)
-        self.library_source_filter = LibrarySourceFilter()
-        self.library_source_filter.selection_changed.connect(self._apply_library_filters)
         self.library_sort_combo = ScrollSafeComboBox()
         self.library_sort_combo.setFixedWidth(150)
         set_translated_tooltip(self.library_sort_combo, "Sort songs")
         self.library_sort_combo.currentIndexChanged.connect(lambda _index: self._refresh_song_list())
         filter_layout.addWidget(self.library_search_edit, 1)
-        filter_layout.addWidget(self.library_source_filter, 0)
         filter_layout.addWidget(self.library_sort_combo, 0)
 
         self.song_list = QListWidget()
         self.song_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.song_list.currentItemChanged.connect(self._on_library_selection_changed)
         self.song_list.itemDoubleClicked.connect(lambda _item: self._open_selected_library_details())
 
         list_layout.addLayout(list_header)
@@ -533,28 +643,42 @@ class MainWindow(QMainWindow):
         self.library_details_panel = LibraryDetailsPanel()
         self.library_details_panel.back_requested.connect(self._close_library_details)
         self.library_details_panel.open_location_requested.connect(self._open_library_asset_location)
-        self.library_details_panel.open_vocal_requested.connect(self._use_library_item)
         self.library_details_panel.remove_asset_requested.connect(self._remove_library_asset)
+        self.library_details_panel.remove_assets_requested.connect(self._remove_library_assets)
+        self.library_details_panel.preview_requested.connect(
+            self._toggle_library_asset_preview
+        )
+        self.library_details_panel.preview_play_toggled.connect(
+            self._toggle_library_asset_preview_playback
+        )
+        self.library_details_panel.preview_seek_requested.connect(
+            self._seek_library_asset_preview
+        )
 
         self.library_content_stack = QStackedWidget()
         self.library_content_stack.addWidget(list_panel)
         self.library_content_stack.addWidget(self.library_details_panel)
         self._populate_library_sort_combo()
 
-        layout.addWidget(import_panel, 1)
-        layout.addWidget(self.library_content_stack, 3)
+        self.library_splitter = create_workspace_splitter(
+            (import_panel, self.library_content_stack),
+            object_name="LibraryWorkspaceSplitter",
+            sizes=(390, 1210),
+            stretch_factors=(0, 1),
+            collapsible=(True, False),
+        )
+        layout.addWidget(self.library_splitter, 1)
         return page
 
     def _build_separation_page(self) -> QWidget:
         page = QWidget()
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
+        layout.setSpacing(0)
 
         left_panel = QFrame()
         left_panel.setObjectName("Panel")
         left_panel.setMinimumWidth(380)
-        left_panel.setMaximumWidth(460)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(16)
@@ -562,8 +686,9 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._build_separate_step_page(), 1)
 
         self.separation_results_panel = VocalResultsPanel(mode="separation")
-        self.separation_results_panel.result_selected.connect(
-            self._activate_separation_result
+        self.separation_stem_pool = SeparationStemPoolPanel()
+        self.separation_stem_pool.selection_changed.connect(
+            self._on_separation_stem_selection_changed
         )
         self.separation_results_panel.open_location_requested.connect(
             self._open_vocal_output_location
@@ -573,20 +698,47 @@ class MainWindow(QMainWindow):
             self._on_result_playback_settings_changed
         )
 
-        layout.addWidget(left_panel, 0)
-        layout.addWidget(self.separation_results_panel, 1)
+        self.separation_results_splitter = create_workspace_splitter(
+            (self.separation_stem_pool, self.separation_results_panel),
+            object_name="SeparationResultsSplitter",
+            sizes=(320, 890),
+            stretch_factors=(0, 1),
+            collapsible=(True, True),
+        )
+        self.separation_transport_bar = ResultTransportBar()
+        self.separation_transport_bar.play_toggled.connect(
+            self._toggle_global_playback
+        )
+        self.separation_transport_bar.seek_requested.connect(
+            self._seek_global_playback
+        )
+        separation_results = QWidget()
+        separation_results.setObjectName("WorkspaceResultArea")
+        separation_results_layout = QVBoxLayout(separation_results)
+        separation_results_layout.setContentsMargins(0, 0, 0, 0)
+        separation_results_layout.setSpacing(8)
+        separation_results_layout.addWidget(self.separation_results_splitter, 1)
+        separation_results_layout.addWidget(self.separation_transport_bar, 0)
+
+        self.separation_splitter = create_workspace_splitter(
+            (left_panel, separation_results),
+            object_name="SeparationWorkspaceSplitter",
+            sizes=(390, 1210),
+            stretch_factors=(0, 1),
+            collapsible=(True, False),
+        )
+        layout.addWidget(self.separation_splitter, 1)
         return page
 
     def _build_conversion_page(self) -> QWidget:
         page = QWidget()
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
+        layout.setSpacing(0)
 
         left_panel = QFrame()
         left_panel.setObjectName("Panel")
         left_panel.setMinimumWidth(380)
-        left_panel.setMaximumWidth(460)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(16)
@@ -604,15 +756,48 @@ class MainWindow(QMainWindow):
             self._on_result_playback_settings_changed
         )
 
-        layout.addWidget(left_panel, 0)
-        layout.addWidget(self.vocal_results_panel, 1)
+        self.conversion_result_browser = ConversionResultBrowser()
+        self.conversion_result_browser.converted_selected.connect(
+            self._activate_vocal_converted_version
+        )
+
+        self.conversion_results_splitter = create_workspace_splitter(
+            (self.conversion_result_browser, self.vocal_results_panel),
+            object_name="ConversionResultsSplitter",
+            sizes=(320, 880),
+            stretch_factors=(0, 1),
+            collapsible=(True, False),
+        )
+        self.conversion_transport_bar = ResultTransportBar()
+        self.conversion_transport_bar.play_toggled.connect(
+            self._toggle_global_playback
+        )
+        self.conversion_transport_bar.seek_requested.connect(
+            self._seek_global_playback
+        )
+        conversion_results = QWidget()
+        conversion_results.setObjectName("WorkspaceResultArea")
+        conversion_results_layout = QVBoxLayout(conversion_results)
+        conversion_results_layout.setContentsMargins(0, 0, 0, 0)
+        conversion_results_layout.setSpacing(8)
+        conversion_results_layout.addWidget(self.conversion_results_splitter, 1)
+        conversion_results_layout.addWidget(self.conversion_transport_bar, 0)
+
+        self.conversion_splitter = create_workspace_splitter(
+            (left_panel, conversion_results),
+            object_name="ConversionWorkspaceSplitter",
+            sizes=(400, 1200),
+            stretch_factors=(0, 1),
+            collapsible=(True, False),
+        )
+        layout.addWidget(self.conversion_splitter, 1)
         return page
 
     def _build_studio_page(self) -> QWidget:
         page = QWidget()
-        layout = QHBoxLayout(page)
+        layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
+        layout.setSpacing(12)
 
         self.video_preview_panel = VideoPreviewPanel()
         self.video_preview_panel.browse_requested.connect(self._choose_video_file)
@@ -622,19 +807,96 @@ class MainWindow(QMainWindow):
         self.video_preview_panel.clear_requested.connect(self._clear_video_source)
         self.video_preview_panel.download_requested.connect(self._start_video_download)
         self.video_preview_panel.saved_source_requested.connect(self._select_saved_video_source)
-        self.studio_output_panel = self._build_output_panel()
-        self.video_preview_panel.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Expanding,
+        self.video_preview_panel.set_compact_mode(True)
+        self.studio_editor = StudioEditor(include_sidebars=False)
+        self.studio_editor.session_changed.connect(self._on_studio_editor_session_changed)
+        self.studio_editor.seek_requested.connect(self._seek_studio_timeline)
+        self.studio_editor.open_location_requested.connect(self._open_track_location)
+        self.studio_transport_bar = StudioTransportBar()
+        self.studio_transport_bar.play_toggled.connect(self._toggle_global_playback)
+        self.studio_transport_bar.seek_requested.connect(self._seek_studio_timeline)
+        self.studio_transport_bar.zoom_changed.connect(self.studio_editor.set_zoom)
+        self.studio_transport_bar.split_mode_changed.connect(
+            self.studio_editor.set_split_mode
         )
-        self.studio_output_panel.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Expanding,
+        self.studio_editor.split_mode_changed.connect(
+            self.studio_transport_bar.set_split_mode
+        )
+        self.studio_editor.split_tool_available_changed.connect(
+            self.studio_transport_bar.set_split_enabled
+        )
+        self.studio_transport_bar.undo_requested.connect(self.studio_editor.undo)
+        self.studio_transport_bar.redo_requested.connect(self.studio_editor.redo)
+        self.studio_editor.history_availability_changed.connect(
+            self.studio_transport_bar.set_history_available
         )
 
-        layout.addWidget(self.video_preview_panel, 5)
-        layout.addWidget(self.studio_output_panel, 7)
+        studio_timeline_area = QWidget()
+        studio_timeline_area.setObjectName("StudioTimelineArea")
+        studio_timeline_layout = QVBoxLayout(studio_timeline_area)
+        studio_timeline_layout.setContentsMargins(0, 0, 0, 0)
+        studio_timeline_layout.setSpacing(8)
+        studio_timeline_layout.addWidget(self.studio_transport_bar, 0)
+        studio_timeline_layout.addWidget(self.studio_editor, 1)
+
+        self.studio_center_splitter = create_workspace_splitter(
+            (self.video_preview_panel, studio_timeline_area),
+            object_name="StudioCenterSplitter",
+            orientation=Qt.Orientation.Vertical,
+            sizes=self.settings.studio_layout.center_sizes,
+            stretch_factors=(45, 55),
+        )
+
+        self.studio_workspace_splitter = create_workspace_splitter(
+            (
+                self.studio_editor.sound_pool,
+                self.studio_center_splitter,
+                self.studio_editor.inspector_scroll,
+            ),
+            object_name="StudioWorkspaceSplitter",
+            sizes=self.settings.studio_layout.workspace_sizes,
+            stretch_factors=(0, 1, 0),
+            collapsible=(True, False, True),
+        )
+
+        self.studio_layout_save_timer = QTimer(self)
+        self.studio_layout_save_timer.setSingleShot(True)
+        self.studio_layout_save_timer.setInterval(350)
+        self.studio_layout_save_timer.timeout.connect(self._save_studio_layout)
+        self.studio_workspace_splitter.splitterMoved.connect(
+            self._queue_studio_layout_save
+        )
+        self.studio_center_splitter.splitterMoved.connect(
+            self._queue_studio_layout_save
+        )
+
+        # The old rows remain parented and hidden while Separation and Conversion
+        # still use them as their shared playback controls.
+        self.studio_output_panel = self._build_output_panel()
+        self.studio_output_panel.setParent(page)
+        self.studio_output_panel.hide()
+
+        layout.addWidget(self.studio_workspace_splitter, 1)
         return page
+
+    def _queue_studio_layout_save(self, *_args) -> None:
+        self.studio_layout_save_timer.start()
+
+    def _save_studio_layout(self) -> None:
+        workspace_sizes = tuple(self.studio_workspace_splitter.sizes())
+        center_sizes = tuple(self.studio_center_splitter.sizes())
+        if len(workspace_sizes) != 3 or len(center_sizes) != 2:
+            return
+        if sum(workspace_sizes) <= 0 or sum(center_sizes) <= 0:
+            return
+        studio_layout = StudioLayoutSettings(
+            workspace_sizes=workspace_sizes,
+            center_sizes=center_sizes,
+        )
+        if studio_layout == self.settings.studio_layout:
+            return
+        self.settings = replace(self.settings, studio_layout=studio_layout)
+        save_app_settings(self.settings)
 
     def _build_export_page(self) -> QWidget:
         self.export_page = ExportPage()
@@ -710,6 +972,14 @@ class MainWindow(QMainWindow):
         rvc_title = QLabel("RVC Convert")
         rvc_title.setObjectName("SectionTitle")
 
+        self.conversion_input_pool = VocalVersionPool(
+            "vocal",
+            title_key="Conversion Input",
+        )
+        self.conversion_input_pool.setProperty("poolContext", "conversionInput")
+        self.conversion_input_pool.setMinimumHeight(190)
+        self.conversion_input_pool.setMaximumHeight(300)
+
         self.rvc_settings_frame = QFrame()
         self.rvc_settings_frame.setObjectName("InsetCard")
         form = QGridLayout(self.rvc_settings_frame)
@@ -762,6 +1032,7 @@ class MainWindow(QMainWindow):
         self.rvc_action.set_action_enabled(False)
 
         rvc_layout.addWidget(rvc_title)
+        rvc_layout.addWidget(self.conversion_input_pool)
         rvc_layout.addWidget(self.rvc_settings_frame)
         rvc_layout.addWidget(self.rvc_action)
         rvc_layout.addStretch(1)
@@ -825,8 +1096,13 @@ class MainWindow(QMainWindow):
         self.primary_navigation.set_theme_mode(self.settings.theme_mode)
         self.theme_button.set_theme_mode(self.settings.theme_mode)
         self.settings_button.set_theme_mode(self.settings.theme_mode)
-        if hasattr(self, "workspace_dock"):
-            self.workspace_dock.set_theme_mode(self.settings.theme_mode)
+        for transport_name in (
+            "separation_transport_bar",
+            "conversion_transport_bar",
+        ):
+            transport = getattr(self, transport_name, None)
+            if transport is not None:
+                transport.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "update_status_button"):
             self.update_status_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "processing_queue_panel"):
@@ -847,6 +1123,12 @@ class MainWindow(QMainWindow):
             self.model_workspace_page.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "separation_results_panel"):
             self.separation_results_panel.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "separation_stem_pool"):
+            self.separation_stem_pool.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "conversion_input_pool"):
+            self.conversion_input_pool.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "conversion_result_browser"):
+            self.conversion_result_browser.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "vocal_results_panel"):
             self.vocal_results_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "library_details_panel"):
@@ -855,6 +1137,10 @@ class MainWindow(QMainWindow):
             self.export_page.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "video_preview_panel"):
             self.video_preview_panel.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "studio_editor"):
+            self.studio_editor.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "studio_transport_bar"):
+            self.studio_transport_bar.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "song_list"):
             for index in range(self.song_list.count()):
                 row = self.song_list.itemWidget(self.song_list.item(index))
@@ -869,9 +1155,11 @@ class MainWindow(QMainWindow):
         self.language_button.setText("KR" if self.settings.language == LANGUAGE_KOREAN else "EN")
         set_translated_tooltip(self.language_button, "Language")
         self.google_account_button.apply_language()
+        self.primary_navigation.apply_language()
         for language, action in self.language_actions.items():
             action.setChecked(language == self.settings.language)
-        self.workspace_dock.apply_language()
+        self.separation_transport_bar.apply_language()
+        self.conversion_transport_bar.apply_language()
         self.update_status_button.apply_language()
         self.processing_queue_panel.apply_language()
         self.processing_queue_button.apply_language()
@@ -879,14 +1167,22 @@ class MainWindow(QMainWindow):
         self.log_drawer.apply_language()
         self.model_workspace_page.apply_language()
         self.separation_results_panel.apply_language()
+        self.separation_stem_pool.apply_language()
+        self.conversion_input_pool.apply_language()
         self.vocal_results_panel.apply_language()
+        self.conversion_result_browser.apply_language()
         self.library_details_panel.apply_language()
         self.export_page.apply_language()
         self.video_preview_panel.apply_language()
-        self.library_source_filter.apply_language()
+        self.studio_editor.apply_language()
+        self.studio_transport_bar.apply_language()
         self.separation_recipe_selector.apply_language()
         self._populate_library_sort_combo()
         set_translated_tooltip(self.library_sort_combo, "Sort songs")
+
+        if hasattr(self, "song_list"):
+            self._sync_work_song_rows()
+        self._sync_work_song_navigation()
 
     def _position_update_status(self) -> None:
         if not hasattr(self, "update_status_button"):
@@ -894,37 +1190,53 @@ class MainWindow(QMainWindow):
         button = self.update_status_button
         if not button.isVisible():
             return
-        anchor_tops: list[int] = []
-        if self.workspace_dock.isVisible():
-            anchor_tops.append(self.workspace_dock.geometry().top())
         button.move(
             *update_button_position(
                 self._content_widget.height(),
                 button.height(),
-                anchor_tops=tuple(anchor_tops),
+                anchor_tops=(),
             )
         )
         button.raise_()
 
     def _sync_playback_surfaces(self) -> None:
-        if not hasattr(self, "workspace_dock"):
-            return
-        page_index = self.page_stack.currentIndex()
-        scope = self._workspace_scope_for_page(page_index)
-        is_workspace_page = scope is not None
-        self.workspace_dock.set_playback_scope(scope)
-        self.workspace_dock.setVisible(is_workspace_page)
         position_update_status = getattr(self, "_position_update_status", None)
         if callable(position_update_status):
             position_update_status()
         self._position_processing_queue()
 
+    def _result_transport_for_scope(
+        self,
+        scope: WorkspacePlaybackScope | None,
+    ) -> ResultTransportBar | None:
+        return {
+            WorkspacePlaybackScope.SEPARATION: getattr(
+                self, "separation_transport_bar", None
+            ),
+            WorkspacePlaybackScope.CONVERSION: getattr(
+                self, "conversion_transport_bar", None
+            ),
+        }.get(scope)
+
+    def _clear_result_transports(
+        self,
+        *,
+        except_transport: ResultTransportBar | None = None,
+    ) -> None:
+        for transport_name in (
+            "separation_transport_bar",
+            "conversion_transport_bar",
+        ):
+            transport = getattr(self, transport_name, None)
+            if transport is not None and transport is not except_transport:
+                transport.clear()
+
     def _position_processing_queue(self) -> None:
-        if not hasattr(self, "processing_queue_panel") or not hasattr(self, "workspace_dock"):
+        if not hasattr(self, "processing_queue_panel"):
             return
         panel = self.processing_queue_panel
         parent = self._content_widget
-        player_top = self.workspace_dock.geometry().top() if self.workspace_dock.isVisible() else parent.height() - 16
+        player_top = parent.height() - 16
         drawer_open = hasattr(self, "log_drawer") and self.log_drawer.isVisible()
         queue_open = self._processing_queue_drawer_open and panel.has_tasks()
         if self._processing_queue_drawer_open and not queue_open:
@@ -1317,6 +1629,13 @@ class MainWindow(QMainWindow):
         self._apply_language()
 
     def _navigate_to_page(self, index: int) -> None:
+        if (
+            index in WORK_SONG_REQUIRED_PAGES
+            and hasattr(self, "current_work_item")
+            and self.current_work_item is None
+        ):
+            self.primary_navigation.set_current_page(self.page_stack.currentIndex())
+            return
         previous_index = self.page_stack.currentIndex()
         if previous_index == PAGE_STUDIO and index != PAGE_STUDIO:
             self.studio_session_autosave.flush()
@@ -1325,11 +1644,17 @@ class MainWindow(QMainWindow):
             self._suspend_playback()
         if index != PAGE_MODELS:
             self.model_workspace_page.stop_preview()
+        # Populate the hidden Studio workspace before exposing it. Otherwise the
+        # already-built video panel paints one frame ahead of the sound pool and timeline.
+        if index == PAGE_STUDIO:
+            self._restore_current_studio_session()
         self.page_stack.setCurrentIndex(index)
         self.primary_navigation.set_current_page(index)
         if index == PAGE_EXPORT:
             self._refresh_export_page()
-        if previous_index in workspace_pages and index in workspace_pages:
+        if index == PAGE_STUDIO:
+            self._prepare_studio_playback_surface()
+        elif previous_index in workspace_pages and index in workspace_pages:
             self._sync_playback_queue_for_page(index, force=True)
         else:
             self._sync_playback_queue_for_page(index)
@@ -1601,7 +1926,7 @@ class MainWindow(QMainWindow):
             )
             row.set_theme_mode(self.settings.theme_mode)
             apply_widget_language(row)
-            row.use_requested.connect(self._use_library_item)
+            row.work_song_toggled.connect(self._toggle_library_work_song)
             row.details_requested.connect(self._open_library_details)
             row.rename_requested.connect(self._rename_library_item)
             row.remove_requested.connect(self._remove_library_item)
@@ -1620,11 +1945,10 @@ class MainWindow(QMainWindow):
             pass
         elif self.song_list.count() > 0:
             self.song_list.setCurrentRow(0)
-        else:
-            self._on_library_selection_changed()
-        self._sync_song_row_selection()
+        self._sync_work_song_rows()
+        self._sync_navigation_work_song_selector()
         self._apply_library_filters()
-        self._refresh_work_song_selector()
+        self._sync_result_song_titles()
         self._refresh_export_page()
         if self._current_playback_context() == "library":
             self._refresh_playback_ui(is_playing=self.player.is_playing())
@@ -1640,9 +1964,6 @@ class MainWindow(QMainWindow):
                 self.song_list.setCurrentItem(item)
                 return True
         return False
-
-    def _on_library_selection_changed(self, *_args) -> None:
-        self._sync_song_row_selection()
 
     def _toggle_library_preview(self, song_id: str) -> None:
         if song_id == self._library_preview_song_id:
@@ -1723,7 +2044,6 @@ class MainWindow(QMainWindow):
 
     def _apply_library_filters(self, *_args) -> None:
         query = self.library_search_edit.text().strip().casefold()
-        source_filters = self.library_source_filter.selected_sources()
         visible_items = []
         preview_is_visible = False
         for index in range(self.song_list.count()):
@@ -1733,8 +2053,6 @@ class MainWindow(QMainWindow):
             is_visible = song is not None and (
                 not query or query in song.title.casefold() or query in song.path.name.casefold()
             )
-            if is_visible and source_filters:
-                is_visible = song.source_type in source_filters
             list_item.setHidden(not is_visible)
             if is_visible:
                 visible_items.append(list_item)
@@ -1763,11 +2081,62 @@ class MainWindow(QMainWindow):
             details = self.library.asset_details(song_id)
         except KeyError:
             return
+        opening_from_list = self.library_content_stack.currentWidget() is not self.library_details_panel
+        if opening_from_list and self._current_playback_context() == "library":
+            self._suspend_playback()
         self.library_details_panel.set_details(details)
         self.library_content_stack.setCurrentWidget(self.library_details_panel)
+        queue = self.current_playback_queue
+        if queue is not None and queue.context == "library_asset":
+            path = Path(queue.source_id)
+            self.library_details_panel.set_preview_expanded(path, True)
+            self._refresh_playback_ui(is_playing=self.player.is_playing())
 
     def _close_library_details(self) -> None:
+        if self._current_playback_context() == "library_asset":
+            self._suspend_playback()
+        self.library_details_panel.clear_preview()
         self.library_content_stack.setCurrentIndex(0)
+
+    def _toggle_library_asset_preview(self, path: Path) -> None:
+        resolved = path.expanduser().resolve()
+        source_id = str(resolved)
+        queue = self.current_playback_queue
+        if queue is not None and queue.context == "library_asset" and queue.source_id == source_id:
+            self._playback_resume_positions.pop(("library_asset", source_id), None)
+            self._stop_playback(clear_queue=True)
+            return
+
+        if queue is not None and queue.context in {"library", "library_asset"}:
+            self._suspend_playback()
+        preview_queue = self._library_asset_playback_queue(resolved)
+        if preview_queue is None:
+            return
+        self.library_details_panel.set_preview_expanded(resolved, True)
+        self._set_playback_queue(
+            preview_queue,
+            position_ms=self._resume_position(preview_queue),
+        )
+
+    def _toggle_library_asset_preview_playback(self, path: Path) -> None:
+        resolved = path.expanduser().resolve()
+        source_id = str(resolved)
+        queue = self.current_playback_queue
+        if queue is None or queue.context != "library_asset" or queue.source_id != source_id:
+            self._toggle_library_asset_preview(resolved)
+        queue = self.current_playback_queue
+        if queue is not None and queue.context == "library_asset" and queue.source_id == source_id:
+            self._toggle_global_playback()
+
+    def _seek_library_asset_preview(self, path: Path, position_ms: int) -> None:
+        queue = self.current_playback_queue
+        if (
+            queue is None
+            or queue.context != "library_asset"
+            or queue.source_id != str(path.expanduser().resolve())
+        ):
+            return
+        self._seek_global_playback(position_ms)
 
     def _open_library_asset_location(self, path: Path) -> None:
         try:
@@ -1789,6 +2158,10 @@ class MainWindow(QMainWindow):
                     "This cannot be undone."
                 )
             )
+        elif asset.removal_scope == REMOVAL_STUDIO_SESSION:
+            message = tr(
+                "Reset the studio session for this song? Timeline edits and mix settings will be removed."
+            )
         else:
             message = tr(
                 "Delete '{name}' from this song? This cannot be undone.",
@@ -1805,22 +2178,62 @@ class MainWindow(QMainWindow):
         ):
             return
 
+        self._execute_library_asset_removal(song_id, (asset,))
+
+    def _remove_library_assets(self, song_id: str, assets: tuple[SongAsset, ...]) -> None:
+        removable = tuple(asset for asset in assets if asset.can_remove)
+        if not removable or song_id not in self._song_items_by_id:
+            return
+        message = tr(
+            "Delete {count} selected items? Vocal result files may remove their entire "
+            "separation result. This cannot be undone.",
+            count=len(removable),
+        )
+        if not ConfirmationDialog.confirm(
+            self,
+            tr("Delete Selected Files"),
+            message,
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Delete"),
+            cancel_label=tr("Cancel"),
+        ):
+            return
+        self._execute_library_asset_removal(song_id, removable)
+
+    def _execute_library_asset_removal(
+        self,
+        song_id: str,
+        assets: tuple[SongAsset, ...],
+    ) -> None:
+        song = self._song_items_by_id.get(song_id)
+        if song is None or not assets:
+            return
+
         queue = self.current_playback_queue
-        affects_playback = queue is not None and (
+        affects_playback = queue is not None and any(
             any(_same_path(path, asset.path) for path in queue.paths)
             or (
                 asset.removal_scope == REMOVAL_VOCAL_OUTPUT
                 and any(_is_path_within(path, asset.path.parent) for path in queue.paths)
             )
+            for asset in assets
         )
         if affects_playback:
             self._stop_playback(clear_queue=True)
 
         try:
-            result = self.library.remove_asset(song_id, asset.path)
+            results = self.library.remove_assets(
+                song_id,
+                tuple(asset.path for asset in assets),
+            )
         except Exception as exc:
             _set_optional_label(self.library_status_label, f"Remove failed: {_last_error_line(str(exc))}")
+            self._refresh_song_list()
             return
+
+        if any(asset.removal_scope == REMOVAL_STUDIO_SESSION for asset in assets):
+            self.studio_session_autosave.discard(song_id)
 
         preferred_output = None
         if self.current_work_item is not None and self.current_work_item.id == song_id:
@@ -1831,28 +2244,64 @@ class MainWindow(QMainWindow):
             self._assign_work_item(refreshed_song, persist=False)
             preferred_output = refreshed_song.output_job_dir if refreshed_song is not None else None
 
-        if asset.removal_scope in {REMOVAL_VOCAL_OUTPUT, REMOVAL_VOCAL_TAKE}:
+        has_vocal_removal = any(
+            asset.removal_scope in {REMOVAL_VOCAL_OUTPUT, REMOVAL_VOCAL_TAKE}
+            for asset in assets
+        )
+        if has_vocal_removal:
             self._refresh_output_sets(
                 preferred_job_dir=preferred_output,
                 select_fallback=preferred_output is not None,
             )
         else:
             self._refresh_song_list()
-            if self.current_work_item is not None and self.current_work_item.id == song_id:
-                self._refresh_video_source()
-                self._refresh_output_playback_queue()
+        if self.current_work_item is not None and self.current_work_item.id == song_id:
+            if any(asset.stage == STAGE_STUDIO for asset in assets):
+                self._restore_current_studio_session()
+            self._refresh_video_source()
+            self._refresh_output_playback_queue()
         _set_optional_label(
             self.library_status_label,
-            "Link removed" if result.detached_only else "Removed",
+            "Link removed"
+            if results and all(result.detached_only for result in results)
+            else "Removed",
         )
 
-    def _sync_song_row_selection(self) -> None:
-        selected_id = self._browsed_song_id()
+    def _sync_work_song_rows(self) -> None:
+        work_song_id = self.current_work_item.id if self.current_work_item is not None else ""
         for index in range(self.song_list.count()):
             item = self.song_list.item(index)
             row = self.song_list.itemWidget(item)
-            if hasattr(row, "set_selected"):
-                row.set_selected(item.data(Qt.ItemDataRole.UserRole) == selected_id)
+            if hasattr(row, "set_work_song_active"):
+                row.set_work_song_active(
+                    item.data(Qt.ItemDataRole.UserRole) == work_song_id
+                )
+
+    def _sync_navigation_work_song_selector(self) -> None:
+        if not hasattr(self, "primary_navigation"):
+            return
+        selected_id = self.current_work_item.id if self.current_work_item is not None else ""
+        songs = sort_song_items(list(self._song_items_by_id.values()), "newest")
+        self.primary_navigation.set_work_songs(
+            ((song.id, song.title) for song in songs),
+            selected_id,
+        )
+
+    def _on_navigation_work_song_changed(self, song_id: str) -> None:
+        if getattr(self, "_work_song_load_worker", None) is not None:
+            self._sync_navigation_work_song_selector()
+            return
+        if not song_id:
+            self._set_current_song(None)
+            return
+        song = self._song_items_by_id.get(song_id)
+        if song is None:
+            self._sync_navigation_work_song_selector()
+            return
+        if getattr(song, "output_job_dir", None) is not None:
+            self._start_library_work_song_load(song)
+            return
+        self._select_work_song(song)
 
     def _browsed_song(self) -> SongItem | None:
         current_item = self.song_list.currentItem()
@@ -1887,63 +2336,88 @@ class MainWindow(QMainWindow):
         if song is None:
             return
 
+        if not ConfirmationDialog.confirm(
+            self,
+            tr("Delete Song"),
+            tr(
+                "Delete '{name}' and all files managed by JJZero Audio for this song? "
+                "Original or linked files outside the library will not be deleted. "
+                "This cannot be undone.",
+                name=song.title,
+            ),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Delete"),
+            cancel_label=tr("Cancel"),
+        ):
+            return
+
         was_current_song = self.current_song is not None and self.current_song.id == song_id
         was_work_item = self.current_work_item is not None and self.current_work_item.id == song_id
-        is_previewing_song = (
-            self._current_playback_context() == "library"
-            and self.current_playback_queue is not None
-            and self.current_playback_queue.source_id == song_id
+        queue = self.current_playback_queue
+        package_dir = song.package_dir
+        affects_playback = queue is not None and (
+            queue.source_id == song_id
+            or was_current_song
+            or was_work_item
+            or (
+                package_dir is not None
+                and any(_is_path_within(path, package_dir) for path in queue.paths)
+            )
         )
-        if is_previewing_song:
+        if affects_playback:
             self._stop_playback(clear_queue=True)
             self._library_preview_song_id = ""
         self._playback_resume_positions.pop(("library", song_id), None)
-        if not self.library.remove_item(song_id):
+        self.studio_session_autosave.discard(song_id)
+        try:
+            removed = self.library.remove_item(song_id)
+        except Exception as exc:
+            _set_optional_label(
+                self.library_status_label,
+                f"Delete failed: {_last_error_line(str(exc))}",
+            )
+            return
+        if not removed:
             return
 
         if was_current_song or was_work_item:
             self._set_current_song(None)
-        _set_optional_label(self.library_status_label, "Removed")
+        _set_optional_label(self.library_status_label, tr("Deleted"))
         self._refresh_song_list()
 
-    def _refresh_work_song_selector(self) -> None:
-        if not hasattr(self, "workspace_dock"):
-            return
-        selected_id = self.current_work_item.id if self.current_work_item is not None else ""
-        songs = sorted(
-            self._song_items_by_id.values(),
-            key=lambda item: (item.title.casefold(), item.id),
-        )
-        self.workspace_dock.set_songs(
-            ((song.id, song.title) for song in songs),
-            selected_id,
-        )
-        if selected_id and self.workspace_dock.selected_song_id() != selected_id:
-            self._set_current_song(None)
-
-    def _on_global_work_song_changed(self, song_id: str) -> None:
-        song = self._song_items_by_id.get(song_id) if song_id else None
-        if song is not None and song.kind == "output":
-            self._set_output_work_song(song)
-        else:
-            self._set_current_song(song)
+    def _sync_result_song_titles(self) -> None:
+        title = self.current_work_item.title if self.current_work_item is not None else ""
+        if hasattr(self, "separation_results_panel"):
+            self.separation_results_panel.set_song_title(title)
+        if hasattr(self, "vocal_results_panel"):
+            self.vocal_results_panel.set_song_title(title)
 
     def _set_current_song(self, song: SongItem | None, *, persist: bool = True) -> None:
-        self._assign_work_item(song, persist=persist)
-        if song is None or song.output_job_dir is None:
-            self._apply_output_set(None)
-            return
-        sound_set = load_output_sound_set(song.output_job_dir, self.settings.output_root)
-        self._select_output_set(song.output_job_dir)
-        self._apply_output_set(sound_set)
+        sound_set = (
+            load_output_sound_set(song.output_job_dir, self.settings.output_root)
+            if song is not None and song.output_job_dir is not None
+            else None
+        )
+        self._apply_loaded_work_song(song, sound_set, persist=persist)
 
     def _set_output_work_song(self, song: SongItem, *, persist: bool = True) -> bool:
+        sound_set = (
+            load_output_sound_set(song.output_job_dir, self.settings.output_root)
+            if song.output_job_dir is not None
+            else None
+        )
+        return self._apply_loaded_work_song(song, sound_set, persist=persist)
+
+    def _apply_loaded_work_song(
+        self,
+        song: SongItem | None,
+        sound_set: OutputSoundSet | None,
+        *,
+        persist: bool = True,
+    ) -> bool:
         self._assign_work_item(song, persist=persist)
-        if song.output_job_dir is None:
-            self._apply_output_set(None)
-            return False
-        sound_set = load_output_sound_set(song.output_job_dir, self.settings.output_root)
-        if sound_set is None:
+        if song is None or song.output_job_dir is None or sound_set is None:
             self._apply_output_set(None)
             return False
         self._select_output_set(sound_set.job_dir)
@@ -1955,19 +2429,39 @@ class MainWindow(QMainWindow):
         self.current_song = item if item is not None and item.kind == "source" else None
         self.separation_action.set_progress(0)
         self.separation_action.set_status("")
-        if hasattr(self, "workspace_dock"):
-            selected_id = item.id if item is not None else ""
-            if selected_id and not self.workspace_dock.has_song(selected_id):
-                self._refresh_work_song_selector()
-            else:
-                self.workspace_dock.select_song(selected_id)
+        self._sync_result_song_titles()
         if persist and self._work_song_ready:
             try:
                 self.work_song_store.save(item.id if item is not None else "")
             except OSError as exc:
                 _set_optional_label(self.output_status_label, f"Work song failed: {_last_error_line(str(exc))}")
+        if hasattr(self, "song_list"):
+            self._sync_work_song_rows()
+        self._sync_work_song_navigation()
         self._sync_work_song_capabilities()
         self._refresh_video_source()
+
+    def _sync_work_song_navigation(self) -> None:
+        if not hasattr(self, "primary_navigation"):
+            return
+        sync_selector = getattr(self, "_sync_navigation_work_song_selector", None)
+        if callable(sync_selector):
+            sync_selector()
+        has_work_song = self.current_work_item is not None
+        locked_tooltip = tr("Select a work song in Library to unlock this page.")
+        for page_id in WORK_SONG_REQUIRED_PAGES:
+            self.primary_navigation.set_page_enabled(
+                page_id,
+                has_work_song,
+                disabled_tooltip=locked_tooltip,
+            )
+        self.primary_navigation.set_page_enabled(PAGE_EXPORT, True)
+        if (
+            not has_work_song
+            and hasattr(self, "page_stack")
+            and self.page_stack.currentIndex() in WORK_SONG_REQUIRED_PAGES
+        ):
+            self._navigate_to_page(PAGE_LIBRARY)
 
     def _sync_work_song_capabilities(self) -> None:
         capabilities = build_work_song_capabilities(
@@ -2024,6 +2518,13 @@ class MainWindow(QMainWindow):
             original_song_url=original_url,
             saved_sources=saved_sources,
         )
+        if (
+            hasattr(self, "studio_editor")
+            and item is not None
+            and self.page_stack.currentIndex() == PAGE_STUDIO
+            and not getattr(self, "_is_loading_studio_session", False)
+        ):
+            self._restore_current_studio_session()
         self._sync_video_workspace()
 
     def _sync_video_workspace(self) -> None:
@@ -2062,21 +2563,89 @@ class MainWindow(QMainWindow):
         else:
             self._set_current_song(song)
 
-    def _use_library_item(self, song_id: str) -> None:
-        if song_id:
-            self._select_library_song(song_id)
-        song = self._browsed_song()
+    def _toggle_library_work_song(self, song_id: str) -> None:
+        if self._work_song_load_worker is not None:
+            return
+        song = self._song_items_by_id.get(song_id)
         if song is None:
-            _set_optional_label(self.library_status_label, "Select song.")
             return
-        if song.kind == "output":
-            self._use_output_song(song)
+        if self.current_work_item is not None and self.current_work_item.id == song_id:
+            self._set_current_song(None)
             return
+        if song.output_job_dir is None:
+            self._select_work_song(song)
+            return
+        self._start_library_work_song_load(song)
 
-        self._select_work_song(song)
-        _set_optional_label(self.library_status_label, "Loaded")
-        self._navigate_to_page(PAGE_SEPARATION)
-        self._navigate_to_vocal_step(0)
+    def _start_library_work_song_load(self, song: SongItem) -> None:
+        if song.output_job_dir is None:
+            self._select_work_song(song)
+            return
+        self._work_song_loading_id = song.id
+        self._set_library_work_song_loading(song.id, True)
+        worker = TaskWorker(
+            lambda _progress: load_output_sound_set(
+                song.output_job_dir,
+                self.settings.output_root,
+            )
+        )
+        self._work_song_load_worker = worker
+        self._workers.append(worker)
+
+        def complete(result: object) -> None:
+            current = self._song_items_by_id.get(song.id)
+            try:
+                if current is not None:
+                    self._apply_loaded_work_song(
+                        current,
+                        result if isinstance(result, OutputSoundSet) else None,
+                    )
+            finally:
+                self._finish_library_work_song_load(song.id)
+
+        def failed(error: str) -> None:
+            self._logger.warning("Work-song load failed: %s", _last_error_line(error))
+            _set_optional_label(
+                self.library_status_label,
+                f"Load failed: {_last_error_line(error)}",
+            )
+            self._finish_library_work_song_load(song.id)
+            self._sync_navigation_work_song_selector()
+
+        def cleanup() -> None:
+            if self._work_song_load_worker is worker:
+                self._work_song_load_worker = None
+            if worker in self._workers:
+                self._workers.remove(worker)
+            worker.deleteLater()
+
+        worker.succeeded.connect(complete)
+        worker.failed.connect(failed)
+        worker.finished.connect(cleanup)
+        worker.start()
+
+    def _finish_library_work_song_load(self, song_id: str) -> None:
+        self._set_library_work_song_loading(song_id, False)
+        if self._work_song_loading_id == song_id:
+            self._work_song_loading_id = ""
+
+    def _set_library_work_song_loading(self, song_id: str, is_loading: bool) -> None:
+        navigation = getattr(self, "primary_navigation", None)
+        selector = getattr(navigation, "work_song_selector", None)
+        if (
+            selector is not None
+            and selector.selected_song_id() == song_id
+            and hasattr(selector, "set_loading")
+        ):
+            selector.set_loading(is_loading)
+        for index in range(self.song_list.count()):
+            item = self.song_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) != song_id:
+                continue
+            row = self.song_list.itemWidget(item)
+            if hasattr(row, "set_work_song_loading"):
+                row.set_work_song_loading(is_loading)
+            return
 
     def _library_playback_queue(self, song: SongItem) -> PlaybackQueue | None:
         try:
@@ -2094,6 +2663,31 @@ class MainWindow(QMainWindow):
             title=song.title,
             paths=tuple(paths),
             volumes=tuple(1.0 for _path in paths),
+            duration_ms=duration_ms,
+        )
+
+    def _library_asset_playback_queue(self, path: Path) -> PlaybackQueue | None:
+        resolved = path.expanduser().resolve()
+        if resolved.suffix.casefold() not in SUPPORTED_AUDIO_EXTENSIONS or not resolved.is_file():
+            _set_optional_label(self.library_status_label, "Cannot preview.")
+            return None
+        try:
+            duration_ms = self._duration_ms_for_paths([resolved])
+        except Exception as exc:
+            _set_optional_label(
+                self.library_status_label,
+                f"Load failed: {_last_error_line(str(exc))}",
+            )
+            return None
+        if duration_ms <= 0:
+            _set_optional_label(self.library_status_label, "Cannot preview.")
+            return None
+        return PlaybackQueue(
+            context="library_asset",
+            source_id=str(resolved),
+            title=resolved.name,
+            paths=(resolved,),
+            volumes=(1.0,),
             duration_ms=duration_ms,
         )
 
@@ -2295,19 +2889,24 @@ class MainWindow(QMainWindow):
         self._apply_output_set(load_output_sound_set(job_dir, self.settings.output_root))
 
     def _activate_vocal_converted_version(self, path: Path | None) -> None:
-        if self.current_output_set is None:
+        if path is None:
+            return
+        owner = self.conversion_result_browser.version_for_path(path)
+        job_dir = owner.job_dir if owner is not None else (
+            self.current_output_set.job_dir if self.current_output_set is not None else None
+        )
+        if job_dir is None:
             return
         try:
-            self.vocal_project_store.set_active_take(self.current_output_set.job_dir, path)
+            self.vocal_project_store.set_active_take(job_dir, path)
         except Exception as exc:
             self._logger.warning("Could not persist active vocal take: %s", exc)
-        song = self.library.activate_converted_output(self.current_output_set.job_dir, path)
+        song = self.library.activate_converted_output(job_dir, path)
         if song is not None:
             self._song_items_by_id[song.id] = song
-            if self.current_work_item is not None and self.current_work_item.id == song.id:
-                self._assign_work_item(song, persist=False)
         self.converted_track.select_path(path)
-        self._refresh_output_playback_queue()
+        self.conversion_result_browser.select_converted(path)
+        self._apply_conversion_result_context(owner, selected_converted_path=path)
 
     def _activate_separation_result(self, job_dir: Path) -> None:
         song = self.library.activate_output(job_dir)
@@ -2415,10 +3014,12 @@ class MainWindow(QMainWindow):
             self.vocal_track.set_single_path(None)
             self.instrumental_track.set_single_path(None)
             self.converted_track.set_options([])
-            self._apply_studio_session(StudioSession())
-            self.separation_results_panel.set_versions((), None)
-            self.separation_results_panel.set_result(None)
-            self.vocal_results_panel.set_result(None)
+            if self.page_stack.currentIndex() == PAGE_STUDIO:
+                self._apply_studio_session(StudioSession())
+            self.separation_stem_pool.set_versions((), None)
+            self._apply_separation_stem_selection(None, None)
+            versions = self._current_vocal_versions()
+            self._refresh_conversion_input_choices(versions, None)
             self.rvc_action.set_status("")
             _set_optional_label(self.output_status_label, "")
             self._refresh_output_playback_queue()
@@ -2431,11 +3032,12 @@ class MainWindow(QMainWindow):
         selected_version = self._current_vocal_result(sound_set)
         selected_converted = selected_version.active_converted_path if selected_version is not None else None
         self.converted_track.set_options(list(sound_set.converted_vocal_paths), selected_converted)
-        self._restore_current_studio_session()
-        project = self._load_vocal_project(selected_version)
+        if self.page_stack.currentIndex() == PAGE_STUDIO:
+            self._restore_current_studio_session()
         self._refresh_separation_versions(selected_version)
-        self.separation_results_panel.set_result(selected_version)
-        self.vocal_results_panel.set_result(selected_version, project)
+        versions = self._current_vocal_versions()
+        selected_job_dir = selected_version.job_dir if selected_version is not None else None
+        self._refresh_conversion_input_choices(versions, selected_job_dir)
         self.rvc_action.set_progress(0)
         self.rvc_action.set_status("")
         _set_optional_label(self.output_status_label, "")
@@ -2460,41 +3062,128 @@ class MainWindow(QMainWindow):
         except KeyError:
             return None
 
-    def _load_vocal_project(self, result: SongVocalVersion | None) -> VocalProject | None:
-        if result is None:
-            return None
-        try:
-            return self.vocal_project_store.open_or_create(
-                result.job_dir,
-                active_converted_path=result.active_converted_path,
-            )
-        except Exception as exc:
-            self._logger.warning("Could not load vocal project %s: %s", result.job_dir, exc)
-            return None
-
     def _refresh_vocal_project_panel(self) -> None:
         if self.current_output_set is None:
-            self.separation_results_panel.set_result(None)
-            self.vocal_results_panel.set_result(None)
+            self.separation_stem_pool.set_versions((), None)
+            self._apply_separation_stem_selection(None, None)
+            self._refresh_conversion_input_choices(self._current_vocal_versions(), None)
             return
         result = self._current_vocal_result(self.current_output_set)
         self._refresh_separation_versions(result)
-        self.separation_results_panel.set_result(result)
-        self.vocal_results_panel.set_result(result, self._load_vocal_project(result))
+        self._refresh_conversion_input_choices(
+            self._current_vocal_versions(),
+            result.job_dir if result is not None else None,
+        )
 
     def _refresh_separation_versions(self, selected: SongVocalVersion | None) -> None:
-        item = self.current_song or self.current_work_item
-        if item is None:
-            self.separation_results_panel.set_versions((), None)
-            return
-        try:
-            versions = self.library.vocal_versions(item.id)
-        except KeyError:
-            versions = ()
-        self.separation_results_panel.set_versions(
+        versions = self._current_vocal_versions()
+        vocal_result, instrumental_result = self.separation_stem_pool.set_versions(
             versions,
             selected.job_dir if selected is not None else None,
         )
+        self._apply_separation_stem_selection(vocal_result, instrumental_result)
+
+    def _on_separation_stem_selection_changed(
+        self,
+        vocal_result: SongVocalVersion | None,
+        instrumental_result: SongVocalVersion | None,
+    ) -> None:
+        self._apply_separation_stem_selection(vocal_result, instrumental_result)
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _apply_separation_stem_selection(
+        self,
+        vocal_result: SongVocalVersion | None,
+        instrumental_result: SongVocalVersion | None,
+    ) -> None:
+        self._separation_preview_paths = {
+            "original": vocal_result.vocals_path if vocal_result is not None else None,
+            "instrumental": (
+                instrumental_result.instrumental_path
+                if instrumental_result is not None
+                else None
+            ),
+        }
+        self.separation_results_panel.set_separation_stems(
+            vocal_result,
+            instrumental_result,
+        )
+
+    def _current_vocal_versions(self) -> tuple[SongVocalVersion, ...]:
+        item = self.current_song or self.current_work_item
+        if item is None:
+            return ()
+        try:
+            return self.library.vocal_versions(item.id)
+        except KeyError:
+            return ()
+
+    def _refresh_conversion_input_choices(
+        self,
+        versions: tuple[SongVocalVersion, ...],
+        selected_job_dir: Path | None,
+        preferred_converted_path: Path | None = None,
+    ) -> None:
+        selected = self.conversion_input_pool.set_versions(
+            versions,
+            selected_job_dir,
+            preserve_selection=True,
+        )
+        projects = self._conversion_projects(versions)
+        self.conversion_result_browser.set_versions(
+            versions,
+            projects=projects,
+            preferred_path=preferred_converted_path,
+        )
+        selected_converted = self.conversion_result_browser.selected_path()
+        result_owner = self.conversion_result_browser.version_for_path(selected_converted)
+        self._apply_conversion_result_context(
+            result_owner or selected,
+            selected_converted_path=selected_converted,
+        )
+
+    def _apply_conversion_result_context(
+        self,
+        version: SongVocalVersion | None,
+        *,
+        selected_converted_path: Path | None = None,
+    ) -> None:
+        projects = self.conversion_result_browser.projects()
+        takes = tuple(take for project in projects for take in project.takes)
+        selected_path = (
+            selected_converted_path
+            if selected_converted_path is not None
+            else self.conversion_result_browser.selected_path()
+        )
+        self.vocal_results_panel.set_conversion_context(
+            version,
+            converted_paths=self.conversion_result_browser.converted_paths(),
+            takes=takes,
+            selected_converted_path=selected_path,
+        )
+        if self.page_stack.currentIndex() == PAGE_CONVERSION:
+            self._refresh_output_playback_queue(WorkspacePlaybackScope.CONVERSION)
+
+    def _conversion_projects(
+        self,
+        versions: tuple[SongVocalVersion, ...],
+    ) -> dict[Path, VocalProject]:
+        projects: dict[Path, VocalProject] = {}
+        for version in versions:
+            if not version.converted_vocal_paths:
+                continue
+            try:
+                project = self.vocal_project_store.load(version.job_dir)
+            except Exception as exc:
+                self._logger.warning(
+                    "Could not load vocal project %s: %s",
+                    version.job_dir,
+                    exc,
+                )
+                continue
+            if project is not None:
+                projects[version.job_dir] = project
+        return projects
 
     def _sync_current_work_output_item(self, sound_set: OutputSoundSet | None) -> None:
         if self.current_song is not None:
@@ -2502,7 +3191,7 @@ class MainWindow(QMainWindow):
         if sound_set is None:
             return
         item = self._output_item_for_sound_set(sound_set)
-        if item is not None:
+        if item is not None and item != self.current_work_item:
             self._assign_work_item(item)
 
     def _output_item_for_sound_set(self, sound_set: OutputSoundSet) -> SongItem | None:
@@ -2687,7 +3376,8 @@ class MainWindow(QMainWindow):
         save_app_settings(self.settings)
 
     def _start_rvc_conversion(self, *_args) -> None:
-        if self.current_output_set is None or self.current_work_item is None:
+        sound_set = self._conversion_input_sound_set()
+        if sound_set is None or self.current_work_item is None:
             self.rvc_action.set_status("No output.")
             return
         if not self.settings.rvc.voice_model:
@@ -2697,7 +3387,6 @@ class MainWindow(QMainWindow):
         self.rvc_action.set_running(True)
         self.rvc_action.set_progress(8)
         self.rvc_action.set_status("Converting")
-        sound_set = self.current_output_set
         scope = WorkTaskScope(self.current_work_item.id)
         settings = settings_for_managed_rvc_runtime(
             self.settings.rvc,
@@ -2721,8 +3410,15 @@ class MainWindow(QMainWindow):
             action_scope=lambda: scope.is_current(self.current_work_item),
         )
 
+    def _conversion_input_sound_set(self) -> OutputSoundSet | None:
+        version = self.conversion_input_pool.selected_version()
+        if version is None:
+            return None
+        return load_output_sound_set(version.job_dir, self.settings.output_root)
+
     def _on_rvc_succeeded(self, scope: WorkTaskScope, job_dir: Path, result: object) -> None:
         output_path = getattr(result, "output_path", None)
+        should_monitor = scope.is_current(self.current_work_item)
         if isinstance(output_path, Path):
             if isinstance(result, RvcConversionResult):
                 try:
@@ -2740,10 +3436,16 @@ class MainWindow(QMainWindow):
                     )
                 except Exception as exc:
                     self._logger.warning("Could not register vocal take metadata: %s", exc)
-            updated = self.library.activate_converted_output(job_dir, output_path)
-            if updated is not None:
-                self._song_items_by_id[updated.id] = updated
-        self._refresh_output_sets_after_task(scope, job_dir)
+        current_job_dir = self.current_output_set.job_dir if self.current_output_set is not None else None
+        preferred_job_dir = current_job_dir or (
+            job_dir if scope.is_current(self.current_work_item) else None
+        )
+        self._refresh_output_sets(
+            preferred_job_dir=preferred_job_dir,
+            select_fallback=preferred_job_dir is not None,
+        )
+        if should_monitor and isinstance(output_path, Path):
+            self._activate_vocal_converted_version(output_path)
         if scope.is_current(self.current_work_item):
             self.rvc_action.set_progress(100)
             self.rvc_action.set_status("Done")
@@ -2868,6 +3570,9 @@ class MainWindow(QMainWindow):
         muted: bool,
         volume_percent: int,
     ) -> None:
+        if self.page_stack.currentIndex() == PAGE_CONVERSION:
+            self._refresh_output_playback_queue(WorkspacePlaybackScope.CONVERSION)
+            return
         track = self._output_track(track_id)
         if track is None:
             return
@@ -2916,6 +3621,14 @@ class MainWindow(QMainWindow):
                 volume_percent=session.converted_vocal.volume_percent,
             )
             self._sync_result_playback_settings()
+            item = self.current_song or self.current_work_item
+            try:
+                assets = self.library.studio_assets(item.id) if item is not None else ()
+            except KeyError:
+                assets = ()
+            self.studio_editor.set_context(session, assets)
+            if self.page_stack.currentIndex() == PAGE_STUDIO:
+                self._sync_idle_studio_transport()
         finally:
             self._is_loading_studio_session = False
 
@@ -2925,12 +3638,11 @@ class MainWindow(QMainWindow):
             ("instrumental", self.instrumental_track),
             ("converted", self.converted_track),
         ):
-            for panel in (self.separation_results_panel, self.vocal_results_panel):
-                panel.set_mix_state(
-                    track_id,
-                    muted=track.is_muted(),
-                    volume_percent=track.volume_percent(),
-                )
+            self.separation_results_panel.set_mix_state(
+                track_id,
+                muted=track.is_muted(),
+                volume_percent=track.volume_percent(),
+            )
 
     def _output_track(self, track_id: str) -> TrackRow | None:
         return {
@@ -2945,14 +3657,99 @@ class MainWindow(QMainWindow):
         item = self.current_song or self.current_work_item
         if item is None:
             return
-        self.studio_session_autosave.queue(item.id, self._studio_session_from_tracks())
+        session = self._studio_session_from_tracks()
+        if session.tracks and session != self.studio_editor.session():
+            try:
+                assets = self.library.studio_assets(item.id)
+            except KeyError:
+                assets = ()
+            self.studio_editor.set_context(session, assets)
+        self.studio_session_autosave.queue(item.id, session)
 
     def _studio_session_from_tracks(self) -> StudioSession:
-        return StudioSession(
-            original_vocal=_studio_track_state(self.vocal_track),
-            instrumental=_studio_track_state(self.instrumental_track),
-            converted_vocal=_studio_track_state(self.converted_track),
-        )
+        session = self.studio_editor.session()
+        if not session.tracks:
+            return StudioSession(
+                original_vocal=_studio_track_state(self.vocal_track),
+                instrumental=_studio_track_state(self.instrumental_track),
+                converted_vocal=_studio_track_state(self.converted_track),
+            )
+        rows = {
+            "original_vocal": self.vocal_track,
+            "instrumental": self.instrumental_track,
+            "converted_vocal": self.converted_track,
+        }
+        for track in session.tracks:
+            row = rows.get(track.role)
+            if row is not None:
+                session = set_studio_track_mix(
+                    session,
+                    track.track_id,
+                    muted=row.is_muted(),
+                    volume_percent=row.volume_percent(),
+                )
+        return session
+
+    def _on_studio_editor_session_changed(self, session: StudioSession) -> None:
+        if self._is_loading_studio_session:
+            return
+        self._is_loading_studio_session = True
+        try:
+            self.vocal_track.set_mix_state(
+                muted=session.state_for("original_vocal").muted,
+                volume_percent=session.state_for("original_vocal").volume_percent,
+            )
+            self.instrumental_track.set_mix_state(
+                muted=session.state_for("instrumental").muted,
+                volume_percent=session.state_for("instrumental").volume_percent,
+            )
+            self.converted_track.set_mix_state(
+                muted=session.state_for("converted_vocal").muted,
+                volume_percent=session.state_for("converted_vocal").volume_percent,
+            )
+            self._sync_result_playback_settings()
+        finally:
+            self._is_loading_studio_session = False
+        item = self.current_song or self.current_work_item
+        if item is not None:
+            self.studio_session_autosave.queue(item.id, session)
+        queue = self.current_playback_queue
+        if queue is not None and queue.scope == WorkspacePlaybackScope.STUDIO.value:
+            self._refresh_output_playback_queue(WorkspacePlaybackScope.STUDIO)
+
+    def _seek_studio_timeline(self, position_ms: int) -> None:
+        if (
+            self.current_playback_queue is not None
+            and self.current_playback_queue.scope == WorkspacePlaybackScope.STUDIO.value
+        ):
+            self._seek_global_playback(position_ms)
+            return
+        self._playback_position_ms = max(0, position_ms)
+        self.studio_editor.set_playhead(self._playback_position_ms)
+        duration_ms = session_duration_ms(self.studio_editor.session())
+        self.studio_transport_bar.set_position(self._playback_position_ms, duration_ms)
+        item = self.current_song or self.current_work_item
+        if item is not None:
+            self._playback_resume_positions[("output", f"studio:{item.id}")] = (
+                self._playback_position_ms
+            )
+
+    def _prepare_studio_playback_surface(self) -> None:
+        queue = self.current_playback_queue
+        if queue is not None and queue.scope == WorkspacePlaybackScope.STUDIO.value:
+            self._refresh_playback_ui(is_playing=self.player.is_playing())
+            return
+        if queue is not None:
+            self._suspend_playback()
+        self._sync_idle_studio_transport()
+
+    def _sync_idle_studio_transport(self) -> None:
+        duration_ms = session_duration_ms(self.studio_editor.session())
+        position_ms = max(0, min(self._playback_position_ms, duration_ms))
+        self.studio_transport_bar.set_queue(duration_ms)
+        self.studio_transport_bar.set_position(position_ms, duration_ms)
+        self.studio_transport_bar.set_playing(False)
+        self.studio_editor.set_playhead(position_ms)
 
     def _on_studio_session_save_failed(self, error: str) -> None:
         _set_optional_label(self.output_status_label, f"Session failed: {_last_error_line(error)}")
@@ -3005,14 +3802,14 @@ class MainWindow(QMainWindow):
         self.current_playback_queue = queue
         self._playback_position_ms = 0
         if queue is None:
-            self.workspace_dock.clear()
+            MainWindow._clear_result_transports(self)
             self._sync_playback_surfaces()
             self._update_output_playheads(0, 0)
             return
 
         self._library_preview_song_id = queue.source_id if queue.context == "library" else ""
         if queue.context == "library":
-            self.workspace_dock.clear()
+            MainWindow._clear_result_transports(self)
 
         self._playback_position_ms = max(0, min(position_ms, queue.duration_ms))
         self._refresh_playback_ui(is_playing=False)
@@ -3028,9 +3825,11 @@ class MainWindow(QMainWindow):
         self._playback_position_ms = 0
         if clear_queue:
             self.current_playback_queue = None
-            self.workspace_dock.clear()
+            MainWindow._clear_result_transports(self)
             if queue is not None and queue.context == "library":
                 self._library_preview_song_id = ""
+            elif queue is not None and queue.context == "library_asset":
+                self.library_details_panel.set_preview_expanded(Path(queue.source_id), False)
             self._sync_playback_surfaces()
             self._update_output_playheads(0, 0)
             return
@@ -3052,6 +3851,8 @@ class MainWindow(QMainWindow):
             )
             if queue.context == "library":
                 self._set_library_preview_expanded(queue.source_id, False)
+            elif queue.context == "library_asset":
+                self.library_details_panel.set_preview_expanded(Path(queue.source_id), False)
         self._stop_playback(clear_queue=True)
 
     def _resume_position(self, queue: PlaybackQueue) -> int:
@@ -3094,7 +3895,7 @@ class MainWindow(QMainWindow):
             self._refresh_playback_ui(is_playing=was_playing)
             self._update_output_playheads(self._playback_position_ms, queue.duration_ms)
             if was_playing:
-                if queue.has_same_sources(current_queue):
+                if queue.has_same_sources(current_queue) and not queue.reload_on_refresh:
                     try:
                         self.player.set_volumes(queue.volumes)
                     except AudioPlaybackError as exc:
@@ -3124,7 +3925,11 @@ class MainWindow(QMainWindow):
     def _refresh_playback_ui(self, *, is_playing: bool) -> None:
         queue = self.current_playback_queue
         if queue is None:
-            self.workspace_dock.clear()
+            MainWindow._clear_result_transports(self)
+            if self.page_stack.currentIndex() == PAGE_STUDIO:
+                self._sync_idle_studio_transport()
+            else:
+                self.studio_transport_bar.clear()
             self._sync_playback_surfaces()
             self._sync_video_playback(False)
             return
@@ -3135,10 +3940,35 @@ class MainWindow(QMainWindow):
                 row.set_preview_queue(queue.duration_ms)
                 row.set_preview_position(self._playback_position_ms, queue.duration_ms)
                 row.set_preview_playing(is_playing)
+        elif queue.context == "library_asset":
+            path = Path(queue.source_id)
+            self.library_details_panel.set_preview_queue(path, queue.duration_ms)
+            self.library_details_panel.set_preview_position(
+                path,
+                self._playback_position_ms,
+                queue.duration_ms,
+            )
+            self.library_details_panel.set_preview_playing(path, is_playing)
+        elif queue.scope == WorkspacePlaybackScope.STUDIO.value:
+            self.studio_transport_bar.set_queue(queue.duration_ms)
+            self.studio_transport_bar.set_position(
+                self._playback_position_ms,
+                queue.duration_ms,
+            )
+            self.studio_transport_bar.set_playing(is_playing)
         else:
-            self.workspace_dock.set_queue(queue.duration_ms)
-            self.workspace_dock.set_position(self._playback_position_ms, queue.duration_ms)
-            self.workspace_dock.set_playing(is_playing)
+            transport = MainWindow._result_transport_for_scope(
+                self,
+                self._workspace_scope_for_queue(queue)
+            )
+            MainWindow._clear_result_transports(
+                self,
+                except_transport=transport,
+            )
+            if transport is not None:
+                transport.set_queue(queue.duration_ms)
+                transport.set_position(self._playback_position_ms, queue.duration_ms)
+                transport.set_playing(is_playing)
         self._sync_playback_surfaces()
         self._sync_video_playback(is_playing)
 
@@ -3165,19 +3995,30 @@ class MainWindow(QMainWindow):
         self,
         scope: WorkspacePlaybackScope | None = None,
     ) -> list[tuple[Path, float]]:
+        if scope is WorkspacePlaybackScope.CONVERSION:
+            panel = getattr(self, "vocal_results_panel", None)
+            playback_tracks = getattr(panel, "playback_tracks", None)
+            if callable(playback_tracks):
+                return list(playback_tracks())
         tracks: list[tuple[Path, float]] = []
-        track_rows = (
-            tuple(
-                track
+        separation_paths = getattr(self, "_separation_preview_paths", {})
+        if scope is None:
+            track_rows = (("", track) for track in self.output_tracks)
+        else:
+            output_track = getattr(self, "_output_track", None)
+            track_rows = (
+                (track_id, output_track(track_id))
                 for track_id in scope_track_ids(scope)
-                for track in (self._output_track(track_id),)
-                if track is not None
             )
-            if scope is not None
-            else self.output_tracks
-        )
-        for track in track_rows:
-            path = track.current_path()
+        for track_id, track in track_rows:
+            if track is None:
+                continue
+            path = (
+                separation_paths.get(track_id)
+                if scope is WorkspacePlaybackScope.SEPARATION
+                and track_id in separation_paths
+                else track.current_path()
+            )
             if path is not None:
                 volume = 0.0 if track.is_muted() else track.volume()
                 tracks.append((path, volume))
@@ -3203,6 +4044,8 @@ class MainWindow(QMainWindow):
         self,
         scope: WorkspacePlaybackScope,
     ) -> PlaybackQueue | None:
+        if scope is WorkspacePlaybackScope.STUDIO:
+            return self._studio_timeline_playback_queue()
         tracks = self._playback_track_paths(scope)
         duration_ms = self._duration_ms_for_paths([path for path, _volume in tracks])
         if not tracks or duration_ms <= 0:
@@ -3221,15 +4064,90 @@ class MainWindow(QMainWindow):
                 duration_ms=duration_ms,
                 scope=scope.value,
             )
+        work_item = getattr(self, "current_work_item", None)
+        source_id = (
+            f"separation:{work_item.id}"
+            if scope is WorkspacePlaybackScope.SEPARATION and work_item is not None
+            else "separation:"
+            + (
+                str(self.current_output_set.job_dir)
+                if self.current_output_set is not None
+                else "preview"
+            )
+            if scope is WorkspacePlaybackScope.SEPARATION
+            else str(self.current_output_set.job_dir)
+            if self.current_output_set is not None
+            else ""
+        )
         return PlaybackQueue(
             context="output",
-            source_id=str(self.current_output_set.job_dir) if self.current_output_set is not None else "",
+            source_id=source_id,
             title=scope_label(scope),
             paths=tuple(path for path, _volume in tracks),
             volumes=tuple(volume for _path, volume in tracks),
             duration_ms=duration_ms,
             scope=scope.value,
         )
+
+    def _studio_timeline_playback_queue(self) -> PlaybackQueue | None:
+        item = self.current_song or self.current_work_item
+        if item is None:
+            return None
+        session = self.studio_editor.session()
+        duration_ms = session_duration_ms(session)
+        if duration_ms <= 0:
+            self.studio_editor.set_status(tr("Add a sound to the timeline."))
+            return None
+        try:
+            sources = self.library.studio_mix_sources(item.id, session)
+            direct_duration = self._direct_studio_preview_duration(sources)
+            if direct_duration > 0:
+                self.studio_editor.set_status("")
+                return PlaybackQueue(
+                    context="output",
+                    source_id=f"studio:{item.id}",
+                    title=scope_label(WorkspacePlaybackScope.STUDIO),
+                    paths=tuple(source.path for source in sources),
+                    volumes=tuple(source.volume for source in sources),
+                    duration_ms=direct_duration,
+                    scope=WorkspacePlaybackScope.STUDIO.value,
+                )
+            preview_path = self.library.render_studio_preview(item.id, session)
+            duration_ms = read_audio_metadata(preview_path).duration_ms
+        except (AudioExportError, KeyError, OSError, ValueError) as exc:
+            self.studio_editor.set_status(_last_error_line(str(exc)))
+            return None
+        self.studio_editor.set_status("")
+        return PlaybackQueue(
+            context="output",
+            source_id=f"studio:{item.id}",
+            title=scope_label(WorkspacePlaybackScope.STUDIO),
+            paths=(preview_path,),
+            volumes=(1.0,),
+            duration_ms=duration_ms,
+            scope=WorkspacePlaybackScope.STUDIO.value,
+            reload_on_refresh=True,
+        )
+
+    @staticmethod
+    def _direct_studio_preview_duration(sources: tuple[AudioMixSource, ...]) -> int:
+        if not sources:
+            return 0
+        duration_ms = 0
+        for source in sources:
+            if source.timeline_start_ms != 0 or source.source_start_ms != 0:
+                return 0
+            if not 0.0 <= source.volume <= 2.0:
+                return 0
+            try:
+                source_duration = read_audio_metadata(source.path).duration_ms
+            except Exception:
+                return 0
+            source_end = source.source_end_ms
+            if source_end is not None and abs(source_end - source_duration) > 10:
+                return 0
+            duration_ms = max(duration_ms, source_duration)
+        return duration_ms
 
     def _update_output_playheads(self, position_ms: int, duration_ms: int | None = None) -> None:
         queue = self.current_playback_queue if self._current_playback_context() == "output" else None
@@ -3240,6 +4158,9 @@ class MainWindow(QMainWindow):
         if scope is None:
             self.separation_results_panel.set_playhead_ratio(0.0)
             self.vocal_results_panel.set_playhead_ratio(0.0)
+            studio_editor = getattr(self, "studio_editor", None)
+            if studio_editor is not None:
+                studio_editor.set_playhead(0)
             for track in self.output_tracks:
                 track.set_playhead_ratio(0.0)
         elif scope is WorkspacePlaybackScope.SEPARATION:
@@ -3247,8 +4168,9 @@ class MainWindow(QMainWindow):
         elif scope is WorkspacePlaybackScope.CONVERSION:
             self.vocal_results_panel.set_playhead_ratio(ratio)
         elif scope is WorkspacePlaybackScope.STUDIO:
-            for track in self.output_tracks:
-                track.set_playhead_ratio(ratio)
+            studio_editor = getattr(self, "studio_editor", None)
+            if studio_editor is not None:
+                studio_editor.set_playhead(position)
 
     @staticmethod
     def _workspace_scope_for_queue(
@@ -3262,6 +4184,8 @@ class MainWindow(QMainWindow):
             return None
 
     def _loaded_output_duration_ms(self) -> int:
+        if hasattr(self, "studio_editor"):
+            return session_duration_ms(self.studio_editor.session())
         return self._duration_ms_for_paths(self._loaded_track_paths(WorkspacePlaybackScope.STUDIO))
 
     def _duration_ms_for_paths(self, paths: list[Path]) -> int:

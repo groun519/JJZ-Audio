@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QWidget
 
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
-from jang_app.qt_app.widgets import SvgIconButton
+from jang_app.qt_app.widgets import DangerIconButton, SvgIconButton
 
 
 class ShareProgressAction(QWidget):
@@ -55,8 +55,7 @@ class ShareProgressAction(QWidget):
         set_translated_tooltip(self.button, "Share with Google Drive")
         self.button.clicked.connect(self.requested.emit)
 
-        self.delete_button = SvgIconButton("trash", size=button_extent, paint_inset=2)
-        self.delete_button.setObjectName("DangerIconButton")
+        self.delete_button = DangerIconButton(size=button_extent, paint_inset=2)
         set_translated_tooltip(self.delete_button, "Delete from Google Drive")
         self.delete_button.clicked.connect(self.delete_requested.emit)
 

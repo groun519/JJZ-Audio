@@ -1,31 +1,98 @@
 from __future__ import annotations
 
-import atexit
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QVBoxLayout, QWidget
-
+from jang_app.qt_app.horizontal_reveal import HorizontalReveal
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
 from jang_app.qt_app.overflow_title_label import OverflowTitleLabel
 from jang_app.qt_app.transport_controls import TransportControls
-from jang_app.qt_app.widgets import SvgIconButton
+from jang_app.qt_app.waveform_thumbnail import WaveformThumbnail
+from jang_app.qt_app.widgets import (
+    COMPACT_ICON_BUTTON_SIZE,
+    DangerIconButton,
+    FeedbackButton,
+    SvgIconButton,
+)
+from jang_app.services.i18n import tr
 from jang_app.services.song_metadata import SongDisplayMetadata
-from jang_app.services.waveform import build_waveform_peaks, waveform_cache_key
 
 
-_WAVEFORM_POINT_COUNT = 160
-_WAVEFORM_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="library-waveform")
-_WAVEFORM_CACHE: dict[tuple[str, int, int, int], list[float]] = {}
-atexit.register(lambda: _WAVEFORM_EXECUTOR.shutdown(wait=False, cancel_futures=True))
+class WorkSongRevealButton(SvgIconButton):
+    """Work-song action with a lightweight perimeter loading indicator."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("pin", size=34)
+        self.setParent(parent)
+        self._loading = False
+        self._loading_phase = 0.0
+        self._loading_color = QColor("#765814")
+        self._loading_timer = QTimer(self)
+        self._loading_timer.setInterval(24)
+        self._loading_timer.timeout.connect(self._advance_loading_border)
+
+    def set_theme_mode(self, theme_mode: str) -> None:
+        super().set_theme_mode(theme_mode)
+        self._loading_color = QColor("#e7d3a0" if theme_mode == "dark" else "#765814")
+        self.update()
+
+    def _icon_key(self) -> str:
+        return "pin_filled" if self.isChecked() else "pin"
+
+    def set_loading(self, is_loading: bool) -> None:
+        loading = bool(is_loading)
+        if loading == self._loading:
+            return
+        self._loading = loading
+        self.setProperty("loading", loading)
+        self.setEnabled(not loading)
+        if loading:
+            self._loading_timer.start()
+        else:
+            self._loading_timer.stop()
+            self._loading_phase = 0.0
+        self.update()
+
+    def is_loading(self) -> bool:
+        return self._loading
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self._loading:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        outline = QPainterPath()
+        outline.addRoundedRect(QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5), 9, 9)
+        start = self._loading_phase % 1.0
+        span = 0.28
+        steps = 28
+        previous_t = start
+        previous = outline.pointAtPercent(previous_t)
+        for index in range(1, steps + 1):
+            current_t = (start + span * index / steps) % 1.0
+            current = outline.pointAtPercent(current_t)
+            if current_t >= previous_t:
+                color = QColor(self._loading_color)
+                color.setAlpha(55 + round(200 * index / steps))
+                pen = QPen(color, 2.4)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(previous), QPointF(current))
+            previous_t = current_t
+            previous = current
+
+    def _advance_loading_border(self) -> None:
+        self._loading_phase = (self._loading_phase + 0.025) % 1.0
+        self.update()
 
 
 class SongListRow(QWidget):
     rename_requested = Signal(str, str)
     remove_requested = Signal(str)
-    use_requested = Signal(str)
+    work_song_toggled = Signal(str)
     details_requested = Signal(str)
     preview_requested = Signal(str)
     preview_play_toggled = Signal(str)
@@ -42,9 +109,12 @@ class SongListRow(QWidget):
         super().__init__(parent)
         self.setObjectName("SongListRow")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setProperty("selected", False)
+        self.setProperty("workSong", False)
+        self.setProperty("workSongPulse", False)
         self._item_id = item_id
         self._is_editing = False
+        self._is_hovered = False
+        self._is_work_song = False
         self._preview_expanded = False
         self.setMouseTracking(True)
 
@@ -66,34 +136,52 @@ class SongListRow(QWidget):
         self.metadata_label = QLabel(metadata.detail_label)
         self.metadata_label.setObjectName("LibraryRowMeta")
 
-        self.waveform = MiniWaveformView()
+        self.waveform = WaveformThumbnail(minimum_width=190)
         self.waveform.set_path(metadata.waveform_path)
 
-        self.use_button = SvgIconButton("arrow_right", size=30)
-        set_translated_tooltip(self.use_button, "Open in Separation")
-        self.use_button.clicked.connect(lambda: self.use_requested.emit(self._item_id))
-        self.details_button = SvgIconButton("database", size=30)
+        self.work_song_button = WorkSongRevealButton()
+        self.work_song_button.setObjectName("WorkSongRevealButton")
+        self.work_song_button.setCheckable(True)
+        set_translated_tooltip(self.work_song_button, "Set as work song")
+        self.work_song_button.setAccessibleName(tr("Set as work song"))
+        self.work_song_button.clicked.connect(
+            lambda: self.work_song_toggled.emit(self._item_id)
+        )
+        self.work_song_reveal = HorizontalReveal(44)
+        self.work_song_reveal.setObjectName("WorkSongRevealSlot")
+        work_song_layout = QHBoxLayout(self.work_song_reveal)
+        work_song_layout.setContentsMargins(0, 0, 10, 0)
+        work_song_layout.setSpacing(0)
+        work_song_layout.addWidget(self.work_song_button)
+
+        self.details_button = SvgIconButton("database", size=COMPACT_ICON_BUTTON_SIZE)
         set_translated_tooltip(self.details_button, "Open song details")
         self.details_button.clicked.connect(lambda: self.details_requested.emit(self._item_id))
-        self.rename_button = SvgIconButton("edit", size=30)
+        self.rename_button = SvgIconButton("edit", size=COMPACT_ICON_BUTTON_SIZE)
         set_translated_tooltip(self.rename_button, "Rename")
         self.rename_button.clicked.connect(self._begin_rename)
-        self.remove_button = SvgIconButton("trash", size=30)
+        self.remove_button = DangerIconButton(size=COMPACT_ICON_BUTTON_SIZE)
         set_translated_tooltip(self.remove_button, "Remove")
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self._item_id))
-        self.action_buttons = (
-            self.use_button,
+        self.secondary_action_buttons = (
             self.details_button,
             self.rename_button,
             self.remove_button,
         )
+        self.action_buttons = (
+            *self.secondary_action_buttons,
+        )
 
         action_container = QWidget()
         action_container.setObjectName("SongActionSlot")
-        action_container.setFixedWidth(141)
+        action_spacing = 7
+        action_container.setFixedWidth(
+            len(self.action_buttons) * COMPACT_ICON_BUTTON_SIZE
+            + (len(self.action_buttons) - 1) * action_spacing
+        )
         action_layout = QHBoxLayout(action_container)
         action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(7)
+        action_layout.setSpacing(action_spacing)
         for button in self.action_buttons:
             action_layout.addWidget(button)
 
@@ -107,6 +195,7 @@ class SongListRow(QWidget):
         body_layout = QHBoxLayout()
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(14)
+        body_layout.addWidget(self.work_song_reveal, 0)
         body_layout.addWidget(self.source_badge, 0)
         body_layout.addLayout(text_layout, 2)
         body_layout.addWidget(self.waveform, 3)
@@ -134,12 +223,13 @@ class SongListRow(QWidget):
         layout.addWidget(self.preview_divider)
         layout.addWidget(self.preview_transport)
 
-        self._set_actions_visible(False)
+        self._sync_action_visibility()
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(0, 138 if self._preview_expanded else 84)
 
     def set_theme_mode(self, theme_mode: str) -> None:
+        self.work_song_button.set_theme_mode(theme_mode)
         self.waveform.set_theme_mode(theme_mode)
         self.preview_transport.set_theme_mode(theme_mode)
         for button in self.action_buttons:
@@ -172,18 +262,41 @@ class SongListRow(QWidget):
     def set_preview_position(self, position_ms: int, duration_ms: int) -> None:
         self.preview_transport.set_position(position_ms, duration_ms)
 
-    def set_selected(self, is_selected: bool) -> None:
-        self.setProperty("selected", is_selected)
-        self.style().unpolish(self)
-        self.style().polish(self)
+    def set_work_song_active(self, is_active: bool) -> None:
+        active = bool(is_active)
+        if active == self._is_work_song:
+            return
+        changed = active != self._is_work_song
+        self._is_work_song = active
+        self.work_song_button.setChecked(active)
+        self.setProperty("workSong", active)
+        tooltip = "Clear work song" if active else "Set as work song"
+        set_translated_tooltip(self.work_song_button, tooltip)
+        self.work_song_button.setAccessibleName(tr(tooltip))
+        if active and changed:
+            self.setProperty("workSongPulse", True)
+            QTimer.singleShot(450, self._finish_work_song_pulse)
+        elif not active:
+            self.setProperty("workSongPulse", False)
+        self._refresh_style()
+        self._sync_action_visibility()
+
+    def is_work_song_active(self) -> bool:
+        return self._is_work_song
+
+    def set_work_song_loading(self, is_loading: bool) -> None:
+        self.work_song_button.set_loading(is_loading)
+        self._sync_action_visibility()
 
     def enterEvent(self, event) -> None:  # noqa: N802
-        self._set_actions_visible(True)
+        self._is_hovered = True
+        self._sync_action_visibility()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
+        self._is_hovered = False
         if not self._is_editing:
-            self._set_actions_visible(False)
+            self._sync_action_visibility()
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
@@ -191,16 +304,21 @@ class SongListRow(QWidget):
             self.preview_requested.emit(self._item_id)
         super().mouseReleaseEvent(event)
 
-    def _set_actions_visible(self, is_visible: bool) -> None:
-        for button in self.action_buttons:
-            button.setVisible(is_visible)
+    def _sync_action_visibility(self) -> None:
+        show_hover_actions = self._is_hovered or self._is_editing
+        self.work_song_reveal.set_revealed(
+            show_hover_actions or self._is_work_song or self.work_song_button.is_loading(),
+            animated=self.isVisible(),
+        )
+        for button in self.secondary_action_buttons:
+            button.setVisible(show_hover_actions)
 
     def _begin_rename(self) -> None:
         self._is_editing = True
         self.title_edit.setText(self.title_label.text())
         self.title_label.hide()
         self.title_edit.show()
-        self._set_actions_visible(True)
+        self._sync_action_visibility()
         self.title_edit.setFocus(Qt.FocusReason.MouseFocusReason)
         self.title_edit.selectAll()
 
@@ -212,143 +330,19 @@ class SongListRow(QWidget):
         current_title = self.title_label.text()
         self.title_edit.hide()
         self.title_label.show()
+        self._sync_action_visibility()
         if next_title and next_title != current_title:
             self.rename_requested.emit(self._item_id, next_title)
         else:
             self.title_edit.setText(current_title)
 
+    def _finish_work_song_pulse(self) -> None:
+        if not self.property("workSongPulse"):
+            return
+        self.setProperty("workSongPulse", False)
+        self._refresh_style()
 
-class MiniWaveformView(QFrame):
-    _peaks_ready = Signal(object, object)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setObjectName("MiniWaveform")
-        self.setFixedHeight(42)
-        self.setMinimumWidth(190)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._peaks: list[float] = []
-        self._theme_mode = "white"
-        self._is_available = False
-        self._is_loading = False
-        self._did_attempt_load = False
-        self._cache_key: tuple[str, int, int, int] | None = None
-        self._path: Path | None = None
-        self._peaks_ready.connect(self._apply_peaks)
-
-    def set_theme_mode(self, theme_mode: str) -> None:
-        self._theme_mode = theme_mode
+    def _refresh_style(self) -> None:
+        self.style().unpolish(self)
+        self.style().polish(self)
         self.update()
-
-    def set_path(self, path: Path | None) -> None:
-        self._peaks = []
-        self._is_available = False
-        self._is_loading = False
-        self._did_attempt_load = False
-        self._cache_key = None
-        self._path = path
-        if path is None:
-            self.update()
-            return
-
-        try:
-            cache_key = waveform_cache_key(path, _WAVEFORM_POINT_COUNT)
-        except Exception:
-            self.update()
-            return
-
-        cached = _WAVEFORM_CACHE.get(cache_key)
-        if cached is not None:
-            self._peaks = cached
-            self._is_available = bool(cached)
-            self._did_attempt_load = True
-        self._cache_key = cache_key
-        self.update()
-
-    def _emit_peaks(self, cache_key: tuple[str, int, int, int], completed) -> None:
-        try:
-            peaks = completed.result()
-        except Exception:
-            peaks = []
-        self._peaks_ready.emit(cache_key, peaks)
-
-    def _apply_peaks(self, cache_key: tuple[str, int, int, int], peaks: list[float]) -> None:
-        if cache_key != self._cache_key:
-            return
-        if peaks:
-            _WAVEFORM_CACHE[cache_key] = peaks
-        else:
-            _WAVEFORM_CACHE.pop(cache_key, None)
-        self._peaks = peaks
-        self._is_available = bool(peaks)
-        self._is_loading = False
-        self._did_attempt_load = True
-        self.update()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        colors = _mini_waveform_palette(self._theme_mode)
-
-        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(colors["background"]))
-        painter.drawRoundedRect(rect, 11, 11)
-
-        content = rect.adjusted(12, 8, -12, -8)
-        center_y = content.center().y()
-        painter.setPen(QPen(colors["midline"], 1))
-        painter.drawLine(QPointF(content.left(), center_y), QPointF(content.right(), center_y))
-
-        if not self._is_available:
-            self._ensure_loading()
-            _draw_waveform_placeholder(painter, content, colors["muted"])
-            return
-
-        painter.setPen(QPen(colors["wave"], 1))
-        step = content.width() / max(1, len(self._peaks) - 1)
-        max_height = content.height() * 0.46
-        for index, peak in enumerate(self._peaks):
-            x = content.left() + index * step
-            height = max(1.0, peak * max_height)
-            painter.drawLine(QPointF(x, center_y - height), QPointF(x, center_y + height))
-
-    def _ensure_loading(self) -> None:
-        if self._path is None or self._is_loading or self._is_available or self._did_attempt_load:
-            return
-        if self._cache_key is None:
-            return
-        self._is_loading = True
-        self._did_attempt_load = True
-        future = _WAVEFORM_EXECUTOR.submit(build_waveform_peaks, self._path, _WAVEFORM_POINT_COUNT)
-        future.add_done_callback(lambda completed, key=self._cache_key: self._emit_peaks(key, completed))
-
-
-def _mini_waveform_palette(theme_mode: str) -> dict[str, QColor]:
-    if theme_mode == "dark":
-        return {
-            "background": QColor("#202020"),
-            "midline": QColor("#55544f"),
-            "wave": QColor("#deddd8"),
-            "muted": QColor("#898780"),
-        }
-    return {
-        "background": QColor("#ebe7dd"),
-        "midline": QColor("#c8c0b2"),
-        "wave": QColor("#10100e"),
-        "muted": QColor("#8b857a"),
-    }
-
-
-def _draw_waveform_placeholder(painter: QPainter, content: QRectF, color: QColor) -> None:
-    painter.setPen(QPen(color, 1))
-    center_y = content.center().y()
-    step = max(6.0, content.width() / 24)
-    max_height = content.height() * 0.28
-    x = content.left()
-    index = 0
-    while x <= content.right():
-        height = max_height * (0.25 + 0.75 * ((index % 5) / 4))
-        painter.drawLine(QPointF(x, center_y - height), QPointF(x, center_y + height))
-        x += step
-        index += 1

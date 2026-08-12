@@ -141,15 +141,6 @@ def relative_package_path(layout: RvcModelPackageLayout, path: Path | None) -> s
     return resolved.relative_to(layout.model_dir.resolve()).as_posix()
 
 
-def resolve_package_path(model_dir: Path, value: object) -> Path | None:
-    if not isinstance(value, str) or not value:
-        return None
-    resolved = (model_dir / Path(value)).resolve()
-    if not _is_within(resolved, model_dir):
-        raise ValueError("Model manifest path leaves its package")
-    return resolved
-
-
 def _report_progress(progress: Callable[[int], None] | None, copied: int, total: int) -> None:
     if progress is None:
         return

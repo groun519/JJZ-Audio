@@ -9,9 +9,15 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 try:
-    from scripts.prepare_rvc_runtime_profile import REPLACED_PACKAGE_PATTERNS
+    from scripts.prepare_rvc_runtime_profile import (
+        REPLACED_PACKAGE_PATTERNS,
+        install_precision_packages,
+    )
 except ModuleNotFoundError:  # Direct script execution adds scripts/, not the project root.
-    from prepare_rvc_runtime_profile import REPLACED_PACKAGE_PATTERNS
+    from prepare_rvc_runtime_profile import (
+        REPLACED_PACKAGE_PATTERNS,
+        install_precision_packages,
+    )
 
 
 DIRECTML_VERSION = "0.2.5.dev240914"
@@ -78,6 +84,7 @@ def prepare_directml_profile(
             )
             _patch_directml_staticmethod_defaults(staging)
             _validate_directml(python, staging, runner)
+            install_precision_packages(python, staging, runner)
         write_accelerator_profile_manifest(
             staging,
             "directml",

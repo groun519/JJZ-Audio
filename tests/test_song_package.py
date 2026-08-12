@@ -33,10 +33,12 @@ class SongPackageStoreTests(unittest.TestCase):
             manifest = json.loads((package.folder / "song.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 manifest["source"]["audio"],
-                f"01_source/audio/voice__{package.song_id[-8:]}.m4a",
+                "01_source/audio/source.m4a",
             )
             self.assertEqual(manifest["source"]["type"], "youtube")
             self.assertEqual(manifest["source"]["url"], "url")
+            self.assertRegex(package.folder.name, r"^s_[0-9a-f]{16}$")
+            self.assertNotIn("My Song", package.folder.name)
 
     def test_output_reference_uses_project_relative_path_and_survives_reload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -85,6 +87,25 @@ class SongPackageStoreTests(unittest.TestCase):
             self.assertNotEqual(first, second)
             self.assertEqual(first.parent, package.folder / "02_vocal" / "separations")
             self.assertEqual(second.parent, first.parent)
+            self.assertRegex(first.name, r"^r_[0-9a-f]{12}$")
+            self.assertRegex(second.name, r"^r_[0-9a-f]{12}$")
+
+    def test_legacy_title_named_package_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            root = project / "workspace" / "library" / "songs"
+            store = SongPackageStore(root, project)
+            package, _created = store.import_audio(source, title="Legacy Song")
+            legacy_folder = root / "Legacy Song__12345678"
+            package.folder.rename(legacy_folder)
+
+            loaded = SongPackageStore(root, project).require(package.song_id)
+
+            self.assertEqual(loaded.folder, legacy_folder.resolve())
+            self.assertEqual(loaded.title, "Legacy Song")
+            self.assertTrue(loaded.source_path.is_file())
 
     def test_output_version_can_be_activated_without_reordering_history(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -128,6 +149,78 @@ class SongPackageStoreTests(unittest.TestCase):
             self.assertEqual(selected.active_output.active_converted_path, converted.resolve())
             self.assertEqual(detached.outputs, ())
             self.assertTrue(converted.is_file())
+
+    def test_remove_managed_data_deletes_package_files_but_preserves_external_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            external_output = project / "legacy-output"
+            external_output.mkdir()
+            (external_output / "vocals.wav").write_bytes(b"external")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            package, _created = store.import_audio(source, title="Song")
+            store.attach_output(package.song_id, external_output, "Legacy")
+            (package.folder / "02_vocal" / "managed.wav").write_bytes(b"managed")
+            (package.folder / "03_studio" / "session.json").write_text("{}", encoding="utf-8")
+            (package.folder / "04_exports" / "mix.wav").write_bytes(b"mix")
+
+            removed = store.remove_managed_data(package.song_id)
+
+            self.assertTrue(removed.removed)
+            self.assertIsNone(removed.source_path)
+            self.assertEqual(removed.outputs, ())
+            self.assertTrue((package.folder / "song.json").is_file())
+            self.assertEqual(
+                {item.name for item in package.folder.iterdir()},
+                {"song.json"},
+            )
+            self.assertTrue((external_output / "vocals.wav").is_file())
+            self.assertIn(external_output.resolve(), removed.detached_output_dirs)
+            self.assertTrue(source.is_file())
+
+    def test_reimport_after_managed_data_removal_restores_source_without_old_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            package, _created = store.import_audio(source, title="Song")
+            (package.folder / "02_vocal" / "old.wav").write_bytes(b"old")
+            store.remove_managed_data(package.song_id)
+
+            restored, created = store.import_audio(source, title="Ignored")
+
+            self.assertTrue(created)
+            self.assertEqual(restored.song_id, package.song_id)
+            self.assertFalse(restored.removed)
+            self.assertIsNotNone(restored.source_path)
+            self.assertTrue(restored.source_path.is_file())
+            self.assertEqual(restored.source_path.read_bytes(), source.read_bytes())
+            self.assertFalse((restored.folder / "02_vocal" / "old.wav").exists())
+            self.assertEqual(restored.outputs, ())
+
+    def test_purge_legacy_removed_data_cleans_old_soft_deleted_packages_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            package, _created = store.import_audio(source, title="Song")
+            (package.folder / "04_exports" / "old-mix.wav").write_bytes(b"mix")
+            store.set_removed(package.song_id, True)
+
+            first_count = store.purge_legacy_removed_data()
+            second_count = store.purge_legacy_removed_data()
+            removed = store.require(package.song_id, include_removed=True)
+
+            self.assertEqual(first_count, 1)
+            self.assertEqual(second_count, 0)
+            self.assertIsNone(removed.source_path)
+            self.assertEqual(
+                {item.name for item in removed.folder.iterdir()},
+                {"song.json"},
+            )
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from jang_app.services import settings as settings_module
 from jang_app.services.settings import (
     AppSettings,
     RvcSettings,
+    StudioLayoutSettings,
     load_app_settings,
     save_app_settings,
 )
@@ -46,6 +47,42 @@ class RvcSettingsTests(unittest.TestCase):
 
             self.assertEqual(loaded.rvc.model_id, "")
             self.assertEqual(loaded.rvc.voice_model, "weights/voice.pth")
+
+    def test_studio_layout_sizes_are_persisted_and_invalid_values_use_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_file = Path(temporary) / "settings.json"
+            expected = StudioLayoutSettings(
+                workspace_sizes=(220, 1_050, 310),
+                center_sizes=(410, 590),
+            )
+            with patch.object(settings_module, "SETTINGS_FILE", settings_file):
+                save_app_settings(AppSettings(studio_layout=expected))
+                loaded = load_app_settings()
+                settings_file.write_text(
+                    '{"studio_layout": {"workspace_sizes": [0, 0, 0]}}',
+                    encoding="utf-8",
+                )
+                invalid = load_app_settings()
+
+            self.assertEqual(loaded.studio_layout, expected)
+            self.assertEqual(
+                invalid.studio_layout.workspace_sizes,
+                StudioLayoutSettings().workspace_sizes,
+            )
+
+    def test_removed_conversion_monitor_preference_is_discarded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_file = Path(temporary) / "settings.json"
+            settings_file.write_text(
+                '{"conversion_auto_monitor": false}',
+                encoding="utf-8",
+            )
+            with patch.object(settings_module, "SETTINGS_FILE", settings_file):
+                loaded = load_app_settings()
+                save_app_settings(loaded)
+
+            self.assertFalse(hasattr(loaded, "conversion_auto_monitor"))
+            self.assertNotIn("conversion_auto_monitor", settings_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

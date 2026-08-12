@@ -120,7 +120,12 @@ class RvcConvertTests(unittest.TestCase):
                 cuda_ready=False,
             )
             selection = RvcDeviceSelection("cuda:0", "cpu", capabilities, "CUDA unavailable")
-            settings = RvcSettings(root=rvc_root, voice_model="weights/voice.pth", device="cuda:0")
+            settings = RvcSettings(
+                root=rvc_root,
+                voice_model="weights/voice.pth",
+                pitch=-12,
+                device="cuda:0",
+            )
 
             def complete_conversion(args, **_kwargs):
                 Path(args[5]).write_bytes(b"converted")
@@ -134,9 +139,11 @@ class RvcConvertTests(unittest.TestCase):
                 result = rvc_convert.convert_vocal_with_rvc(source, root / "output", settings)
 
             args = command.call_args.args[0]
+            self.assertEqual(args[3], "-12")
             self.assertEqual(args[8], "cpu")
             self.assertTrue(result.output_path.is_file())
             self.assertEqual(result.voice_model, settings.voice_model)
+            self.assertEqual(result.pitch, -12)
             self.assertEqual(result.requested_device, settings.device)
             self.assertEqual(result.effective_device, "cpu")
 
@@ -234,18 +241,28 @@ class RvcConvertTests(unittest.TestCase):
                 result = rvc_convert.convert_vocal_with_rvc(source, long_job_dir, settings)
 
             command_output = Path(command.call_args.args[0][5])
-            self.assertEqual(command_output, result.output_path)
+            command_input = Path(command.call_args.args[0][4])
+            self.assertNotEqual(command_input, source)
+            self.assertNotEqual(command_output, result.output_path)
+            self.assertLessEqual(rvc_convert._path_length(command_input), safe_path_length)
+            self.assertLessEqual(rvc_convert._path_length(command_output), safe_path_length)
             self.assertTrue(result.output_path.name.startswith("rvc_m12_"))
             self.assertLessEqual(rvc_convert._path_length(result.output_path), safe_path_length)
             self.assertTrue(result.output_path.is_file())
 
-    def test_conversion_rejects_output_folder_that_cannot_fit_compact_name(self) -> None:
+    def test_deep_output_folder_uses_compact_name_without_rejecting_conversion(self) -> None:
         output_dir = Path("C:/") / ("x" * 230)
         settings = RvcSettings(root=Path("C:/rvc"), voice_model="weights/voice.pth")
         descriptive_stem = rvc_convert._build_rvc_output_stem(Path("vocals.wav"), settings)
 
-        with self.assertRaisesRegex(RvcConversionError, "shorter media storage location"):
-            rvc_convert._safe_rvc_output_stem(output_dir, descriptive_stem, ".wav", settings.pitch)
+        stem = rvc_convert._safe_rvc_output_stem(
+            output_dir,
+            descriptive_stem,
+            ".wav",
+            settings.pitch,
+        )
+
+        self.assertTrue(stem.startswith("rvc_p0_"))
 
     def test_output_collision_falls_back_to_fixed_length_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

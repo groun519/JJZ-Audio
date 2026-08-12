@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -11,6 +12,9 @@ from pathlib import Path
 
 TORCH_VERSION = "2.7.1"
 CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu128"
+ROFORMER_REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements-roformer-runtime.txt"
+PRECISION_PACKAGE_DIRNAME = "jjzero-roformer-packages"
+PRECISION_MARKER_FILE = "jjzero-precision-build.json"
 PROFILE_REQUIREMENTS = (
     f"torch=={TORCH_VERSION}+cu128",
     f"torchaudio=={TORCH_VERSION}+cu128",
@@ -89,12 +93,81 @@ def prepare_cu128_profile(
                 "Installing the RVC cu128 Torch profile",
             )
             _validate_profile(python, staging, runner)
+            install_precision_packages(python, staging, runner)
         _write_build_manifest(staging)
         _swap_tree(staging, target, backup)
     except Exception:
         _remove_tree(staging)
         raise
     return target
+
+
+def install_precision_packages(
+    python: Path,
+    runtime_root: Path,
+    runner: CommandRunner | None = None,
+) -> Path:
+    root = runtime_root.expanduser().resolve()
+    target = root / PRECISION_PACKAGE_DIRNAME
+    requirements_hash = hashlib.sha256(ROFORMER_REQUIREMENTS.read_bytes()).hexdigest()
+    marker = target / PRECISION_MARKER_FILE
+    package = target / "audio_separator" / "__init__.py"
+    if package.is_file() and _precision_marker_matches(marker, requirements_hash):
+        return target
+
+    staging = root / f".{PRECISION_PACKAGE_DIRNAME}.preparing"
+    backup = root / f".{PRECISION_PACKAGE_DIRNAME}.previous"
+    _remove_tree(staging)
+    command_runner = runner or _run_command
+    try:
+        _require_success(
+            command_runner(
+                (
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--no-cache-dir",
+                    "--no-deps",
+                    "--target",
+                    str(staging),
+                    "-r",
+                    str(ROFORMER_REQUIREMENTS),
+                ),
+                root,
+            ),
+            "Installing the precision separation runtime",
+        )
+        if not (staging / "audio_separator" / "__init__.py").is_file():
+            raise RuntimeError("The precision separation package was not installed.")
+        (staging / PRECISION_MARKER_FILE).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "requirements_sha256": requirements_hash,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        _swap_tree(staging, target, backup)
+    except Exception:
+        _remove_tree(staging)
+        raise
+    return target
+
+
+def _precision_marker_matches(marker: Path, requirements_hash: str) -> bool:
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(value, dict)
+        and value.get("schema_version") == 1
+        and value.get("requirements_sha256") == requirements_hash
+    )
 
 
 def _validate_profile(python: Path, cwd: Path, runner: CommandRunner) -> None:

@@ -9,6 +9,7 @@ import numpy as np
 import soundfile as sf
 
 from jang_app.services.file_names import safe_display_filename_stem, unique_display_path
+from jang_app.services.audio_mix_processing import process_mix_source
 
 class AudioExportError(RuntimeError):
     """Raised when preview audio cannot be exported."""
@@ -22,6 +23,12 @@ class AudioMixSource:
     label: str
     path: Path
     volume: float = 1.0
+    timeline_start_ms: int = 0
+    source_start_ms: int = 0
+    source_end_ms: int | None = None
+    fade_in_ms: int = 0
+    fade_out_ms: int = 0
+    pan_percent: int = 0
 
 
 def export_mix(
@@ -32,7 +39,7 @@ def export_mix(
         raise AudioExportError("Select at least one unmuted track before exporting a mix.")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    audio_arrays: list[np.ndarray] = []
+    audio_arrays: list[tuple[int, np.ndarray]] = []
     sample_rate: int | None = None
     max_frames = 0
     max_channels = 0
@@ -44,13 +51,34 @@ def export_mix(
         else:
             audio = _resample_audio(audio, current_sample_rate, sample_rate)
 
-        audio_arrays.append(audio * _clamp_volume(source.volume))
-        max_frames = max(max_frames, audio.shape[0])
-        max_channels = max(max_channels, audio.shape[1])
+        source_start_frame = max(0, round(source.source_start_ms * sample_rate / 1000))
+        source_end_frame = (
+            audio.shape[0]
+            if source.source_end_ms is None
+            else max(0, round(source.source_end_ms * sample_rate / 1000))
+        )
+        trimmed = audio[source_start_frame : min(source_end_frame, audio.shape[0])]
+        if trimmed.shape[0] <= 0:
+            continue
+        timeline_start_frame = max(0, round(source.timeline_start_ms * sample_rate / 1000))
+        processed = process_mix_source(
+            trimmed,
+            sample_rate,
+            volume=source.volume,
+            fade_in_ms=source.fade_in_ms,
+            fade_out_ms=source.fade_out_ms,
+            pan_percent=source.pan_percent,
+        )
+        audio_arrays.append((timeline_start_frame, processed))
+        max_frames = max(max_frames, timeline_start_frame + trimmed.shape[0])
+        max_channels = max(max_channels, processed.shape[1])
 
+    if not audio_arrays:
+        raise AudioExportError("The Studio timeline does not contain playable clips.")
     mix = np.zeros((max_frames, max_channels), dtype=np.float32)
-    for audio in audio_arrays:
-        mix[: audio.shape[0], :] += _match_channels(audio, max_channels)
+    for timeline_start_frame, audio in audio_arrays:
+        timeline_end_frame = timeline_start_frame + audio.shape[0]
+        mix[timeline_start_frame:timeline_end_frame, :] += _match_channels(audio, max_channels)
 
     sf.write(output_path, np.clip(mix, -1.0, 1.0), sample_rate or 44100, subtype="PCM_16")
     return output_path
@@ -115,7 +143,3 @@ def _resample_audio(audio: np.ndarray, source_sample_rate: int, target_sample_ra
     for channel in range(audio.shape[1]):
         resampled[:, channel] = np.interp(target_positions, source_positions, audio[:, channel])
     return resampled
-
-
-def _clamp_volume(volume: float) -> float:
-    return max(0.0, min(2.0, volume))

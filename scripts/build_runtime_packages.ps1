@@ -40,10 +40,24 @@ try {
     }
 
     $profileVersions = & $python -c "import json; from jang_app.runtime_version import RVC_RUNTIME_PROFILE_VERSIONS; print(json.dumps(RVC_RUNTIME_PROFILE_VERSIONS))" | ConvertFrom-Json
+    $precisionProfileRoots = @(
+        $profileVersions.PSObject.Properties.Name |
+            Where-Object { $_ -ne "cu118" } |
+            ForEach-Object { Join-Path $runtimeRoot "rvc_profiles\$_" }
+    )
+    & $python scripts\sync_rvc_precision_packages.py @precisionProfileRoots
+    if ($LASTEXITCODE -ne 0) {
+        throw "RVC precision runtime synchronization failed with exit code $LASTEXITCODE"
+    }
     foreach ($profile in $profileVersions.PSObject.Properties.Name) {
-        $profileRoot = Join-Path $runtimeRoot "rvc_profiles\$profile"
+        $profileRoot = if ($profile -eq "cu118") {
+            Join-Path $runtimeRoot "rvc\runtime"
+        }
+        else {
+            Join-Path $runtimeRoot "rvc_profiles\$profile"
+        }
         if (-not (Test-Path -LiteralPath $profileRoot -PathType Container)) {
-            continue
+            throw "Required RVC $profile runtime profile was not found: $profileRoot"
         }
         $profileVersion = [string]$profileVersions.$profile
         Get-ChildItem -LiteralPath $releaseDir -Filter "JJZero-RVC-$profile-$profileVersion-part*.zip" -File |
@@ -52,7 +66,9 @@ try {
             --part-limit $PartLimit `
             --component "rvc-runtime-$profile" `
             --package-prefix "JJZero-RVC-$profile-$profileVersion" `
-            --index-name "rvc-runtime-$profile-packages.json"
+            --index-name "rvc-runtime-$profile-packages.json" `
+            --exclude-directory "__pycache__" `
+            --exclude-suffix ".map"
         if ($LASTEXITCODE -ne 0) {
             throw "RVC $profile runtime package build failed with exit code $LASTEXITCODE"
         }

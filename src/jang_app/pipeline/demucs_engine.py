@@ -10,6 +10,7 @@ from jang_app.config import (
     DEMUCS_RUNTIME_DIR,
     FFMPEG_BIN_DIR,
     RVC_PYTHON_EXE,
+    TOOL_WORKSPACE_DIR,
     VENV_SCRIPTS_DIR,
 )
 from jang_app.pipeline.separation_engine import (
@@ -21,12 +22,10 @@ from jang_app.pipeline.separation_engine import (
 from jang_app.services.app_logging import get_logger
 from jang_app.services.command import run_command
 from jang_app.services.environment import MissingExecutableError, require_executable
-from jang_app.services.separation_postprocess import (
-    SeparationPostprocessError,
-    enforce_mixture_consistency,
-)
+from jang_app.pipeline.separation_postprocessor import postprocess_stems
 from jang_app.services.separation_assets import separation_model_component_count
 from jang_app.services.separation_recipe import SeparationRecipe, save_separation_run
+from jang_app.services.tool_workspace import ToolWorkspace
 
 
 _DEMUCS_PROGRESS_PATTERN = re.compile(r"(\d{1,3})%\|")
@@ -54,40 +53,49 @@ class DemucsEngine:
             recipe.float32,
         )
         require_demucs_tools()
-        output_root = request.output_root.expanduser().resolve()
-        output_root.mkdir(parents=True, exist_ok=True)
-        completed = run_command(
-            build_demucs_command(source, output_root, recipe=recipe),
-            env=build_demucs_environment(),
-            output_callback=build_demucs_progress_callback(
-                progress_callback,
-                expected_cycles=(
-                    separation_model_component_count(recipe.model)
-                    * max(1, recipe.shifts)
+        job_dir = request.output_root.expanduser().resolve()
+        job_dir.mkdir(parents=True, exist_ok=True)
+        with ToolWorkspace(TOOL_WORKSPACE_DIR, "demucs") as workspace:
+            staged_source = workspace.stage_input(source)
+            completed = run_command(
+                build_demucs_command(staged_source, workspace.output_dir, recipe=recipe),
+                env=build_demucs_environment(),
+                output_callback=build_demucs_progress_callback(
+                    progress_callback,
+                    expected_cycles=(
+                        separation_model_component_count(recipe.model)
+                        * max(1, recipe.shifts)
+                    ),
                 ),
-            ),
-        )
-        if completed.returncode != 0:
-            logger.error("Demucs failed with exit code %s\n%s", completed.returncode, completed.output)
-            raise SeparationError(
-                f"Demucs failed with exit code {completed.returncode}. See logs for details."
             )
+            if completed.returncode != 0:
+                logger.error(
+                    "Demucs failed with exit code %s\n%s",
+                    completed.returncode,
+                    completed.output,
+                )
+                raise SeparationError(
+                    f"Demucs failed with exit code {completed.returncode}. See logs for details."
+                )
 
-        job_dir = output_root / recipe.model / source.stem
-        vocals_path = job_dir / "vocals.wav"
-        accompaniment_path = job_dir / "no_vocals.wav"
-        if not vocals_path.exists() or not accompaniment_path.exists():
-            job_dir = find_demucs_job_dir(output_root / recipe.model, source.stem)
-            vocals_path = job_dir / "vocals.wav"
-            accompaniment_path = job_dir / "no_vocals.wav"
-
-        postprocess_status, postprocess_detail = postprocess_stems(
-            source,
-            vocals_path,
-            accompaniment_path,
-            recipe,
-            progress_callback,
-        )
+            staged_job = find_demucs_job_dir(
+                workspace.output_dir / recipe.model,
+                staged_source.stem,
+            )
+            staged_vocals = staged_job / "vocals.wav"
+            staged_accompaniment = staged_job / "no_vocals.wav"
+            postprocess_status, postprocess_detail = postprocess_stems(
+                staged_source,
+                staged_vocals,
+                staged_accompaniment,
+                recipe,
+                progress_callback,
+            )
+            vocals_path = workspace.publish_file(staged_vocals, job_dir / "vocals.wav")
+            accompaniment_path = workspace.publish_file(
+                staged_accompaniment,
+                job_dir / "no_vocals.wav",
+            )
         save_separation_run(
             job_dir,
             recipe,
@@ -217,39 +225,6 @@ def find_demucs_job_dir(model_output_dir: Path, source_stem: str) -> Path:
     if not (job_dir / "vocals.wav").exists() or not (job_dir / "no_vocals.wav").exists():
         raise SeparationError(f"Separated stems are missing in: {job_dir}")
     return job_dir
-
-
-def postprocess_stems(
-    source: Path,
-    vocals_path: Path,
-    accompaniment_path: Path,
-    recipe: SeparationRecipe,
-    progress_callback: ProgressCallback | None,
-) -> tuple[str, str]:
-    if not recipe.mixture_consistency:
-        return "not_requested", ""
-    if progress_callback is not None:
-        progress_callback(96)
-    logger = get_logger()
-    try:
-        report = enforce_mixture_consistency(source, vocals_path, accompaniment_path)
-    except SeparationPostprocessError as exc:
-        logger.warning("Separation quality normalization skipped: %s", exc)
-        return "skipped", str(exc)
-    logger.info(
-        "Separation quality normalization complete: frames=%s rate=%s channels=%s residual_before=%.8f residual_after=%.8f peak=%.5f",
-        report.frames,
-        report.sample_rate,
-        report.channels,
-        report.residual_rms_before,
-        report.residual_rms_after,
-        report.peak,
-    )
-    return (
-        "applied",
-        f"residual {report.residual_rms_before:.8f} -> {report.residual_rms_after:.8f}; "
-        f"peak {report.peak:.5f}",
-    )
 
 
 def _normalize_name(value: str) -> str:

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from jang_app.config import APP_ICON_PATH
 from jang_app.qt_app.startup_splash import StartupSplash
+from jang_app.version import __version__
 
 
 class StartupSplashTests(unittest.TestCase):
@@ -21,6 +22,9 @@ class StartupSplashTests(unittest.TestCase):
         self.assertEqual(splash.detail_label.text(), "Loading workspace modules")
         self.assertAlmostEqual(splash.progress, 0.48)
         self.assertTrue(splash.close_button.isHidden())
+        self.assertEqual(splash.descriptor_label.text(), "AUDIO WORKSPACE")
+        self.assertEqual(splash.version_label.text(), f"v{__version__}")
+        self.assertEqual(splash.version_label.objectName(), "SplashVersion")
 
         splash.show_error("Broken runtime")
 

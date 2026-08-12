@@ -14,6 +14,7 @@ from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.widgets import (
     FeedbackButton,
     InfoPopoverButton,
+    SvgIconButton,
     WindowTitleBar,
     _TRACK_ICON_SVGS,
     _track_button_palette,
@@ -75,6 +76,30 @@ class ButtonFeedbackTests(unittest.TestCase):
                 self.assertNotEqual(normal["background"], hovered["background"])
                 self.assertNotEqual(hovered["background"], pressed["background"])
                 self.assertNotEqual(checked["background"], checked_pressed["background"])
+
+    def test_svg_icon_button_keeps_requested_square_size_under_app_theme(self) -> None:
+        for theme_mode in ("dark", "white"):
+            host = QWidget()
+            host.setStyleSheet(build_stylesheet(theme_mode))
+            button = SvgIconButton("edit", size=30)
+            button.setParent(host)
+            button.ensurePolished()
+
+            with self.subTest(theme_mode=theme_mode):
+                self.assertEqual(button.size().toTuple(), (30, 30))
+                self.assertEqual(button.sizeHint().toTuple(), (30, 30))
+
+            host.close()
+
+    def test_svg_icon_button_size_rule_does_not_constrain_its_tooltip(self) -> None:
+        button = SvgIconButton("pin", size=26)
+        button.setToolTip("Set as work song")
+        stylesheet = button.styleSheet()
+
+        self.assertIn("QPushButton {", stylesheet)
+        self.assertNotIn("QToolTip", stylesheet)
+        self.assertEqual(button.toolTip(), "Set as work song")
+        button.close()
 
     def test_window_close_button_is_distinct_before_hover(self) -> None:
         for theme_mode in ("dark", "white"):

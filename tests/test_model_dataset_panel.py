@@ -9,6 +9,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
+from jang_app.qt_app.widgets import DangerIconButton
 from jang_app.services.i18n import tr
 from jang_app.services.model_dataset import ModelDatasetStore
 
@@ -17,6 +18,15 @@ class ModelDatasetPanelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_source_removal_uses_the_shared_danger_button(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            panel = ModelDatasetPanel(ModelDatasetStore(Path(temporary) / "workspace"))
+
+            self.assertIsInstance(panel.remove_button, DangerIconButton)
+            self.assertEqual(panel.remove_button.icon_name(), "trash")
+            self.assertTrue(panel.remove_button.property("persistentDanger"))
+            panel.close()
 
     def test_close_editor_clears_training_selection_without_changing_data(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

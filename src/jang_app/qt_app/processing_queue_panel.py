@@ -25,7 +25,7 @@ class ProcessingQueueButton(SvgIconButton):
 
     def __init__(self, queue: ProcessingQueue, parent: QWidget | None = None) -> None:
         super().__init__("logs", size=30)
-        self.setFixedSize(48, 26)
+        self.lock_outer_size(48, 26)
         if parent is not None:
             self.setParent(parent)
         self.setObjectName("ProcessingQueueButton")

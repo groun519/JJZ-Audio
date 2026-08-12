@@ -1,7 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <rect width="256" height="256" rx="58" fill="#080808"/>
-  <path d="M72 58v96c0 28-17 46-45 46" fill="none" stroke="#f7f4ec" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M106 58h98l-98 140h98" fill="none" stroke="#f7f4ec" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="70" cy="198" r="12" fill="#f7f4ec"/>
-  <circle cx="205" cy="58" r="12" fill="#f7f4ec"/>
+  <defs>
+    <linearGradient id="tile" x1="28" y1="18" x2="226" y2="238" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1b1a17"/>
+      <stop offset="0.48" stop-color="#0d0d0c"/>
+      <stop offset="1" stop-color="#070707"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="52" y1="48" x2="205" y2="211" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf6"/>
+      <stop offset="1" stop-color="#dcd9cf"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="248" height="248" rx="58" fill="url(#tile)" stroke="#3a3832" stroke-width="8"/>
+  <rect x="15" y="15" width="226" height="226" rx="48" fill="none" stroke="#f5efe0" stroke-opacity="0.07" stroke-width="2"/>
+  <path d="M43 48h63v101c0 43-24 67-68 67h-8v-37h8c20 0 29-10 29-30V84H43z" fill="url(#mark)"/>
+  <path d="M108 48h116v34l-69 94h69v40H104v-34l70-94h-66z" fill="url(#mark)"/>
 </svg>

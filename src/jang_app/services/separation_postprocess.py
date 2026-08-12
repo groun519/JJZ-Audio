@@ -100,8 +100,10 @@ def enforce_mixture_consistency(
                     raise SeparationPostprocessError("A separated stem ended before its declared length.")
 
                 residual = mixture - vocal - backing
-                corrected_vocal = vocal + residual * 0.5
-                corrected_backing = backing + residual * 0.5
+                # Preserve the model's vocal estimate. Sending mixture residual back
+                # into vocals can reintroduce accompaniment that the model removed.
+                corrected_vocal = vocal
+                corrected_backing = backing + residual
                 residual_after = mixture - corrected_vocal - corrected_backing
                 vocals_output.write(corrected_vocal)
                 instrumental_output.write(corrected_backing)

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- Added Fast, Precision, and Custom vocal-separation workflows, including independent vocal and instrumental model selection.
+- Added reusable vocal and instrumental result pools with linked-pair and free-selection comparison modes.
+- Added dedicated conversion input and RVC result pools with synchronized Original Vocal, Instrumental, and Converted Vocal monitoring.
+- Added a Studio sound pool and non-destructive timeline for arranging, moving, splitting, trimming, muting, and mixing audio and video clips.
+- Added a workspace-wide Space shortcut for play and pause while preserving text, numeric, combo, popup, and dialog input behavior.
+
+### Changed
+
+- Reorganized the production workflow into dedicated Separation, Conversion, Studio, and Export pages around one persistent work song.
+- Upgraded the managed AI runtime for RoFormer separation assets and the refreshed CUDA 11.8 RVC profile.
+
+### Fixed
+
+- Preserved the separated vocal estimate during quality-mode mixture correction so residual accompaniment is not injected back into vocals.
+- Prevented long Windows media paths from blocking RVC conversion by staging runtime work under a short managed path.
+- Refreshed converted-vocal discovery so newly created takes appear in Conversion, Studio, and Library views without restarting the app.
+- Scoped playback to the visible workspace while preserving the shared playhead when navigating between production pages.
+
 ## 0.2.8 - 2026-08-09
 
 ### Added

@@ -17,6 +17,7 @@ from jang_app.services.rvc_inference_runtime import (
 )
 from jang_app.services.settings import RvcSettings
 from jang_app.services.text_tail import combined_output, text_tail
+from jang_app.services.tool_workspace import ToolWorkspace
 
 
 # The bundled SciPy runtime still opens WAV outputs through the legacy Windows
@@ -79,10 +80,14 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
         )
 
     logger.info(
-        "Starting RVC conversion: input=%s output=%s model=%s requested_device=%s effective_device=%s",
+        "Starting RVC conversion: input=%s output=%s model=%s index=%s pitch=%s "
+        "f0_method=%s requested_device=%s effective_device=%s",
         source,
         output_path,
         model_path,
+        index_path or "none",
+        settings.pitch,
+        settings.f0_method,
         device.requested_device,
         device.effective_device,
     )
@@ -99,34 +104,52 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
         ".".join(str(part) for part in capabilities.device_capability) or "unknown",
         ",".join(capabilities.cuda_arch_list) or "unknown",
     )
-    completed = run_command(
-        [
-            runtime_python,
-            wrapper_script,
-            rvc_root,
-            str(settings.pitch),
-            source,
-            output_path,
-            model_path,
-            str(index_path) if index_path else "",
-            device.effective_device,
-            settings.f0_method,
-        ],
-        cwd=workspace,
-        env=build_rvc_environment(rvc_root),
-    )
-    if completed.returncode != 0:
-        process_output = text_tail(combined_output(completed.stdout, completed.stderr))
-        logger.error("RVC conversion failed with exit code %s\n%s", completed.returncode, process_output)
-        raise RvcConversionError(
-            _conversion_failure_message(
-                completed.returncode,
+    staging_root = workspace / "conversion_jobs"
+    with ToolWorkspace(staging_root, "rvc") as job:
+        staged_input = job.stage_input(source)
+        staged_model = job.stage_file(model_path, f"m{model_path.suffix.casefold()}")
+        staged_index = (
+            job.stage_file(index_path, f"x{index_path.suffix.casefold()}")
+            if index_path is not None
+            else None
+        )
+        staged_output = job.root / "o.wav"
+        _require_safe_rvc_runtime_paths(staged_input, staged_output)
+        completed = run_command(
+            [
+                runtime_python,
+                wrapper_script,
+                rvc_root,
+                str(settings.pitch),
+                staged_input,
+                staged_output,
+                staged_model,
+                str(staged_index) if staged_index else "",
                 device.effective_device,
+                settings.f0_method,
+            ],
+            cwd=workspace,
+            env=build_rvc_environment(rvc_root),
+        )
+        if completed.returncode != 0:
+            process_output = text_tail(combined_output(completed.stdout, completed.stderr))
+            logger.error(
+                "RVC conversion failed with exit code %s\n%s",
+                completed.returncode,
                 process_output,
             )
-        )
-    if not output_path.exists():
-        raise RvcConversionError(f"RVC conversion did not create output: {output_path}")
+            raise RvcConversionError(
+                _conversion_failure_message(
+                    completed.returncode,
+                    device.effective_device,
+                    process_output,
+                )
+            )
+        if not staged_output.is_file():
+            raise RvcConversionError(
+                f"RVC conversion did not create a staged output: {staged_output}"
+            )
+        _publish_rvc_output(staged_output, output_path)
 
     logger.info("RVC conversion complete: output=%s", output_path)
     return RvcConversionResult(
@@ -278,14 +301,29 @@ def _safe_rvc_output_stem(output_dir: Path, stem: str, suffix: str, pitch: int) 
 
     digest = hashlib.sha256(stem.encode("utf-8")).hexdigest()[:10]
     pitch_name = f"p{pitch}" if pitch >= 0 else f"m{abs(pitch)}"
-    compact_stem = f"rvc_{pitch_name}_{digest}"
-    compact_candidate = output_dir / f"{compact_stem}{suffix}"
-    if _path_length(compact_candidate) > _RVC_SAFE_OUTPUT_PATH_LENGTH:
+    return f"rvc_{pitch_name}_{digest}"
+
+
+def _require_safe_rvc_runtime_paths(*paths: Path) -> None:
+    unsafe = next(
+        (path for path in paths if _path_length(path) > _RVC_SAFE_OUTPUT_PATH_LENGTH),
+        None,
+    )
+    if unsafe is not None:
         raise RvcConversionError(
-            "RVC output folder path is too long for the bundled Windows audio runtime. "
-            f"Choose a shorter media storage location: {output_dir}"
+            "The RVC working path is too long for the bundled Windows audio runtime. "
+            f"Choose a shorter workspace location: {unsafe.parent}"
         )
-    return compact_stem
+
+
+def _publish_rvc_output(staged_output: Path, output_path: Path) -> None:
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(staged_output), str(output_path))
+    except OSError as exc:
+        raise RvcConversionError(
+            f"RVC conversion finished, but the output could not be saved: {output_path}"
+        ) from exc
 
 
 def _path_length(path: Path) -> int:

@@ -25,11 +25,18 @@ class RvcSettings:
 
 
 @dataclass(frozen=True)
+class StudioLayoutSettings:
+    workspace_sizes: tuple[int, int, int] = (250, 900, 320)
+    center_sizes: tuple[int, int] = (340, 460)
+
+
+@dataclass(frozen=True)
 class AppSettings:
     output_root: Path = SEPARATION_OUTPUT_DIR
     rvc: RvcSettings = field(default_factory=RvcSettings)
     theme_mode: str = "white"
     language: str = LANGUAGE_KOREAN
+    studio_layout: StudioLayoutSettings = field(default_factory=StudioLayoutSettings)
 
 
 def load_app_settings() -> AppSettings:
@@ -45,6 +52,21 @@ def load_app_settings() -> AppSettings:
     output_root = _path_from_data(data.get("output_root"), default_settings.output_root)
     theme_mode = _theme_mode_from_data(data.get("theme_mode"), default_settings.theme_mode)
     language = normalize_language(data.get("language"))
+    studio_layout_data = (
+        data.get("studio_layout")
+        if isinstance(data.get("studio_layout"), dict)
+        else {}
+    )
+    studio_layout = StudioLayoutSettings(
+        workspace_sizes=_size_tuple_from_data(
+            studio_layout_data.get("workspace_sizes"),
+            default_settings.studio_layout.workspace_sizes,
+        ),
+        center_sizes=_size_tuple_from_data(
+            studio_layout_data.get("center_sizes"),
+            default_settings.studio_layout.center_sizes,
+        ),
+    )
     rvc_data = data.get("rvc") if isinstance(data.get("rvc"), dict) else {}
     rvc = RvcSettings(
         root=_path_from_data(rvc_data.get("root"), default_settings.rvc.root),
@@ -55,7 +77,13 @@ def load_app_settings() -> AppSettings:
         device=normalize_rvc_device(rvc_data.get("device")),
         f0_method="rmvpe",
     )
-    return AppSettings(output_root=output_root, rvc=rvc, theme_mode=theme_mode, language=language)
+    return AppSettings(
+        output_root=output_root,
+        rvc=rvc,
+        theme_mode=theme_mode,
+        language=language,
+        studio_layout=studio_layout,
+    )
 
 
 def save_app_settings(settings: AppSettings) -> None:
@@ -64,6 +92,10 @@ def save_app_settings(settings: AppSettings) -> None:
         "output_root": str(settings.output_root.expanduser()),
         "theme_mode": settings.theme_mode,
         "language": normalize_language(settings.language),
+        "studio_layout": {
+            "workspace_sizes": list(settings.studio_layout.workspace_sizes),
+            "center_sizes": list(settings.studio_layout.center_sizes),
+        },
         "rvc": {
             "root": str(settings.rvc.root.expanduser()),
             "model_id": settings.rvc.model_id,
@@ -94,6 +126,19 @@ def _int_from_data(value: object, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _size_tuple_from_data(
+    value: object,
+    default: tuple[int, ...],
+) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) != len(default):
+        return default
+    try:
+        sizes = tuple(max(0, min(10_000, int(size))) for size in value)
+    except (TypeError, ValueError):
+        return default
+    return sizes if sum(sizes) > 0 else default
 
 
 def _theme_mode_from_data(value: object, default: str) -> str:

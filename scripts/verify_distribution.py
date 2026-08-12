@@ -113,6 +113,11 @@ def required_runtime_files(distribution: Path) -> tuple[Path, ...]:
     rvc_root = root / "runtime" / "rvc"
     return (
         rvc_root / "runtime" / "python.exe",
+        rvc_root
+        / "runtime"
+        / "jjzero-roformer-packages"
+        / "audio_separator"
+        / "__init__.py",
         root / "runtime" / "ffmpeg" / "bin" / "ffmpeg.exe",
         root / "runtime" / "ffmpeg" / "bin" / "ffprobe.exe",
         root
@@ -208,6 +213,8 @@ def _verify_rvc_runtime(distribution: Path) -> bool:
         "import lib.jjzero_device; "
         "import lib.infer_pack.models; "
         "import vc_infer_pipeline; "
+        "sys.path.insert(0, 'runtime/jjzero-roformer-packages'); "
+        "import audio_separator; "
         "assert torch.cuda.is_available(); "
         "print(torch.__version__)"
     )

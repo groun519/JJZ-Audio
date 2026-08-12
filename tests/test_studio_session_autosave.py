@@ -45,6 +45,16 @@ class StudioSessionAutosaveTests(unittest.TestCase):
         self.assertEqual(failed.count(), 1)
         self.assertEqual(failed.at(0)[0], "disk unavailable")
 
+    def test_discard_prevents_a_removed_session_from_being_recreated(self) -> None:
+        saved: list[tuple[str, StudioSession]] = []
+        autosave = StudioSessionAutosave(lambda song_id, session: saved.append((song_id, session)))
+        autosave.queue("song-1", StudioSession())
+
+        autosave.discard("song-1")
+        autosave.flush()
+
+        self.assertEqual(saved, [])
+
 
 if __name__ == "__main__":
     unittest.main()

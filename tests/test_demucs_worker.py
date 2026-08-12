@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from jang_app.pipeline import demucs_engine
-from jang_app.services.separation_recipe import HIGH_QUALITY_RECIPE
+from jang_app.pipeline.separation_engine import SeparationRequest
+from jang_app.services.separation_recipe import FAST_RECIPE
 class DemucsRuntimeTests(unittest.TestCase):
     def test_frozen_separation_uses_the_shared_ai_runtime(self) -> None:
         source = Path("input.wav")
@@ -56,10 +59,16 @@ class DemucsRuntimeTests(unittest.TestCase):
         )
 
     def test_quality_recipe_maps_to_explicit_demucs_arguments(self) -> None:
+        quality_recipe = replace(
+            FAST_RECIPE,
+            model="htdemucs_ft",
+            shifts=2,
+            overlap=0.5,
+        )
         command = demucs_engine.build_demucs_command(
             Path("input.wav"),
             Path("output"),
-            recipe=HIGH_QUALITY_RECIPE,
+            recipe=quality_recipe,
         )
 
         self.assertIn("htdemucs_ft", command)
@@ -80,6 +89,39 @@ class DemucsRuntimeTests(unittest.TestCase):
         self.assertEqual(updates, sorted(updates))
         self.assertEqual(updates[-1], 100)
         self.assertIn(50, updates)
+
+    def test_engine_keeps_native_command_paths_in_short_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / ("long title " * 12 + ".wav")
+            source.write_bytes(b"source")
+            output = root / "managed" / "r_123456789abc"
+            commands: list[list[str]] = []
+
+            def run(command, **_kwargs):
+                commands.append(command)
+                command_source = Path(command[-1])
+                command_output = Path(command[command.index("-o") + 1])
+                native = command_output / FAST_RECIPE.model / command_source.stem
+                native.mkdir(parents=True)
+                (native / "vocals.wav").write_bytes(b"vocal")
+                (native / "no_vocals.wav").write_bytes(b"music")
+                return SimpleNamespace(returncode=0, output="")
+
+            with (
+                patch.object(demucs_engine, "TOOL_WORKSPACE_DIR", root / "cache"),
+                patch.object(demucs_engine, "require_demucs_tools"),
+                patch.object(demucs_engine, "run_command", side_effect=run),
+            ):
+                result = demucs_engine.DemucsEngine().separate(
+                    SeparationRequest(source, output, FAST_RECIPE)
+                )
+
+            self.assertEqual(result.job_dir, output.resolve())
+            self.assertEqual(result.vocals_path, output.resolve() / "vocals.wav")
+            self.assertEqual(result.vocals_path.read_bytes(), b"vocal")
+            self.assertEqual(Path(commands[0][-1]).name, "i.wav")
+            self.assertNotIn(source.stem, str(result.job_dir))
 
 if __name__ == "__main__":
     unittest.main()

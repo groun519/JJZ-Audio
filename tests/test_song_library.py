@@ -83,7 +83,34 @@ class SongLibraryTests(unittest.TestCase):
             self.assertEqual(library.items()[0].title, "Renamed")
             self.assertTrue(library.remove_item(added.id))
             self.assertEqual(library.items(), [])
-            self.assertTrue(store.require(added.id, include_removed=True).removed)
+            removed = store.require(added.id, include_removed=True)
+            self.assertTrue(removed.removed)
+            self.assertIsNone(removed.source_path)
+            self.assertEqual(
+                {item.name for item in removed.folder.iterdir()},
+                {"song.json"},
+            )
+            self.assertTrue(source.is_file())
+
+    def test_initialization_purges_files_left_by_legacy_library_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            package, _created = store.import_audio(source, title="Removed Song")
+            leftover = package.folder / "04_exports" / "leftover.wav"
+            leftover.write_bytes(b"leftover")
+            store.set_removed(package.song_id, True)
+
+            library = SongLibrary(project / "missing.json", store)
+
+            self.assertEqual(library.items(), [])
+            self.assertFalse(leftover.exists())
+            self.assertEqual(
+                {item.name for item in package.folder.iterdir()},
+                {"song.json"},
+            )
 
     def test_managed_vocal_output_is_registered_and_loaded_from_song_package(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

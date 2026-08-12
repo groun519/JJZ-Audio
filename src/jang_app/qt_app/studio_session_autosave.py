@@ -44,3 +44,9 @@ class StudioSessionAutosave(QObject):
             self._save_session(song_id, session)
         except (KeyError, OSError) as exc:
             self.save_failed.emit(str(exc))
+
+    def discard(self, song_id: str) -> None:
+        if self._pending is None or self._pending[0] != song_id:
+            return
+        self._timer.stop()
+        self._pending = None

@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jang_app.services.song_assets import STAGE_EXPORT, STAGE_SOURCE, STAGE_STUDIO, STAGE_VOCAL
+from jang_app.services.song_assets import (
+    REMOVAL_VOCAL_OUTPUT,
+    STAGE_EXPORT,
+    STAGE_SOURCE,
+    STAGE_STUDIO,
+    STAGE_VOCAL,
+)
 from jang_app.services.song_library import SongLibrary
 from jang_app.services.song_package import SongPackageStore
 
@@ -39,8 +45,11 @@ class SongAssetDetailsTests(unittest.TestCase):
 
             self.assertEqual(len(details.assets_for(STAGE_SOURCE)), 2)
             self.assertEqual(len(details.assets_for(STAGE_VOCAL)), 3)
-            self.assertEqual(len(details.assets_for(STAGE_STUDIO)), 0)
+            self.assertEqual(len(details.assets_for(STAGE_STUDIO)), 1)
             self.assertEqual(len(details.assets_for(STAGE_EXPORT)), 1)
+            studio_asset = details.assets_for(STAGE_STUDIO)[0]
+            self.assertEqual(studio_asset.role, "Studio Session")
+            self.assertTrue(studio_asset.can_remove)
             active_vocal_paths = {asset.path for asset in details.assets_for(STAGE_VOCAL) if asset.is_active}
             self.assertEqual(
                 active_vocal_paths,
@@ -60,12 +69,16 @@ class SongAssetDetailsTests(unittest.TestCase):
             external.mkdir()
             (external / "vocals.wav").write_bytes(b"vocals")
             (external / "no_vocals.wav").write_bytes(b"instrumental")
+            (external / "vocals_rvc_voice.wav").write_bytes(b"converted")
             library.register_output(song.id, external, "Legacy")
 
             vocal_assets = library.asset_details(song.id).assets_for(STAGE_VOCAL)
 
-            self.assertEqual(len(vocal_assets), 2)
+            self.assertEqual(len(vocal_assets), 3)
             self.assertTrue(all(not asset.is_managed for asset in vocal_assets))
+            self.assertTrue(all(asset.can_remove for asset in vocal_assets))
+            converted = next(asset for asset in vocal_assets if asset.role == "Converted Vocal")
+            self.assertEqual(converted.removal_scope, REMOVAL_VOCAL_OUTPUT)
 
 
 if __name__ == "__main__":

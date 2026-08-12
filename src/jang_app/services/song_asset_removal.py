@@ -7,6 +7,7 @@ from pathlib import Path
 from jang_app.services.output_catalog import load_output_sound_set
 from jang_app.services.song_assets import (
     REMOVAL_FILE,
+    REMOVAL_STUDIO_SESSION,
     REMOVAL_VIDEO,
     REMOVAL_VOCAL_OUTPUT,
     REMOVAL_VOCAL_TAKE,
@@ -52,10 +53,63 @@ class SongAssetRemovalService:
         if asset.removal_scope == REMOVAL_VOCAL_TAKE:
             self._remove_vocal_take(package, asset)
             return SongAssetRemovalResult(asset)
+        if asset.removal_scope == REMOVAL_STUDIO_SESSION:
+            self._remove_managed_file(package, asset.path)
+            return SongAssetRemovalResult(asset)
         if asset.removal_scope == REMOVAL_FILE:
             self._remove_managed_file(package, asset.path)
             return SongAssetRemovalResult(asset)
         raise SongAssetRemovalError("This library item cannot be removed separately.")
+
+    def remove_many(
+        self,
+        song_id: str,
+        paths: tuple[Path, ...],
+    ) -> tuple[SongAssetRemovalResult, ...]:
+        package = self._packages.require(song_id)
+        assets_by_path = {
+            asset.path.expanduser().resolve(): asset
+            for asset in build_song_asset_details(package).assets
+            if asset.can_remove
+        }
+        selected: list[SongAsset] = []
+        for path in paths:
+            asset = assets_by_path.get(path.expanduser().resolve())
+            if asset is None:
+                raise SongAssetRemovalError("The selected library data is missing or protected.")
+            if asset not in selected:
+                selected.append(asset)
+
+        selected_output_dirs = {
+            output.job_dir.expanduser().resolve()
+            for asset in selected
+            if asset.removal_scope == REMOVAL_VOCAL_OUTPUT
+            if (output := _output_for_asset(package, asset.path)) is not None
+        }
+        planned_paths: list[Path] = []
+        seen_units: set[tuple[str, Path]] = set()
+        for asset in selected:
+            if asset.removal_scope != REMOVAL_VOCAL_OUTPUT and any(
+                _is_within(asset.path, output_dir) for output_dir in selected_output_dirs
+            ):
+                continue
+            output = (
+                _output_for_asset(package, asset.path)
+                if asset.removal_scope in {REMOVAL_VOCAL_OUTPUT, REMOVAL_VOCAL_TAKE}
+                else None
+            )
+            output_dir = output.job_dir.expanduser().resolve() if output is not None else None
+            unit = (
+                (REMOVAL_VOCAL_OUTPUT, output_dir)
+                if asset.removal_scope == REMOVAL_VOCAL_OUTPUT and output_dir is not None
+                else (asset.removal_scope, asset.path.expanduser().resolve())
+            )
+            if unit in seen_units:
+                continue
+            seen_units.add(unit)
+            planned_paths.append(asset.path)
+
+        return tuple(self.remove(song_id, path) for path in planned_paths)
 
     def _require_removable_asset(self, package: SongPackage, path: Path) -> SongAsset:
         target = path.expanduser().resolve()

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+import weakref
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QMenu, QWidget
 
 
@@ -24,6 +25,7 @@ class WindowLifecycleGuard(QObject):
         super().__init__(application)
         self._blocked_count = 0
         self._last_blocked = ""
+        self._pending_widget_ids: set[int] = set()
 
     @property
     def blocked_count(self) -> int:
@@ -40,13 +42,37 @@ class WindowLifecycleGuard(QObject):
             and watched.isWindow()
             and not self.is_expected_window(watched)
         ):
-            description = _window_description(watched)
-            self._blocked_count += 1
-            self._last_blocked = description
-            _LOGGER.error("Blocked unexpected top-level widget: %s", description)
             watched.hide()
+            self._resolve_after_parenting(watched)
             return True
         return False
+
+    def _resolve_after_parenting(self, widget: QWidget) -> None:
+        widget_id = id(widget)
+        if widget_id in self._pending_widget_ids:
+            return
+        self._pending_widget_ids.add(widget_id)
+        widget_reference = weakref.ref(widget)
+        QTimer.singleShot(
+            0,
+            lambda: self._finish_resolution(widget_id, widget_reference),
+        )
+
+    def _finish_resolution(self, widget_id: int, widget_reference) -> None:
+        self._pending_widget_ids.discard(widget_id)
+        widget = widget_reference()
+        if widget is None:
+            return
+        try:
+            if not widget.isWindow() or self.is_expected_window(widget):
+                widget.show()
+                return
+            description = _window_description(widget)
+        except RuntimeError:
+            return
+        self._blocked_count += 1
+        self._last_blocked = description
+        _LOGGER.error("Blocked unexpected top-level widget: %s", description)
 
     @staticmethod
     def is_expected_window(widget: QWidget) -> bool:

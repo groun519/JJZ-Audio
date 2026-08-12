@@ -10,7 +10,9 @@ from jang_app.services.app_update import ReleaseArtifact, ReleaseComponent, Rele
 from scripts.verify_component_release import (
     _accelerator_metadata_matches,
     _verify_cu128_package_layout,
+    _verify_split_runtime_package_layout,
 )
+from jang_app.services.rvc_training_runtime import required_rvc_training_paths
 
 
 class ComponentReleaseValidationTests(unittest.TestCase):
@@ -70,6 +72,33 @@ class ComponentReleaseValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "torchaudio"):
                 _verify_cu128_package_layout(_manifest(package), root)
 
+    def test_rejects_cu128_profile_without_precision_separator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "cu128.zip"
+            _write_profile_package(
+                package,
+                omitted="jjzero-roformer-packages/audio_separator/__init__.py",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "audio_separator"):
+                _verify_cu128_package_layout(_manifest(package), root)
+
+    def test_accepts_runtime_with_separate_cu118_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = _split_manifest(root)
+
+            _verify_split_runtime_package_layout(manifest, root)
+
+    def test_rejects_split_runtime_that_embeds_cu118_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = _split_manifest(root, embedded_runtime=True)
+
+            with self.assertRaisesRegex(RuntimeError, "RVC profile file"):
+                _verify_split_runtime_package_layout(manifest, root)
+
 
 def _write_profile_package(path: Path, *, omitted: str = "") -> None:
     entries = {
@@ -80,6 +109,7 @@ def _write_profile_package(path: Path, *, omitted: str = "") -> None:
         "Lib/site-packages/numpy/__init__.py": b"numpy",
         "Lib/site-packages/faiss/__init__.py": b"faiss",
         "Lib/site-packages/fairseq/__init__.py": b"fairseq",
+        "jjzero-roformer-packages/audio_separator/__init__.py": b"audio-separator",
         "jjzero-profile-build.json": json.dumps(
             {
                 "schema_version": 1,
@@ -99,6 +129,52 @@ def _manifest(package: Path) -> ReleaseManifest:
     application = ReleaseComponent("application", "0.2.2", "installer", ())
     profile = ReleaseComponent("rvc-runtime-cu128", "1", "extract", (artifact,))
     return ReleaseManifest("0.2.2", (application, profile))
+
+
+def _split_manifest(root: Path, *, embedded_runtime: bool = False) -> ReleaseManifest:
+    shared = root / "shared.zip"
+    profile = root / "cu118.zip"
+    shared_entries = {
+        "ffmpeg/bin/ffmpeg.exe",
+        "ffmpeg/bin/ffprobe.exe",
+        "demucs/torch/hub/checkpoints/955717e8-8726e21a.th",
+        "rvc/infer_cli.py",
+        "rvc/hubert_base.pt",
+        "rvc/rmvpe.pt",
+        *(
+            f"rvc/{path.as_posix()}"
+            for path in required_rvc_training_paths()
+            if path.parts[0] != "runtime"
+        ),
+    }
+    if embedded_runtime:
+        shared_entries.add("rvc/runtime/python.exe")
+    with zipfile.ZipFile(shared, "w") as archive:
+        for name in shared_entries:
+            archive.writestr(name, b"shared")
+    with zipfile.ZipFile(profile, "w") as archive:
+        for name in (
+            "python.exe",
+            "python3.dll",
+            "Lib/site-packages/torch/__init__.py",
+            "Lib/site-packages/torchaudio/__init__.py",
+            "jjzero-roformer-packages/audio_separator/__init__.py",
+        ):
+            archive.writestr(name, b"profile")
+    artifact = lambda path: ReleaseArtifact(
+        path.name,
+        path.stat().st_size,
+        "0" * 64,
+        "https://example.invalid",
+    )
+    return ReleaseManifest(
+        "0.3.0",
+        (
+            ReleaseComponent("application", "0.3.0", "installer", ()),
+            ReleaseComponent("ai-runtime", "3", "extract", (artifact(shared),)),
+            ReleaseComponent("rvc-runtime-cu118", "2", "extract", (artifact(profile),)),
+        ),
+    )
 
 
 if __name__ == "__main__":

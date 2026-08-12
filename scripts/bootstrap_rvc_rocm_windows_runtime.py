@@ -66,6 +66,9 @@ RVC_PYTHON_REQUIREMENTS = (
     "sacrebleu==2.4.3",
     "tqdm==4.67.1",
 )
+SHARED_AUDIO_REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements-rvc-runtime.txt"
+ROFORMER_REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements-roformer-runtime.txt"
+ROFORMER_PACKAGE_DIRNAME = "jjzero-roformer-packages"
 FAIRSEQ_REQUIREMENT = "fairseq==0.12.2"
 _MUTABLE_DATACLASS_DEFAULT = re.compile(
     r"^(?P<indent>\s+)(?P<name>[A-Za-z_]\w*):\s*"
@@ -100,6 +103,19 @@ def bootstrap_rocm_windows_runtime(
         _pip_install(python, staging, ROCM_SDK_REQUIREMENTS)
         _pip_install(python, staging, ROCM_TORCH_REQUIREMENTS)
         _pip_install(python, staging, ("Cython<3", *RVC_PYTHON_REQUIREMENTS))
+        _pip_install(
+            python,
+            staging,
+            _requirement_lines(SHARED_AUDIO_REQUIREMENTS),
+            no_deps=True,
+        )
+        _pip_install(
+            python,
+            staging,
+            _requirement_lines(ROFORMER_REQUIREMENTS),
+            no_deps=True,
+            target=staging / ROFORMER_PACKAGE_DIRNAME,
+        )
         _pip_install(
             python,
             staging,
@@ -141,6 +157,14 @@ def _enable_site_packages(root: Path) -> None:
         lines.append("import site")
     (root / "Lib" / "site-packages").mkdir(parents=True, exist_ok=True)
     path_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _requirement_lines(path: Path) -> tuple[str, ...]:
+    return tuple(
+        line
+        for raw_line in path.read_text(encoding="utf-8").splitlines()
+        if (line := raw_line.strip()) and not line.startswith("#")
+    )
 
 
 def _patch_fairseq_dataclasses(root: Path) -> int:
@@ -248,6 +272,7 @@ def _pip_install(
     no_deps: bool = False,
     no_build_isolation: bool = False,
     environment: dict[str, str] | None = None,
+    target: Path | None = None,
 ) -> None:
     args = [
         str(python),
@@ -261,6 +286,8 @@ def _pip_install(
         args.append("--no-deps")
     if no_build_isolation:
         args.append("--no-build-isolation")
+    if target is not None:
+        args.extend(("--target", str(target)))
     _run((*args, *requirements), cwd, environment=environment)
 
 

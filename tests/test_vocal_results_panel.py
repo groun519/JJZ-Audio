@@ -7,7 +7,7 @@ from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
-from jang_app.qt_app.widgets import TrackMixControl, TrackRow
+from jang_app.qt_app.widgets import DangerIconButton, TrackMixControl, TrackRow
 from jang_app.services.i18n import tr
 from jang_app.services.song_library import SongVocalVersion
 from jang_app.services.vocal_project import (
@@ -66,6 +66,65 @@ class VocalResultsPanelTests(unittest.TestCase):
         self.assertTrue(panel.result_combo.isHidden())
         panel.close()
 
+    def test_work_song_title_is_shown_in_the_result_header(self) -> None:
+        panel = VocalResultsPanel(mode="separation")
+
+        panel.set_song_title("Current Work Song")
+
+        self.assertEqual(panel.song_title_label.text(), "Current Work Song")
+        self.assertEqual(panel.song_title_label.toolTip(), "Current Work Song")
+        self.assertFalse(panel.song_title_label.isHidden())
+        panel.set_song_title("")
+        self.assertTrue(panel.song_title_label.isHidden())
+        panel.close()
+
+    def test_conversion_mode_shows_three_fixed_tracks_without_a_vocal_toggle(self) -> None:
+        panel = VocalResultsPanel(mode="conversion")
+
+        panel.set_result(_version("selected", (Path("converted.wav"),)))
+
+        self.assertEqual(
+            panel.result_waveforms,
+            (
+                panel.original_waveform,
+                panel.instrumental_waveform,
+                panel.converted_waveform,
+            ),
+        )
+        self.assertFalse(hasattr(panel, "vocal_comparison"))
+        self.assertTrue(panel.original_waveform.mix_control.is_muted())
+        self.assertFalse(panel.instrumental_waveform.mix_control.is_muted())
+        self.assertFalse(panel.converted_waveform.mix_control.is_muted())
+        panel.close()
+
+    def test_conversion_mode_hides_duplicate_take_actions(self) -> None:
+        panel = VocalResultsPanel(mode="conversion")
+
+        self.assertTrue(
+            all(button.isHidden() for button in panel.converted_waveform.take_action_buttons)
+        )
+        panel.close()
+
+    def test_conversion_mode_uses_original_vocal_when_no_converted_take_exists(self) -> None:
+        panel = VocalResultsPanel(mode="conversion")
+
+        panel.set_result(_version("selected", ()))
+
+        self.assertFalse(panel.original_waveform.mix_control.is_muted())
+        self.assertFalse(panel.instrumental_waveform.mix_control.is_muted())
+        self.assertTrue(panel.converted_waveform.mix_control.is_muted())
+        panel.close()
+
+    def test_first_converted_take_becomes_the_default_monitor_source(self) -> None:
+        panel = VocalResultsPanel(mode="conversion")
+        panel.set_result(_version("selected", ()))
+
+        panel.set_result(_version("selected", (Path("converted.wav"),)))
+
+        self.assertTrue(panel.original_waveform.mix_control.is_muted())
+        self.assertFalse(panel.converted_waveform.mix_control.is_muted())
+        panel.close()
+
     def test_converted_selector_is_hidden_until_multiple_versions_exist(self) -> None:
         panel = VocalResultsPanel()
         panel.set_result(_version("single", (Path("single.wav"),)))
@@ -75,7 +134,7 @@ class VocalResultsPanelTests(unittest.TestCase):
         self.assertFalse(panel.converted_waveform.path_combo.isHidden())
         panel.close()
 
-    def test_conversion_mode_exposes_one_header_selector_for_converted_takes(self) -> None:
+    def test_conversion_mode_accepts_central_take_selection_without_duplicate_ui(self) -> None:
         panel = VocalResultsPanel(mode="conversion")
         first = Path("first.wav")
         second = Path("second.wav")
@@ -95,21 +154,33 @@ class VocalResultsPanelTests(unittest.TestCase):
             ),
             active_take_id="take-second",
         )
-        selected = QSignalSpy(panel.converted_selected)
-
         panel.set_result(_version("multiple", (first, second), second), project)
 
-        self.assertFalse(panel.conversion_take_combo.isHidden())
-        self.assertEqual(panel.conversion_take_combo.count(), 2)
+        self.assertFalse(hasattr(panel, "conversion_take_combo"))
         self.assertTrue(panel.converted_waveform.path_combo.isHidden())
-        self.assertIn("Warm", panel.conversion_take_combo.currentText())
-        self.assertIn("-5", panel.conversion_take_combo.currentText())
-
-        panel.conversion_take_combo.setCurrentIndex(0)
-
-        self.assertEqual(selected.count(), 1)
-        self.assertEqual(selected.at(0)[0], first)
+        self.assertTrue(panel.select_converted(first))
         self.assertEqual(panel.converted_waveform.current_path(), first)
+        panel.close()
+
+    def test_conversion_input_can_change_without_replacing_the_selected_rvc_take(self) -> None:
+        panel = VocalResultsPanel(mode="conversion")
+        first = _version("first", ())
+        second = _version("second", ())
+        converted = (Path("take-a.wav"), Path("take-b.wav"))
+
+        panel.set_conversion_context(
+            first,
+            converted_paths=converted,
+            selected_converted_path=converted[1],
+        )
+        panel.set_conversion_context(
+            second,
+            converted_paths=converted,
+            selected_converted_path=converted[1],
+        )
+
+        self.assertEqual(panel.original_waveform.current_path(), second.vocals_path)
+        self.assertEqual(panel.converted_waveform.current_path(), converted[1])
         panel.close()
 
     def test_separation_mode_selects_a_saved_run(self) -> None:
@@ -126,12 +197,26 @@ class VocalResultsPanelTests(unittest.TestCase):
         self.assertNotIn(panel.converted_waveform, panel.result_waveforms)
         panel.close()
 
-    def test_separation_selector_is_always_visible_and_labeled(self) -> None:
+    def test_separation_selector_moves_to_the_stem_pool(self) -> None:
         panel = VocalResultsPanel(mode="separation")
 
-        self.assertFalse(panel.result_selector_label.isHidden())
-        self.assertEqual(panel.result_selector_label.text(), tr("Current separation result"))
-        self.assertFalse(panel.result_combo.isHidden())
+        self.assertTrue(panel.result_selector_label.isHidden())
+        self.assertTrue(panel.result_combo.isHidden())
+        panel.close()
+
+    def test_separation_mode_accepts_independent_stem_results(self) -> None:
+        panel = VocalResultsPanel(mode="separation")
+        vocal = _version("vocal", ())
+        instrumental = _version("instrumental", ())
+
+        panel.set_separation_stems(vocal, instrumental)
+
+        self.assertEqual(panel.current_result(), vocal)
+        self.assertEqual(panel.original_waveform.waveform._path, vocal.vocals_path)
+        self.assertEqual(
+            panel.instrumental_waveform.waveform._path,
+            instrumental.instrumental_path,
+        )
         panel.close()
 
     def test_current_result_falls_back_into_an_empty_separation_list(self) -> None:
@@ -167,6 +252,14 @@ class VocalResultsPanelTests(unittest.TestCase):
         reconverted = QSignalSpy(panel.reconvert_take_requested)
 
         panel.converted_waveform.set_takes([path], (take,), path)
+        self.assertIsInstance(panel.converted_waveform.remove_button, DangerIconButton)
+        self.assertEqual(
+            {
+                (button.width(), button.height())
+                for button in panel.converted_waveform.take_action_buttons
+            },
+            {(34, 34)},
+        )
         panel.converted_waveform.rename_button.click()
         panel.converted_waveform.reconvert_button.click()
 
@@ -216,6 +309,18 @@ class VocalResultsPanelTests(unittest.TestCase):
         self.assertEqual(changed.count(), 2)
         self.assertEqual(changed.at(0), ["original", True, 100])
         self.assertEqual(changed.at(1), ["original", True, 150])
+        panel.close()
+
+    def test_separation_results_shrink_without_losing_mix_controls(self) -> None:
+        panel = VocalResultsPanel(mode="separation")
+        panel.resize(290, 640)
+        panel.show()
+        self.app.processEvents()
+
+        self.assertLessEqual(panel.minimumSizeHint().width(), 300)
+        self.assertFalse(panel.original_waveform.mix_control.mixer_label.isVisible())
+        self.assertTrue(panel.original_waveform.mix_control.volume_slider.isVisible())
+        self.assertTrue(panel.original_waveform.mix_control.volume_label.isVisible())
         panel.close()
 
     def test_result_mix_state_sync_does_not_emit_a_user_change(self) -> None:

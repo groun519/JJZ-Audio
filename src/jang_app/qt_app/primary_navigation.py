@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout
+from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QSizePolicy
 
-from jang_app.qt_app.widgets import FeedbackButton, render_app_icon
+from jang_app.qt_app.navigation_work_song_selector import NavigationWorkSongSelector
+from jang_app.qt_app.widgets import FeedbackButton, TransparentContainer, render_app_icon
 
 
 _PAGE_ICONS = {
@@ -121,6 +122,7 @@ class NavigationActionButton(FeedbackButton):
 class PrimaryNavigationBar(QFrame):
     page_requested = Signal(int)
     settings_requested = Signal()
+    work_song_changed = Signal(str)
 
     def __init__(
         self,
@@ -130,7 +132,7 @@ class PrimaryNavigationBar(QFrame):
     ) -> None:
         super().__init__()
         self.setObjectName("NavigationDock")
-        self.setFixedHeight(54)
+        self.setFixedHeight(66)
         leading_items = tuple(leading_pages)
         workflow_items = tuple(workflow_pages)
         if not leading_items or not workflow_items:
@@ -144,6 +146,8 @@ class PrimaryNavigationBar(QFrame):
         export_label, export_id = export_page
         self.export_button = self._add_button(export_label, export_id)
         self.buttons = (*self.leading_buttons, *self.workflow_buttons, self.export_button)
+        self.work_song_selector = NavigationWorkSongSelector()
+        self.work_song_selector.song_changed.connect(self.work_song_changed.emit)
         self.settings_button = NavigationActionButton("settings", "Settings")
         self.settings_button.clicked.connect(self.settings_requested.emit)
 
@@ -151,26 +155,42 @@ class PrimaryNavigationBar(QFrame):
         self.export_divider = _navigation_divider()
         self.settings_divider = _navigation_divider()
 
+        self.leading_slot = _NavigationSideSlot()
+        leading_layout = QHBoxLayout(self.leading_slot)
+        leading_layout.setContentsMargins(0, 0, 0, 0)
+        leading_layout.setSpacing(0)
+        leading_layout.addWidget(self.work_song_selector, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.channel_slot = TransparentContainer(object_name="NavigationChannelSlot")
+        channel_layout = QHBoxLayout(self.channel_slot)
+        channel_layout.setContentsMargins(0, 0, 0, 0)
+        channel_layout.setSpacing(4)
+        for button in self.leading_buttons:
+            channel_layout.addWidget(button)
+        channel_layout.addSpacing(12)
+        channel_layout.addWidget(self.data_divider)
+        channel_layout.addSpacing(12)
+        for button in self.workflow_buttons:
+            channel_layout.addWidget(button)
+        channel_layout.addSpacing(12)
+        channel_layout.addWidget(self.export_divider)
+        channel_layout.addSpacing(12)
+        channel_layout.addWidget(self.export_button)
+
+        self.trailing_slot = _NavigationSideSlot()
+        trailing_layout = QHBoxLayout(self.trailing_slot)
+        trailing_layout.setContentsMargins(0, 0, 0, 0)
+        trailing_layout.setSpacing(12)
+        trailing_layout.addStretch(1)
+        trailing_layout.addWidget(self.settings_divider)
+        trailing_layout.addWidget(self.settings_button)
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 8, 16, 8)
-        layout.setSpacing(4)
-        layout.addStretch(1)
-        for button in self.leading_buttons:
-            layout.addWidget(button)
-        layout.addSpacing(12)
-        layout.addWidget(self.data_divider)
-        layout.addSpacing(12)
-        for button in self.workflow_buttons:
-            layout.addWidget(button)
-        layout.addSpacing(12)
-        layout.addWidget(self.export_divider)
-        layout.addSpacing(12)
-        layout.addWidget(self.export_button)
-        layout.addSpacing(12)
-        layout.addWidget(self.settings_divider)
-        layout.addSpacing(12)
-        layout.addWidget(self.settings_button)
-        layout.addStretch(1)
+        layout.setSpacing(0)
+        layout.addWidget(self.leading_slot, 1)
+        layout.addWidget(self.channel_slot, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.trailing_slot, 1)
 
         self.button_group.idClicked.connect(self.page_requested.emit)
         self.set_current_page(leading_items[0][1])
@@ -180,7 +200,34 @@ class PrimaryNavigationBar(QFrame):
         if button is not None:
             button.setChecked(True)
 
+    def set_page_enabled(
+        self,
+        page_id: int,
+        enabled: bool,
+        *,
+        disabled_tooltip: str = "",
+    ) -> None:
+        button = self.button_group.button(page_id)
+        if button is None:
+            return
+        button.setEnabled(enabled)
+        button.setToolTip("" if enabled else disabled_tooltip)
+
+    def set_work_songs(
+        self,
+        songs: Iterable[tuple[str, str]],
+        selected_id: str = "",
+    ) -> None:
+        self.work_song_selector.set_songs(songs, selected_id)
+
+    def select_work_song(self, song_id: str) -> None:
+        self.work_song_selector.select_song(song_id)
+
+    def apply_language(self) -> None:
+        self.work_song_selector.apply_language()
+
     def set_theme_mode(self, theme_mode: str) -> None:
+        self.work_song_selector.set_theme_mode(theme_mode)
         for button in self.buttons:
             button.set_theme_mode(theme_mode)
         self.settings_button.set_theme_mode(theme_mode)
@@ -196,6 +243,19 @@ def _navigation_divider() -> QFrame:
     divider.setObjectName("NavigationGroupDivider")
     divider.setFixedSize(1, 20)
     return divider
+
+
+class _NavigationSideSlot(TransparentContainer):
+    def __init__(self) -> None:
+        super().__init__(object_name="NavigationSideSlot")
+        self.setMinimumWidth(180)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(344, 50)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(180, 50)
 
 
 def _navigation_palette(

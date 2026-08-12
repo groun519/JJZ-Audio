@@ -13,6 +13,7 @@ class PlaybackQueue:
     volumes: tuple[float, ...]
     duration_ms: int = 0
     scope: str = ""
+    reload_on_refresh: bool = False
 
     def with_duration(self, duration_ms: int) -> PlaybackQueue:
         return PlaybackQueue(
@@ -23,6 +24,7 @@ class PlaybackQueue:
             volumes=self.volumes,
             duration_ms=max(0, duration_ms),
             scope=self.scope,
+            reload_on_refresh=self.reload_on_refresh,
         )
 
     def has_same_sources(self, other: PlaybackQueue | None) -> bool:

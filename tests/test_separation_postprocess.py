@@ -26,7 +26,8 @@ class SeparationPostprocessTests(unittest.TestCase):
             backing = np.column_stack((np.cos(time * 45), np.cos(time * 45))) * 0.3
             mixture = voice + backing
             sf.write(source, mixture, 44_100, subtype="FLOAT")
-            sf.write(vocals, voice - 0.01, 44_100, subtype="FLOAT")
+            estimated_voice = voice - 0.01
+            sf.write(vocals, estimated_voice, 44_100, subtype="FLOAT")
             sf.write(instrumental, backing - 0.01, 44_100, subtype="FLOAT")
 
             report = enforce_mixture_consistency(source, vocals, instrumental)
@@ -35,6 +36,7 @@ class SeparationPostprocessTests(unittest.TestCase):
 
             self.assertEqual(rate, 44_100)
             self.assertEqual(corrected_voice.shape, mixture.shape)
+            np.testing.assert_allclose(corrected_voice, estimated_voice, atol=1e-7)
             np.testing.assert_allclose(corrected_voice + corrected_backing, mixture, atol=1e-6)
             self.assertGreater(report.residual_rms_before, report.residual_rms_after)
             self.assertLess(report.residual_rms_after, 1e-6)

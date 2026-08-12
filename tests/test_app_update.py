@@ -318,11 +318,111 @@ class AppUpdateTests(unittest.TestCase):
 
         self.assertEqual(plan.rvc_profile, "rocm-win")
         self.assertEqual(plan.rvc_fallback_profile, "directml")
-        self.assertTrue(plan.runtime_required)
+        self.assertFalse(plan.runtime_required)
         self.assertEqual(
             [artifact.name for artifact in plan.artifacts],
-            ["runtime.zip", "rocm.zip", "directml.zip"],
+            ["rocm.zip", "directml.zip"],
         )
+
+    def test_split_runtime_downloads_shared_engine_and_one_cu118_profile(self) -> None:
+        artifact = lambda name: ReleaseArtifact(
+            name, 1, "a" * 64, f"https://example.test/{name}"
+        )
+        release = ReleaseManifest(
+            "0.3.0",
+            (
+                ReleaseComponent("application", "0.3.0", "installer", (artifact("app.exe"),)),
+                ReleaseComponent("ai-runtime", "3", "extract", (artifact("runtime.zip"),)),
+                ReleaseComponent(
+                    "rvc-runtime-cu118",
+                    "2",
+                    "extract",
+                    (artifact("cu118.zip"),),
+                ),
+            ),
+        )
+
+        plan = create_update_plan(
+            release,
+            current_version="0.3.0",
+            runtime_version=None,
+            runtime_ready=False,
+            desired_rvc_profile="cu118",
+        )
+
+        self.assertTrue(plan.runtime_required)
+        self.assertTrue(plan.rvc_profile_required)
+        self.assertEqual(
+            [artifact.name for artifact in plan.artifacts],
+            ["runtime.zip", "cu118.zip"],
+        )
+
+    def test_split_runtime_reuses_a_complete_legacy_cu118_profile(self) -> None:
+        artifact = lambda name: ReleaseArtifact(
+            name, 1, "a" * 64, f"https://example.test/{name}"
+        )
+        release = ReleaseManifest(
+            "0.3.0",
+            (
+                ReleaseComponent("application", "0.3.0", "installer", (artifact("app.exe"),)),
+                ReleaseComponent("ai-runtime", "3", "extract", (artifact("runtime.zip"),)),
+                ReleaseComponent(
+                    "rvc-runtime-cu118",
+                    "2",
+                    "extract",
+                    (artifact("cu118.zip"),),
+                ),
+            ),
+        )
+
+        plan = create_update_plan(
+            release,
+            current_version="0.3.0",
+            runtime_version="2",
+            runtime_ready=True,
+            desired_rvc_profile="cu118",
+            installed_rvc_profile="cu118",
+            installed_rvc_profile_version="2",
+            installed_rvc_preferred_profile="cu118",
+            installed_rvc_preferred_version="2",
+        )
+
+        self.assertTrue(plan.runtime_required)
+        self.assertFalse(plan.rvc_profile_required)
+        self.assertEqual([item.name for item in plan.artifacts], ["runtime.zip"])
+
+    def test_profile_update_does_not_redownload_shared_engine(self) -> None:
+        artifact = lambda name: ReleaseArtifact(
+            name, 1, "a" * 64, f"https://example.test/{name}"
+        )
+        release = ReleaseManifest(
+            "0.3.0",
+            (
+                ReleaseComponent("application", "0.3.0", "installer", (artifact("app.exe"),)),
+                ReleaseComponent("ai-runtime", "3", "extract", (artifact("runtime.zip"),)),
+                ReleaseComponent(
+                    "rvc-runtime-cu128",
+                    "2",
+                    "extract",
+                    (artifact("cu128.zip"),),
+                ),
+            ),
+        )
+
+        plan = create_update_plan(
+            release,
+            current_version="0.3.0",
+            runtime_version="3",
+            desired_rvc_profile="cu128",
+            installed_rvc_profile="cu128",
+            installed_rvc_profile_version="1",
+            installed_rvc_preferred_profile="cu128",
+            installed_rvc_preferred_version="1",
+        )
+
+        self.assertFalse(plan.runtime_required)
+        self.assertTrue(plan.rvc_profile_required)
+        self.assertEqual([item.name for item in plan.artifacts], ["cu128.zip"])
 
     def test_failed_rocm_version_is_quarantined_until_a_new_profile_version(self) -> None:
         release = _amd_release()

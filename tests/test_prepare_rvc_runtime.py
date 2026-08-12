@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.prepare_rvc_runtime import (
     DIRECTML_PROFILE_ASSET_FILES,
@@ -11,6 +12,7 @@ from scripts.prepare_rvc_runtime import (
     RUNTIME_DIRECTORIES,
     RUNTIME_FILES,
     TRAINING_ASSET_FILES,
+    _install_audio_worker_runtime,
     prepare_rvc_runtime,
 )
 
@@ -59,6 +61,29 @@ class PrepareRvcRuntimeTests(unittest.TestCase):
                     source / "runtime-copy",
                     install_demucs=False,
                 )
+
+    def test_installs_precision_separator_into_isolated_package_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "rvc"
+            runtime = destination / "runtime"
+            runtime.mkdir(parents=True)
+            (runtime / "python.exe").write_bytes(b"python")
+            completed = type("Completed", (), {"returncode": 0})()
+
+            with patch(
+                "scripts.prepare_rvc_runtime.subprocess.run",
+                return_value=completed,
+            ) as run:
+                _install_audio_worker_runtime(destination)
+
+            self.assertEqual(run.call_count, 2)
+            precision_command = run.call_args_list[1].args[0]
+            target = runtime / "jjzero-roformer-packages"
+            self.assertEqual(
+                precision_command[precision_command.index("--target") + 1],
+                str(target),
+            )
+            self.assertIn("requirements-roformer-runtime.txt", precision_command[-1])
 
     @staticmethod
     def _create_source(source: Path) -> None:

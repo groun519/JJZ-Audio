@@ -17,6 +17,7 @@ from jang_app.runtime_version import AI_RUNTIME_VERSION
 from jang_app.services.command import hidden_subprocess_kwargs
 from jang_app.services.rvc_runtime_profile import (
     RVC_BASE_RUNTIME_PROFILES,
+    RVC_PROFILE_CU118,
     RVC_PROFILE_CPU,
     normalize_rvc_profile,
     rvc_profile_candidates,
@@ -312,18 +313,22 @@ def create_update_plan(
     )
     profile_component = (
         release.rvc_runtime_profile(selected_profile)
-        if selected_profile and rvc_profile_requires_overlay(selected_profile)
+        if selected_profile
         else None
     )
-    base_fallback_recorded = bool(
+    legacy_base_selected = bool(
         selected_profile in RVC_BASE_RUNTIME_PROFILES
+        and profile_component is None
+    )
+    base_fallback_recorded = bool(
+        legacy_base_selected
         and installed_rvc_profile
         and normalize_rvc_profile(installed_rvc_profile) in RVC_BASE_RUNTIME_PROFILES
         and normalize_rvc_profile(installed_rvc_preferred_profile) == preferred_profile
         and installed_rvc_preferred_version == preferred_version
     )
     if (
-        selected_profile in RVC_BASE_RUNTIME_PROFILES
+        legacy_base_selected
         and installed_rvc_profile
         and normalize_rvc_profile(installed_rvc_profile) not in RVC_BASE_RUNTIME_PROFILES
         and runtime is not None
@@ -331,25 +336,31 @@ def create_update_plan(
         runtime_required = True
     base_fallback_required = bool(
         preferred_profile
-        and selected_profile in RVC_BASE_RUNTIME_PROFILES
+        and legacy_base_selected
         and selected_profile != preferred_profile
         and not base_fallback_recorded
     )
     profile_required = base_fallback_required or (
         profile_component is not None
         and (
-            runtime_required
-            or normalize_rvc_profile(installed_rvc_profile) != selected_profile
+            normalize_rvc_profile(installed_rvc_profile) != selected_profile
             or installed_rvc_profile_version != profile_component.version
             or normalize_rvc_profile(installed_rvc_preferred_profile or installed_rvc_profile)
             != preferred_profile
             or installed_rvc_preferred_version != preferred_version
         )
     )
-    if profile_component is not None and profile_required and runtime is not None:
-        runtime_required = True
     fallback_reason = ""
-    if selected_profile and preferred_profile and selected_profile != preferred_profile:
+    cpu_uses_cu118 = (
+        preferred_profile == RVC_PROFILE_CPU
+        and selected_profile == RVC_PROFILE_CU118
+    )
+    if (
+        selected_profile
+        and preferred_profile
+        and selected_profile != preferred_profile
+        and not cpu_uses_cu118
+    ):
         fallback_reason = (
             f"RVC {preferred_profile} activation previously failed for version {preferred_version}."
             if preferred_quarantined

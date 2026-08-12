@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+from PySide6.QtWidgets import QApplication, QWidget
+
+from jang_app.qt_app.studio_sound_pool import StudioSoundPool
+from jang_app.qt_app.sound_pool_item import SoundPoolItemCard
+from jang_app.qt_app.widgets import COMPACT_ICON_BUTTON_SIZE
+from jang_app.services.studio_assets import StudioSoundAsset
+from jang_app.services.studio_session import (
+    TRACK_CONVERTED_VOCAL,
+    TRACK_INSTRUMENTAL,
+    TRACK_ORIGINAL_VOCAL,
+    TRACK_VIDEO,
+    StudioAssetRef,
+)
+from jang_app.services.i18n import tr
+from jang_app.services.vocal_project import VocalConversionSettings, VocalTake
+
+
+class StudioSoundPoolTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_role_filter_and_search_keep_matching_assets(self) -> None:
+        pool = StudioSoundPool()
+        assets = _assets()
+        pool.set_assets(assets)
+
+        pool.role_buttons[TRACK_CONVERTED_VOCAL].click()
+        self.assertEqual(pool.visible_asset_ids(), (assets[2].asset_id,))
+
+        pool.role_buttons["all"].click()
+        pool.search_edit.setText("maximum")
+        self.assertEqual(pool.visible_asset_ids(), (assets[0].asset_id, assets[1].asset_id))
+        self.assertEqual(pool.count_label.text(), "2 / 3")
+
+    def test_card_selection_does_not_add_an_asset(self) -> None:
+        pool = StudioSoundPool()
+        asset = _assets()[0]
+        pool.set_assets((asset,))
+
+        self.assertFalse(hasattr(pool._cards[asset.asset_id], "add_button"))
+        self.assertIsInstance(pool._cards[asset.asset_id], SoundPoolItemCard)
+
+    def test_grid_adapts_to_width_and_list_mode_uses_one_column(self) -> None:
+        host = QWidget()
+        pool = StudioSoundPool(host)
+        pool.set_assets(_assets())
+        pool.resize(620, 500)
+        pool.show()
+        self.app.processEvents()
+
+        self.assertGreaterEqual(pool.column_count(), 2)
+        self.assertEqual(
+            pool.grid_button.size().toTuple(),
+            (COMPACT_ICON_BUTTON_SIZE, COMPACT_ICON_BUTTON_SIZE),
+        )
+        self.assertEqual(pool.list_button.size(), pool.grid_button.size())
+        pool.list_button.click()
+        self.assertEqual(pool.column_count(), 1)
+        host.close()
+
+    def test_cards_are_parented_and_create_no_popup_windows(self) -> None:
+        pool = StudioSoundPool()
+        pool.set_assets(_assets())
+        pool.set_assets(_assets()[:1])
+        self.app.processEvents()
+
+        self.assertTrue(all(card.parentWidget() is pool.content for card in pool._cards.values()))
+        child_windows = [child for child in pool.findChildren(QWidget) if child.isWindow()]
+        self.assertEqual(child_windows, [])
+
+    def test_cards_use_consistent_role_badge_and_card_sizes(self) -> None:
+        pool = StudioSoundPool()
+        assets = _assets()
+        pool.resize(300, 700)
+        pool.set_assets(assets)
+        pool.show()
+        self.app.processEvents()
+
+        cards = [pool._cards[asset.asset_id] for asset in assets]
+        self.assertEqual(len({card.height() for card in cards}), 1)
+        self.assertEqual(len({card.source_badge.width() for card in cards}), 1)
+        pool.close()
+
+    def test_converted_card_uses_model_pitch_and_result_context(self) -> None:
+        take = VocalTake(
+            "take-voice-a",
+            "voice-a / Pitch -12",
+            Path("rvc_0123456789.wav"),
+            "2026-08-11T02:41:51+00:00",
+            VocalConversionSettings(
+                "models/voice-a.pth",
+                "models/voice-a.index",
+                -12,
+                "cuda:0",
+                "cuda:0",
+                "rmvpe",
+            ),
+        )
+        asset = StudioSoundAsset(
+            StudioAssetRef("fast", TRACK_CONVERTED_VOCAL, "rvc_0123456789.wav"),
+            "Fast Separation / rvc_0123456789",
+            Path("rvc_0123456789.wav"),
+            151_000,
+            take,
+        )
+        pool = StudioSoundPool()
+        pool.set_assets((asset,))
+        card = pool._cards[asset.asset_id]
+
+        self.assertEqual(card.title_label.text(), f"voice-a / {tr('Pitch')} -12")
+        self.assertIn(tr("Fast Separation"), card.detail_label.text())
+        self.assertNotIn("rvc_0123456789", card.title_label.text())
+
+    def test_legacy_converted_filename_is_humanized(self) -> None:
+        asset = StudioSoundAsset(
+            StudioAssetRef(
+                "legacy",
+                TRACK_CONVERTED_VOCAL,
+                "vocals_rvc_jin_pitch_m12_jin_rmvpe.wav",
+            ),
+            "htdemucs / vocals_rvc_jin_pitch_m12_jin_rmvpe",
+            Path("vocals_rvc_jin_pitch_m12_jin_rmvpe.wav"),
+            151_000,
+        )
+        pool = StudioSoundPool()
+        pool.set_assets((asset,))
+
+        self.assertEqual(
+            pool._cards[asset.asset_id].title_label.text(),
+            f"jin / {tr('Pitch')} -12",
+        )
+
+    def test_video_asset_uses_video_preview_and_filter(self) -> None:
+        video = StudioSoundAsset(
+            StudioAssetRef("video-source", TRACK_VIDEO, "source.mp4"),
+            "Source Video",
+            Path("source.mp4"),
+            151_000,
+            media_kind="video",
+        )
+        pool = StudioSoundPool()
+        pool.set_assets((*_assets(), video))
+
+        pool.role_buttons[TRACK_VIDEO].click()
+
+        self.assertEqual(pool.visible_asset_ids(), (video.asset_id,))
+        self.assertIs(pool._cards[video.asset_id].preview_widget, pool._cards[video.asset_id].video_thumbnail)
+
+
+def _assets() -> tuple[StudioSoundAsset, ...]:
+    return (
+        StudioSoundAsset(
+            StudioAssetRef("maximum", TRACK_ORIGINAL_VOCAL),
+            "Maximum / Original Vocal",
+            Path("maximum-vocals.wav"),
+            151_000,
+        ),
+        StudioSoundAsset(
+            StudioAssetRef("maximum", TRACK_INSTRUMENTAL),
+            "Maximum / Instrumental",
+            Path("maximum-instrumental.wav"),
+            151_000,
+        ),
+        StudioSoundAsset(
+            StudioAssetRef("high-quality", TRACK_CONVERTED_VOCAL, "voice.wav"),
+            "High Quality / voice-rmvpe-p0",
+            Path("voice.wav"),
+            151_000,
+        ),
+    )
+
+
+if __name__ == "__main__":
+    unittest.main()

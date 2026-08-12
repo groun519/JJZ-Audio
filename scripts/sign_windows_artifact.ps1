@@ -9,22 +9,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$command = Get-Command signtool.exe -ErrorAction SilentlyContinue
-$candidates = @()
-if ($command) {
-    $candidates += $command.Source
-}
-$kitRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
-if (Test-Path -LiteralPath $kitRoot) {
-    $candidates += Get-ChildItem -LiteralPath $kitRoot -Filter signtool.exe -File -Recurse |
-        Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
-        Sort-Object FullName -Descending |
-        Select-Object -ExpandProperty FullName
-}
-$signTool = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-if (-not $signTool) {
-    throw "Windows SDK signtool.exe was not found."
-}
+. (Join-Path $PSScriptRoot "windows_sdk_tools.ps1")
+$signTool = Find-WindowsSdkTool "signtool.exe"
 
 $identityArguments = @()
 if ($CertificateThumbprint) {

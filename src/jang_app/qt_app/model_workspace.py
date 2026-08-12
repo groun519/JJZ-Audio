@@ -44,6 +44,7 @@ from jang_app.qt_app.model_training_panel import (
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
 from jang_app.qt_app.text_input_dialog import TextInputDialog
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton, attach_list_item_widget
+from jang_app.qt_app.workspace_splitter import create_workspace_splitter
 from jang_app.qt_app.workers import TaskWorker
 from jang_app.services.clip_edit_history import REVIEW_READY
 from jang_app.services.command import CommandCancellation
@@ -203,16 +204,23 @@ class ModelWorkspacePage(QWidget):
         view = QWidget()
         layout = QHBoxLayout(view)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
-        layout.addWidget(self._build_library_controls(), 0)
-        layout.addWidget(self._build_model_library(), 1)
+        layout.setSpacing(0)
+        controls = self._build_library_controls()
+        library = self._build_model_library()
+        self.model_library_splitter = create_workspace_splitter(
+            (controls, library),
+            object_name="ModelLibraryWorkspaceSplitter",
+            sizes=(300, 1300),
+            stretch_factors=(0, 1),
+            collapsible=(True, False),
+        )
+        layout.addWidget(self.model_library_splitter, 1)
         return view
 
     def _build_library_controls(self) -> QFrame:
         controls = QFrame()
         controls.setObjectName("Panel")
         controls.setMinimumWidth(270)
-        controls.setMaximumWidth(320)
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(20, 20, 20, 20)
         controls_layout.setSpacing(16)

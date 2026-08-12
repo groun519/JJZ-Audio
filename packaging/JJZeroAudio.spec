@@ -28,7 +28,6 @@ analysis = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "tkinterdnd2"],
     noarchive=False,
     optimize=1,
 )

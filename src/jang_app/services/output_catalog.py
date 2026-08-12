@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+_CONVERTED_VOCAL_PATTERNS = ("vocals_rvc*.wav", "rvc_*.wav")
+
+
 @dataclass(frozen=True)
 class OutputSoundSet:
     label: str
@@ -30,6 +33,17 @@ def load_output_sound_set(job_dir: Path, output_root: Path) -> OutputSoundSet | 
     return _load_output_sound_set(job_dir.expanduser().resolve(), output_root.expanduser().resolve())
 
 
+def converted_vocal_paths(job_dir: Path) -> tuple[Path, ...]:
+    root = job_dir.expanduser().resolve()
+    paths = {
+        path.resolve()
+        for pattern in _CONVERTED_VOCAL_PATTERNS
+        for path in root.glob(pattern)
+        if path.is_file()
+    }
+    return tuple(sorted(paths, key=lambda path: path.stat().st_mtime, reverse=True))
+
+
 def _candidate_job_dirs(root: Path) -> list[Path]:
     return [
         path
@@ -44,13 +58,7 @@ def _load_output_sound_set(job_dir: Path, output_root: Path) -> OutputSoundSet |
     if not vocals_path.is_file() or not instrumental_path.is_file():
         return None
 
-    converted_paths = tuple(
-        sorted(
-            job_dir.glob("vocals_rvc*.wav"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-    )
+    converted_paths = converted_vocal_paths(job_dir)
     return OutputSoundSet(
         label=_relative_label(job_dir, output_root),
         job_dir=job_dir,

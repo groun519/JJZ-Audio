@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from jang_app.config import DOWNLOAD_OUTPUT_DIR, SONG_LIBRARY_FILE, SUPPORTED_AUDIO_EXTENSIONS
+from jang_app.services.audio_export import AudioMixSource
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set
 from jang_app.services.song_asset_removal import SongAssetRemovalResult, SongAssetRemovalService
 from jang_app.services.song_assets import SongAssetDetails, build_song_asset_details
@@ -22,10 +23,13 @@ from jang_app.services.song_video_export import (
 )
 from jang_app.services.song_export import (
     SongAudioExport,
+    build_song_mix_sources,
     export_song_mix,
     list_song_audio_exports,
+    render_studio_preview,
     song_audio_export_dir,
 )
+from jang_app.services.studio_assets import StudioSoundAsset, studio_sound_pool
 from jang_app.services.studio_session import (
     StudioSession,
     load_studio_session as load_package_studio_session,
@@ -112,6 +116,7 @@ class SongLibrary:
         self._legacy_titles: dict[str, str] = {}
         self._legacy_hidden_outputs: set[Path] = set()
         self._legacy_paths: tuple[Path, ...] = ()
+        self._store.purge_legacy_removed_data()
         self._load_legacy_index()
         self._migrate_legacy_sources()
 
@@ -206,11 +211,31 @@ class SongLibrary:
     def remove_asset(self, item_id: str, path: Path) -> SongAssetRemovalResult:
         return self._asset_removal.remove(item_id, path)
 
+    def remove_assets(
+        self,
+        item_id: str,
+        paths: tuple[Path, ...],
+    ) -> tuple[SongAssetRemovalResult, ...]:
+        return self._asset_removal.remove_many(item_id, paths)
+
     def studio_session(self, item_id: str) -> StudioSession:
         return load_package_studio_session(self._store.require(item_id))
 
     def save_studio_session(self, item_id: str, session: StudioSession) -> Path:
         return save_package_studio_session(self._store.require(item_id), session)
+
+    def studio_assets(self, item_id: str) -> tuple[StudioSoundAsset, ...]:
+        return studio_sound_pool(self._store.require(item_id))
+
+    def studio_mix_sources(
+        self,
+        item_id: str,
+        session: StudioSession,
+    ) -> tuple[AudioMixSource, ...]:
+        return build_song_mix_sources(self._store.require(item_id), session)
+
+    def render_studio_preview(self, item_id: str, session: StudioSession) -> Path:
+        return render_studio_preview(self._store.require(item_id), session)
 
     def video_source(self, item_id: str) -> VideoSource:
         return self._video_sources.resolve(self._store.require(item_id))
@@ -348,7 +373,7 @@ class SongLibrary:
 
     def remove_item(self, item_id: str) -> bool:
         try:
-            self._store.set_removed(item_id, True)
+            self._store.remove_managed_data(item_id)
         except KeyError:
             return False
         return True

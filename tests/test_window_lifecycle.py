@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMenu, QVBoxLayout, QWidget
 
+from jang_app.qt_app.library_details_panel import LibraryDetailsPanel
 from jang_app.qt_app.share_progress_action import ShareProgressAction
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
 from jang_app.qt_app.window_lifecycle import (
     WindowLifecycleGuard,
     install_window_lifecycle_guard,
 )
-from jang_app.qt_app.widgets import TrackRow
+from jang_app.qt_app.widgets import DangerIconButton, TrackRow
+from jang_app.services.song_assets import SongAsset, SongAssetDetails
 
 
 class WindowLifecycleGuardTests(unittest.TestCase):
@@ -83,6 +86,7 @@ class WindowLifecycleGuardTests(unittest.TestCase):
         share_action = ShareProgressAction(parent=host)
         self.app.processEvents()
 
+        self.assertIsInstance(share_action.delete_button, DangerIconButton)
         self.assertEqual(guard.blocked_count, 0)
         layout.addWidget(result_panel)
         layout.addWidget(track_row)
@@ -90,8 +94,65 @@ class WindowLifecycleGuardTests(unittest.TestCase):
         host.show()
         self.app.processEvents()
 
-        self.assertTrue(result_panel.result_combo.isVisible())
+        self.assertFalse(result_panel.result_combo.isVisible())
+        self.assertTrue(result_panel.original_waveform.isVisible())
+        self.assertTrue(result_panel.instrumental_waveform.isVisible())
         self.assertTrue(track_row.path_combo.isVisible())
         self.assertTrue(share_action.isVisible())
+        self.assertEqual(guard.blocked_count, 0)
+        host.close()
+
+    def test_temporarily_top_level_children_are_restored_after_layout_parenting(self) -> None:
+        guard = install_window_lifecycle_guard(self.app)
+        host = QWidget()
+        host.setProperty("allowTopLevelWindow", True)
+        layout = QVBoxLayout(host)
+        host.show()
+
+        child = QLabel("Deferred child")
+        child.show()
+        layout.addWidget(child)
+        self.app.processEvents()
+
+        self.assertTrue(child.isVisible())
+        self.assertFalse(child.isWindow())
+        self.assertEqual(guard.blocked_count, 0)
+        host.close()
+
+    def test_library_asset_actions_are_not_blocked_as_top_level_windows(self) -> None:
+        guard = install_window_lifecycle_guard(self.app)
+        host = QWidget()
+        host.setProperty("allowTopLevelWindow", True)
+        layout = QVBoxLayout(host)
+        panel = LibraryDetailsPanel()
+        layout.addWidget(panel)
+        host.show()
+        panel.set_details(
+            SongAssetDetails(
+                song_id="song-1",
+                title="Song One",
+                source_type="local",
+                source_url="",
+                original_name="source.wav",
+                package_dir=Path("song-package"),
+                created_at="",
+                assets=(
+                    SongAsset(
+                        "vocal",
+                        "Original Vocal",
+                        Path("vocals.wav"),
+                        removal_scope="vocal_output",
+                    ),
+                ),
+            )
+        )
+        panel.stage_stack.set_current_index(1)
+        self.app.processEvents()
+
+        row = panel.vocal_page.asset_rows[0]
+        self.assertTrue(row.remove_slot.isVisible())
+        self.assertFalse(row.remove_button.isVisible())
+        row._set_remove_emphasis(True)
+        self.assertTrue(row.remove_button.isVisible())
         self.assertEqual(guard.blocked_count, 0)
         host.close()

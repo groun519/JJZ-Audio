@@ -8,12 +8,15 @@ def build_stylesheet(theme_mode: str) -> str:
     from jang_app.config import ASSETS_DIR
 
     icon_tone = "light" if theme_mode == "dark" else "dark"
+    check_tone = "dark" if theme_mode == "dark" else "light"
     chevron_down = (ASSETS_DIR / f"control_chevron_down_{icon_tone}.svg").as_posix()
     chevron_up = (ASSETS_DIR / f"control_chevron_up_{icon_tone}.svg").as_posix()
+    check_icon = (ASSETS_DIR / f"control_check_{check_tone}.svg").as_posix()
     return _stylesheet(
         **theme_tokens(theme_mode),
         chevron_down=chevron_down,
         chevron_up=chevron_up,
+        check_icon=check_icon,
     )
 
 
@@ -61,6 +64,9 @@ def theme_tokens(theme_mode: str) -> dict[str, str]:
             "danger_text": "#f0b4b4",
             "danger_background": "#3a2022",
             "danger_border": "#7a3a3f",
+            "pair_accent": "#f2c45c",
+            "pair_background": "#302817",
+            "pair_border": "#8c6d27",
         }
 
     return {
@@ -105,6 +111,9 @@ def theme_tokens(theme_mode: str) -> dict[str, str]:
         "danger_text": "#8a2930",
         "danger_background": "#f6e4e4",
         "danger_border": "#d7a2a5",
+        "pair_accent": "#8a6200",
+        "pair_background": "#fff1bf",
+        "pair_border": "#c38d13",
     }
 
 
@@ -151,8 +160,12 @@ def _stylesheet(
     danger_text: str,
     danger_background: str,
     danger_border: str,
+    pair_accent: str,
+    pair_background: str,
+    pair_border: str,
     chevron_down: str,
     chevron_up: str,
+    check_icon: str,
 ) -> str:
     return f"""
         QWidget {{
@@ -240,6 +253,39 @@ def _stylesheet(
             background: transparent;
         }}
 
+        QLabel#NavigationWorkSongPopupTitle {{
+            color: {text};
+            font-size: 14px;
+            font-weight: 900;
+        }}
+
+        QLabel#NavigationWorkSongPopupCount {{
+            min-width: 28px;
+            max-width: 28px;
+            min-height: 22px;
+            max-height: 22px;
+            color: {muted};
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 8px;
+            qproperty-alignment: AlignCenter;
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QLineEdit#NavigationWorkSongSearch {{
+            min-height: 34px;
+            max-height: 34px;
+            padding: 0 11px;
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QLineEdit#NavigationWorkSongSearch:focus {{
+            border-color: {button_border};
+        }}
+
         QFrame#NavigationGroupDivider {{
             background: {border};
             border: 0;
@@ -250,10 +296,38 @@ def _stylesheet(
             border: 0;
         }}
 
-        QFrame#WorkspaceTransportDock {{
+        QFrame#ResultTransportBar {{
             background: {surface};
             border: 1px solid {border};
-            border-radius: 16px;
+            border-radius: 12px;
+        }}
+
+        QLabel#VocalResultSongTitle {{
+            color: {muted};
+            font-size: 12px;
+            font-weight: 750;
+        }}
+
+        QFrame#StudioTransportBar {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QWidget#StudioTimelineArea {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLabel#StudioTransportToolLabel {{
+            color: {muted};
+            font-size: 11px;
+            font-weight: 800;
+        }}
+
+        QFrame#StudioTransportDivider {{
+            background: {border};
+            border: 0;
         }}
 
         QComboBox#WorkSongCombo {{
@@ -318,10 +392,127 @@ def _stylesheet(
             border-radius: 18px;
         }}
 
+        QFrame#StudioInspector {{
+            background: {surface};
+            border: 0;
+        }}
+
+        QStackedWidget#StudioInspectorStack,
+        QWidget#StudioInspectorEmptyPage,
+        QWidget#StudioInspectorSectionContent {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QFrame#StudioInspectorHeader {{
+            background: transparent;
+            border: 0;
+            min-height: 42px;
+        }}
+
+        QLabel#StudioInspectorKind {{
+            min-height: 22px;
+            max-height: 22px;
+            padding: 0 7px;
+            color: {muted};
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 7px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#StudioInspectorName {{
+            color: {text};
+            font-size: 13px;
+            font-weight: 850;
+        }}
+
+        QFrame#StudioInspectorSection {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QLabel#StudioInspectorSectionTitle {{
+            color: {text};
+            font-size: 12px;
+            font-weight: 850;
+        }}
+
+        QPushButton#StudioInspectorSectionToggle,
+        QPushButton#StudioInspectorResetButton {{
+            min-height: 26px;
+            max-height: 26px;
+            padding: 0 9px;
+            color: {muted};
+            background: transparent;
+            border: 1px solid {border};
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QPushButton#StudioInspectorSectionToggle:hover,
+        QPushButton#StudioInspectorResetButton:hover {{
+            color: {text};
+            background: {hover};
+            border-color: {focus};
+        }}
+
+        QLabel#StudioInspectorReadOnlyValue {{
+            min-height: 30px;
+            padding: 0 8px;
+            color: {text};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 8px;
+            font-weight: 750;
+        }}
+
+        QLabel#StudioInspectorSliderValue {{
+            color: {muted};
+            font-size: 11px;
+            font-weight: 800;
+        }}
+
+        QDoubleSpinBox#StudioInspectorGainSpin {{
+            min-height: 32px;
+            max-height: 32px;
+            padding-left: 8px;
+            padding-right: 26px;
+        }}
+
         QFrame#VideoPreviewPanel {{
             background: {surface};
             border: 1px solid {border};
             border-radius: 18px;
+        }}
+
+        QSplitter[workspaceSplitter="true"] {{
+            background: transparent;
+        }}
+
+        QSplitter[workspaceSplitter="true"]::handle:horizontal {{
+            width: 6px;
+            border: 0;
+            background: transparent;
+        }}
+
+        QSplitter[workspaceSplitter="true"]::handle:horizontal:hover {{
+            border: 0;
+            background: transparent;
+        }}
+
+        QSplitter[workspaceSplitter="true"]::handle:vertical {{
+            height: 6px;
+            border: 0;
+            background: transparent;
+        }}
+
+        QSplitter[workspaceSplitter="true"]::handle:vertical:hover {{
+            border: 0;
+            background: transparent;
         }}
 
         QWidget#VideoCanvas, QFrame#VideoCanvas {{
@@ -390,6 +581,235 @@ def _stylesheet(
             background: {card};
             border: 1px solid {border};
             border-radius: 18px;
+        }}
+
+        QFrame#StudioSoundPool {{
+            background: {card};
+            border: 1px solid {border};
+            border-radius: 18px;
+        }}
+
+        QScrollArea#StudioSoundPoolScroll,
+        QScrollArea#StudioSoundPoolScroll > QWidget > QWidget,
+        QWidget#StudioSoundPoolContent {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLineEdit#StudioSoundSearch {{
+            min-height: 32px;
+            max-height: 32px;
+            border-radius: 9px;
+            font-size: 10px;
+        }}
+
+        QFrame#StudioSoundRoleFilter {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 9px;
+        }}
+
+        QPushButton#StudioSoundRoleButton {{
+            min-width: 0;
+            min-height: 25px;
+            max-height: 25px;
+            padding: 0 6px;
+            color: {muted};
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 7px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QPushButton#StudioSoundRoleButton:hover,
+        QPushButton#StudioSoundRoleButton[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#StudioSoundRoleButton:checked {{
+            color: {tab_active_text};
+            background: {tab_active};
+            border-color: {tab_active_border};
+        }}
+
+        QLabel#StudioSoundCount {{
+            min-width: 20px;
+            padding: 2px 6px;
+            color: {muted};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 8px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#StudioSoundEmpty {{
+            min-height: 100px;
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QFrame#StudioSoundCard,
+        QFrame#VocalVersionCard {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 13px;
+        }}
+
+        QFrame#StudioSoundCard:hover,
+        QFrame#VocalVersionCard:hover {{
+            background: {hover};
+            border-color: {button_border};
+        }}
+
+        QFrame#StudioSoundCard[selected="true"] {{
+            background: {selection};
+            border-color: {focus};
+        }}
+
+        QFrame#VocalVersionCard[selected="true"] {{
+            background: {selection};
+            border-color: {focus};
+        }}
+
+        QFrame#VocalVersionCard[selected="true"][linkedSelection="true"] {{
+            background: {pair_background};
+            border-color: {pair_border};
+        }}
+
+        QFrame#VocalVersionCard[selected="true"][linkedSelection="true"] QWidget#StudioSoundCardTitle {{
+            color: {pair_accent};
+        }}
+
+        QFrame#VocalVersionCard[selected="true"][linkedSelection="true"] QFrame#StudioSoundRoleStrip {{
+            background: {pair_accent};
+        }}
+
+        QFrame#SeparationStemPoolPanel {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 18px;
+        }}
+
+        QFrame#VocalVersionPool,
+        QFrame#SoundPoolList {{
+            background: {card};
+            border: 1px solid {border};
+            border-radius: 13px;
+        }}
+
+        QLabel#SoundPoolListTitle {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
+        QLabel#SoundPoolListCount,
+        QLabel#SeparationPairStatus {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QLabel#SeparationPairStatus[paired="true"] {{
+            color: {pair_accent};
+        }}
+
+        QLabel#SoundPoolListEmpty {{
+            min-height: 60px;
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 9px;
+            font-weight: 700;
+        }}
+
+        QFrame#StudioSoundRoleStrip {{
+            background: {muted};
+            border: 0;
+            border-radius: 1px;
+        }}
+
+        QFrame#StudioSoundRoleStrip[role="original_vocal"] {{
+            background: #d6a85f;
+        }}
+
+        QFrame#StudioSoundRoleStrip[role="instrumental"] {{
+            background: #58a88f;
+        }}
+
+        QFrame#StudioSoundRoleStrip[role="converted_vocal"] {{
+            background: #d2675a;
+        }}
+
+        QFrame#StudioSoundRoleStrip[role="video"] {{
+            background: #668cc4;
+        }}
+
+        QLabel#StudioVideoThumbnail {{
+            color: #a9c8f2;
+            background: #151c26;
+            border: 1px solid #3d5575;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 900;
+            letter-spacing: 2px;
+        }}
+
+        QWidget#StudioSoundCardTitle {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 11px;
+            font-weight: 900;
+        }}
+
+        QLabel#StudioSoundCardDetail,
+        QLabel#StudioSoundDuration {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 9px;
+            font-weight: 700;
+        }}
+
+        QLabel#StudioSoundSourceBadge {{
+            padding: 2px 6px;
+            color: {text};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 7px;
+            font-size: 8px;
+            font-weight: 900;
+        }}
+
+        QLabel#StudioSoundSourceBadge[role="original_vocal"] {{
+            color: #d6a85f;
+            border-color: #80693f;
+        }}
+
+        QLabel#StudioSoundSourceBadge[role="instrumental"] {{
+            color: #65b99f;
+            border-color: #3f7565;
+        }}
+
+        QLabel#StudioSoundSourceBadge[role="converted_vocal"] {{
+            color: #df7770;
+            border-color: #864b47;
+        }}
+
+        QLabel#StudioSoundSourceBadge[role="video"] {{
+            color: #8bb5ec;
+            border-color: #4d6e98;
         }}
 
         QFrame#ModelWorkspaceHeader {{
@@ -870,9 +1290,19 @@ def _stylesheet(
             background: {hover};
         }}
 
-        QWidget#SongListRow[selected="true"] {{
-            background: {selection};
-            border: 1px solid {tab_active_border};
+        QWidget#SongListRow[workSong="true"] {{
+            background: {warning_background};
+            border: 1px solid {warning_border};
+        }}
+
+        QWidget#SongListRow[workSong="true"]:hover {{
+            background: {warning_background};
+            border-color: {warning_text};
+        }}
+
+        QWidget#SongListRow[workSongPulse="true"] {{
+            background: {warning_background};
+            border: 2px solid {warning_text};
         }}
 
         QFrame#LibraryPreviewDivider {{
@@ -883,60 +1313,6 @@ def _stylesheet(
         QWidget#LibraryPreviewTransport {{
             background: transparent;
             border: 0;
-        }}
-
-        QFrame#LibrarySourceFilter {{
-            background: {raised};
-            border: 1px solid {border};
-            border-radius: 12px;
-        }}
-
-        QPushButton#LibrarySourceFlag {{
-            min-height: 28px;
-            max-height: 28px;
-            padding: 0 9px;
-            color: {muted};
-            background: transparent;
-            border: 1px solid transparent;
-            border-radius: 9px;
-            font-size: 10px;
-            font-weight: 850;
-        }}
-
-        QPushButton#LibrarySourceFlag:hover,
-        QPushButton#LibrarySourceFlag[pointerState="hover"] {{
-            color: {text};
-            background: {hover};
-        }}
-
-        QPushButton#LibrarySourceFlag:pressed,
-        QPushButton#LibrarySourceFlag[pointerState="pressed"] {{
-            color: {text};
-            background: {pressed};
-        }}
-
-        QPushButton#LibrarySourceFlag:checked {{
-            color: {tab_active_text};
-            background: {tab_active};
-            border-color: {tab_active_border};
-        }}
-
-        QPushButton#LibrarySourceFlag[sourceType="local"]:checked {{
-            color: {source_local_text};
-            background: {source_local_background};
-            border-color: {source_local_border};
-        }}
-
-        QPushButton#LibrarySourceFlag[sourceType="youtube"]:checked {{
-            color: {source_youtube_text};
-            background: {source_youtube_background};
-            border-color: {source_youtube_border};
-        }}
-
-        QPushButton#LibrarySourceFlag[sourceType="output"]:checked {{
-            color: {source_output_text};
-            background: {source_output_background};
-            border-color: {source_output_border};
         }}
 
         QWidget#ModelListRow {{
@@ -1075,6 +1451,55 @@ def _stylesheet(
             border: 0;
         }}
 
+        QWidget#WorkSongRevealSlot {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QPushButton#WorkSongRevealButton {{
+            min-width: 34px;
+            max-width: 34px;
+            min-height: 34px;
+            max-height: 34px;
+            padding: 0;
+            color: {warning_text};
+            background: {warning_background};
+            border: 1px solid {warning_border};
+            border-radius: 10px;
+        }}
+
+        QPushButton#WorkSongRevealButton:hover,
+        QPushButton#WorkSongRevealButton[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+            border-color: {warning_text};
+        }}
+
+        QPushButton#WorkSongRevealButton:pressed,
+        QPushButton#WorkSongRevealButton[pointerState="pressed"] {{
+            color: {text};
+            background: {pressed};
+            border-color: {warning_text};
+        }}
+
+        QPushButton#WorkSongRevealButton:checked {{
+            color: {warning_text};
+            background: {warning_background};
+            border: 2px solid {warning_text};
+        }}
+
+        QPushButton#WorkSongRevealButton:checked:hover,
+        QPushButton#WorkSongRevealButton:checked[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#WorkSongRevealButton:checked:pressed,
+        QPushButton#WorkSongRevealButton:checked[pointerState="pressed"] {{
+            color: {text};
+            background: {pressed};
+        }}
+
         #LibraryRowTitle {{
             color: {text};
             font-size: 14px;
@@ -1118,6 +1543,52 @@ def _stylesheet(
 
         QFrame#LibraryAssetRow:hover {{
             background: {hover};
+        }}
+
+        QFrame#LibraryAssetRow[previewExpanded="true"] {{
+            background: {selection};
+            border: 1px solid {tab_active_border};
+        }}
+
+        QWidget#LibraryAssetPreviewTransport {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLabel#LibraryAssetSelectedCount {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QCheckBox#LibraryAssetCheckBox {{
+            background: transparent;
+            border: 0;
+            spacing: 0;
+        }}
+
+        QCheckBox#LibraryAssetCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            background: {surface};
+            border: 1px solid {button_border};
+            border-radius: 4px;
+        }}
+
+        QCheckBox#LibraryAssetCheckBox::indicator:hover {{
+            background: {hover};
+            border-color: {focus};
+        }}
+
+        QCheckBox#LibraryAssetCheckBox::indicator:checked {{
+            background: {accent};
+            border-color: {accent};
+            image: url("{check_icon}");
+        }}
+
+        QCheckBox#LibraryAssetCheckBox::indicator:disabled {{
+            background: {card};
+            border-color: {border};
         }}
 
         QLabel#LibraryAssetRole {{
@@ -1233,6 +1704,35 @@ def _stylesheet(
             background: {raised};
             border: 1px solid {border};
             border-radius: 14px;
+        }}
+
+        QFrame#ConversionVocalPool {{
+            background: {card};
+            border: 1px solid {border};
+            border-radius: 18px;
+        }}
+
+        QScrollArea#SoundPoolListScroll,
+        QScrollArea#SoundPoolListScroll > QWidget > QWidget,
+        QWidget#SoundPoolListContent {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QFrame#ConversionVocalCard {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 13px;
+        }}
+
+        QFrame#ConversionVocalCard:hover {{
+            background: {hover};
+            border-color: {button_border};
+        }}
+
+        QFrame#ConversionVocalCard[selected="true"] {{
+            background: {selection};
+            border-color: {focus};
         }}
 
         QLabel#VocalTakeMetadata {{
@@ -2844,6 +3344,12 @@ def _stylesheet(
             background: transparent;
         }}
 
+        QPushButton#DangerIconButton {{
+            padding: 0;
+            border: 0;
+            background: transparent;
+        }}
+
         QPushButton#TrackActionButton, QPushButton#TrackMuteButton {{
             min-width: 26px;
             max-width: 26px;
@@ -2864,7 +3370,7 @@ def _stylesheet(
             background: transparent;
         }}
 
-        QLineEdit, QComboBox, QSpinBox {{
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
             min-height: 34px;
             padding: 0 10px;
             background: {raised};
@@ -2893,11 +3399,12 @@ def _stylesheet(
             height: 6px;
         }}
 
-        QSpinBox {{
+        QSpinBox, QDoubleSpinBox {{
             padding-right: 28px;
         }}
 
-        QSpinBox::up-button, QSpinBox::down-button {{
+        QSpinBox::up-button, QSpinBox::down-button,
+        QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
             subcontrol-origin: border;
             width: 24px;
             border: 0;
@@ -2905,28 +3412,29 @@ def _stylesheet(
             background: transparent;
         }}
 
-        QSpinBox::up-button {{
+        QSpinBox::up-button, QDoubleSpinBox::up-button {{
             subcontrol-position: top right;
             border-top-right-radius: 8px;
         }}
 
-        QSpinBox::down-button {{
+        QSpinBox::down-button, QDoubleSpinBox::down-button {{
             subcontrol-position: bottom right;
             border-bottom-right-radius: 8px;
         }}
 
         QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+        QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover,
         QComboBox::drop-down:hover {{
             background: {hover};
         }}
 
-        QSpinBox::up-arrow {{
+        QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
             image: url("{chevron_up}");
             width: 8px;
             height: 5px;
         }}
 
-        QSpinBox::down-arrow {{
+        QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
             image: url("{chevron_down}");
             width: 8px;
             height: 5px;

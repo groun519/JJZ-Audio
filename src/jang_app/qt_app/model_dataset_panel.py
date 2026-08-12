@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from jang_app.config import SUPPORTED_AUDIO_EXTENSIONS
 from jang_app.qt_app.model_clip_editor import ModelClipEditor
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
-from jang_app.qt_app.widgets import SvgIconButton, attach_list_item_widget
+from jang_app.qt_app.widgets import DangerIconButton, SvgIconButton, attach_list_item_widget
 from jang_app.qt_app.workers import TaskCallable, TaskWorker
 from jang_app.services.audio_metadata import format_duration
 from jang_app.services.audio_denoise import render_denoise_preview
@@ -59,7 +59,8 @@ class ModelDatasetPanel(QWidget):
 
         self.add_button = _dataset_icon_button("file_plus", "Add source audio")
         self.add_button.clicked.connect(self._choose_files)
-        self.remove_button = _dataset_icon_button("trash", "Remove source audio")
+        self.remove_button = DangerIconButton(size=30)
+        set_translated_tooltip(self.remove_button, "Remove source audio")
         self.remove_button.clicked.connect(self._remove_sources)
         self.move_right_button = _dataset_icon_button(
             "arrow_right",

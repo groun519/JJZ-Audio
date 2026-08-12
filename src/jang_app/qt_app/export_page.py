@@ -11,6 +11,7 @@ from jang_app.qt_app.localization import apply_widget_language, set_translated_t
 from jang_app.qt_app.share_progress_action import ShareProgressAction
 from jang_app.qt_app.work_song_selector import WorkSongSelector
 from jang_app.qt_app.widgets import SvgIconButton, TaskActionWidget
+from jang_app.qt_app.workspace_splitter import create_workspace_splitter
 from jang_app.services.google_drive_share import drive_share_target_id
 from jang_app.services.song_export import SongAudioExport
 from jang_app.services.song_video_export import SongVideoExport
@@ -38,7 +39,6 @@ class ExportPage(QWidget):
         left_panel = QFrame()
         left_panel.setObjectName("Panel")
         left_panel.setMinimumWidth(380)
-        left_panel.setMaximumWidth(460)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(14)
@@ -98,9 +98,15 @@ class ExportPage(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
-        layout.addWidget(left_panel, 0)
-        layout.addWidget(results_panel, 1)
+        layout.setSpacing(0)
+        self.workspace_splitter = create_workspace_splitter(
+            (left_panel, results_panel),
+            object_name="ExportWorkspaceSplitter",
+            sizes=(420, 1180),
+            stretch_factors=(0, 1),
+            collapsible=(True, False),
+        )
+        layout.addWidget(self.workspace_splitter, 1)
         self.set_exports((), (), None)
 
     def set_exports(

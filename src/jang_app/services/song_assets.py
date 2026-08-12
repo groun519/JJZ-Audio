@@ -5,6 +5,7 @@ from pathlib import Path
 
 from jang_app.services.output_catalog import load_output_sound_set
 from jang_app.services.song_package import EXPORT_STAGE, SOURCE_STAGE, STUDIO_STAGE, VOCAL_STAGE, SongPackage
+from jang_app.services.studio_session import STUDIO_SESSION_NAME
 from jang_app.services.video_source import VideoSourceStore
 
 
@@ -18,6 +19,7 @@ REMOVAL_FILE = "file"
 REMOVAL_VIDEO = "video"
 REMOVAL_VOCAL_OUTPUT = "vocal_output"
 REMOVAL_VOCAL_TAKE = "vocal_take"
+REMOVAL_STUDIO_SESSION = "studio_session"
 
 _INTERNAL_STATE_FILES = {"session.json", "video.json", "vocal_project.json"}
 
@@ -75,6 +77,20 @@ def build_song_asset_details(package: SongPackage) -> SongAssetDetails:
         )
         known_paths.add(video_source.path.resolve())
 
+    studio_session = package.folder / STUDIO_STAGE / STUDIO_SESSION_NAME
+    if studio_session.is_file():
+        assets.append(
+            _asset(
+                package,
+                STAGE_STUDIO,
+                "Studio Session",
+                studio_session,
+                is_active=True,
+                removal_scope=REMOVAL_STUDIO_SESSION,
+            )
+        )
+        known_paths.add(studio_session.resolve())
+
     for output in package.outputs:
         sound_set = load_output_sound_set(output.job_dir, package.folder / VOCAL_STAGE)
         if sound_set is None:
@@ -100,6 +116,7 @@ def build_song_asset_details(package: SongPackage) -> SongAssetDetails:
         if active_converted not in sound_set.converted_vocal_paths:
             active_converted = sound_set.converted_vocal_paths[0] if sound_set.converted_vocal_paths else None
         for path in sound_set.converted_vocal_paths:
+            converted_is_managed = _is_within(path.expanduser().resolve(), package.folder)
             assets.append(
                 _asset(
                     package,
@@ -110,8 +127,8 @@ def build_song_asset_details(package: SongPackage) -> SongAssetDetails:
                     is_active=output_active and path == active_converted,
                     removal_scope=(
                         REMOVAL_VOCAL_TAKE
-                        if _is_within(path.expanduser().resolve(), package.folder)
-                        else ""
+                        if converted_is_managed
+                        else REMOVAL_VOCAL_OUTPUT
                     ),
                 )
             )

@@ -6,7 +6,7 @@ import wave
 from pathlib import Path
 
 from jang_app.services.song_asset_removal import SongAssetRemovalError
-from jang_app.services.song_assets import STAGE_EXPORT, STAGE_SOURCE, STAGE_VOCAL
+from jang_app.services.song_assets import STAGE_EXPORT, STAGE_SOURCE, STAGE_STUDIO, STAGE_VOCAL
 from jang_app.services.song_library import SongLibrary
 from jang_app.services.song_package import SongPackageStore
 from jang_app.services.video_source import VideoSourceStore
@@ -29,6 +29,29 @@ class SongAssetRemovalTests(unittest.TestCase):
             self.assertEqual(result.removed_output_dir, job_dir.resolve())
             self.assertFalse(result.detached_only)
 
+    def test_bulk_removal_deduplicates_assets_from_the_same_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            library, store, song = _library_with_song(Path(temporary))
+            package = store.require(song.id)
+            job_dir = package.folder / "02_vocal" / "separations" / "run-1" / "htdemucs" / "source"
+            _write_output(job_dir)
+            converted = _write_wave(job_dir / "vocals_rvc_voice.wav")
+            extra = job_dir / "notes.txt"
+            extra.write_text("metadata", encoding="utf-8")
+            library.register_output(song.id, job_dir, "Run 1")
+            assets = library.asset_details(song.id).assets_for(STAGE_VOCAL)
+
+            results = library.remove_assets(
+                song.id,
+                tuple(asset.path for asset in assets),
+            )
+
+            self.assertEqual(len(results), 1)
+            self.assertFalse(job_dir.exists())
+            self.assertFalse(converted.exists())
+            self.assertFalse(extra.exists())
+            self.assertEqual(store.require(song.id).outputs, ())
+
     def test_detaches_linked_separation_without_deleting_external_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -41,6 +64,27 @@ class SongAssetRemovalTests(unittest.TestCase):
             result = library.remove_asset(song.id, vocal.path)
 
             self.assertTrue(external.is_dir())
+            self.assertTrue((external / "vocals.wav").is_file())
+            self.assertEqual(store.require(song.id).outputs, ())
+            self.assertTrue(result.detached_only)
+
+    def test_linked_converted_vocal_can_detach_its_result_without_deleting_external_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library, store, song = _library_with_song(root)
+            external = root / "external-output"
+            _write_output(external)
+            converted = _write_wave(external / "vocals_rvc_voice.wav")
+            library.register_output(song.id, external, "Legacy")
+
+            converted_asset = next(
+                asset
+                for asset in library.asset_details(song.id).assets_for(STAGE_VOCAL)
+                if asset.path == converted
+            )
+            result = library.remove_asset(song.id, converted_asset.path)
+
+            self.assertTrue(converted.is_file())
             self.assertTrue((external / "vocals.wav").is_file())
             self.assertEqual(store.require(song.id).outputs, ())
             self.assertTrue(result.detached_only)
@@ -109,6 +153,19 @@ class SongAssetRemovalTests(unittest.TestCase):
             self.assertFalse(video.path.exists())
             self.assertFalse(exported.exists())
             self.assertFalse(VideoSourceStore().load(package).is_configured)
+            self.assertTrue(package.source_path.is_file())
+
+    def test_removes_studio_session_without_touching_song_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            library, store, song = _library_with_song(Path(temporary))
+            package = store.require(song.id)
+            session_path = package.folder / "03_studio" / "session.json"
+            session_path.write_text("{}", encoding="utf-8")
+            studio_asset = library.asset_details(song.id).assets_for(STAGE_STUDIO)[0]
+
+            library.remove_asset(song.id, studio_asset.path)
+
+            self.assertFalse(session_path.exists())
             self.assertTrue(package.source_path.is_file())
 
 

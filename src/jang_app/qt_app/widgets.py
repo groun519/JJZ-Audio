@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QWheelEvent
+from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QValidator, QWheelEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,6 +32,9 @@ from PySide6.QtWidgets import (
 
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
 from jang_app.services.waveform import build_waveform_peaks
+
+
+COMPACT_ICON_BUTTON_SIZE = 26
 
 
 class TransparentContainer(QWidget):
@@ -228,6 +233,65 @@ class ScrollSafeSlider(_ScrollSafeControl, QSlider):
 
 class ScrollSafeSpinBox(_ScrollSafeControl, QSpinBox):
     pass
+
+
+class ScrollSafeDoubleSpinBox(_ScrollSafeControl, QDoubleSpinBox):
+    pass
+
+
+class TimecodeSpinBox(ScrollSafeSpinBox):
+    """Millisecond value editor presented as MM:SS.mmm or HH:MM:SS.mmm."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setRange(0, 86_400_000)
+        self.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+    def textFromValue(self, value: int) -> str:  # noqa: N802
+        total_ms = max(0, int(value))
+        milliseconds = total_ms % 1_000
+        total_seconds = total_ms // 1_000
+        seconds = total_seconds % 60
+        total_minutes = total_seconds // 60
+        minutes = total_minutes % 60
+        hours = total_minutes // 60
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+        return f"{total_minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+
+    def valueFromText(self, text: str) -> int:  # noqa: N802
+        normalized = text.strip().replace(",", ".")
+        if not normalized:
+            return 0
+        try:
+            parts = normalized.split(":")
+            if len(parts) == 1:
+                return max(0, round(float(parts[0]) * 1_000))
+            if len(parts) == 2:
+                minutes, seconds = parts
+                return max(0, round((int(minutes) * 60 + float(seconds)) * 1_000))
+            if len(parts) == 3:
+                hours, minutes, seconds = parts
+                return max(
+                    0,
+                    round((int(hours) * 3_600 + int(minutes) * 60 + float(seconds)) * 1_000),
+                )
+        except ValueError:
+            return self.value()
+        return self.value()
+
+    def validate(self, text: str, position: int):  # noqa: N802
+        normalized = text.strip().replace(",", ".")
+        complete = (
+            re.fullmatch(r"\d+(?:\.\d{0,3})?", normalized)
+            or re.fullmatch(r"\d+:[0-5]\d(?:\.\d{0,3})?", normalized)
+            or re.fullmatch(r"\d+:[0-5]\d:[0-5]\d(?:\.\d{0,3})?", normalized)
+        )
+        if complete and self.minimum() <= self.valueFromText(normalized) <= self.maximum():
+            return QValidator.State.Acceptable, text, position
+        if not normalized or re.fullmatch(r"[\d:.,]*", normalized):
+            return QValidator.State.Intermediate, text, position
+        return QValidator.State.Invalid, text, position
 
 
 class FeedbackButton(QPushButton):
@@ -504,7 +568,7 @@ def _window_control_button(icon_name: str, tooltip: str) -> QPushButton:
     button = SvgIconButton(icon_name, size=26)
     button.setObjectName("WindowControlButton")
     set_translated_tooltip(button, tooltip)
-    button.setFixedSize(30, 30)
+    button.lock_outer_size(30)
     return button
 
 
@@ -555,6 +619,17 @@ class FileDropCard(QFrame):
 
     def set_selected_text(self, text: str) -> None:
         self._set_selected_text(text)
+
+    def set_compact_mode(self, compact: bool) -> None:
+        layout = self.layout()
+        if compact:
+            self.file_button.lock_outer_size(36)
+            layout.setContentsMargins(12, 6, 12, 6)
+            layout.setSpacing(3)
+            return
+        self.file_button.lock_outer_size(58)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(9)
 
     def _set_selected_text(self, text: str) -> None:
         value = text.strip()
@@ -837,7 +912,19 @@ class SvgIconButton(FeedbackButton):
         self.setText("")
         self.setObjectName("SvgIconButton")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(size, size)
+        # QSS applies the global 34 px button minimum after construction.
+        # Lock icon controls inline so their requested square geometry wins.
+        self.lock_outer_size(size)
+
+    def lock_outer_size(self, width: int, height: int | None = None) -> None:
+        locked_height = width if height is None else height
+        self.setFixedSize(width, locked_height)
+        self.setStyleSheet(
+            "QPushButton { "
+            f"min-width: {width}px; max-width: {width}px; "
+            f"min-height: {locked_height}px; max-height: {locked_height}px; "
+            "padding: 0; border: 0; margin: 0; }"
+        )
 
     def set_icon_name(self, icon_name: str) -> None:
         self._icon_name = icon_name
@@ -875,11 +962,18 @@ class SvgIconButton(FeedbackButton):
         self._draw_keyboard_focus(painter, rect, 9)
 
     def _button_palette(self) -> dict[str, QColor]:
+        is_hovered = self._is_pointer_hovered()
+        if self.objectName() == "DangerIconButton":
+            is_hovered = (
+                is_hovered
+                or self.property("contextHover") is True
+                or self.property("persistentDanger") is True
+            )
         return _track_button_palette(
             self._theme_mode,
             self.isChecked(),
             self.isEnabled(),
-            self._is_pointer_hovered(),
+            is_hovered,
             self._is_pointer_pressed() or self.isDown(),
             self.objectName(),
         )
@@ -892,6 +986,19 @@ class SvgIconButton(FeedbackButton):
         if self._icon_name == "download":
             return "download"
         return self._icon_name
+
+
+class DangerIconButton(SvgIconButton):
+    def __init__(
+        self,
+        size: int = 30,
+        *,
+        paint_inset: int = 1,
+    ) -> None:
+        super().__init__("trash", size=size, paint_inset=paint_inset)
+        self.setObjectName("DangerIconButton")
+        self.setProperty("persistentDanger", True)
+        self.lock_outer_size(size)
 
 
 class ThemeToggleButton(FeedbackButton):
@@ -952,9 +1059,9 @@ class TrackMixControl(QFrame):
         self.setFixedHeight(34)
         self._is_loading = False
 
-        mixer_label = QLabel("LEVEL")
-        mixer_label.setObjectName("TrackMixerLabel")
-        mixer_label.setFixedWidth(42)
+        self.mixer_label = QLabel("LEVEL")
+        self.mixer_label.setObjectName("TrackMixerLabel")
+        self.mixer_label.setFixedWidth(42)
 
         self.mute_button = SvgIconButton("speaker", size=26)
         self.mute_button.setObjectName("TrackMuteButton")
@@ -963,6 +1070,12 @@ class TrackMixControl(QFrame):
         self.mute_button.clicked.connect(self._on_mute_changed)
 
         self.volume_slider = VolumeSlider()
+        self.volume_slider.setMinimumWidth(72)
+        self.volume_slider.setMaximumWidth(180)
+        self.volume_slider.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         self.volume_slider.setRange(0, 200)
         self.volume_slider.setValue(100)
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
@@ -975,10 +1088,14 @@ class TrackMixControl(QFrame):
         layout.setContentsMargins(10, 4, 10, 4)
         layout.setSpacing(8)
         layout.addStretch(1)
-        layout.addWidget(mixer_label, 0)
+        layout.addWidget(self.mixer_label, 0)
         layout.addWidget(self.mute_button, 0)
-        layout.addWidget(self.volume_slider, 0)
+        layout.addWidget(self.volume_slider, 1)
         layout.addWidget(self.volume_label, 0)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        self.mixer_label.setVisible(event.size().width() >= 300)
+        super().resizeEvent(event)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self.mute_button.set_theme_mode(theme_mode)
@@ -1334,6 +1451,14 @@ def _track_button_palette(
         return _shared_icon_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
     if object_name == "DangerIconButton":
         return _danger_icon_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
+    if object_name in {"SeparationPairButton", "WorkSongRevealButton"}:
+        return _separation_pair_button_palette(
+            theme_mode,
+            is_checked,
+            is_enabled,
+            is_hovered,
+            is_pressed,
+        )
 
     if object_name in {"DatasetTransportButton", "DatasetFlatIconButton"}:
         return _transport_group_button_palette(
@@ -1382,6 +1507,67 @@ def _track_button_palette(
     if is_hovered:
         return {"background": colors["hover"], "border": colors["hover_border"], "icon": colors["icon"]}
     return {"background": colors["background"], "border": colors["border"], "icon": colors["icon"]}
+
+
+def _separation_pair_button_palette(
+    theme_mode: str,
+    is_checked: bool,
+    is_enabled: bool,
+    is_hovered: bool,
+    is_pressed: bool,
+) -> dict[str, QColor]:
+    transparent = QColor(0, 0, 0, 0)
+    if theme_mode == "dark":
+        colors = {
+            "idle": transparent,
+            "idle_border": QColor("#484843"),
+            "idle_icon": QColor("#aaa8a1"),
+            "idle_hover": QColor("#30302e"),
+            "active": QColor("#342b18"),
+            "active_hover": QColor("#40351d"),
+            "active_pressed": QColor("#4a3d21"),
+            "active_border": QColor("#8c6d27"),
+            "active_icon": QColor("#f2c45c"),
+            "disabled": QColor("#6c6b66"),
+        }
+    else:
+        colors = {
+            "idle": transparent,
+            "idle_border": QColor("#d8d0c2"),
+            "idle_icon": QColor("#6e6a61"),
+            "idle_hover": QColor("#e7e1d5"),
+            "active": QColor("#fff1bf"),
+            "active_hover": QColor("#f9e6a3"),
+            "active_pressed": QColor("#efd27b"),
+            "active_border": QColor("#c38d13"),
+            "active_icon": QColor("#8a6200"),
+            "disabled": QColor("#aaa397"),
+        }
+
+    if not is_enabled:
+        return {
+            "background": colors["idle"],
+            "border": colors["idle_border"],
+            "icon": colors["disabled"],
+        }
+    if is_checked:
+        background = (
+            colors["active_pressed"]
+            if is_pressed
+            else colors["active_hover"]
+            if is_hovered
+            else colors["active"]
+        )
+        return {
+            "background": background,
+            "border": colors["active_border"],
+            "icon": colors["active_icon"],
+        }
+    return {
+        "background": colors["idle_hover"] if is_hovered or is_pressed else colors["idle"],
+        "border": colors["idle_border"],
+        "icon": colors["idle_icon"],
+    }
 
 
 def _transport_group_button_palette(
@@ -1493,8 +1679,10 @@ def _danger_icon_button_palette(
             "hover": QColor("#3a2022"),
             "pressed": QColor("#52272a"),
             "border": QColor("#7a3a3f"),
-            "icon": QColor("#d9d8d3"),
+            "icon": QColor("#c77b7b"),
             "active_icon": QColor("#f0b4b4"),
+            "disabled_background": QColor("#212120"),
+            "disabled_border": QColor("#484843"),
             "disabled": QColor("#6c6b66"),
         }
     else:
@@ -1503,14 +1691,16 @@ def _danger_icon_button_palette(
             "hover": QColor("#f6e4e4"),
             "pressed": QColor("#eccfd0"),
             "border": QColor("#d7a2a5"),
-            "icon": QColor("#4e4b45"),
+            "icon": QColor("#8a2930"),
             "active_icon": QColor("#8a2930"),
+            "disabled_background": QColor("#ebe7dd"),
+            "disabled_border": QColor("#d8d0c2"),
             "disabled": QColor("#aaa397"),
         }
     if not is_enabled:
         return {
-            "background": colors["background"],
-            "border": colors["background"],
+            "background": colors["disabled_background"],
+            "border": colors["disabled_border"],
             "icon": colors["disabled"],
         }
     if is_pressed:
@@ -1530,6 +1720,21 @@ def _danger_icon_button_palette(
         "border": colors["background"],
         "icon": colors["icon"],
     }
+
+
+def danger_icon_button_palette(
+    theme_mode: str,
+    *,
+    is_enabled: bool = True,
+    is_hovered: bool = True,
+    is_pressed: bool = False,
+) -> dict[str, QColor]:
+    return _danger_icon_button_palette(
+        theme_mode,
+        is_enabled,
+        is_hovered,
+        is_pressed,
+    )
 
 
 def _window_control_palette(
@@ -1856,6 +2061,26 @@ _TRACK_ICON_SVGS = {
         '<path d="M9 14h6"/>'
         "</svg>"
     ),
+    "grid": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<rect x="4" y="4" width="6" height="6" rx="1"/>'
+        '<rect x="14" y="4" width="6" height="6" rx="1"/>'
+        '<rect x="4" y="14" width="6" height="6" rx="1"/>'
+        '<rect x="14" y="14" width="6" height="6" rx="1"/>'
+        "</svg>"
+    ),
+    "list": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M9 6h11M9 12h11M9 18h11"/>'
+        '<circle cx="5" cy="6" r="1" fill="{color}" stroke="none"/>'
+        '<circle cx="5" cy="12" r="1" fill="{color}" stroke="none"/>'
+        '<circle cx="5" cy="18" r="1" fill="{color}" stroke="none"/>'
+        "</svg>"
+    ),
     "edit": (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
         'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" '
@@ -1933,6 +2158,15 @@ _TRACK_ICON_SVGS = {
         'stroke-linecap="round" stroke-linejoin="round">'
         '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/>'
         '<path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/>'
+        "</svg>"
+    ),
+    "magnet": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M6 3v8a6 6 0 0 0 12 0V3"/>'
+        '<path d="M6 7h4V3H6z"/>'
+        '<path d="M14 7h4V3h-4z"/>'
         "</svg>"
     ),
     "cloud_check": (
@@ -2022,6 +2256,22 @@ _TRACK_ICON_SVGS = {
         '<ellipse cx="12" cy="5" rx="8" ry="3"/>'
         '<path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/>'
         '<path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>'
+        "</svg>"
+    ),
+    "pin": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.1" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="m14 4 6 6-3 1-4 4-1 4-7-7 4-1 4-4z"/>'
+        '<path d="m9 15-5 5"/>'
+        "</svg>"
+    ),
+    "pin_filled": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="m14 4 6 6-3 1-4 4-1 4-7-7 4-1 4-4z" fill="{color}"/>'
+        '<path d="m9 15-5 5"/>'
         "</svg>"
     ),
     "model": (

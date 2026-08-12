@@ -5,13 +5,16 @@ import hashlib
 import json
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 DEFAULT_PART_LIMIT = 1700 * 1024 * 1024
 GITHUB_ASSET_LIMIT = 2 * 1024 * 1024 * 1024
 INDEX_NAME = "runtime-packages.json"
 DEFAULT_EXCLUDED_TOP_LEVEL = {"rvc_profiles"}
+DEFAULT_EXCLUDED_PREFIXES = {"rvc/runtime"}
+DEFAULT_EXCLUDED_DIRECTORY_NAMES = {"__pycache__"}
+DEFAULT_EXCLUDED_SUFFIXES = {".map"}
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,10 @@ def build_runtime_packages(
         index_name=INDEX_NAME,
         part_limit=part_limit,
         excluded_top_level=DEFAULT_EXCLUDED_TOP_LEVEL,
+        excluded_prefixes=DEFAULT_EXCLUDED_PREFIXES,
+        excluded_directory_names=DEFAULT_EXCLUDED_DIRECTORY_NAMES,
+        excluded_suffixes=DEFAULT_EXCLUDED_SUFFIXES,
+        metadata={"requires_rvc_profile": True},
     )
 
 
@@ -50,6 +57,10 @@ def build_component_packages(
     index_name: str,
     part_limit: int = DEFAULT_PART_LIMIT,
     excluded_top_level: set[str] | None = None,
+    excluded_prefixes: set[str] | None = None,
+    excluded_directory_names: set[str] | None = None,
+    excluded_suffixes: set[str] | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> Path:
     source = source_root.expanduser().resolve()
     destination = release_dir.expanduser().resolve()
@@ -57,6 +68,12 @@ def build_component_packages(
         raise FileNotFoundError(f"Runtime directory was not found: {source}")
     if part_limit <= 0 or part_limit >= GITHUB_ASSET_LIMIT:
         raise ValueError("Runtime package part limit must be between 1 and 2 GiB.")
+    prefixes = tuple(
+        PurePosixPath(value.replace("\\", "/"))
+        for value in (excluded_prefixes or set())
+    )
+    directory_names = {value.casefold() for value in (excluded_directory_names or set())}
+    suffixes = {value.casefold() for value in (excluded_suffixes or set())}
     files = sorted(
         (
             path
@@ -64,6 +81,9 @@ def build_component_packages(
             if path.is_file()
             and path.relative_to(source).parts[0]
             not in (excluded_top_level or set())
+            and not _matches_prefix(path.relative_to(source), prefixes)
+            and not _contains_directory(path.relative_to(source), directory_names)
+            and path.suffix.casefold() not in suffixes
         ),
         key=lambda path: path.relative_to(source).as_posix(),
     )
@@ -95,6 +115,7 @@ def build_component_packages(
             for item in packages
         ],
     }
+    data.update(metadata or {})
     index_path = destination / index_name
     index_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return index_path
@@ -163,6 +184,9 @@ def main() -> int:
     parser.add_argument("--package-prefix", default="")
     parser.add_argument("--index-name", default=INDEX_NAME)
     parser.add_argument("--exclude-top-level", action="append", default=[])
+    parser.add_argument("--exclude-prefix", action="append", default=[])
+    parser.add_argument("--exclude-directory", action="append", default=[])
+    parser.add_argument("--exclude-suffix", action="append", default=[])
     arguments = parser.parse_args()
     if arguments.component == "ai-runtime" and not arguments.package_prefix:
         index = build_runtime_packages(
@@ -182,9 +206,21 @@ def main() -> int:
             index_name=arguments.index_name,
             part_limit=arguments.part_limit,
             excluded_top_level=set(arguments.exclude_top_level),
+            excluded_prefixes=set(arguments.exclude_prefix),
+            excluded_directory_names=set(arguments.exclude_directory),
+            excluded_suffixes=set(arguments.exclude_suffix),
         )
     print(f"Created runtime package index: {index}")
     return 0
+
+
+def _matches_prefix(path: Path, prefixes: tuple[PurePosixPath, ...]) -> bool:
+    relative = PurePosixPath(path.as_posix())
+    return any(relative == prefix or prefix in relative.parents for prefix in prefixes)
+
+
+def _contains_directory(path: Path, names: set[str]) -> bool:
+    return any(part.casefold() in names for part in path.parts[:-1])
 
 
 if __name__ == "__main__":

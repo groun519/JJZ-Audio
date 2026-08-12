@@ -26,7 +26,13 @@ RUNTIME_FILES = (
 DIRECTML_PROFILE_ASSET_FILES = ("rmvpe.onnx",)
 TRAINING_ASSET_FILES = RVC_TRAINING_ASSET_FILES
 MANIFEST_FILE = "jjzero_runtime.json"
-DEMUCS_REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements-rvc-runtime.txt"
+SHARED_AUDIO_REQUIREMENTS = (
+    Path(__file__).resolve().parents[1] / "requirements-rvc-runtime.txt"
+)
+ROFORMER_REQUIREMENTS = (
+    Path(__file__).resolve().parents[1] / "requirements-roformer-runtime.txt"
+)
+ROFORMER_PACKAGE_DIRNAME = "jjzero-roformer-packages"
 
 
 def main() -> int:
@@ -89,7 +95,7 @@ def prepare_rvc_runtime(
     for model_directory in ("weights", "logs"):
         (resolved_destination / model_directory).mkdir(exist_ok=True)
     if install_demucs:
-        _install_demucs_runtime(resolved_destination)
+        _install_audio_worker_runtime(resolved_destination)
     _write_manifest(resolved_destination, resolved_source.name)
     return resolved_destination
 
@@ -123,7 +129,8 @@ def _write_manifest(destination: Path, source_name: str) -> None:
         "layout_version": 2,
         "source_name": source_name,
         "purpose": "JJZero Audio shared AI runtime",
-        "demucs_requirements": DEMUCS_REQUIREMENTS.name,
+        "audio_worker_requirements": SHARED_AUDIO_REQUIREMENTS.name,
+        "precision_separation_requirements": ROFORMER_REQUIREMENTS.name,
         "model_storage": ["weights", "logs"],
         "training_profile": {
             "version": "v2",
@@ -137,7 +144,7 @@ def _write_manifest(destination: Path, source_name: str) -> None:
     )
 
 
-def _install_demucs_runtime(destination: Path) -> None:
+def _install_audio_worker_runtime(destination: Path) -> None:
     runtime_python = destination / "runtime" / "python.exe"
     completed = subprocess.run(
         [
@@ -148,13 +155,35 @@ def _install_demucs_runtime(destination: Path) -> None:
             "--disable-pip-version-check",
             "--no-deps",
             "-r",
-            str(DEMUCS_REQUIREMENTS),
+            str(SHARED_AUDIO_REQUIREMENTS),
         ],
         check=False,
     )
     if completed.returncode != 0:
         raise RuntimeError(
-            f"Demucs runtime preparation failed with exit code {completed.returncode}."
+            f"Audio worker runtime preparation failed with exit code {completed.returncode}."
+        )
+    roformer_packages = destination / "runtime" / ROFORMER_PACKAGE_DIRNAME
+    shutil.rmtree(roformer_packages, ignore_errors=True)
+    completed = subprocess.run(
+        [
+            str(runtime_python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-deps",
+            "--target",
+            str(roformer_packages),
+            "-r",
+            str(ROFORMER_REQUIREMENTS),
+        ],
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "Precision separation runtime preparation failed with exit code "
+            f"{completed.returncode}."
         )
 
 

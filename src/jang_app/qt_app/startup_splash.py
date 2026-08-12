@@ -14,6 +14,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
+from jang_app.version import __version__
+
 
 class StartupSplash(QWidget):
     close_requested = Signal()
@@ -32,18 +34,28 @@ class StartupSplash(QWidget):
         self._animation_group: QParallelAnimationGroup | None = None
 
         self.logo_label = QLabel(self)
-        self.logo_label.setGeometry(46, 42, 48, 48)
-        self.logo_label.setPixmap(QIcon(str(logo_path)).pixmap(48, 48))
+        self.logo_label.setGeometry(46, 38, 56, 56)
+        self.logo_label.setPixmap(QIcon(str(logo_path)).pixmap(56, 56))
 
         self.brand_label = QLabel("JJZERO", self)
-        self.brand_label.setGeometry(108, 43, 180, 18)
+        self.brand_label.setGeometry(116, 42, 92, 18)
         self.brand_label.setFont(_font(11, QFont.Weight.Bold, 2))
-        self.brand_label.setStyleSheet("color: #aaa8a1; background: transparent;")
+        self.brand_label.setStyleSheet("color: #d6d4cc; background: transparent;")
 
-        self.version_label = QLabel("AUDIO WORKSPACE", self)
-        self.version_label.setGeometry(108, 65, 180, 18)
-        self.version_label.setFont(_font(9, QFont.Weight.DemiBold, 1))
-        self.version_label.setStyleSheet("color: #6c6b66; background: transparent;")
+        self.descriptor_label = QLabel("AUDIO WORKSPACE", self)
+        self.descriptor_label.setGeometry(116, 66, 138, 18)
+        self.descriptor_label.setFont(_font(9, QFont.Weight.DemiBold, 1))
+        self.descriptor_label.setStyleSheet("color: #74736d; background: transparent;")
+
+        self.version_label = QLabel(f"v{__version__}", self)
+        self.version_label.setObjectName("SplashVersion")
+        self.version_label.setGeometry(222, 40, 66, 22)
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.version_label.setFont(_font(9, QFont.Weight.DemiBold))
+        self.version_label.setStyleSheet(
+            "color: #aaa8a1; background: #292927; border: 1px solid #3d3c38; "
+            "border-radius: 10px; padding-bottom: 1px;"
+        )
 
         self.title_label = QLabel("JJZero Audio", self)
         self.title_label.setGeometry(46, 116, 300, 48)

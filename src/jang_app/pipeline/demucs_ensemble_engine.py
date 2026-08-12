@@ -46,7 +46,7 @@ class DemucsEnsembleEngine:
         work_root = output_root / ".e"
         if work_root.exists():
             shutil.rmtree(work_root)
-        job_dir = output_root / recipe.recipe_id / source.stem
+        job_dir = output_root
         completed = False
         stem_pairs: list[SeparationStemPair] = []
         logger.info(
@@ -75,7 +75,7 @@ class DemucsEnsembleEngine:
                     model,
                 )
                 result = self._component_engine.separate(
-                    SeparationRequest(source, work_root, member_recipe),
+                    SeparationRequest(source, work_root / f"m{index + 1}", member_recipe),
                     _member_progress_callback(
                         report_progress,
                         index,

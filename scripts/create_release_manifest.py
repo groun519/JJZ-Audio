@@ -68,9 +68,11 @@ def create_release_manifest(
             ],
         }
     ]
+    runtime_requires_rvc_profile = False
     runtime_index = resolved_release / RUNTIME_INDEX_NAME
     if runtime_index.is_file():
         runtime_data = json.loads(runtime_index.read_text(encoding="utf-8"))
+        runtime_requires_rvc_profile = runtime_data.get("requires_rvc_profile") is True
         if runtime_data.get("version") != runtime_version:
             raise ValueError(
                 "Runtime package version does not match the release runtime version."
@@ -106,6 +108,8 @@ def create_release_manifest(
             )
 
     component_ids = {str(component.get("id", "")) for component in components}
+    if runtime_requires_rvc_profile and "rvc-runtime-cu118" not in component_ids:
+        raise ValueError("The split audio engine release requires a cu118 RVC profile component.")
     if "rvc-runtime-rocm-win" in component_ids and "rvc-runtime-directml" not in component_ids:
         raise ValueError("The Windows ROCm release requires a DirectML fallback component.")
 

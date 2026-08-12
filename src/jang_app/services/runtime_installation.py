@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import stat
+import time
 import zipfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -25,8 +26,11 @@ RVC_PROFILE_STATE_NAME = "jjzero-runtime-profile.json"
 _PRESERVED_DIRECTORIES = (
     Path("rvc/weights"),
     Path("rvc/logs"),
+    Path("rvc/runtime"),
     Path("demucs/torch/hub/checkpoints"),
 )
+_REPLACE_RETRY_ATTEMPTS = 5
+_REPLACE_RETRY_DELAY_SECONDS = 0.05
 
 
 class RuntimeInstallationError(RuntimeError):
@@ -72,7 +76,7 @@ def installed_rvc_runtime_profile(rvc_root: Path) -> RvcRuntimeProfileInstallati
     root = rvc_root.expanduser().resolve()
     runtime = root / "runtime"
     state = runtime / RVC_PROFILE_STATE_NAME
-    if not state.is_file() or not (runtime / "python.exe").is_file():
+    if not state.is_file() or not _rvc_profile_ready(runtime):
         return None
     try:
         data = json.loads(state.read_text(encoding="utf-8"))
@@ -130,6 +134,7 @@ def install_runtime_packages(
 
     def prepare(staging: Path) -> None:
         _preserve_mutable_runtime_data(root, staging)
+        _prune_profile_packaging_artifacts(staging / "rvc" / "runtime")
         repair_rvc_runtime_adapter(staging / "rvc")
         write_json_atomic(
             staging / RUNTIME_STATE_NAME,
@@ -140,12 +145,17 @@ def install_runtime_packages(
                 "package_count": len(archives),
             },
         )
-        _write_rvc_profile_state(
-            staging / "rvc" / "runtime",
-            RVC_PROFILE_CU118,
-            version,
-            len(archives),
-        )
+        legacy_runtime = staging / "rvc" / "runtime"
+        if (
+            (legacy_runtime / "python.exe").is_file()
+            and not (legacy_runtime / RVC_PROFILE_STATE_NAME).is_file()
+        ):
+            _write_rvc_profile_state(
+                legacy_runtime,
+                RVC_PROFILE_CU118,
+                version,
+                len(archives),
+            )
 
     _install_archive_tree(
         archives,
@@ -353,14 +363,25 @@ def _swap_runtime(staging: Path, root: Path, backup: Path) -> None:
     moved_current = False
     try:
         if root.exists():
-            os.replace(root, backup)
+            _replace_path(root, backup)
             moved_current = True
-        os.replace(staging, root)
+        _replace_path(staging, root)
     except Exception:
         if moved_current and backup.exists() and not root.exists():
-            os.replace(backup, root)
+            _replace_path(backup, root)
         raise
     _remove_directory(backup)
+
+
+def _replace_path(source: Path, destination: Path) -> None:
+    for attempt in range(_REPLACE_RETRY_ATTEMPTS):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_RETRY_DELAY_SECONDS * (attempt + 1))
 
 
 def _runtime_ready(root: Path) -> bool:
@@ -370,16 +391,19 @@ def _runtime_ready(root: Path) -> bool:
         root / "ffmpeg" / "bin" / "ffprobe.exe",
         root / "demucs" / "torch" / "hub" / "checkpoints" / "955717e8-8726e21a.th",
         rvc_root / "infer_cli.py",
-        rvc_root / "runtime" / "python.exe",
         rvc_root / "hubert_base.pt",
         rvc_root / "rmvpe.pt",
-        *(rvc_root / path for path in required_rvc_training_paths()),
+        *(
+            rvc_root / path
+            for path in required_rvc_training_paths()
+            if path.parts[0] != "runtime"
+        ),
     )
     return all(path.is_file() for path in required)
 
 
 def _rvc_profile_ready(root: Path) -> bool:
-    return all(
+    required_ready = all(
         path.is_file()
         for path in (
             root / "python.exe",
@@ -389,6 +413,31 @@ def _rvc_profile_ready(root: Path) -> bool:
             root / RVC_PROFILE_STATE_NAME,
         )
     )
+    separator_ready = any(
+        path.is_file()
+        for path in (
+            root / "jjzero-roformer-packages" / "audio_separator" / "__init__.py",
+            root / "Lib" / "site-packages" / "audio_separator" / "__init__.py",
+        )
+    )
+    return required_ready and separator_ready
+
+
+def _prune_profile_packaging_artifacts(runtime_root: Path) -> None:
+    if not runtime_root.is_dir():
+        return
+    for source_map in tuple(runtime_root.rglob("*.map")):
+        try:
+            source_map.unlink(missing_ok=True)
+        except OSError:
+            pass
+    caches = sorted(
+        (path for path in runtime_root.rglob("__pycache__") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for cache in caches:
+        shutil.rmtree(cache, ignore_errors=True)
 
 
 def _write_rvc_profile_state(

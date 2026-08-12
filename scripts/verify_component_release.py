@@ -22,6 +22,7 @@ from jang_app.services.runtime_installation import (
 )
 from jang_app.services.system_diagnostics import run_system_diagnostics
 from jang_app.runtime_version import RVC_RUNTIME_PROFILE_VERSIONS
+from jang_app.services.rvc_training_runtime import required_rvc_training_paths
 
 
 GITHUB_ASSET_LIMIT = 2 * 1024 * 1024 * 1024
@@ -53,6 +54,7 @@ def verify_component_release(
             ):
                 raise RuntimeError(f"Release signature verification failed: {path.name}")
     _verify_cu128_package_layout(manifest, release_root)
+    _verify_split_runtime_package_layout(manifest, release_root)
     _verify_accelerator_package_layouts(manifest, release_root)
     if not install_runtime:
         return
@@ -167,6 +169,7 @@ def _verify_cu128_package_layout(manifest, release_root: Path) -> None:
         "Lib/site-packages/numpy/__init__.py",
         "Lib/site-packages/faiss/__init__.py",
         "Lib/site-packages/fairseq/__init__.py",
+        "jjzero-roformer-packages/audio_separator/__init__.py",
         "jjzero-profile-build.json",
     }
     found: set[str] = set()
@@ -193,6 +196,62 @@ def _verify_cu128_package_layout(manifest, release_root: Path) -> None:
         raise RuntimeError(f"RVC cu128 profile build metadata is incompatible: {metadata}")
 
 
+def _verify_split_runtime_package_layout(manifest, release_root: Path) -> None:
+    runtime = manifest.ai_runtime
+    cu118 = manifest.rvc_runtime_profile("cu118")
+    if runtime is None or cu118 is None:
+        return
+
+    shared_names = _archive_names(runtime, release_root)
+    embedded = next(
+        (name for name in sorted(shared_names) if name.startswith("rvc/runtime/")),
+        "",
+    )
+    if embedded:
+        raise RuntimeError(f"Shared audio engine contains an RVC profile file: {embedded}")
+    shared_required = {
+        "ffmpeg/bin/ffmpeg.exe",
+        "ffmpeg/bin/ffprobe.exe",
+        "demucs/torch/hub/checkpoints/955717e8-8726e21a.th",
+        "rvc/infer_cli.py",
+        "rvc/hubert_base.pt",
+        "rvc/rmvpe.pt",
+        *(
+            f"rvc/{path.as_posix()}"
+            for path in required_rvc_training_paths()
+            if path.parts[0] != "runtime"
+        ),
+    }
+    missing_shared = sorted(shared_required - shared_names)
+    if missing_shared:
+        raise RuntimeError(f"Shared audio engine is incomplete: {missing_shared[0]}")
+
+    profile_names = _archive_names(cu118, release_root)
+    profile_required = {
+        "python.exe",
+        "python3.dll",
+        "Lib/site-packages/torch/__init__.py",
+        "Lib/site-packages/torchaudio/__init__.py",
+    }
+    missing_profile = sorted(profile_required - profile_names)
+    if missing_profile:
+        raise RuntimeError(f"RVC cu118 package is incomplete: {missing_profile[0]}")
+    separator_candidates = {
+        "jjzero-roformer-packages/audio_separator/__init__.py",
+        "Lib/site-packages/audio_separator/__init__.py",
+    }
+    if profile_names.isdisjoint(separator_candidates):
+        raise RuntimeError("RVC cu118 package is incomplete: audio_separator")
+
+
+def _archive_names(component, release_root: Path) -> set[str]:
+    names: set[str] = set()
+    for artifact in component.artifacts:
+        with zipfile.ZipFile(release_root / artifact.name) as package:
+            names.update(package.namelist())
+    return names
+
+
 def _verify_accelerator_package_layouts(manifest, release_root: Path) -> None:
     for profile in ("directml", "rocm-win"):
         component = manifest.rvc_runtime_profile(profile)
@@ -206,6 +265,7 @@ def _verify_accelerator_package_layouts(manifest, release_root: Path) -> None:
             "Lib/site-packages/numpy/__init__.py",
             "Lib/site-packages/faiss/__init__.py",
             "Lib/site-packages/fairseq/__init__.py",
+            "jjzero-roformer-packages/audio_separator/__init__.py",
             "jjzero-profile-build.json",
         }
         if profile == "directml":

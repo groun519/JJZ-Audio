@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.managed_files import write_json_atomic
+from jang_app.services.output_catalog import converted_vocal_paths
 from jang_app.services.vocal_project import (
     UNASSIGNED_SPEAKER_ID,
     VOCAL_PROJECT_SCHEMA_VERSION,
@@ -313,7 +314,7 @@ def _project_from_data(root: Path, data: Mapping[str, object]) -> VocalProject:
 
 
 def _imported_takes(root: Path, active_converted_path: Path | None) -> tuple[VocalTake, ...]:
-    paths = {path.resolve() for path in root.glob("vocals_rvc*.wav") if path.is_file()}
+    paths = set(converted_vocal_paths(root))
     if active_converted_path is not None:
         active = active_converted_path.expanduser().resolve()
         if active.is_file() and active.parent == root:

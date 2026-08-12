@@ -134,8 +134,6 @@ def install_ai_runtime_offline(
     ]
     downloaded = list(packages)
     for profile in rvc_profile_candidates(preferred_profile):
-        if not rvc_profile_requires_overlay(profile):
-            continue
         component_id = rvc_profile_component_id(profile)
         profile_index = index.parent / f"{component_id}-packages.json"
         if not profile_index.is_file():
@@ -242,10 +240,10 @@ def _install_profile_chain(
     if plan.rvc_fallback_profile and plan.rvc_fallback_profile not in attempts:
         attempts.append(plan.rvc_fallback_profile)
     for profile in attempts:
-        if not rvc_profile_requires_overlay(profile):
-            break
         component = plan.release.rvc_runtime_profile(profile)
         if component is None:
+            if not rvc_profile_requires_overlay(profile):
+                break
             failures.append(f"RVC {profile} runtime component is unavailable.")
             continue
         try:

@@ -3,15 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.config import PROJECT_ROOT, SONG_WORKSPACE_DIR
-from jang_app.services.file_names import safe_filename_stem
 from jang_app.services.library_catalog import LibraryCatalog, inferred_catalog_file
 from jang_app.services.managed_files import copy_file_atomic, file_sha256, write_json_atomic
+from jang_app.services.tool_workspace import new_storage_key, stable_storage_key
 
 
 SONG_MANIFEST_VERSION = 1
@@ -94,23 +95,43 @@ class SongPackageStore:
     ) -> tuple[SongPackage, bool]:
         source = source.expanduser().resolve()
         content_hash = file_sha256(source)
+        display_title = title.strip() or source.stem
         existing = next(
             (item for item in self.packages(include_removed=True) if item.source_hash == content_hash),
             None,
         )
         if existing is not None:
             if existing.removed:
-                existing = replace(existing, removed=False)
+                if existing.source_path is None or not existing.source_path.is_file():
+                    self._create_stage_directories(existing.folder)
+                    managed_source = (
+                        existing.folder
+                        / SOURCE_STAGE
+                        / "audio"
+                        / _managed_source_name(source)
+                    )
+                    copy_file_atomic(source, managed_source)
+                    existing = replace(
+                        existing,
+                        source_path=managed_source,
+                        source_type=(
+                            source_type if source_type in {"local", "youtube"} else "local"
+                        ),
+                        source_url=source_url.strip(),
+                        source_hash=content_hash,
+                        original_name=source.name,
+                        removed=False,
+                    )
+                else:
+                    existing = replace(existing, removed=False)
                 self._save(existing)
                 return existing, True
             return existing, False
 
-        display_title = title.strip() or source.stem
         song_id = f"song-{content_hash[:16]}"
-        folder_name = f"{safe_filename_stem(display_title, fallback='song', max_length=56)}__{song_id[-8:]}"
-        folder = self.root / folder_name
+        folder = self.root / stable_storage_key("s", song_id)
         self._create_stage_directories(folder)
-        managed_source = folder / SOURCE_STAGE / "audio" / _managed_source_name(source, song_id)
+        managed_source = folder / SOURCE_STAGE / "audio" / _managed_source_name(source)
         copy_file_atomic(source, managed_source)
         package = SongPackage(
             song_id=song_id,
@@ -140,8 +161,7 @@ class SongPackageStore:
         output_id = _output_id(resolved_job)
         song_id = f"song-{output_id.removeprefix('output-')}"
         display_title = title.strip() or resolved_job.name
-        folder_name = f"{safe_filename_stem(display_title, fallback='recovered', max_length=56)}__{song_id[-8:]}"
-        folder = self.root / folder_name
+        folder = self.root / stable_storage_key("s", song_id)
         self._create_stage_directories(folder)
         output = SongOutputReference(output_id, label, resolved_job, _now())
         package = SongPackage(
@@ -206,7 +226,7 @@ class SongPackageStore:
             package.folder
             / SOURCE_STAGE
             / "audio"
-            / _managed_source_name(source, package.song_id)
+            / _managed_source_name(source)
         )
         copy_file_atomic(source, managed_source)
         updated = replace(
@@ -316,12 +336,9 @@ class SongPackageStore:
 
     def create_vocal_separation_run(self, song_id: str) -> Path:
         output_root = self.vocal_separation_root(song_id)
-        base = output_root / f"run-{datetime.now(UTC):%Y%m%d-%H%M%S}"
-        candidate = base
-        suffix = 2
+        candidate = output_root / new_storage_key("r")
         while candidate.exists():
-            candidate = base.with_name(f"{base.name}-{suffix:03d}")
-            suffix += 1
+            candidate = output_root / new_storage_key("r")
         candidate.mkdir(parents=True)
         return candidate
 
@@ -337,6 +354,55 @@ class SongPackageStore:
         updated = replace(self.require(song_id, include_removed=True), removed=removed)
         self._save(updated)
         return updated
+
+    def remove_managed_data(self, song_id: str) -> SongPackage:
+        package = self.require(song_id, include_removed=True)
+        folder = package.folder.expanduser().resolve()
+        manifest_path = folder / SONG_MANIFEST_NAME
+        if folder.parent != self.root or not manifest_path.is_file():
+            raise ValueError("Song package is outside the managed library")
+
+        detached_outputs = list(package.detached_output_dirs)
+        detached_outputs.extend(
+            output.job_dir
+            for output in package.outputs
+            if not _is_within(output.job_dir, folder)
+        )
+        tombstone = replace(
+            package,
+            source_path=None,
+            outputs=(),
+            active_output_id="",
+            detached_output_dirs=tuple(dict.fromkeys(detached_outputs)),
+            removed=True,
+        )
+
+        for entry in folder.iterdir():
+            if entry.name == SONG_MANIFEST_NAME:
+                continue
+            if entry.is_symlink() or entry.is_file():
+                entry.unlink()
+            elif entry.is_dir():
+                shutil.rmtree(entry)
+        self._save(tombstone, create_stages=False)
+        return tombstone
+
+    def purge_legacy_removed_data(self) -> int:
+        purged = 0
+        for package in self.packages(include_removed=True):
+            if not package.removed or self._is_removal_tombstone(package):
+                continue
+            try:
+                self.remove_managed_data(package.song_id)
+            except (OSError, ValueError) as exc:
+                _LOGGER.warning(
+                    "Could not purge files from removed song package %s: %s",
+                    package.song_id,
+                    exc,
+                )
+                continue
+            purged += 1
+        return purged
 
     def require(self, song_id: str, *, include_removed: bool = False) -> SongPackage:
         package = next(
@@ -358,12 +424,21 @@ class SongPackageStore:
             None,
         )
 
-    def _save(self, package: SongPackage) -> None:
-        self._create_stage_directories(package.folder)
+    def _save(self, package: SongPackage, *, create_stages: bool = True) -> None:
+        if create_stages:
+            self._create_stage_directories(package.folder)
+        else:
+            package.folder.mkdir(parents=True, exist_ok=True)
         source = None
-        if package.source_path is not None:
+        if package.source_path is not None or any(
+            (package.source_hash, package.original_name, package.source_url)
+        ):
             source = {
-                "audio": _relative_path(package.folder, package.source_path),
+                "audio": (
+                    _relative_path(package.folder, package.source_path)
+                    if package.source_path is not None
+                    else ""
+                ),
                 "type": package.source_type,
                 "url": package.source_url,
                 "sha256": package.source_hash,
@@ -413,7 +488,9 @@ class SongPackageStore:
         source_hash = ""
         original_name = ""
         if isinstance(source_data, dict):
-            source_path = _resolve_relative_path(folder, source_data.get("audio"))
+            source_value = source_data.get("audio")
+            if isinstance(source_value, str) and source_value:
+                source_path = _resolve_relative_path(folder, source_value)
             source_type = str(source_data.get("type", "local"))
             source_url = str(source_data.get("url", ""))
             source_hash = str(source_data.get("sha256", ""))
@@ -457,10 +534,11 @@ class SongPackageStore:
 
     def _migrate_managed_source_name(self, package: SongPackage) -> SongPackage:
         source = package.source_path
-        if source is None or source.stem != "source" or not source.is_file():
+        if source is None or not source.is_file():
             return package
-        original = Path(package.original_name) if package.original_name else source
-        target = source.with_name(_managed_source_name(original, package.song_id))
+        target = source.with_name(_managed_source_name(source))
+        if source == target:
+            return package
         if not target.exists():
             source.replace(target)
         updated = replace(package, source_path=target)
@@ -500,15 +578,23 @@ class SongPackageStore:
         ):
             (folder / relative).mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _is_removal_tombstone(package: SongPackage) -> bool:
+        if package.source_path is not None or package.outputs:
+            return False
+        try:
+            return all(entry.name == SONG_MANIFEST_NAME for entry in package.folder.iterdir())
+        except OSError:
+            return False
+
 
 def _output_id(job_dir: Path) -> str:
     digest = hashlib.sha256(str(job_dir.resolve()).casefold().encode("utf-8")).hexdigest()[:16]
     return f"output-{digest}"
 
 
-def _managed_source_name(source: Path, song_id: str) -> str:
-    stem = safe_filename_stem(source.stem, fallback="audio", max_length=48)
-    return f"{stem}__{song_id[-8:]}{source.suffix.lower()}"
+def _managed_source_name(source: Path) -> str:
+    return f"source{source.suffix.lower()}"
 
 
 def _relative_path(folder: Path, path: Path) -> str:

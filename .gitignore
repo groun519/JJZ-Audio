@@ -6,17 +6,17 @@ venv/
 /build/
 /dist/
 /release/
+/artifacts/
+/Cache/
+/Data/
+/Runtime/
 
-workspace/*
-!workspace/.gitkeep
-output/*
-!output/.gitkeep
-logs/*
-!logs/.gitkeep
-settings/*
-!settings/.gitkeep
-third_party/*
-!third_party/.gitkeep
+/workspace/
+/output/
+/logs/
+/settings/
+/third_party/
 
 .DS_Store
 Thumbs.db
+/.test-*.png

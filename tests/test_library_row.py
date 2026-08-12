@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy, QTest
@@ -8,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.library_row import SongListRow
 from jang_app.qt_app.transport_controls import TRANSPORT_BUTTON_SIZE
+from jang_app.qt_app.widgets import COMPACT_ICON_BUTTON_SIZE, DangerIconButton
 from jang_app.services.song_metadata import SongDisplayMetadata
 
 
@@ -16,7 +18,7 @@ class SongListRowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_song_details_is_the_second_hover_action(self) -> None:
+    def test_song_details_is_the_first_trailing_hover_action(self) -> None:
         row = SongListRow(
             "song-1",
             "Song",
@@ -26,11 +28,125 @@ class SongListRowTests(unittest.TestCase):
 
         self.assertEqual(
             row.action_buttons,
-            (row.use_button, row.details_button, row.rename_button, row.remove_button),
+            (
+                row.details_button,
+                row.rename_button,
+                row.remove_button,
+            ),
+        )
+        self.assertIsInstance(row.remove_button, DangerIconButton)
+        self.assertTrue(row.remove_button.property("persistentDanger"))
+        self.assertTrue(
+            all(
+                button.size().toTuple()
+                == (COMPACT_ICON_BUTTON_SIZE, COMPACT_ICON_BUTTON_SIZE)
+                for button in row.action_buttons
+            )
         )
         row.details_button.click()
 
         self.assertEqual(requested.at(0)[0], "song-1")
+        row.close()
+
+    def test_work_song_action_reveals_before_content_and_persists_when_active(self) -> None:
+        row = SongListRow(
+            "song-1",
+            "Song",
+            SongDisplayMetadata("local", "LOCAL", "WAV", "01:00", "1.0 MB", None),
+        )
+        requested = QSignalSpy(row.work_song_toggled)
+        self.assertTrue(row.work_song_reveal.isHidden())
+        self.assertEqual(row.work_song_reveal.maximumWidth(), 0)
+
+        row.resize(960, row.sizeHint().height())
+        row.show()
+        QTest.qWait(30)
+        self.app.processEvents()
+        row._is_hovered = False
+        row._sync_action_visibility()
+        QTest.qWait(220)
+        initial_badge_x = row.source_badge.mapTo(row, row.source_badge.rect().topLeft()).x()
+
+        self.assertFalse(row.work_song_button.isVisible())
+
+        row._is_hovered = True
+        row._sync_action_visibility()
+        QTest.qWait(220)
+        self.app.processEvents()
+
+        revealed_badge_x = row.source_badge.mapTo(row, row.source_badge.rect().topLeft()).x()
+        self.assertTrue(row.work_song_button.isVisible())
+        self.assertEqual(
+            row.work_song_reveal.maximumWidth(),
+            row.work_song_reveal.expanded_width(),
+        )
+        self.assertGreater(revealed_badge_x, initial_badge_x + 25)
+        self.assertLess(
+            row.work_song_button.mapTo(row, row.work_song_button.rect().topLeft()).x(),
+            revealed_badge_x,
+        )
+
+        row.set_work_song_active(True)
+        self.assertTrue(row.work_song_button.isChecked())
+        self.assertTrue(row.work_song_button.isVisible())
+        self.assertTrue(row.property("workSong"))
+
+        row._is_hovered = False
+        row._sync_action_visibility()
+        QTest.qWait(220)
+        self.assertFalse(row.work_song_button.isHidden())
+
+        row.work_song_button.click()
+        self.assertEqual(requested.at(0)[0], "song-1")
+
+        row.set_work_song_active(False)
+        QTest.qWait(220)
+        self.assertFalse(row.work_song_button.isChecked())
+        self.assertFalse(row.work_song_button.isVisible())
+        self.assertEqual(row.work_song_reveal.maximumWidth(), 0)
+        self.assertFalse(row.property("workSong"))
+        row.close()
+
+    def test_unchanged_work_song_state_does_not_repolish_the_row(self) -> None:
+        row = SongListRow(
+            "song-1",
+            "Song",
+            SongDisplayMetadata("local", "LOCAL", "WAV", "01:00", "1.0 MB", None),
+        )
+
+        with patch.object(row, "_refresh_style") as refresh_style:
+            row.set_work_song_active(False)
+            refresh_style.assert_not_called()
+            row.set_work_song_active(True)
+            refresh_style.assert_called_once()
+
+        row.close()
+
+    def test_work_song_loading_keeps_action_visible_and_animates_border(self) -> None:
+        row = SongListRow(
+            "song-1",
+            "Song",
+            SongDisplayMetadata("local", "LOCAL", "WAV", "01:00", "1.0 MB", None),
+        )
+        row.resize(960, row.sizeHint().height())
+        row.show()
+        self.app.processEvents()
+        initial_phase = row.work_song_button._loading_phase
+
+        row.set_work_song_loading(True)
+        QTest.qWait(60)
+
+        self.assertTrue(row.work_song_button.is_loading())
+        self.assertTrue(row.work_song_button.isVisible())
+        self.assertFalse(row.work_song_button.isEnabled())
+        self.assertNotEqual(row.work_song_button._loading_phase, initial_phase)
+
+        row._is_hovered = False
+        row.set_work_song_loading(False)
+        QTest.qWait(220)
+        self.assertFalse(row.work_song_button.is_loading())
+        self.assertTrue(row.work_song_button.isEnabled())
+        self.assertFalse(row.work_song_button.isVisible())
         row.close()
 
     def test_row_expands_inline_transport_without_resizing_the_title_column(self) -> None:

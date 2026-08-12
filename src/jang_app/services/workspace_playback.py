@@ -11,7 +11,7 @@ class WorkspacePlaybackScope(StrEnum):
 
 _TRACK_IDS_BY_SCOPE: dict[WorkspacePlaybackScope, tuple[str, ...]] = {
     WorkspacePlaybackScope.SEPARATION: ("original", "instrumental"),
-    WorkspacePlaybackScope.CONVERSION: ("original", "converted"),
+    WorkspacePlaybackScope.CONVERSION: ("original", "instrumental", "converted"),
     WorkspacePlaybackScope.STUDIO: ("original", "instrumental", "converted"),
 }
 
@@ -22,7 +22,9 @@ _LABEL_BY_SCOPE: dict[WorkspacePlaybackScope, str] = {
 }
 
 
-def scope_track_ids(scope: WorkspacePlaybackScope) -> tuple[str, ...]:
+def scope_track_ids(
+    scope: WorkspacePlaybackScope,
+) -> tuple[str, ...]:
     return _TRACK_IDS_BY_SCOPE[scope]
 
 

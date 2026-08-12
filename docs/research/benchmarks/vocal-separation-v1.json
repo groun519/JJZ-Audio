@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "benchmark_id": "vocal-separation-v1",
+  "title": "JJZero Audio vocal separation benchmark v1",
+  "clips": [
+    {
+      "clip_id": "dracula-easy",
+      "title": "Dracula",
+      "role": "Easy centered vocal and over-processing control",
+      "source": {
+        "kind": "library",
+        "song_id": "song-82fbfebb8a349e06",
+        "sha256": "82fbfebb8a349e0621125d318d2e49f9f19e03a08c6027c32154b9007c89fc3e"
+      },
+      "start_ms": 45000,
+      "end_ms": 65000
+    },
+    {
+      "clip_id": "popin2-artifact",
+      "title": "popin2",
+      "role": "Metallic, fractured, and high-frequency artifact stress test",
+      "source": {
+        "kind": "override",
+        "source_key": "popin2",
+        "sha256": "8aa9630adcc14de25c5c7963b2eb660614cc9f9bfb0fbf02696571bec0b91856"
+      },
+      "start_ms": 26000,
+      "end_ms": 46000
+    },
+    {
+      "clip_id": "999999-synthetic",
+      "title": "999999",
+      "role": "Synthetic vocal, formant, and rapid-pitch preservation",
+      "source": {
+        "kind": "library",
+        "song_id": "song-cadfdce12c06d8b6",
+        "sha256": "cadfdce12c06d8b65af73b4680630a742e21bd84ae4f0c8c15a43af225079a04"
+      },
+      "start_ms": 55000,
+      "end_ms": 75000
+    },
+    {
+      "clip_id": "o3ohn-effects",
+      "title": "O3ohn - BIG BIRD",
+      "role": "Reverb, effects, quiet-vocal, and accompaniment-leakage stress test",
+      "source": {
+        "kind": "library",
+        "song_id": "song-608b0e6f5e245285",
+        "sha256": "608b0e6f5e245285339611c73f1d0429d084db67572ad48692c7c967c154e91b"
+      },
+      "start_ms": 55000,
+      "end_ms": 105000
+    }
+  ],
+  "rvc": {
+    "model_name": "pq-a_e100_s2500.pth",
+    "model_sha256": "a3b600b0a7b99adf902c1dfaa6136c7ae35572025a152d8acd5284f24f5a58b0",
+    "index_name": "added_IVF992_Flat_nprobe_1_pq-a_v2.index",
+    "index_sha256": "5eab57db683dc0b8422c9e8f6aba7734047c9c4bea131c1980b580fb578b8920",
+    "pitch": -12,
+    "f0_method": "rmvpe",
+    "device": "gpu"
+  },
+  "candidates": [
+    {
+      "candidate_id": "htdemucs",
+      "label": "HTDemucs",
+      "recipe_id": "demucs-standard-v1"
+    },
+    {
+      "candidate_id": "bs-roformer-317",
+      "label": "BS-RoFormer 317",
+      "recipe_id": "roformer-precision-v1"
+    },
+    {
+      "candidate_id": "kim-melband",
+      "label": "Kim Vocal MelBand-RoFormer",
+      "recipe_id": "roformer-vocal-melband-v1"
+    }
+  ],
+  "review_dimensions": [
+    "vocal_completeness",
+    "accompaniment_leakage",
+    "separation_artifacts",
+    "effect_handling",
+    "rvc_stability",
+    "final_mix_naturalness"
+  ]
+}
