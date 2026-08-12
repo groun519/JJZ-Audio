@@ -170,6 +170,10 @@ from jang_app.services.song_metadata import build_song_display_metadata
 from jang_app.services.studio_session import StudioSession, StudioTrackState
 from jang_app.services.studio_timeline import session_duration_ms, set_studio_track_mix
 from jang_app.services.update_polling import UpdateCheckOutcome, UpdatePollingPolicy
+from jang_app.services.update_cache import (
+    discard_completed_update,
+    mark_update_cleanup_ready,
+)
 from jang_app.services.video_source import VideoSource
 from jang_app.services.vocal_project import VocalConversionSettings, VocalProject
 from jang_app.services.vocal_project_store import VocalProjectStore
@@ -1581,7 +1585,18 @@ class MainWindow(QMainWindow):
         runtime_packages = tuple(
             path for path in self._downloaded_update if path.name in runtime_names
         )
-        discard_cached_artifacts(runtime_packages, APP_PATHS.cache_dir)
+        if plan.application_required:
+            discard_cached_artifacts(runtime_packages, APP_PATHS.cache_dir)
+        elif runtime_packages:
+            report = discard_completed_update(
+                APP_PATHS.cache_dir,
+                runtime_packages[0].parent,
+            )
+            if report.failed_paths:
+                self._logger.warning(
+                    "Runtime update cache cleanup incomplete | failures=%s",
+                    len(report.failed_paths),
+                )
         self._launch_downloaded_installer_or_restart()
 
     def _launch_downloaded_installer_or_restart(self) -> None:
@@ -1619,6 +1634,15 @@ class MainWindow(QMainWindow):
                     tr("Could not start the update installer."),
                 )
             return
+        if plan is not None and not mark_update_cleanup_ready(
+            APP_PATHS.cache_dir,
+            installer.parent,
+            plan.release.version,
+        ):
+            self._logger.warning(
+                "Application update cache cleanup marker could not be written | version=%s",
+                plan.release.version,
+            )
         QApplication.quit()
 
     def _change_language(self, language: str) -> None:

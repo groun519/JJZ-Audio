@@ -7,9 +7,38 @@ from pathlib import Path
 
 from jang_app.services.app_bootstrap import prepare_app_environment
 from jang_app.services.app_paths import discover_app_paths
+from jang_app.services.update_cache import mark_update_cleanup_ready
 
 
 class AppBootstrapTests(unittest.TestCase):
+    def test_bootstrap_cleans_completed_updates_and_preserves_partial_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            package = source / "src" / "jang_app"
+            package.mkdir(parents=True)
+            paths = discover_app_paths(
+                package,
+                environ={"JJZERO_DATA_ROOT": str(root / "data")},
+                frozen=False,
+                source_root=source,
+            )
+            completed = paths.cache_dir / "updates" / "0.3.0"
+            installer = completed / "setup.exe"
+            installer.parent.mkdir(parents=True)
+            installer.write_bytes(b"installer")
+            self.assertTrue(
+                mark_update_cleanup_ready(paths.cache_dir, completed, "0.3.0")
+            )
+            partial = paths.cache_dir / "updates" / "0.3.1" / "setup.exe.part"
+            partial.parent.mkdir(parents=True)
+            partial.write_bytes(b"partial")
+
+            prepare_app_environment(paths)
+
+            self.assertFalse(completed.exists())
+            self.assertTrue(partial.is_file())
+
     def test_legacy_settings_are_copied_once_and_workspace_is_linked_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

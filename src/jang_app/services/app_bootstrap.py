@@ -11,6 +11,8 @@ from jang_app.services.initial_setup import persist_storage_layout, promote_stor
 from jang_app.services.managed_files import copy_file_atomic, write_json_atomic
 from jang_app.services.rvc_runtime_repair import repair_rvc_runtime_adapter
 from jang_app.services.storage_migration import recover_storage_migrations
+from jang_app.services.update_cache import cleanup_completed_updates
+from jang_app.version import __version__
 
 
 _LEGACY_SETTINGS_FILES = ("app_settings.json", "song_library.json", "work_song.json")
@@ -44,6 +46,8 @@ def prepare_app_environment(paths: AppPaths | None = None) -> AppBootstrapResult
         paths.output_root / "separations",
     ):
         directory.mkdir(parents=True, exist_ok=True)
+
+    _cleanup_update_cache(paths)
 
     repair_rvc_runtime_adapter(paths.runtime_root / "rvc")
     copied = _copy_legacy_settings(paths)
@@ -98,6 +102,27 @@ def prepare_app_environment(paths: AppPaths | None = None) -> AppBootstrapResult
         ",".join(path.name for path in copied) or "none",
     )
     return AppBootstrapResult(tuple(copied), paths.storage_file, migration_file)
+
+
+def _cleanup_update_cache(paths: AppPaths) -> None:
+    try:
+        report = cleanup_completed_updates(paths.cache_dir, __version__)
+    except Exception:
+        _LOGGER.exception("Update cache cleanup deferred")
+        return
+    if report.failed_paths:
+        _LOGGER.warning(
+            "Update cache cleanup incomplete | removed_files=%s | reclaimed_bytes=%s | failures=%s",
+            report.removed_files,
+            report.reclaimed_bytes,
+            len(report.failed_paths),
+        )
+    elif report.removed_files:
+        _LOGGER.info(
+            "Update cache cleanup complete | removed_files=%s | reclaimed_bytes=%s",
+            report.removed_files,
+            report.reclaimed_bytes,
+        )
 
 
 def _copy_legacy_settings(paths: AppPaths) -> list[Path]:
