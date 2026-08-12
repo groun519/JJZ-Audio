@@ -134,6 +134,7 @@ from jang_app.services.hardware_diagnostics_state import (
 )
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set, scan_output_sound_sets
 from jang_app.services.playback_queue import PlaybackQueue
+from jang_app.services.playback_session import PlaybackSession
 from jang_app.services.processing_queue import ProcessingQueue
 from jang_app.services.rvc_execution_runtime import settings_for_managed_rvc_runtime
 from jang_app.services.rvc_model_choices import (
@@ -243,9 +244,10 @@ class MainWindow(QMainWindow):
         self.current_song: SongItem | None = None
         self.current_work_item: SongItem | None = None
         self.current_output_set: OutputSoundSet | None = None
-        self.current_playback_queue: PlaybackQueue | None = None
-        self._playback_position_ms = 0
-        self._playback_resume_positions: dict[tuple[str, str], int] = {}
+        self.playback_session = PlaybackSession()
+        self.current_playback_queue: PlaybackQueue | None = self.playback_session.queue
+        self._playback_position_ms = self.playback_session.position_ms
+        self._playback_resume_positions = self.playback_session.resume_positions
         self._library_preview_song_id = ""
         self._export_song_id = ""
         self._processing_queue_drawer_open = False
@@ -2376,9 +2378,9 @@ class MainWindow(QMainWindow):
             _set_optional_label(self.library_status_label, "Name required.")
             return
 
-        queue = self.current_playback_queue
-        if queue is not None and queue.context == "library" and queue.source_id == song_id:
-            self.current_playback_queue = replace(queue, title=new_title)
+        session = MainWindow._playback_session(self)
+        if session.replace_title("library", song_id, new_title) is not None:
+            MainWindow._sync_playback_session_state(self, session)
         _set_optional_label(self.library_status_label, "Renamed")
         self._refresh_song_list()
         self._select_library_song(song_id)
@@ -3603,8 +3605,9 @@ class MainWindow(QMainWindow):
             self._handle_playback_error(queue, exc)
             return
 
-        self.current_playback_queue = queue
-        self._playback_position_ms = start_ms
+        session = MainWindow._playback_session(self)
+        session.refresh_queue(queue, position_ms=start_ms)
+        MainWindow._sync_playback_session_state(self, session)
         if queue.context == "output":
             _set_optional_label(self.output_status_label, "")
         elif queue.context == "library":
@@ -3614,7 +3617,9 @@ class MainWindow(QMainWindow):
         self.playback_timer.start()
 
     def _pause_playback(self) -> None:
-        self._playback_position_ms = self.player.position_ms()
+        session = MainWindow._playback_session(self)
+        session.set_position_ms(self.player.position_ms())
+        MainWindow._sync_playback_session_state(self, session)
         self.player.pause()
         self.playback_timer.stop()
         self._refresh_playback_ui(is_playing=False)
@@ -3624,7 +3629,9 @@ class MainWindow(QMainWindow):
         queue = self.current_playback_queue
         if queue is None:
             return
-        self._playback_position_ms = max(0, min(position_ms, queue.duration_ms))
+        session = MainWindow._playback_session(self)
+        session.set_position_ms(position_ms)
+        MainWindow._sync_playback_session_state(self, session)
         was_playing = self.player.is_playing()
         if was_playing and self._playback_position_ms >= queue.duration_ms:
             self.player.pause()
@@ -3841,8 +3848,9 @@ class MainWindow(QMainWindow):
         position_ms = self.player.position_ms() if was_playing else self._playback_position_ms
         refreshed_queue = self._studio_playback_queue(item.id, session, sources)
         self._studio_playback_sources = sources
-        self.current_playback_queue = refreshed_queue
-        self._playback_position_ms = max(0, min(position_ms, refreshed_queue.duration_ms))
+        playback_session = MainWindow._playback_session(self)
+        playback_session.refresh_queue(refreshed_queue, position_ms=position_ms)
+        MainWindow._sync_playback_session_state(self, playback_session)
 
         live_updated = False
         if same_layout:
@@ -3959,8 +3967,9 @@ class MainWindow(QMainWindow):
             duration_ms
         )
         self._studio_playback_sources = sources
-        self.current_playback_queue = refreshed_queue
-        self._playback_position_ms = max(0, min(position_ms, duration_ms))
+        playback_session = MainWindow._playback_session(self)
+        playback_session.refresh_queue(refreshed_queue, position_ms=position_ms)
+        MainWindow._sync_playback_session_state(self, playback_session)
         self._studio_playback_queue_dirty = False
         self.studio_editor.set_status("")
         if was_playing:
@@ -4002,14 +4011,19 @@ class MainWindow(QMainWindow):
         ):
             self._seek_global_playback(position_ms)
             return
-        self._playback_position_ms = max(0, position_ms)
+        playback_session = MainWindow._playback_session(self)
+        playback_session.set_position_ms(position_ms)
+        MainWindow._sync_playback_session_state(self, playback_session)
         self.studio_editor.set_playhead(self._playback_position_ms)
         duration_ms = session_duration_ms(self.studio_editor.session())
         self.studio_transport_bar.set_position(self._playback_position_ms, duration_ms)
         item = self.current_song or self.current_work_item
         if item is not None:
-            self._playback_resume_positions[("output", f"studio:{item.id}")] = (
-                self._playback_position_ms
+            playback_session.remember_position(
+                "output",
+                f"studio:{item.id}",
+                self._playback_position_ms,
+                duration_ms=duration_ms,
             )
 
     def _prepare_studio_playback_surface(self) -> None:
@@ -4039,16 +4053,21 @@ class MainWindow(QMainWindow):
             return
         if not self.player.is_playing():
             self.playback_timer.stop()
-            self._playback_position_ms = min(self.player.position_ms(), queue.duration_ms)
+            playback_session = MainWindow._playback_session(self)
+            playback_session.set_position_ms(min(self.player.position_ms(), queue.duration_ms))
+            MainWindow._sync_playback_session_state(self, playback_session)
             self._refresh_playback_ui(is_playing=False)
             self._update_output_playheads(self._playback_position_ms, queue.duration_ms)
             return
 
-        self._playback_position_ms = self.player.position_ms()
+        playback_session = MainWindow._playback_session(self)
+        playback_session.set_position_ms(self.player.position_ms())
+        MainWindow._sync_playback_session_state(self, playback_session)
         if self._playback_position_ms >= queue.duration_ms:
             self.player.pause()
             self.playback_timer.stop()
-            self._playback_position_ms = queue.duration_ms
+            playback_session.set_position_ms(queue.duration_ms)
+            MainWindow._sync_playback_session_state(self, playback_session)
             self._refresh_playback_ui(is_playing=False)
             self._update_output_playheads(queue.duration_ms, queue.duration_ms)
             return
@@ -4063,22 +4082,18 @@ class MainWindow(QMainWindow):
         auto_play: bool = False,
     ) -> None:
         previous_queue = self.current_playback_queue
-        if previous_queue is not None and (
-            queue is None
-            or previous_queue.context != queue.context
-            or previous_queue.source_id != queue.source_id
-        ):
-            previous_position = (
-                self.player.position_ms() if self.player.is_playing() else self._playback_position_ms
-            )
-            self._playback_resume_positions[(previous_queue.context, previous_queue.source_id)] = max(
-                0,
-                min(previous_position, previous_queue.duration_ms),
-            )
+        previous_position = (
+            self.player.position_ms() if self.player.is_playing() else self._playback_position_ms
+        )
+        session = MainWindow._playback_session(self)
+        session.set_queue(
+            queue,
+            position_ms=position_ms,
+            previous_position_ms=previous_position,
+        )
         self.player.stop()
         self.playback_timer.stop()
-        self.current_playback_queue = queue
-        self._playback_position_ms = 0
+        MainWindow._sync_playback_session_state(self, session)
         if queue is None:
             MainWindow._clear_result_transports(self)
             self._sync_playback_surfaces()
@@ -4089,7 +4104,6 @@ class MainWindow(QMainWindow):
         if queue.context == "library":
             MainWindow._clear_result_transports(self)
 
-        self._playback_position_ms = max(0, min(position_ms, queue.duration_ms))
         self._refresh_playback_ui(is_playing=False)
         self._update_output_playheads(self._playback_position_ms, queue.duration_ms)
         if auto_play:
@@ -4100,9 +4114,13 @@ class MainWindow(QMainWindow):
         if update_player:
             self.player.stop()
         self.playback_timer.stop()
-        self._playback_position_ms = 0
+        session = MainWindow._playback_session(self)
         if clear_queue:
-            self.current_playback_queue = None
+            session.clear_queue()
+        else:
+            session.stop()
+        MainWindow._sync_playback_session_state(self, session)
+        if clear_queue:
             MainWindow._clear_result_transports(self)
             if queue is not None and queue.context == "library":
                 self._library_preview_song_id = ""
@@ -4123,10 +4141,9 @@ class MainWindow(QMainWindow):
                 if self.player.is_playing()
                 else self._playback_position_ms
             )
-            self._playback_resume_positions[(queue.context, queue.source_id)] = max(
-                0,
-                min(position_ms, queue.duration_ms),
-            )
+            session = MainWindow._playback_session(self)
+            session.suspend(position_ms)
+            MainWindow._sync_playback_session_state(self, session)
             if queue.context == "library":
                 self._set_library_preview_expanded(queue.source_id, False)
             elif queue.context == "library_asset":
@@ -4134,13 +4151,7 @@ class MainWindow(QMainWindow):
         self._stop_playback(clear_queue=True)
 
     def _resume_position(self, queue: PlaybackQueue) -> int:
-        return max(
-            0,
-            min(
-                self._playback_resume_positions.get((queue.context, queue.source_id), 0),
-                queue.duration_ms,
-            ),
-        )
+        return MainWindow._playback_session(self).resume_position(queue)
 
     def _refresh_output_playback_queue(
         self,
@@ -4162,14 +4173,21 @@ class MainWindow(QMainWindow):
 
         if self._current_playback_context() == "output":
             if current_queue is not None and current_queue.source_id != queue.source_id:
-                self._playback_resume_positions[(current_queue.context, current_queue.source_id)] = max(
-                    0,
-                    min(position_ms, current_queue.duration_ms),
+                session = MainWindow._playback_session(self)
+                session.set_queue(
+                    queue,
+                    position_ms=session.resume_position(queue),
+                    previous_position_ms=position_ms,
                 )
-                self._set_playback_queue(queue, position_ms=self._resume_position(queue))
+                self.player.stop()
+                self.playback_timer.stop()
+                MainWindow._sync_playback_session_state(self, session)
+                self._refresh_playback_ui(is_playing=False)
+                self._update_output_playheads(self._playback_position_ms, queue.duration_ms)
                 return
-            self.current_playback_queue = queue
-            self._playback_position_ms = max(0, min(position_ms, queue.duration_ms))
+            session = MainWindow._playback_session(self)
+            session.refresh_queue(queue, position_ms=position_ms)
+            MainWindow._sync_playback_session_state(self, session)
             self._refresh_playback_ui(is_playing=was_playing)
             self._update_output_playheads(self._playback_position_ms, queue.duration_ms)
             if was_playing:
@@ -4251,10 +4269,10 @@ class MainWindow(QMainWindow):
         self._sync_video_playback(is_playing)
 
     def _current_playback_context(self) -> str:
-        return self.current_playback_queue.context if self.current_playback_queue is not None else ""
+        return MainWindow._playback_session(self).current_context()
 
     def _is_playing_context(self, context: str) -> bool:
-        return self.player.is_playing() and self._current_playback_context() == context
+        return self.player.is_playing() and MainWindow._playback_session(self).is_context(context)
 
     def _handle_playback_error(self, queue: PlaybackQueue, error: Exception) -> None:
         self._logger.error(
@@ -4651,6 +4669,23 @@ class MainWindow(QMainWindow):
     def _on_drive_share_deleted(self, target_id: str) -> None:
         self.model_workspace_page.set_share_deleted(target_id)
         self.export_page.set_share_deleted(target_id)
+
+    @staticmethod
+    def _playback_session(self) -> PlaybackSession:
+        session = getattr(self, "playback_session", None)
+        if isinstance(session, PlaybackSession):
+            return session
+        return PlaybackSession(
+            queue=getattr(self, "current_playback_queue", None),
+            position_ms=getattr(self, "_playback_position_ms", 0),
+            resume_positions=getattr(self, "_playback_resume_positions", {}),
+        )
+
+    @staticmethod
+    def _sync_playback_session_state(self, session: PlaybackSession) -> None:
+        self.current_playback_queue = session.queue
+        self._playback_position_ms = session.position_ms
+        self._playback_resume_positions = session.resume_positions
 
     def _start_drive_model_import(self, link: str) -> None:
         self.google_drive.import_model_link(link)

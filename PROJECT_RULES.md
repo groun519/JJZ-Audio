@@ -2,6 +2,8 @@
 
 This document records the working rules for this project.
 
+See [docs/CODE_PHILOSOPHY.md](docs/CODE_PHILOSOPHY.md) for the project-level responsibility and ownership model that guides code structure decisions.
+
 ## Workflow
 
 - Discuss and agree before changing implementation direction.
