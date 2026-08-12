@@ -21,3 +21,4 @@ venv/
 Thumbs.db
 /.test-*.png
 /.superpowers/
+/.worktrees/
