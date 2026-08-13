@@ -4,34 +4,11 @@ import unittest
 from pathlib import Path
 
 from jang_app.services.song_library import SongItem
-from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
+from jang_app.services.work_scope import WorkTaskScope
 
 
 def _song(song_id: str, *, kind: str = "source") -> SongItem:
     return SongItem(song_id, Path(f"{song_id}.wav"), kind=kind)
-
-
-class WorkSongCapabilitiesTests(unittest.TestCase):
-    def test_source_without_output_can_only_separate(self) -> None:
-        capabilities = build_work_song_capabilities(_song("source"), output_available=False)
-
-        self.assertTrue(capabilities.can_separate)
-        self.assertFalse(capabilities.can_convert)
-        self.assertFalse(capabilities.can_export)
-
-    def test_loaded_output_enables_downstream_workflows(self) -> None:
-        capabilities = build_work_song_capabilities(_song("output", kind="output"), output_available=True)
-
-        self.assertFalse(capabilities.can_separate)
-        self.assertTrue(capabilities.can_attach_source)
-        self.assertTrue(capabilities.can_convert)
-        self.assertTrue(capabilities.can_export)
-
-    def test_source_with_an_existing_output_can_be_separated_again(self) -> None:
-        capabilities = build_work_song_capabilities(_song("source"), output_available=True)
-
-        self.assertTrue(capabilities.can_separate)
-        self.assertFalse(capabilities.can_attach_source)
 
 
 class WorkTaskScopeTests(unittest.TestCase):

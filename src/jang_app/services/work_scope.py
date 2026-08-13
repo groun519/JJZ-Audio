@@ -7,28 +7,6 @@ from jang_app.services.song_library import SongItem
 
 
 @dataclass(frozen=True)
-class WorkSongCapabilities:
-    can_separate: bool = False
-    can_attach_source: bool = False
-    can_convert: bool = False
-    can_export: bool = False
-
-
-def build_work_song_capabilities(
-    item: SongItem | None,
-    *,
-    output_available: bool,
-) -> WorkSongCapabilities:
-    has_output = item is not None and output_available
-    return WorkSongCapabilities(
-        can_separate=item is not None and item.kind == "source",
-        can_attach_source=item is not None and item.kind == "output",
-        can_convert=has_output,
-        can_export=has_output,
-    )
-
-
-@dataclass(frozen=True)
 class OutputRefreshTarget:
     preferred_job_dir: Path | None
     select_fallback: bool

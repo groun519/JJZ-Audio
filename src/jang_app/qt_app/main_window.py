@@ -194,8 +194,12 @@ from jang_app.services.workspace_playback import (
     scope_label,
     scope_track_ids,
 )
-from jang_app.services.work_scope import WorkTaskScope, build_work_song_capabilities
-from jang_app.services.work_song import WorkSongStore
+from jang_app.services.work_scope import WorkTaskScope
+from jang_app.services.work_song import (
+    WorkSongSession,
+    WorkSongStore,
+    build_work_song_capabilities,
+)
 from jang_app.services.youtube_download import YouTubeDownloadResult, download_youtube_audio
 from jang_app.version import __version__
 
@@ -220,7 +224,8 @@ class MainWindow(QMainWindow):
         set_language(settings.language)
         self.library = SongLibrary()
         self.work_song_store = work_song_store or WorkSongStore()
-        self._work_song_ready = False
+        self.work_song_session = WorkSongSession(self.work_song_store)
+        self._work_song_ready = self.work_song_session.ready
         self._work_song_load_worker: TaskWorker | None = None
         self._work_song_loading_id = ""
         self.player = AudioPlayer()
@@ -242,8 +247,8 @@ class MainWindow(QMainWindow):
         )
         self._action_task_ids: dict[int, str] = {}
         self._song_items_by_id: dict[str, SongItem] = {}
-        self.current_song: SongItem | None = None
-        self.current_work_item: SongItem | None = None
+        self.current_song: SongItem | None = self.work_song_session.source_item
+        self.current_work_item: SongItem | None = self.work_song_session.item
         self.current_output_set: OutputSoundSet | None = None
         self.playback_session = PlaybackSession()
         self.current_playback_queue: PlaybackQueue | None = self.playback_session.queue
@@ -1958,7 +1963,6 @@ class MainWindow(QMainWindow):
         selected_id = self._browsed_song_id()
         detail_song_id = self.library_details_panel.song_id
         detail_is_open = self.library_content_stack.currentIndex() == 1
-        work_item_id = self.current_work_item.id if self.current_work_item is not None else ""
         self.song_list.blockSignals(True)
         self.song_list.clear()
         items = self.library.items()
@@ -1967,12 +1971,9 @@ class MainWindow(QMainWindow):
             if self._current_playback_context() == "library":
                 self._stop_playback(clear_queue=True)
             self._library_preview_song_id = ""
-        self.current_work_item = self._song_items_by_id.get(work_item_id)
-        self.current_song = (
-            self.current_work_item
-            if self.current_work_item is not None and self.current_work_item.kind == "source"
-            else None
-        )
+        session = MainWindow._work_song_session(self)
+        session.refresh(self._song_items_by_id)
+        MainWindow._sync_work_song_session_state(self, session)
         sort_mode = str(self.library_sort_combo.currentData() or "newest")
         for item in sort_song_items(items, sort_mode):
             metadata = build_song_display_metadata(item, self.settings.output_root)
@@ -2349,7 +2350,7 @@ class MainWindow(QMainWindow):
         )
 
     def _sync_work_song_rows(self) -> None:
-        work_song_id = self.current_work_item.id if self.current_work_item is not None else ""
+        work_song_id = MainWindow._work_song_session(self).selected_id
         for index in range(self.song_list.count()):
             item = self.song_list.item(index)
             row = self.song_list.itemWidget(item)
@@ -2361,7 +2362,7 @@ class MainWindow(QMainWindow):
     def _sync_navigation_work_song_selector(self) -> None:
         if not hasattr(self, "primary_navigation"):
             return
-        selected_id = self.current_work_item.id if self.current_work_item is not None else ""
+        selected_id = MainWindow._work_song_session(self).selected_id
         songs = sort_song_items(list(self._song_items_by_id.values()), "newest")
         self.primary_navigation.set_work_songs(
             ((song.id, song.title) for song in songs),
@@ -2369,20 +2370,24 @@ class MainWindow(QMainWindow):
         )
 
     def _on_navigation_work_song_changed(self, song_id: str) -> None:
-        if getattr(self, "_work_song_load_worker", None) is not None:
+        session = MainWindow._work_song_session(self)
+        route = session.navigation_route(
+            song_id,
+            self._song_items_by_id,
+            load_in_progress=getattr(self, "_work_song_load_worker", None) is not None,
+        )
+        if route.action == "sync_selector":
             self._sync_navigation_work_song_selector()
             return
-        if not song_id:
+        if route.action == "clear":
             self._set_current_song(None)
             return
-        song = self._song_items_by_id.get(song_id)
-        if song is None:
-            self._sync_navigation_work_song_selector()
+        if route.song is None:
             return
-        if getattr(song, "output_job_dir", None) is not None:
-            self._start_library_work_song_load(song)
+        if route.action == "load_output":
+            self._start_library_work_song_load(route.song)
             return
-        self._select_work_song(song)
+        self._select_work_song(route.song)
 
     def _browsed_song(self) -> SongItem | None:
         current_item = self.song_list.currentItem()
@@ -2468,7 +2473,7 @@ class MainWindow(QMainWindow):
         self._refresh_song_list()
 
     def _sync_result_song_titles(self) -> None:
-        title = self.current_work_item.title if self.current_work_item is not None else ""
+        title = MainWindow._work_song_session(self).title
         if hasattr(self, "separation_results_panel"):
             self.separation_results_panel.set_song_title(title)
         if hasattr(self, "vocal_results_panel"):
@@ -2506,16 +2511,15 @@ class MainWindow(QMainWindow):
         return True
 
     def _assign_work_item(self, item: SongItem | None, *, persist: bool = True) -> None:
-        self.current_work_item = item
-        self.current_song = item if item is not None and item.kind == "source" else None
+        session = MainWindow._work_song_session(self)
+        try:
+            session.assign(item, persist=persist)
+        except OSError as exc:
+            _set_optional_label(self.output_status_label, f"Work song failed: {_last_error_line(str(exc))}")
+        MainWindow._sync_work_song_session_state(self, session)
         self.separation_action.set_progress(0)
         self.separation_action.set_status("")
         self._sync_result_song_titles()
-        if persist and self._work_song_ready:
-            try:
-                self.work_song_store.save(item.id if item is not None else "")
-            except OSError as exc:
-                _set_optional_label(self.output_status_label, f"Work song failed: {_last_error_line(str(exc))}")
         if hasattr(self, "song_list"):
             self._sync_work_song_rows()
         self._sync_work_song_navigation()
@@ -2528,7 +2532,7 @@ class MainWindow(QMainWindow):
         sync_selector = getattr(self, "_sync_navigation_work_song_selector", None)
         if callable(sync_selector):
             sync_selector()
-        has_work_song = self.current_work_item is not None
+        has_work_song = MainWindow._work_song_session(self).has_selection()
         locked_tooltip = tr("Select a work song in Library to unlock this page.")
         for page_id in WORK_SONG_REQUIRED_PAGES:
             self.primary_navigation.set_page_enabled(
@@ -2545,8 +2549,7 @@ class MainWindow(QMainWindow):
             self._navigate_to_page(PAGE_LIBRARY)
 
     def _sync_work_song_capabilities(self) -> None:
-        capabilities = build_work_song_capabilities(
-            self.current_work_item,
+        capabilities = MainWindow._work_song_session(self).capabilities(
             output_available=self._current_output_matches_work_song(),
         )
         self.separation_action.set_button_text(
@@ -2638,18 +2641,15 @@ class MainWindow(QMainWindow):
         )
 
     def _restore_work_song(self) -> None:
-        state = self.work_song_store.load()
-        item = self._song_items_by_id.get(state.song_id) if state.song_id else None
-        if item is not None and item.kind == "output":
-            self._set_output_work_song(item, persist=False)
+        session = MainWindow._work_song_session(self)
+        route = session.restore_route(self._song_items_by_id)
+        MainWindow._sync_work_song_session_state(self, session)
+        if route.action == "load_output" and route.song is not None:
+            self._set_output_work_song(route.song, persist=False)
+        elif route.action == "select" and route.song is not None:
+            self._set_current_song(route.song, persist=False)
         else:
-            self._set_current_song(item, persist=False)
-        self._work_song_ready = True
-        if state.song_id and item is None:
-            try:
-                self.work_song_store.save("")
-            except OSError:
-                pass
+            self._set_current_song(None, persist=False)
 
     def _select_work_song(self, song: SongItem) -> None:
         if song.kind == "output":
@@ -2658,18 +2658,22 @@ class MainWindow(QMainWindow):
             self._set_current_song(song)
 
     def _toggle_library_work_song(self, song_id: str) -> None:
-        if self._work_song_load_worker is not None:
+        route = MainWindow._work_song_session(self).toggle_route(
+            song_id,
+            self._song_items_by_id,
+            load_in_progress=self._work_song_load_worker is not None,
+        )
+        if route.action == "ignore":
             return
-        song = self._song_items_by_id.get(song_id)
-        if song is None:
-            return
-        if self.current_work_item is not None and self.current_work_item.id == song_id:
+        if route.action == "clear":
             self._set_current_song(None)
             return
-        if song.output_job_dir is None:
-            self._select_work_song(song)
+        if route.song is None:
             return
-        self._start_library_work_song_load(song)
+        if route.action == "load_output":
+            self._start_library_work_song_load(route.song)
+            return
+        self._select_work_song(route.song)
 
     def _start_library_work_song_load(self, song: SongItem) -> None:
         if song.output_job_dir is None:
@@ -4711,6 +4715,23 @@ class MainWindow(QMainWindow):
         self.current_playback_queue = session.queue
         self._playback_position_ms = session.position_ms
         self._playback_resume_positions = session.resume_positions
+
+    @staticmethod
+    def _work_song_session(self) -> WorkSongSession:
+        session = getattr(self, "work_song_session", None)
+        if isinstance(session, WorkSongSession):
+            return session
+        return WorkSongSession(
+            getattr(self, "work_song_store", None),
+            item=getattr(self, "current_work_item", None),
+            ready=getattr(self, "_work_song_ready", False),
+        )
+
+    @staticmethod
+    def _sync_work_song_session_state(self, session: WorkSongSession) -> None:
+        self.current_work_item = session.item
+        self.current_song = session.source_item
+        self._work_song_ready = session.ready
 
     def _start_drive_model_import(self, link: str) -> None:
         self.google_drive.import_model_link(link)
