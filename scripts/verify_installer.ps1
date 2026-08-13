@@ -260,7 +260,7 @@ Assert-PreservedFiles $immutableSourceFiles "managed storage migration"
 
 $managedFiles = @(
     (Join-Path $managedStorageRoot "Data\library\songs\upgrade-song\song.json"),
-    (Join-Path $managedStorageRoot "Data\library\songs\upgrade-song\01_source\audio\upgrade-song.wav"),
+    (Join-Path $managedStorageRoot "Data\library\songs\upgrade-song\01_source\audio\source.wav"),
     (Join-Path $managedStorageRoot "Data\library\songs\upgrade-song\02_vocal\separations\run-upgrade\htdemucs\upgrade-song\vocals.wav"),
     (Join-Path $managedStorageRoot "Data\models\catalog.json"),
     (Join-Path $managedStorageRoot "Output\exports\upgrade-mix.wav"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from jang_app.services.app_bootstrap import prepare_app_environment
@@ -33,7 +34,7 @@ def main() -> int:
             f"Expected legacy storage version 1, found {current.storage_version}."
         )
 
-    before_song_ids, before_model_ids = _library_ids(current)
+    before_song_ids, before_model_ids = _legacy_library_ids(current)
     _require_expected_records(before_song_ids, before_model_ids, "before migration")
 
     configured = migrate_storage(plan_storage_migration(current, target_root))
@@ -77,7 +78,7 @@ def main() -> int:
         / "upgrade-song"
         / "01_source"
         / "audio"
-        / "upgrade-song.wav",
+        / "source.wav",
         target_root
         / "Data"
         / "library"
@@ -129,6 +130,27 @@ def _library_ids(paths: AppPaths) -> tuple[set[str], set[str]]:
         catalog_file=paths.catalog_file,
     ).records()
     return {song.id for song in songs}, {model.model_id for model in models}
+
+
+def _legacy_library_ids(paths: AppPaths) -> tuple[set[str], set[str]]:
+    song_ids: set[str] = set()
+    for manifest in (paths.workspace_root / "library" / "songs").glob("*/song.json"):
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        song_id = data.get("id")
+        if isinstance(song_id, str) and song_id:
+            song_ids.add(song_id)
+
+    model_ids: set[str] = set()
+    catalog = paths.workspace_root / "models" / "catalog.json"
+    if catalog.is_file():
+        data = json.loads(catalog.read_text(encoding="utf-8"))
+        for record in data.get("models", ()):
+            if not isinstance(record, dict):
+                continue
+            model_id = record.get("id")
+            if isinstance(model_id, str) and model_id:
+                model_ids.add(model_id)
+    return song_ids, model_ids
 
 
 def _require_expected_records(
