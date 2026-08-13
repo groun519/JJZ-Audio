@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 0.3.2 - 2026-08-13
+
+### Added
+
+- Added a Studio media foundation that accepts images and video, places reusable media in the timeline, keeps preview playback synchronized, and renders the arranged result through FFmpeg.
+- Added dedicated playback and work-song sessions so queue state, playhead position, resume positions, and the active production song have explicit owners outside the main window.
+- Added Studio character effects for radio tone, ring modulation, bit reduction, distortion, and reusable multi-effect voice presets.
+- Added Level Match so a converted vocal can follow the loudness movement of its original reference without replacing the converted tone.
+- Added audio delivery presets for master WAV, lossless FLAC, high-quality MP3, Discord-sized Opus, and custom output settings.
+- Added video delivery presets with explicit resolution, frame rate, quality, encoding-speed, and audio-bitrate controls.
+- Added reusable RVC inference presets and controls for index rate, median filtering, envelope mix, and consonant protection.
+
+### Changed
+
+- Made the Studio sound pool more compact and added direct removal of managed sound assets without leaving the workspace.
+- Centralized work-song routing and capability decisions so Separation, Conversion, Studio, and Export resolve the same active song consistently.
+- Reorganized Export into dedicated audio and video workflows with one direct export action and inline output preview, rename, folder, and Drive-sharing actions.
+- Expanded Studio effect editing with presets, plain-language control help, real-time parameter updates, and matching offline export processing.
+- Clarified system diagnostics by reporting voice-conversion acceleration and model-training devices separately, including AMD DirectML conversion with CPU training.
+
+### Fixed
+
+- Prevented Studio sound cards and other composite widgets from briefly appearing as separate windows while pages are being constructed.
+- Reused unchanged Studio sound cards instead of rebuilding every waveform card during page entry, removing the visible black-frame transition.
+- Kept draggable Studio playheads, clips, splitters, and transport controls visually and behaviorally consistent across workspace layouts.
+- Preserved shared-file state and progress directly on export rows and improved error details for Drive sharing and RVC conversion.
+
+### Quality
+
+- Documented the project responsibility model and added regression coverage for playback ownership, work-song restoration, Studio media, effects, level matching, sound-pool reuse, export formats, diagnostics, and video compatibility.
+
 ## 0.3.1 - 2026-08-12
 
 ### Added
