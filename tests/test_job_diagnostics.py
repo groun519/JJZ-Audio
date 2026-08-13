@@ -59,6 +59,16 @@ class JobDiagnosticsTests(unittest.TestCase):
     def test_classifies_common_runtime_failures(self) -> None:
         self.assertEqual(classify_error("CUDA out of memory").code, "CUDA_OUT_OF_MEMORY")
         self.assertEqual(
+            classify_error("OpenBLAS: malloc failed in gemm_driver").code,
+            "RVC_MEMORY_EXHAUSTED",
+        )
+        self.assertEqual(
+            classify_error(
+                "No module named 'triton'\nfaiss.swigfaiss.py\nWindows fatal exception: access violation"
+            ).code,
+            "RVC_FAISS_RUNTIME_CRASH",
+        )
+        self.assertEqual(
             classify_error("CUDA error: no kernel image is available for execution").code,
             "CUDA_ARCHITECTURE_UNSUPPORTED",
         )

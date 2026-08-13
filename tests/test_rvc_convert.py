@@ -8,6 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+import soundfile as sf
+
 from jang_app.config import FFMPEG_BIN_DIR
 from jang_app.pipeline import rvc_convert
 from jang_app.pipeline.rvc_convert import RvcConversionError
@@ -155,6 +158,60 @@ class RvcConvertTests(unittest.TestCase):
             self.assertEqual(result.requested_device, settings.device)
             self.assertEqual(result.effective_device, "cpu")
             self.assertEqual(result.inference, settings.inference)
+
+    def test_long_conversion_automatically_runs_overlapping_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rvc_root = root / "rvc"
+            source = root / "vocal.wav"
+            model = rvc_root / "weights" / "voice.pth"
+            workspace = root / "workspace"
+            sf.write(
+                source,
+                np.linspace(-0.5, 0.5, 3_000, dtype=np.float32),
+                1_000,
+                subtype="FLOAT",
+            )
+            for path in (model, rvc_root / "runtime" / "python.exe", rvc_root / "infer_cli.py"):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"test")
+            workspace.mkdir()
+            capabilities = RvcInferenceCapabilities(
+                imports_ready=True,
+                cpu_ready=True,
+                faiss_ready=True,
+                cuda_available=False,
+                cuda_ready=False,
+            )
+            selection = RvcDeviceSelection("cpu", "cpu", capabilities)
+            settings = RvcSettings(root=rvc_root, voice_model="weights/voice.pth", device="cpu")
+            progress: list[int] = []
+
+            def complete_chunk(args, **_kwargs):
+                audio, sample_rate = sf.read(args[4], dtype="float32")
+                sf.write(args[5], audio, sample_rate, subtype="PCM_16")
+                return CommandResult(args, 0, "", "")
+
+            with (
+                patch.object(rvc_convert, "select_rvc_inference_device", return_value=selection),
+                patch.object(rvc_convert, "_prepare_rvc_workspace", return_value=workspace),
+                patch.object(rvc_convert, "_RVC_AUTO_CHUNK_THRESHOLD_SECONDS", 1.0),
+                patch.object(rvc_convert, "_RVC_AUTO_CHUNK_CORE_SECONDS", 1.0),
+                patch.object(rvc_convert, "_RVC_AUTO_CHUNK_CONTEXT_SECONDS", 0.1),
+                patch.object(rvc_convert, "run_command", side_effect=complete_chunk) as command,
+            ):
+                result = rvc_convert.convert_vocal_with_rvc(
+                    source,
+                    root / "output",
+                    settings,
+                    progress_callback=progress.append,
+                )
+
+            rendered, sample_rate = sf.read(result.output_path, dtype="float32")
+            self.assertEqual(command.call_count, 3)
+            self.assertEqual(sample_rate, 1_000)
+            self.assertEqual(len(rendered), 3_000)
+            self.assertEqual(progress, [33, 67, 100])
 
     def test_conversion_failure_includes_rvc_process_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

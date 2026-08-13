@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -10,6 +11,11 @@ from jang_app.config import RVC_WORKSPACE_DIR
 from jang_app.services.app_logging import get_logger
 from jang_app.services.command import run_command
 from jang_app.services.managed_files import link_or_copy_file
+from jang_app.services.overlapping_audio_chunks import (
+    audio_requires_chunking,
+    stitch_crossfaded_audio_chunks,
+    write_overlapping_audio_chunks,
+)
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 from jang_app.services.rvc_inference_runtime import (
@@ -24,6 +30,10 @@ from jang_app.services.tool_workspace import ToolWorkspace
 # The bundled SciPy runtime still opens WAV outputs through the legacy Windows
 # file API. Keep conversion paths below MAX_PATH with room for collision suffixes.
 _RVC_SAFE_OUTPUT_PATH_LENGTH = 240
+_RVC_AUTO_CHUNK_THRESHOLD_SECONDS = 8 * 60
+_RVC_AUTO_CHUNK_CORE_SECONDS = 4 * 60
+_RVC_AUTO_CHUNK_CONTEXT_SECONDS = 2
+_RVC_AUTO_CHUNK_SIZE_BYTES = 512 * 1024 * 1024
 
 
 class RvcConversionError(RuntimeError):
@@ -45,7 +55,12 @@ class RvcConversionResult:
     inference: RvcInferenceSettings = field(default_factory=RvcInferenceSettings)
 
 
-def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSettings) -> RvcConversionResult:
+def convert_vocal_with_rvc(
+    input_path: Path,
+    output_dir: Path,
+    settings: RvcSettings,
+    progress_callback: Callable[[int], None] | None = None,
+) -> RvcConversionResult:
     logger = get_logger()
     source = input_path.expanduser().resolve()
     rvc_root = settings.root.expanduser().resolve()
@@ -122,40 +137,57 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
         )
         staged_output = job.root / "o.wav"
         _require_safe_rvc_runtime_paths(staged_input, staged_output)
-        completed = run_command(
-            [
-                runtime_python,
-                wrapper_script,
-                rvc_root,
-                str(settings.pitch),
+        command_environment = build_rvc_environment(rvc_root)
+        if _requires_automatic_chunking(staged_input):
+            chunks = write_overlapping_audio_chunks(
                 staged_input,
-                staged_output,
-                staged_model,
-                str(staged_index) if staged_index else "",
-                device.effective_device,
-                settings.f0_method,
-                _cli_number(settings.inference.index_rate),
-                str(settings.inference.filter_radius),
-                _cli_number(settings.inference.rms_mix_rate),
-                _cli_number(settings.inference.protect),
-            ],
-            cwd=workspace,
-            env=build_rvc_environment(rvc_root),
-        )
-        if completed.returncode != 0:
-            process_output = text_tail(combined_output(completed.stdout, completed.stderr))
-            logger.error(
-                "RVC conversion failed with exit code %s\n%s",
-                completed.returncode,
-                process_output,
+                job.root / "chunks",
+                core_seconds=_RVC_AUTO_CHUNK_CORE_SECONDS,
+                context_seconds=_RVC_AUTO_CHUNK_CONTEXT_SECONDS,
             )
-            raise RvcConversionError(
-                _conversion_failure_message(
-                    completed.returncode,
-                    device.effective_device,
-                    process_output,
+            logger.info(
+                "RVC automatic chunking enabled: chunks=%s core_seconds=%s context_seconds=%s",
+                len(chunks),
+                _RVC_AUTO_CHUNK_CORE_SECONDS,
+                _RVC_AUTO_CHUNK_CONTEXT_SECONDS,
+            )
+            converted_chunks: list[Path] = []
+            for chunk in chunks:
+                chunk_output = chunk.path.with_name(f"c{chunk.index:03d}_o.wav")
+                _run_rvc_conversion_command(
+                    runtime_python=runtime_python,
+                    wrapper_script=wrapper_script,
+                    rvc_root=rvc_root,
+                    input_path=chunk.path,
+                    output_path=chunk_output,
+                    model_path=staged_model,
+                    index_path=staged_index,
+                    device=device.effective_device,
+                    settings=settings,
+                    workspace=workspace,
+                    environment=command_environment,
+                    chunk_label=f"{chunk.index + 1}/{len(chunks)}",
                 )
+                converted_chunks.append(chunk_output)
+                if progress_callback is not None:
+                    progress_callback(round((chunk.index + 1) * 100 / len(chunks)))
+            stitch_crossfaded_audio_chunks(chunks, converted_chunks, staged_output)
+        else:
+            _run_rvc_conversion_command(
+                runtime_python=runtime_python,
+                wrapper_script=wrapper_script,
+                rvc_root=rvc_root,
+                input_path=staged_input,
+                output_path=staged_output,
+                model_path=staged_model,
+                index_path=staged_index,
+                device=device.effective_device,
+                settings=settings,
+                workspace=workspace,
+                environment=command_environment,
             )
+            if progress_callback is not None:
+                progress_callback(100)
         if not staged_output.is_file():
             raise RvcConversionError(
                 f"RVC conversion did not create a staged output: {staged_output}"
@@ -176,6 +208,66 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
         f0_method=settings.f0_method,
         inference=settings.inference,
     )
+
+
+def _requires_automatic_chunking(source: Path) -> bool:
+    return audio_requires_chunking(
+        source,
+        duration_threshold_seconds=_RVC_AUTO_CHUNK_THRESHOLD_SECONDS,
+        size_threshold_bytes=_RVC_AUTO_CHUNK_SIZE_BYTES,
+    )
+
+
+def _run_rvc_conversion_command(
+    *,
+    runtime_python: Path,
+    wrapper_script: Path,
+    rvc_root: Path,
+    input_path: Path,
+    output_path: Path,
+    model_path: Path,
+    index_path: Path | None,
+    device: str,
+    settings: RvcSettings,
+    workspace: Path,
+    environment: Mapping[str, str],
+    chunk_label: str = "",
+) -> None:
+    completed = run_command(
+        [
+            runtime_python,
+            wrapper_script,
+            rvc_root,
+            str(settings.pitch),
+            input_path,
+            output_path,
+            model_path,
+            str(index_path) if index_path else "",
+            device,
+            settings.f0_method,
+            _cli_number(settings.inference.index_rate),
+            str(settings.inference.filter_radius),
+            _cli_number(settings.inference.rms_mix_rate),
+            _cli_number(settings.inference.protect),
+        ],
+        cwd=workspace,
+        env=environment,
+    )
+    if completed.returncode != 0:
+        process_output = text_tail(combined_output(completed.stdout, completed.stderr))
+        get_logger().error(
+            "RVC conversion failed%s with exit code %s\n%s",
+            f" in automatic chunk {chunk_label}" if chunk_label else "",
+            completed.returncode,
+            process_output,
+        )
+        message = _conversion_failure_message(completed.returncode, device, process_output)
+        if chunk_label:
+            message = f"RVC automatic segment {chunk_label} failed.\n\n{message}"
+        raise RvcConversionError(message)
+    if not output_path.is_file():
+        detail = f" for automatic segment {chunk_label}" if chunk_label else ""
+        raise RvcConversionError(f"RVC conversion did not create an output{detail}: {output_path}")
 
 
 def list_voice_models(rvc_root: Path) -> list[str]:

@@ -5127,7 +5127,12 @@ def _resolved_path_key(path: Path | None) -> str:
 
 def _convert_with_progress(input_path: Path, output_dir: Path, settings: RvcSettings, progress) -> object:
     progress(12)
-    result = convert_vocal_with_rvc(input_path, output_dir, settings)
+    result = convert_vocal_with_rvc(
+        input_path,
+        output_dir,
+        settings,
+        progress_callback=lambda value: progress(12 + round(value * 0.86)),
+    )
     progress(100)
     return result
 

@@ -51,6 +51,20 @@ def diagnostic_task(task_id: str) -> Iterator[None]:
 
 def classify_error(error: str) -> ErrorClassification:
     value = error.lower()
+    if "openblas: malloc failed" in value or "cannot allocate memory" in value:
+        return ErrorClassification(
+            "RVC_MEMORY_EXHAUSTED",
+            "RVC exhausted available system memory while processing the audio.",
+        )
+    if "faiss" in value and (
+        "access violation" in value
+        or "3221225477" in value
+        or "0xc0000005" in value
+    ):
+        return ErrorClassification(
+            "RVC_FAISS_RUNTIME_CRASH",
+            "The RVC index search runtime crashed while processing the audio.",
+        )
     rules = (
         (
             (
