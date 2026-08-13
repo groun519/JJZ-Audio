@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## 0.3.3 - 2026-08-14
+
+### Added
+
+- Added precise model evaluation with a bundled reference vocal, pitch-shift analysis from -24 to +24 semitones, cached results, and recommended, clean, and usable ranges.
+- Added complete model-work Google Drive packages that preserve training material, edited clips, analysis results, checkpoints, and inference artifacts.
+- Added explicit work-conversion and work-output sessions so conversion inputs, generated takes, and output selection have stable owners.
+
+### Changed
+
+- Expanded model training status with live activity details, elapsed and remaining time, resume or restart recovery, and low-memory retry guidance.
+- Kept the processing queue available when empty, expanded its active-task summary, and added direct navigation between queue and diagnostic logs.
+- Added hover model deletion with confirmation and safe cleanup of JJZero-owned model files and training work.
+- Checked Google Drive capacity before packaging and uploading, while reusing existing shares without duplicate work.
+
+### Fixed
+
+- Stabilized long-track RVC conversion with overlapping chunks, compact managed work paths, and collision-safe output names.
+- Prevented inactive conversion jobs from replacing the current song's playback or selected take.
+- Recovered missing feature-extraction outputs on CPU, preserved valid previous outputs, and retried CUDA out-of-memory training with a smaller batch.
+- Kept ROCm training on the supported single-device path and prevented explicit DirectML requests from silently falling back to CPU.
+- Corrected waveform remainder sampling so long waveforms and clip positions remain aligned with playback duration.
+- Prevented dynamic queue and log widgets from appearing as unintended top-level windows.
+
+### Quality
+
+- Added regression coverage for model evaluation, training activity and recovery, model-work sharing, complete model deletion, long conversion, AMD device selection, queue navigation, waveform alignment, and output ownership.
+
 ## 0.3.2 - 2026-08-13
 
 ### Added

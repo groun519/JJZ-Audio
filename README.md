@@ -20,9 +20,9 @@
 </p>
 
 > [!NOTE]
-> 이 문서는 정식 배포된 **JJZero Audio 0.3.2** 기준으로 작성되어 있습니다. 설치 파일은 [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest)에서 받을 수 있습니다.
+> 이 문서는 정식 배포된 **JJZero Audio 0.3.3** 기준으로 작성되어 있습니다. 설치 파일은 [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest)에서 받을 수 있습니다.
 
-Studio 음성 효과, Level Match와 내보내기 변경 사항은 [0.3.2 패치노트](docs/releases/0.3.2.md)에서 확인할 수 있습니다.
+모델 평가, 학습 복구와 RVC 안정성 변경 사항은 [0.3.3 패치노트](docs/releases/0.3.3.md)에서 확인할 수 있습니다.
 
 <p align="center">
   <img src="docs/assets/releases/0.3.0/separation-pools.png" width="920" alt="JJZero Audio 0.3.0 보컬·반주 결과 선택 화면">
