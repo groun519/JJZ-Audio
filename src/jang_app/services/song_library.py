@@ -10,10 +10,18 @@ from pathlib import Path
 
 from jang_app.config import DOWNLOAD_OUTPUT_DIR, SONG_LIBRARY_FILE, SUPPORTED_AUDIO_EXTENSIONS
 from jang_app.services.audio_export import AudioMixSource
+from jang_app.services.audio_export_settings import AudioExportSettings
+from jang_app.services.export_catalog import rename_exported_file
 from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set
 from jang_app.services.song_asset_removal import SongAssetRemovalResult, SongAssetRemovalService
 from jang_app.services.song_assets import SongAssetDetails, build_song_asset_details
-from jang_app.services.song_package import SongOutputReference, SongPackage, SongPackageStore, VOCAL_STAGE
+from jang_app.services.song_package import (
+    EXPORT_STAGE,
+    VOCAL_STAGE,
+    SongOutputReference,
+    SongPackage,
+    SongPackageStore,
+)
 from jang_app.services.separation_recipe import load_separation_run
 from jang_app.services.song_video_export import (
     SongVideoExport,
@@ -36,6 +44,7 @@ from jang_app.services.studio_session import (
     save_studio_session as save_package_studio_session,
 )
 from jang_app.services.video_source import VideoSource, VideoSourceStore
+from jang_app.services.video_export_settings import VideoExportSettings
 
 
 @dataclass(frozen=True)
@@ -269,9 +278,19 @@ class SongLibrary:
         self._video_sources.clear(package)
         return self._video_sources.resolve(package)
 
-    def export_audio_mix(self, item_id: str) -> Path:
+    def export_audio_mix(
+        self,
+        item_id: str,
+        settings: AudioExportSettings | None = None,
+        progress: Callable[[int], None] | None = None,
+    ) -> Path:
         package = self._store.require(item_id)
-        return export_song_mix(package, load_package_studio_session(package))
+        return export_song_mix(
+            package,
+            load_package_studio_session(package),
+            settings,
+            progress,
+        )
 
     def audio_exports(self, item_id: str) -> tuple[SongAudioExport, ...]:
         return list_song_audio_exports(self._store.require(item_id))
@@ -282,6 +301,7 @@ class SongLibrary:
     def render_video(
         self,
         item_id: str,
+        settings: VideoExportSettings | None = None,
         progress: Callable[[int], None] | None = None,
     ) -> Path:
         package = self._store.require(item_id)
@@ -289,7 +309,8 @@ class SongLibrary:
             package,
             self._video_sources.resolve(package),
             load_package_studio_session(package),
-            progress,
+            progress=progress,
+            settings=settings,
         )
 
     def video_export_dir(self, item_id: str) -> Path:
@@ -297,6 +318,16 @@ class SongLibrary:
 
     def video_exports(self, item_id: str) -> tuple[SongVideoExport, ...]:
         return list_song_video_exports(self._store.require(item_id))
+
+    def rename_export(self, item_id: str, source: Path, name: str) -> Path:
+        package = self._store.require(item_id)
+        export_root = (package.folder / EXPORT_STAGE).resolve()
+        resolved = source.expanduser().resolve()
+        try:
+            resolved.relative_to(export_root)
+        except ValueError as exc:
+            raise ValueError("Exported file is outside the selected song package.") from exc
+        return rename_exported_file(resolved, name)
 
     def vocal_separation_root(self, item_id: str) -> Path:
         return self._store.vocal_separation_root(item_id)

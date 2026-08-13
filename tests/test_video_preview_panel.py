@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from jang_app.qt_app.theme import build_stylesheet
 from jang_app.qt_app.video_preview_panel import VideoPlaybackSynchronizer, VideoPreviewPanel
 from jang_app.qt_app.widgets import DangerIconButton
+from jang_app.services.studio_session import MEDIA_FILL, StudioMediaSettings
 from jang_app.services.video_source import VIDEO_KIND_FILE, VIDEO_KIND_YOUTUBE, VideoSource
 
 
@@ -82,18 +84,49 @@ class VideoPreviewPanelTests(unittest.TestCase):
     def test_timeline_media_switches_between_image_and_empty_gap(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             image = Path(temporary) / "cover.png"
-            image.write_bytes(b"image")
+            source = QImage(320, 180, QImage.Format.Format_RGB32)
+            source.fill(QColor("#cc4422"))
+            self.assertTrue(source.save(str(image)))
             panel = VideoPreviewPanel()
             panel.set_source(VideoSource(), enabled=True)
             panel.set_active(True)
+            panel.image_widget.resize(640, 360)
+            settings = StudioMediaSettings(
+                fit_mode=MEDIA_FILL,
+                scale_percent=125,
+                offset_x_percent=10,
+            )
 
-            panel.sync_timeline_media(image, "image", 0, True)
+            panel.sync_timeline_media(image, "image", 0, True, settings)
             self.assertIs(panel.stack.currentWidget(), panel.image_widget)
             self.assertEqual(panel._preview_path, image.resolve())
+            self.assertEqual(panel.image_widget._settings, settings)
+            self.assertFalse(panel.image_widget.pixmap().isNull())
 
             panel.sync_timeline_media(None, "", 0, False)
             self.assertIs(panel.stack.currentWidget(), panel.image_widget)
             self.assertIsNone(panel._preview_path)
+            panel.close()
+
+    def test_video_source_audio_only_unmutes_for_the_active_enabled_clip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            video = Path(temporary) / "source.mp4"
+            video.write_bytes(b"video")
+            panel = VideoPreviewPanel()
+            panel.set_source(VideoSource(), enabled=True)
+            panel.set_active(True)
+
+            panel.sync_timeline_media(
+                video,
+                "video",
+                0,
+                False,
+                StudioMediaSettings(source_audio_enabled=True),
+            )
+            self.assertFalse(panel.audio_output.isMuted())
+
+            panel.sync_timeline_media(None, "", 0, False)
+            self.assertTrue(panel.audio_output.isMuted())
             panel.close()
 
     def test_original_youtube_url_action_attaches_the_work_song_source(self) -> None:

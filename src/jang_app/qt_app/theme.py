@@ -440,8 +440,7 @@ def _stylesheet(
             font-weight: 850;
         }}
 
-        QPushButton#StudioInspectorSectionToggle,
-        QPushButton#StudioInspectorResetButton {{
+        QPushButton#StudioInspectorSectionToggle {{
             min-height: 26px;
             max-height: 26px;
             padding: 0 9px;
@@ -453,8 +452,7 @@ def _stylesheet(
             font-weight: 800;
         }}
 
-        QPushButton#StudioInspectorSectionToggle:hover,
-        QPushButton#StudioInspectorResetButton:hover {{
+        QPushButton#StudioInspectorSectionToggle:hover {{
             color: {text};
             background: {hover};
             border-color: {focus};
@@ -514,19 +512,87 @@ def _stylesheet(
         }}
 
         QStackedWidget#StudioInspectorDetailStack,
-        QWidget#StudioReverbEditor {{
+        QWidget#StudioReverbEditor,
+        QWidget#StudioCharacterEffectEditor {{
             background: transparent;
             border: 0;
         }}
 
-        QFrame#StudioReverbSection {{
+        QFrame#StudioReverbSection,
+        QFrame#StudioCharacterFxSection {{
             background: {raised};
             border: 1px solid {border};
             border-radius: 12px;
         }}
 
+        QFrame#StudioReverbPresetSection,
+        QFrame#StudioCharacterFxPresetSection {{
+            background: {surface};
+            border: 1px solid {button_border};
+            border-radius: 12px;
+        }}
+
+        QFrame#StudioReverbActionBar {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 12px;
+            min-height: 38px;
+            max-height: 38px;
+        }}
+
+        QComboBox#StudioReverbPresetCombo,
+        QComboBox#StudioCharacterFxPresetCombo {{
+            min-height: 32px;
+            max-height: 32px;
+            padding-left: 10px;
+            padding-right: 28px;
+        }}
+
+        QPushButton#StudioEffectToggle {{
+            min-width: 52px;
+            max-width: 52px;
+            min-height: 30px;
+            max-height: 30px;
+            padding: 0;
+            color: {faint};
+            background: {raised};
+            border: 1px solid {button_border};
+            border-radius: 15px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QPushButton#StudioEffectToggle:hover,
+        QPushButton#StudioEffectToggle[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#StudioEffectToggle:checked {{
+            color: {success_text};
+            background: {success_background};
+            border-color: {success_border};
+        }}
+
+        QPushButton#StudioEffectToggle:checked:hover,
+        QPushButton#StudioEffectToggle:checked[pointerState="hover"] {{
+            color: {text};
+            border-color: {success_text};
+        }}
+
+        QPushButton#ToggleSwitchButton {{
+            min-width: 42px;
+            max-width: 42px;
+            min-height: 24px;
+            max-height: 24px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+        }}
+
         QSpinBox#StudioReverbControl,
-        QDoubleSpinBox#StudioReverbControl {{
+        QDoubleSpinBox#StudioReverbControl,
+        QSpinBox#StudioCharacterFxControl {{
             min-height: 30px;
             max-height: 30px;
             padding-left: 8px;
@@ -628,6 +694,13 @@ def _stylesheet(
             background: transparent;
         }}
 
+        QScrollArea#RvcSettingsScroll,
+        QScrollArea#RvcSettingsScroll > QWidget > QWidget,
+        QWidget#RvcSettingsScrollContent {{
+            background: transparent;
+            border: 0;
+        }}
+
         QFrame#Card, QFrame#TrackCard {{
             background: {card};
             border: 1px solid {border};
@@ -697,6 +770,31 @@ def _stylesheet(
             border: 0;
             font-size: 9px;
             font-weight: 700;
+        }}
+
+        QLabel#StudioFxGroupLabel {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            padding: 4px 2px 2px 2px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#StudioEffectReferenceStatus {{
+            color: {warning_text};
+            background: {warning_background};
+            border: 1px solid {warning_border};
+            border-radius: 9px;
+            padding: 8px 10px;
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QLabel#StudioEffectReferenceStatus[available="true"] {{
+            color: {success_text};
+            background: {success_background};
+            border-color: {success_border};
         }}
 
         QLineEdit#StudioSoundSearch {{
@@ -1061,7 +1159,7 @@ def _stylesheet(
             font-weight: 800;
         }}
 
-        QLabel#TrainingProfileBadge, QLabel#TrainingEpochBadge {{
+        QLabel#TrainingProfileBadge, QLabel#TrainingComputeBadge, QLabel#TrainingEpochBadge {{
             color: {muted};
             background: {surface};
             border: 1px solid {border};
@@ -1072,6 +1170,10 @@ def _stylesheet(
         }}
 
         QLabel#TrainingEpochBadge {{
+            color: {text};
+        }}
+
+        QLabel#TrainingComputeBadge {{
             color: {text};
         }}
 
@@ -1744,6 +1846,159 @@ def _stylesheet(
             border: 0;
         }}
 
+        QFrame#AudioExportControls,
+        QFrame#VideoExportControls {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QLabel#ExportSettingsTitle {{
+            color: {text};
+            font-size: 13px;
+            font-weight: 900;
+        }}
+
+        QFrame#ExportPresetBar {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QPushButton#ExportPresetButton {{
+            min-height: 38px;
+            padding: 0 6px;
+            color: {muted};
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 7px;
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QPushButton#ExportPresetButton:hover {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#ExportPresetButton:checked {{
+            color: {tab_active_text};
+            background: {tab_active};
+            border-color: {tab_active_border};
+        }}
+
+        QPushButton#ExportPresetButton:disabled {{
+            color: {faint};
+            background: transparent;
+        }}
+
+        QLabel#CollapsibleHeaderSummary {{
+            color: {faint};
+            font-size: 9px;
+            font-weight: 700;
+        }}
+
+        QPushButton#RvcInferencePresetButton {{
+            min-width: 0;
+            min-height: 30px;
+            padding: 0 5px;
+            color: {muted};
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QPushButton#RvcInferencePresetButton:hover {{
+            color: {text};
+            background: {hover};
+        }}
+
+        QPushButton#RvcInferencePresetButton:checked {{
+            color: {tab_active_text};
+            background: {tab_active};
+            border-color: {tab_active_border};
+        }}
+
+        QFrame#RvcAdvancedSettingsPanel {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLabel#RvcInferenceSliderValue {{
+            color: {text};
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QSlider#RvcInferenceSlider {{
+            min-height: 24px;
+        }}
+
+        QLabel#RvcInferenceCustomBadge {{
+            padding: 2px 7px;
+            color: {tab_active_text};
+            background: {tab_active};
+            border: 1px solid {tab_active_border};
+            border-radius: 7px;
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QFrame#RvcInferenceDetailsPanel {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLabel#AudioExportSummary {{
+            color: {muted};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 8px;
+            padding: 8px 10px;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QLabel#ExportFieldLabel {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QComboBox#ExportSettingCombo {{
+            min-height: 30px;
+        }}
+
+        QCheckBox#ExportDitherCheck {{
+            color: {text};
+            min-height: 30px;
+            padding-left: 2px;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QProgressBar#ExportInlineProgress {{
+            height: 6px;
+            background: {surface};
+            border: 0;
+            border-radius: 3px;
+        }}
+
+        QProgressBar#ExportInlineProgress::chunk {{
+            background: {accent};
+            border-radius: 3px;
+        }}
+
+        QLabel#AudioExportStatus {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
         QFrame#ExportRow {{
             background: {raised};
             border: 1px solid {border};
@@ -1754,7 +2009,7 @@ def _stylesheet(
             background: {hover};
         }}
 
-        QLabel#ExportName {{
+        QWidget#ExportName {{
             color: {text};
             font-size: 12px;
             font-weight: 800;

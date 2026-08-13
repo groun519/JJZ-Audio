@@ -3,15 +3,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPalette
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPalette
 from PySide6.QtWidgets import QSplitter, QSplitterHandle, QWidget
 
 
 WORKSPACE_SPLITTER_HANDLE_WIDTH = 6
-_RESTING_STRENGTH = 0.10
-_HOVER_STRENGTH = 0.62
-_PRESSED_STRENGTH = 0.88
+_RESTING_STRENGTH = 0.0
+_HOVER_STRENGTH = 0.52
+_PRESSED_STRENGTH = 0.76
 _FADE_DURATION_MS = 140
+_EDGE_INSET = 12.0
 
 
 class WorkspaceSplitter(QSplitter):
@@ -24,6 +25,11 @@ class SoftWorkspaceSplitterHandle(QSplitterHandle):
 
     def __init__(self, orientation: Qt.Orientation, parent: QSplitter) -> None:
         super().__init__(orientation, parent)
+        self.setCursor(
+            Qt.CursorShape.SplitHCursor
+            if orientation == Qt.Orientation.Horizontal
+            else Qt.CursorShape.SplitVCursor
+        )
         self._visual_strength = _RESTING_STRENGTH
         self._pressed = False
         self._animation = QPropertyAnimation(self, b"visualStrength", self)
@@ -64,58 +70,40 @@ class SoftWorkspaceSplitterHandle(QSplitterHandle):
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        palette = self.palette()
-        background = QColor(palette.color(QPalette.ColorRole.Window))
-        foreground = QColor(palette.color(QPalette.ColorRole.WindowText))
-        line_color = _blend_color(
-            background,
-            foreground,
-            self._visual_strength * 0.34,
-        )
-        grip_color = _blend_color(
-            background,
-            foreground,
-            self._visual_strength,
-        )
         rect = QRectF(self.rect())
+        if self._visual_strength <= 0.001 or rect.isEmpty():
+            return
+
+        edge_color = QColor(self.palette().color(QPalette.ColorRole.WindowText))
+        edge_color.setAlpha(round(255 * self._visual_strength * 0.15))
+        soft_color = QColor(edge_color)
+        soft_color.setAlpha(round(255 * self._visual_strength * 0.055))
+        clear_color = QColor(edge_color)
+        clear_color.setAlpha(0)
+
+        if self.orientation() == Qt.Orientation.Horizontal:
+            visual_rect = rect.adjusted(0, _EDGE_INSET, 0, -_EDGE_INSET)
+            gradient = QLinearGradient(visual_rect.left(), 0, visual_rect.right(), 0)
+        else:
+            visual_rect = rect.adjusted(_EDGE_INSET, 0, -_EDGE_INSET, 0)
+            gradient = QLinearGradient(0, visual_rect.top(), 0, visual_rect.bottom())
+        if visual_rect.isEmpty():
+            return
+        gradient.setColorAt(0.0, edge_color)
+        gradient.setColorAt(0.28, soft_color)
+        gradient.setColorAt(0.5, clear_color)
+        gradient.setColorAt(0.72, soft_color)
+        gradient.setColorAt(1.0, edge_color)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        if self.orientation() == Qt.Orientation.Horizontal:
-            center = rect.center().x()
-            painter.fillRect(QRectF(center - 0.5, 8, 1, max(0.0, rect.height() - 16)), line_color)
-            if self._visual_strength > 0.18:
-                painter.setBrush(grip_color)
-                painter.drawRoundedRect(
-                    QRectF(center - 1.5, rect.center().y() - 10, 3, 20),
-                    1.5,
-                    1.5,
-                )
-        else:
-            center = rect.center().y()
-            painter.fillRect(QRectF(8, center - 0.5, max(0.0, rect.width() - 16), 1), line_color)
-            if self._visual_strength > 0.18:
-                painter.setBrush(grip_color)
-                painter.drawRoundedRect(
-                    QRectF(rect.center().x() - 10, center - 1.5, 20, 3),
-                    1.5,
-                    1.5,
-                )
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(visual_rect, 3.0, 3.0)
 
     def _animate_to(self, target: float) -> None:
         self._animation.stop()
         self._animation.setStartValue(self._visual_strength)
         self._animation.setEndValue(target)
         self._animation.start()
-
-
-def _blend_color(background: QColor, foreground: QColor, strength: float) -> QColor:
-    amount = max(0.0, min(1.0, strength))
-    return QColor(
-        round(background.red() + (foreground.red() - background.red()) * amount),
-        round(background.green() + (foreground.green() - background.green()) * amount),
-        round(background.blue() + (foreground.blue() - background.blue()) * amount),
-    )
-
 
 def create_workspace_splitter(
     panels: Sequence[QWidget],

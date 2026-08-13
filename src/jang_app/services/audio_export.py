@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -12,8 +12,9 @@ from jang_app.services.file_names import safe_display_filename_stem, unique_disp
 from jang_app.services.audio_mix_processing import process_mix_source
 from jang_app.services.studio_session import StudioEffect
 
+
 class AudioExportError(RuntimeError):
-    """Raised when preview audio cannot be exported."""
+    """Raised when audio cannot be rendered or exported."""
 
 
 NamedAudioPath = tuple[str, Path]
@@ -31,16 +32,34 @@ class AudioMixSource:
     fade_out_ms: int = 0
     pan_percent: int = 0
     effects: tuple[StudioEffect, ...] = ()
+    reference_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class RenderedAudioMix:
+    samples: np.ndarray
+    sample_rate: int
 
 
 def export_mix(
     sources: Sequence[AudioMixSource],
     output_path: Path,
 ) -> Path:
+    rendered = render_audio_mix(sources)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(
+        output_path,
+        np.clip(rendered.samples, -1.0, 1.0),
+        rendered.sample_rate,
+        subtype="PCM_16",
+    )
+    return output_path
+
+
+def render_audio_mix(sources: Sequence[AudioMixSource]) -> RenderedAudioMix:
     if not sources:
         raise AudioExportError("Select at least one unmuted track before exporting a mix.")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     audio_arrays: list[tuple[int, np.ndarray]] = []
     sample_rate: int | None = None
     max_frames = 0
@@ -63,6 +82,12 @@ def export_mix(
         if trimmed.shape[0] <= 0:
             continue
         timeline_start_frame = max(0, round(source.timeline_start_ms * sample_rate / 1000))
+        reference_audio = _read_reference_segment(
+            source,
+            sample_rate,
+            source_start_frame,
+            source_end_frame,
+        )
         processed = process_mix_source(
             trimmed,
             sample_rate,
@@ -71,6 +96,7 @@ def export_mix(
             fade_out_ms=source.fade_out_ms,
             pan_percent=source.pan_percent,
             effects=source.effects,
+            reference_audio=reference_audio,
         )
         audio_arrays.append((timeline_start_frame, processed))
         max_frames = max(max_frames, timeline_start_frame + processed.shape[0])
@@ -82,9 +108,7 @@ def export_mix(
     for timeline_start_frame, audio in audio_arrays:
         timeline_end_frame = timeline_start_frame + audio.shape[0]
         mix[timeline_start_frame:timeline_end_frame, :] += _match_channels(audio, max_channels)
-
-    sf.write(output_path, np.clip(mix, -1.0, 1.0), sample_rate or 44100, subtype="PCM_16")
-    return output_path
+    return RenderedAudioMix(mix, sample_rate or 44_100)
 
 
 def export_audio_files(sources: Sequence[NamedAudioPath], output_dir: Path) -> list[Path]:
@@ -114,6 +138,19 @@ def _read_audio(path: Path) -> tuple[np.ndarray, int]:
         raise AudioExportError(f"Audio file does not exist: {source}")
     audio, sample_rate = sf.read(source, always_2d=True, dtype="float32")
     return audio, sample_rate
+
+
+def _read_reference_segment(
+    source: AudioMixSource,
+    sample_rate: int,
+    source_start_frame: int,
+    source_end_frame: int,
+) -> np.ndarray | None:
+    if source.reference_path is None or not source.reference_path.expanduser().is_file():
+        return None
+    reference, reference_sample_rate = _read_audio(source.reference_path)
+    reference = _resample_audio(reference, reference_sample_rate, sample_rate)
+    return reference[source_start_frame : min(source_end_frame, reference.shape[0])]
 
 
 def _match_channels(audio: np.ndarray, target_channels: int) -> np.ndarray:

@@ -41,7 +41,7 @@ class StudioTransportBar(QFrame):
         self.split_button.setObjectName("StudioSplitButton")
         self.split_button.setCheckable(True)
         self.split_button.setEnabled(False)
-        self.split_button.toggled.connect(self.split_mode_changed.emit)
+        self.split_button.toggled.connect(self._on_split_mode_toggled)
 
         self.undo_button = SvgIconButton("undo", size=34)
         self.undo_button.setObjectName("StudioUndoButton")
@@ -103,6 +103,7 @@ class StudioTransportBar(QFrame):
         self.split_button.blockSignals(True)
         self.split_button.setChecked(bool(enabled) and self.split_button.isEnabled())
         self.split_button.blockSignals(False)
+        self._sync_split_tooltip()
         self.split_button.update()
 
     def set_history_available(self, can_undo: bool, can_redo: bool) -> None:
@@ -117,6 +118,21 @@ class StudioTransportBar(QFrame):
         if self.split_button.isChecked():
             self.split_button.setChecked(False)
 
+    def _on_split_mode_toggled(self, enabled: bool) -> None:
+        self._sync_split_tooltip(enabled)
+        self.split_mode_changed.emit(enabled)
+
+    def _sync_split_tooltip(self, enabled: bool | None = None) -> None:
+        is_active = self.split_button.isChecked() if enabled is None else bool(enabled)
+        set_translated_tooltip(
+            self.split_button,
+            (
+                "Cut Tool Active (click or Esc to exit)"
+                if is_active
+                else "Cut Tool (Ctrl+B, Esc to exit)"
+            ),
+        )
+
     def set_theme_mode(self, theme_mode: str) -> None:
         self.transport.set_theme_mode(theme_mode)
         self.split_button.set_theme_mode(theme_mode)
@@ -128,7 +144,7 @@ class StudioTransportBar(QFrame):
         self.zoom_label.setText(tr("Zoom"))
         set_translated_tooltip(self.undo_button, "Undo Studio edit (Ctrl+Z)")
         set_translated_tooltip(self.redo_button, "Redo Studio edit (Ctrl+Y)")
-        set_translated_tooltip(self.split_button, "Cut Tool (Ctrl+B, Esc to exit)")
+        self._sync_split_tooltip()
 
 
 def _divider() -> QFrame:

@@ -15,6 +15,7 @@ from jang_app.services.runtime_installation import (
     installed_rvc_runtime_profile,
 )
 from jang_app.services.rvc_runtime_profile import (
+    RVC_PROFILE_CU118,
     RVC_PROFILE_CU128,
     RVC_PROFILE_DIRECTML,
     RVC_PROFILE_ROCM_WINDOWS,
@@ -68,7 +69,7 @@ def run_system_diagnostics(
     stage_reporter: DiagnosticStageReporter | None = None,
 ) -> SystemDiagnostics:
     checks: list[DiagnosticCheck] = []
-    total_stages = 6
+    total_stages = 7
 
     def record(check: DiagnosticCheck) -> None:
         checks.append(check)
@@ -117,7 +118,16 @@ def run_system_diagnostics(
         record(
             DiagnosticCheck(
                 "cuda",
-                "GPU Acceleration",
+                "Voice Conversion Acceleration",
+                DiagnosticStatus.SKIPPED,
+                "Not checked until the audio engine is ready.",
+            )
+        )
+        start("training_device", 7)
+        record(
+            DiagnosticCheck(
+                "training_device",
+                "Model Training Device",
                 DiagnosticStatus.SKIPPED,
                 "Not checked until the audio engine is ready.",
             )
@@ -133,7 +143,16 @@ def run_system_diagnostics(
         record(
             DiagnosticCheck(
                 "cuda",
-                "GPU Acceleration",
+                "Voice Conversion Acceleration",
+                DiagnosticStatus.SKIPPED,
+                "Not checked because the audio engine needs repair.",
+            )
+        )
+        start("training_device", 7)
+        record(
+            DiagnosticCheck(
+                "training_device",
+                "Model Training Device",
                 DiagnosticStatus.SKIPPED,
                 "Not checked because the audio engine needs repair.",
             )
@@ -158,6 +177,15 @@ def run_system_diagnostics(
     record(runtime_check)
     start("cuda", 6)
     record(cuda_check)
+    start("training_device", 7)
+    record(
+        _training_device_check(
+            desired_profile,
+            capabilities,
+            profile_error=profile_error,
+            fallback_detail=fallback_detail,
+        )
+    )
     return SystemDiagnostics(tuple(checks))
 
 
@@ -261,38 +289,99 @@ def _runtime_checks(
         )
         cuda = DiagnosticCheck(
             "cuda",
-            "GPU Acceleration",
+            "Voice Conversion Acceleration",
             DiagnosticStatus.WARNING,
             f"{active} | {_last_detail_line(fallback_detail)}",
         )
     elif capabilities.cuda_ready and capabilities.device_count > 0:
         cuda = DiagnosticCheck(
             "cuda",
-            "GPU Acceleration",
+            "Voice Conversion Acceleration",
             DiagnosticStatus.PASS,
             _accelerator_detail(capabilities),
         )
     elif capabilities.directml_ready:
         cuda = DiagnosticCheck(
             "cuda",
-            "GPU Acceleration",
+            "Voice Conversion Acceleration",
             DiagnosticStatus.PASS,
-            capabilities.directml_device_name or "DirectML device ready",
+            capabilities.directml_device_name or "DirectML GPU conversion ready",
         )
     elif capabilities.cuda_available:
         detail = capabilities.cuda_detail or "CUDA operation failed. CPU conversion will be used."
-        cuda = DiagnosticCheck("cuda", "GPU Acceleration", DiagnosticStatus.WARNING, detail)
+        cuda = DiagnosticCheck(
+            "cuda",
+            "Voice Conversion Acceleration",
+            DiagnosticStatus.WARNING,
+            detail,
+        )
     elif capabilities.directml_available:
         detail = capabilities.directml_detail or "DirectML operation failed. CPU conversion will be used."
-        cuda = DiagnosticCheck("cuda", "GPU Acceleration", DiagnosticStatus.WARNING, detail)
+        cuda = DiagnosticCheck(
+            "cuda",
+            "Voice Conversion Acceleration",
+            DiagnosticStatus.WARNING,
+            detail,
+        )
     else:
         cuda = DiagnosticCheck(
             "cuda",
-            "GPU Acceleration",
+            "Voice Conversion Acceleration",
             DiagnosticStatus.WARNING,
             "GPU acceleration is unavailable. CPU conversion and training will be used.",
         )
     return runtime, cuda
+
+
+def _training_device_check(
+    desired_profile: str,
+    capabilities: RvcInferenceCapabilities,
+    *,
+    profile_error: str = "",
+    fallback_detail: str = "",
+) -> DiagnosticCheck:
+    title = "Model Training Device"
+    if profile_error:
+        return DiagnosticCheck(
+            "training_device",
+            title,
+            DiagnosticStatus.SKIPPED,
+            "Not checked until the correct audio engine profile is ready.",
+        )
+    if fallback_detail:
+        return DiagnosticCheck(
+            "training_device",
+            title,
+            DiagnosticStatus.WARNING,
+            "GPU training is unavailable. CPU training will be used.",
+        )
+    if desired_profile == RVC_PROFILE_DIRECTML:
+        return DiagnosticCheck(
+            "training_device",
+            title,
+            DiagnosticStatus.PASS,
+            "CPU training selected for AMD DirectML compatibility. Voice conversion still uses the AMD GPU.",
+        )
+    if desired_profile == RVC_PROFILE_ROCM_WINDOWS and capabilities.cuda_ready:
+        return DiagnosticCheck(
+            "training_device",
+            title,
+            DiagnosticStatus.PASS,
+            _accelerator_detail(capabilities),
+        )
+    if desired_profile in {RVC_PROFILE_CU118, RVC_PROFILE_CU128} and capabilities.cuda_ready:
+        return DiagnosticCheck(
+            "training_device",
+            title,
+            DiagnosticStatus.PASS,
+            _accelerator_detail(capabilities),
+        )
+    return DiagnosticCheck(
+        "training_device",
+        title,
+        DiagnosticStatus.WARNING,
+        "GPU training is unavailable. CPU training will be used.",
+    )
 
 
 def _profile_error(desired_profile, installed_profile, capabilities) -> str:

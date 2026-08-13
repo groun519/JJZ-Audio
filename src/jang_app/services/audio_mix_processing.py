@@ -4,8 +4,16 @@ import math
 
 import numpy as np
 
+from jang_app.services.audio_character_fx import apply_character_effect
+from jang_app.services.audio_level_match import apply_vocal_level_match
 from jang_app.services.audio_reverb import apply_reverb
-from jang_app.services.studio_session import STUDIO_EFFECT_REVERB, StudioEffect
+from jang_app.services.studio_audio_levels import clamp_studio_source_volume
+from jang_app.services.studio_character_fx_presets import CHARACTER_EFFECT_KINDS
+from jang_app.services.studio_session import (
+    STUDIO_EFFECT_LEVEL_MATCH,
+    STUDIO_EFFECT_REVERB,
+    StudioEffect,
+)
 
 
 def process_mix_source(
@@ -17,14 +25,25 @@ def process_mix_source(
     fade_out_ms: int = 0,
     pan_percent: int = 0,
     effects: tuple[StudioEffect, ...] = (),
+    reference_audio: np.ndarray | None = None,
 ) -> np.ndarray:
     """Apply non-destructive clip and track processing before timeline mixing."""
     processed = np.asarray(audio, dtype=np.float32).copy()
-    processed *= max(0.0, min(8.0, float(volume)))
+    for effect in effects:
+        if effect.enabled and effect.kind == STUDIO_EFFECT_LEVEL_MATCH:
+            processed = apply_vocal_level_match(
+                processed,
+                reference_audio,
+                sample_rate,
+                effect.level_match,
+            )
+    processed *= clamp_studio_source_volume(volume)
     _apply_fades(processed, sample_rate, fade_in_ms, fade_out_ms)
     for effect in effects:
         if effect.enabled and effect.kind == STUDIO_EFFECT_REVERB:
             processed = apply_reverb(processed, sample_rate, effect.reverb)
+        elif effect.enabled and effect.kind in CHARACTER_EFFECT_KINDS:
+            processed = apply_character_effect(processed, sample_rate, effect)
     return _apply_pan(processed, pan_percent)
 
 

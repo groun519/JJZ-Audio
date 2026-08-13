@@ -38,6 +38,7 @@ class StudioTransportBarTests(unittest.TestCase):
     def test_split_button_toggles_persistent_cut_tool_only_when_available(self) -> None:
         bar = StudioTransportBar()
         changed = QSignalSpy(bar.split_mode_changed)
+        inactive_tooltip = bar.split_button.toolTip()
 
         bar.split_button.click()
         self.assertEqual(changed.count(), 0)
@@ -45,11 +46,20 @@ class StudioTransportBarTests(unittest.TestCase):
         bar.set_split_enabled(True)
         bar.split_shortcut.activated.emit()
         self.assertTrue(bar.split_button.isChecked())
+        active_palette = bar.split_button._button_palette()
+        self.assertEqual(active_palette["icon"].name(), "#8a6200")
+        self.assertEqual(active_palette["background"].name(), "#fff1bf")
+        self.assertNotEqual(bar.split_button.toolTip(), inactive_tooltip)
+        bar.set_theme_mode("dark")
+        dark_active_palette = bar.split_button._button_palette()
+        self.assertEqual(dark_active_palette["icon"].name(), "#f2c45c")
+        self.assertEqual(dark_active_palette["background"].name(), "#342b18")
         self.assertEqual(changed.count(), 1)
         self.assertTrue(changed.at(0)[0])
 
         bar.exit_split_shortcut.activated.emit()
         self.assertFalse(bar.split_button.isChecked())
+        self.assertEqual(bar.split_button.toolTip(), inactive_tooltip)
         self.assertEqual(changed.count(), 2)
         self.assertFalse(changed.at(1)[0])
         bar.close()

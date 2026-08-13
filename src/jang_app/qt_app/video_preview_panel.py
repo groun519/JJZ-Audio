@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Protocol
 
 from PySide6.QtCore import QEvent, QUrl, Qt, Signal
-from PySide6.QtGui import QPixmap, QResizeEvent
+from PySide6.QtGui import QPainter, QPixmap, QResizeEvent
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -26,6 +26,7 @@ from jang_app.qt_app.localization import (
 )
 from jang_app.qt_app.widgets import DangerIconButton, FileDropCard, ScrollSafeComboBox, SvgIconButton
 from jang_app.services.i18n import tr
+from jang_app.services.studio_session import MEDIA_FILL, StudioMediaSettings
 from jang_app.services.video_source import VideoSource
 
 
@@ -312,18 +313,21 @@ class VideoPreviewPanel(QFrame):
         media_kind: str,
         source_position_ms: int,
         is_playing: bool,
+        settings: StudioMediaSettings | None = None,
     ) -> None:
         if not self._active:
             return
         if path is None or not path.is_file():
             self.synchronizer.sync(self.media_player.position(), False)
+            self.media_player.setSource(QUrl())
             self._preview_path = None
             self._preview_kind = ""
+            self.audio_output.setMuted(True)
             self.image_widget.clear_source()
             self.stack.setCurrentWidget(self.image_widget)
             return
         resolved = path.expanduser().resolve()
-        self._activate_preview_path(resolved, media_kind)
+        self._activate_preview_path(resolved, media_kind, settings)
         if media_kind == "video":
             self.synchronizer.sync(source_position_ms, is_playing)
 
@@ -425,9 +429,20 @@ class VideoPreviewPanel(QFrame):
         if error_text:
             self.source_label.setToolTip(error_text)
 
-    def _activate_preview_path(self, path: Path, media_kind: str) -> None:
+    def _activate_preview_path(
+        self,
+        path: Path,
+        media_kind: str,
+        settings: StudioMediaSettings | None = None,
+    ) -> None:
         resolved = path.expanduser().resolve()
+        media_settings = settings or StudioMediaSettings()
+        self.audio_output.setMuted(
+            media_kind != "video" or not media_settings.source_audio_enabled
+        )
         if self._preview_path == resolved and self._preview_kind == media_kind:
+            if media_kind == "image":
+                self.image_widget.set_media_settings(media_settings)
             return
         self.media_player.stop()
         self.media_player.setSource(QUrl())
@@ -435,6 +450,7 @@ class VideoPreviewPanel(QFrame):
         self._preview_kind = media_kind
         if media_kind == "image":
             self.image_widget.set_path(resolved)
+            self.image_widget.set_media_settings(media_settings)
             self.stack.setCurrentWidget(self.image_widget)
             return
         self.media_player.setSource(QUrl.fromLocalFile(str(resolved)))
@@ -447,6 +463,7 @@ class _ImageCanvas(QLabel):
         self.setObjectName("VideoCanvas")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._source = QPixmap()
+        self._settings = StudioMediaSettings()
 
     def set_path(self, path: Path) -> None:
         self._source = QPixmap(str(path))
@@ -456,6 +473,10 @@ class _ImageCanvas(QLabel):
         self._source = QPixmap()
         self.clear()
 
+    def set_media_settings(self, settings: StudioMediaSettings) -> None:
+        self._settings = settings
+        self._refresh_pixmap()
+
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._refresh_pixmap()
@@ -464,13 +485,28 @@ class _ImageCanvas(QLabel):
         if self._source.isNull() or self.width() <= 0 or self.height() <= 0:
             self.clear()
             return
-        self.setPixmap(
-            self._source.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+        source_width = max(1, self._source.width())
+        source_height = max(1, self._source.height())
+        fit_scale = min(self.width() / source_width, self.height() / source_height)
+        if self._settings.fit_mode == MEDIA_FILL:
+            fit_scale = max(self.width() / source_width, self.height() / source_height)
+        scale = fit_scale * self._settings.scale_percent / 100
+        width = max(1, round(source_width * scale))
+        height = max(1, round(source_height * scale))
+        scaled = self._source.scaled(
+            width,
+            height,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
+        canvas = QPixmap(self.size())
+        canvas.fill(Qt.GlobalColor.black)
+        x = (self.width() - width) / 2 + self.width() * self._settings.offset_x_percent / 100
+        y = (self.height() - height) / 2 + self.height() * self._settings.offset_y_percent / 100
+        painter = QPainter(canvas)
+        painter.drawPixmap(round(x), round(y), scaled)
+        painter.end()
+        self.setPixmap(canvas)
 
 
 class _VideoUrlField(QFrame):

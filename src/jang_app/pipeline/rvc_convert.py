@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from jang_app.config import RVC_WORKSPACE_DIR
@@ -11,6 +11,7 @@ from jang_app.services.app_logging import get_logger
 from jang_app.services.command import run_command
 from jang_app.services.managed_files import link_or_copy_file
 from jang_app.services.rvc_environment import build_rvc_environment
+from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 from jang_app.services.rvc_inference_runtime import (
     RvcInferenceRuntimeError,
     select_rvc_inference_device,
@@ -41,6 +42,7 @@ class RvcConversionResult:
     requested_device: str = "auto"
     effective_device: str = "cpu"
     f0_method: str = "rmvpe"
+    inference: RvcInferenceSettings = field(default_factory=RvcInferenceSettings)
 
 
 def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSettings) -> RvcConversionResult:
@@ -81,7 +83,8 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
 
     logger.info(
         "Starting RVC conversion: input=%s output=%s model=%s index=%s pitch=%s "
-        "f0_method=%s requested_device=%s effective_device=%s",
+        "f0_method=%s requested_device=%s effective_device=%s "
+        "index_rate=%.2f filter_radius=%s rms_mix_rate=%.2f protect=%.2f",
         source,
         output_path,
         model_path,
@@ -90,6 +93,10 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
         settings.f0_method,
         device.requested_device,
         device.effective_device,
+        settings.inference.index_rate,
+        settings.inference.filter_radius,
+        settings.inference.rms_mix_rate,
+        settings.inference.protect,
     )
     if device.fallback_reason:
         logger.warning("RVC device fallback: %s", device.fallback_reason)
@@ -127,6 +134,10 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
                 str(staged_index) if staged_index else "",
                 device.effective_device,
                 settings.f0_method,
+                _cli_number(settings.inference.index_rate),
+                str(settings.inference.filter_radius),
+                _cli_number(settings.inference.rms_mix_rate),
+                _cli_number(settings.inference.protect),
             ],
             cwd=workspace,
             env=build_rvc_environment(rvc_root),
@@ -163,6 +174,7 @@ def convert_vocal_with_rvc(input_path: Path, output_dir: Path, settings: RvcSett
         requested_device=settings.device,
         effective_device=device.effective_device,
         f0_method=settings.f0_method,
+        inference=settings.inference,
     )
 
 
@@ -329,6 +341,10 @@ def _publish_rvc_output(staged_output: Path, output_path: Path) -> None:
 def _path_length(path: Path) -> int:
     # UTF-16 code units match the length Windows uses for legacy file paths.
     return len(str(path).encode("utf-16-le")) // 2
+
+
+def _cli_number(value: float) -> str:
+    return f"{value:.2f}"
 
 
 def _build_rvc_output_stem(source: Path, settings: RvcSettings) -> str:

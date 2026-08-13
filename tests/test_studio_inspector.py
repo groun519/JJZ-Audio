@@ -16,10 +16,14 @@ from jang_app.qt_app.widgets import COMPACT_ICON_BUTTON_SIZE, TimecodeSpinBox
 from jang_app.services.i18n import tr
 from jang_app.services.studio_assets import StudioSoundAsset
 from jang_app.services.studio_session import (
+    MEDIA_FILL,
+    TRACK_CONVERTED_VOCAL,
     TRACK_ORIGINAL_VOCAL,
+    TRACK_VIDEO,
     StudioAssetRef,
     StudioClip,
     StudioEffect,
+    StudioMediaSettings,
     StudioTrack,
 )
 
@@ -71,6 +75,10 @@ class StudioInspectorTests(unittest.TestCase):
             self.assertEqual(inspector.stack.currentIndex(), inspector.CLIP_PAGE)
             self.assertEqual(inspector.duration_value.text(), "00:02.000")
             self.assertEqual(inspector.gain_spin.value(), -2.5)
+            self.assertEqual(inspector.gain_spin.minimum(), -100.0)
+            self.assertEqual(inspector.gain_spin.maximum(), 30.0)
+            self.assertEqual(inspector.gain_slider.minimum(), -1_000)
+            self.assertEqual(inspector.gain_slider.maximum(), 300)
             self.assertEqual(inspector.gain_spin.width(), 112)
             inspector.setStyleSheet(build_stylesheet("dark"))
             inspector.resize(300, 720)
@@ -134,6 +142,98 @@ class StudioInspectorTests(unittest.TestCase):
         self.assertEqual(changed.at(0)[0], clip.clip_id)
         self.assertEqual(changed.at(0)[1].reverb.dry_wet_percent, 44)
         self.assertEqual(tuple(removed.at(0)), (clip.clip_id, effect.effect_id))
+        inspector.close()
+
+    def test_character_effects_use_the_shared_inspector_editor(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        effects = (
+            StudioEffect("fx-radio", "radio_filter"),
+            StudioEffect("fx-ring", "ring_modulator"),
+            StudioEffect("fx-bits", "bitcrusher"),
+            StudioEffect("fx-drive", "distortion"),
+            StudioEffect("fx-level", "level_match"),
+        )
+        clip = StudioClip("clip-1", reference, 0, 0, 2_000, effects=effects)
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(clip,),
+        )
+        inspector = StudioInspector()
+
+        inspector.set_selection(track, clip, None)
+
+        self.assertEqual(inspector.effect_tab_ids(), tuple(effect.effect_id for effect in effects))
+        self.assertEqual(
+            {editor.effect_kind for editor in inspector.effect_editors.values()},
+            {"radio_filter", "ring_modulator", "bitcrusher", "distortion", "level_match"},
+        )
+        level_editor = inspector.effect_editors["fx-level"]
+        self.assertFalse(level_editor.reference_status.property("available"))
+
+        converted_reference = StudioAssetRef("output-1", TRACK_CONVERTED_VOCAL, "rvc.wav")
+        converted_clip = replace(clip, asset=converted_reference)
+        converted_track = replace(track, role=TRACK_CONVERTED_VOCAL, clips=(converted_clip,))
+        inspector.set_selection(converted_track, converted_clip, None)
+        self.assertTrue(level_editor.reference_status.property("available"))
+        inspector.close()
+
+    def test_media_clip_controls_follow_image_and_video_capabilities(self) -> None:
+        image_reference = StudioAssetRef("image", TRACK_VIDEO, "cover.png")
+        image_asset = StudioSoundAsset(
+            image_reference,
+            "Cover",
+            Path("cover.png"),
+            30_000,
+            media_kind="image",
+        )
+        image_clip = StudioClip(
+            "image-clip",
+            image_reference,
+            0,
+            0,
+            5_000,
+            media=StudioMediaSettings(fit_mode=MEDIA_FILL, scale_percent=125),
+        )
+        track = StudioTrack("media-track", "Media", TRACK_VIDEO, clips=(image_clip,))
+        inspector = StudioInspector()
+        changed = QSignalSpy(inspector.media_values_changed)
+
+        inspector.set_selection(track, image_clip, image_asset)
+
+        self.assertTrue(inspector.media_section.isVisibleTo(inspector))
+        self.assertTrue(inspector.image_controls.isVisibleTo(inspector))
+        self.assertFalse(inspector.source_audio_button.isVisibleTo(inspector))
+        self.assertFalse(inspector.source_section.isVisibleTo(inspector))
+        self.assertTrue(inspector.fit_buttons[MEDIA_FILL].isChecked())
+        inspector.image_duration_spin.setValue(7_500)
+        inspector.scale_spin.setValue(140)
+        inspector._emit_media_values()
+        self.assertEqual(changed.at(0)[1], 7_500)
+        self.assertEqual(changed.at(0)[2].scale_percent, 140)
+
+        video_reference = StudioAssetRef("video", TRACK_VIDEO, "source.mp4")
+        video_asset = StudioSoundAsset(
+            video_reference,
+            "Source",
+            Path("source.mp4"),
+            30_000,
+            media_kind="video",
+        )
+        video_clip = StudioClip("video-clip", video_reference, 0, 2_000, 8_000)
+        inspector.set_selection(
+            StudioTrack("media-track", "Media", TRACK_VIDEO, clips=(video_clip,)),
+            video_clip,
+            video_asset,
+        )
+
+        self.assertFalse(inspector.image_controls.isVisibleTo(inspector))
+        self.assertTrue(inspector.source_audio_button.isVisibleTo(inspector))
+        self.assertTrue(inspector.source_section.isVisibleTo(inspector))
+        self.assertTrue(inspector.source_section.content.isVisibleTo(inspector))
+        inspector.source_audio_button.click()
+        self.assertTrue(changed.at(changed.count() - 1)[2].source_audio_enabled)
         inspector.close()
 
     def test_selecting_another_clip_resets_the_active_effect_tab(self) -> None:

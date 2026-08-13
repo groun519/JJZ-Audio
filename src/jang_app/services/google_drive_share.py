@@ -114,6 +114,9 @@ class GoogleDriveShareService:
             progress(100)
         return removed
 
+    def move_shared_source(self, source: Path, target: Path, category: str) -> bool:
+        return self._catalog.move_source(source, target, category)
+
     def _client(self) -> GoogleDriveClient:
         return GoogleDriveClient(
             lambda force_refresh: self._oauth.access_token(

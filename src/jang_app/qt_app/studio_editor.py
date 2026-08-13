@@ -31,11 +31,19 @@ from jang_app.qt_app.workspace_splitter import create_workspace_splitter
 from jang_app.qt_app.theme import theme_tokens
 from jang_app.services.i18n import tr
 from jang_app.services.studio_assets import StudioSoundAsset
+from jang_app.services.studio_character_fx_presets import (
+    EDITABLE_EFFECT_KINDS,
+    character_effect,
+    character_effect_chain,
+    studio_effect_name,
+)
 from jang_app.services.studio_session import (
+    STUDIO_EFFECT_REVERB,
     TRACK_AUDIO,
     TRACK_VIDEO,
     StudioClip,
     StudioEffect,
+    StudioMediaSettings,
     StudioSession,
     StudioTrack,
 )
@@ -50,6 +58,7 @@ from jang_app.services.studio_timeline import (
     remove_studio_clip_effect,
     remove_studio_track,
     session_duration_ms,
+    set_studio_clip_media,
     set_studio_clip_mix,
     set_studio_track_collapsed,
     set_studio_track_name,
@@ -96,6 +105,7 @@ class StudioTimelineView(QWidget):
     COLLAPSED_LANE_HEIGHT = 42
     ADD_TRACK_HEIGHT = 48
     HANDLE_WIDTH = 7
+    PLAYHEAD_HIT_WIDTH = 14
 
     def __init__(self) -> None:
         super().__init__()
@@ -114,6 +124,7 @@ class StudioTimelineView(QWidget):
         self._horizontal_offset = 0
         self._vertical_offset = 0
         self._playhead_ms = 0
+        self._playhead_hovered = False
         self._split_mode = False
         self._split_hover: tuple[str, int] | None = None
         self._hover_effect: tuple[str, str] | None = None
@@ -244,6 +255,17 @@ class StudioTimelineView(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
+        point = event.position().toPoint()
+        if (
+            event.position().x() >= self._header_right()
+            and (
+                self._point_on_playhead(point)
+                or self._point_in_ruler(event.position().y())
+            )
+        ):
+            self._begin_playhead_drag(event.position().x())
+            event.accept()
+            return
         effect_hit = self._effect_at(event.position().toPoint())
         if effect_hit is not None:
             clip, effect, _chip_rect, remove_rect = effect_hit
@@ -259,8 +281,6 @@ class StudioTimelineView(QWidget):
             self.update()
             return
         if self._point_in_ruler(event.position().y()):
-            if event.position().x() >= self._header_right():
-                self.seek_requested.emit(self._x_to_ms(event.position().x()))
             event.accept()
             return
         if self._split_mode:
@@ -339,6 +359,10 @@ class StudioTimelineView(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._drag_mode == "playhead":
+            self._scrub_playhead(event.position().x())
+            event.accept()
+            return
         if self._drag_mode == "volume":
             track = self._track(self._drag_track_id)
             if track is not None:
@@ -376,6 +400,12 @@ class StudioTimelineView(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_mode == "playhead":
+            self._scrub_playhead(event.position().x())
+            self._drag_mode = ""
+            self._update_cursor(event.position().toPoint())
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._drag_mode == "volume":
             track = self._track(self._drag_track_id)
             volume = self._drag_volume_value
@@ -595,12 +625,21 @@ class StudioTimelineView(QWidget):
             painter.setPen(QColor(self._theme["text"]))
             if chip_rect.width() >= 58:
                 text_rect = chip_rect.adjusted(6, 0, -18 if hovered else -6, 0)
-                painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, tr("Reverb"))
+                label = painter.fontMetrics().elidedText(
+                    self._effect_label(effect),
+                    Qt.TextElideMode.ElideRight,
+                    max(1, int(text_rect.width())),
+                )
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, label)
             elif not hovered:
                 painter.drawText(chip_rect, Qt.AlignmentFlag.AlignCenter, "FX")
             if hovered:
                 painter.drawText(remove_rect, Qt.AlignmentFlag.AlignCenter, "×")
         painter.restore()
+
+    @staticmethod
+    def _effect_label(effect: StudioEffect) -> str:
+        return tr(studio_effect_name(effect.kind))
 
     def _effect_chip_rects(
         self,
@@ -714,8 +753,17 @@ class StudioTimelineView(QWidget):
         x = self._ms_to_x(self._playhead_ms)
         if x < self._header_right() or x > self.width():
             return
-        painter.setPen(QPen(QColor("#e05a47"), 2))
-        painter.drawLine(int(x), 0, int(x), self.height())
+        active = self._drag_mode == "playhead" or self._playhead_hovered
+        color = QColor("#f06b56" if active else "#e05a47")
+        ruler_top = self._ruler_top()
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(color, 3 if active else 2))
+        painter.drawLine(int(x), int(ruler_top + 12), int(x), self.height())
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(QRectF(x - 5, ruler_top + 2, 10, 13), 3, 3)
+        painter.restore()
 
     def _paint_add_track_row(self, painter: QPainter) -> None:
         row = self._add_track_rect()
@@ -1000,7 +1048,43 @@ class StudioTimelineView(QWidget):
         self._drag_track_id = ""
         self.update()
 
+    def _begin_playhead_drag(self, x_position: float) -> None:
+        self._clear_drag()
+        self._drag_mode = "playhead"
+        self._playhead_hovered = True
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self._scrub_playhead(x_position)
+
+    def _scrub_playhead(self, x_position: float) -> None:
+        duration_ms = session_duration_ms(self._session)
+        position_ms = min(duration_ms, self._x_to_ms(x_position))
+        if position_ms == self._playhead_ms:
+            return
+        self._playhead_ms = position_ms
+        self.seek_requested.emit(position_ms)
+        self.update()
+
+    def _point_on_playhead(self, point: QPoint) -> bool:
+        if point.x() < self._header_right():
+            return False
+        x = self._ms_to_x(self._playhead_ms)
+        if x < self._header_right() or x > self.width():
+            return False
+        return QRectF(
+            x - self.PLAYHEAD_HIT_WIDTH / 2,
+            self._ruler_top(),
+            self.PLAYHEAD_HIT_WIDTH,
+            max(0, self.height() - self._ruler_top()),
+        ).contains(point)
+
     def _update_cursor(self, point: QPoint) -> None:
+        playhead_hovered = self._point_on_playhead(point)
+        if playhead_hovered != self._playhead_hovered:
+            self._playhead_hovered = playhead_hovered
+            self.update()
+        if playhead_hovered:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            return
         if self._split_mode:
             hit = self._clip_at(point)
             next_hover = None
@@ -1072,7 +1156,11 @@ class StudioTimelineView(QWidget):
         self._split_hover = None
         self._hover_effect = None
         self._effect_drop_clip_id = ""
-        self.unsetCursor()
+        self._playhead_hovered = self._drag_mode == "playhead"
+        if self._playhead_hovered:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.unsetCursor()
         self.update()
         super().leaveEvent(event)
 
@@ -1224,6 +1312,7 @@ class StudioEditor(QWidget):
 
         self.inspector = StudioInspector(self)
         self.inspector.clip_values_changed.connect(self._set_clip_values)
+        self.inspector.media_values_changed.connect(self._set_media_values)
         self.inspector.track_mix_changed.connect(self._set_track_mix)
         self.inspector.track_name_changed.connect(self._set_track_name)
         self.inspector.effect_changed.connect(self._update_effect)
@@ -1287,7 +1376,10 @@ class StudioEditor(QWidget):
     def has_media_track(self) -> bool:
         return any(track.role == TRACK_VIDEO for track in self._session.tracks)
 
-    def media_at(self, position_ms: int) -> tuple[StudioSoundAsset, int] | None:
+    def media_at(
+        self,
+        position_ms: int,
+    ) -> tuple[StudioSoundAsset, int, StudioMediaSettings] | None:
         position = max(0, int(position_ms))
         track = next((item for item in self._session.tracks if item.role == TRACK_VIDEO), None)
         if track is None:
@@ -1299,7 +1391,7 @@ class StudioEditor(QWidget):
             if asset is None or asset.media_kind not in {"video", "image"}:
                 continue
             source_position = clip.source_start_ms + position - clip.timeline_start_ms
-            return asset, source_position
+            return asset, source_position, clip.media
         return None
 
     def set_playhead(self, position_ms: int) -> None:
@@ -1366,14 +1458,28 @@ class StudioEditor(QWidget):
             self.set_status(str(exc))
 
     def _drop_effect(self, effect_kind: str, clip_id: str) -> None:
-        if effect_kind != "reverb" or self._clip(clip_id) is None:
+        if self._clip(clip_id) is None:
             return
-        effect = StudioEffect(
-            effect_id=f"fx-{uuid.uuid4().hex}",
-            kind=effect_kind,
-        )
+        if effect_kind.startswith("preset:"):
+            effects = character_effect_chain(effect_kind.removeprefix("preset:"))
+        elif effect_kind in EDITABLE_EFFECT_KINDS:
+            effects = (character_effect(effect_kind),)
+        elif effect_kind == STUDIO_EFFECT_REVERB:
+            effects = (
+                StudioEffect(
+                    effect_id=f"fx-{uuid.uuid4().hex}",
+                    kind=effect_kind,
+                ),
+            )
+        else:
+            return
+        if not effects:
+            return
         try:
-            self._commit(add_studio_clip_effect(self._session, clip_id, effect))
+            updated = self._session
+            for effect in effects:
+                updated = add_studio_clip_effect(updated, clip_id, effect)
+            self._commit(updated)
             self.timeline.select_clip(clip_id)
         except StudioTimelineError as exc:
             self.set_status(str(exc))
@@ -1480,6 +1586,31 @@ class StudioEditor(QWidget):
                 fade_in_ms=current_clip.fade_in_ms if fade_in_ms is None else fade_in_ms,
                 fade_out_ms=current_clip.fade_out_ms if fade_out_ms is None else fade_out_ms,
             )
+            self._commit(updated)
+        except StudioTimelineError as exc:
+            self.set_status(str(exc))
+            self._sync_inspector(clip_id=clip_id)
+
+    def _set_media_values(
+        self,
+        clip_id: str,
+        duration_ms: int,
+        settings: StudioMediaSettings,
+    ) -> None:
+        clip = self._clip(clip_id)
+        asset = self._assets_by_id.get(clip.asset.asset_id) if clip is not None else None
+        if clip is None or asset is None or asset.media_kind not in {"video", "image"}:
+            return
+        try:
+            updated = self._session
+            if asset.media_kind == "image" and duration_ms != clip.duration_ms:
+                updated = trim_studio_clip(
+                    updated,
+                    clip_id,
+                    source_start_ms=0,
+                    source_end_ms=max(100, int(duration_ms)),
+                )
+            updated = set_studio_clip_media(updated, clip_id, settings)
             self._commit(updated)
         except StudioTimelineError as exc:
             self.set_status(str(exc))

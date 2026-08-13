@@ -3,12 +3,14 @@ from __future__ import annotations
 import uuid
 from dataclasses import replace
 
+from jang_app.services.studio_audio_levels import clamp_studio_clip_gain_db
 from jang_app.services.studio_session import (
     TRACK_AUDIO,
     TRACK_VIDEO,
     StudioAssetRef,
     StudioClip,
     StudioEffect,
+    StudioMediaSettings,
     StudioSession,
     StudioTrack,
 )
@@ -293,7 +295,7 @@ def set_studio_track_collapsed(
 
 def set_studio_clip_gain(session: StudioSession, clip_id: str, gain_db: float) -> StudioSession:
     track, _clip = _find_clip(session, clip_id)
-    clamped = max(-60.0, min(12.0, float(gain_db)))
+    clamped = clamp_studio_clip_gain_db(gain_db)
     return _replace_track(
         session,
         track.track_id,
@@ -328,7 +330,7 @@ def set_studio_clip_mix(
             gain_db=(
                 candidate.gain_db
                 if gain_db is None
-                else max(-60.0, min(12.0, float(gain_db)))
+                else clamp_studio_clip_gain_db(gain_db)
             ),
             muted=candidate.muted if muted is None else bool(muted),
             fade_in_ms=(
@@ -348,6 +350,22 @@ def set_studio_clip_mix(
         session,
         track.track_id,
         lambda current: replace(current, clips=tuple(update(clip) for clip in current.clips)),
+    )
+
+
+def set_studio_clip_media(
+    session: StudioSession,
+    clip_id: str,
+    settings: StudioMediaSettings,
+) -> StudioSession:
+    track, _clip = _find_clip(session, clip_id)
+    if track.role != TRACK_VIDEO:
+        raise StudioTimelineError("Media settings can only be changed on a media clip.")
+    return _replace_clip(
+        session,
+        track.track_id,
+        clip_id,
+        lambda clip: replace(clip, media=settings),
     )
 
 

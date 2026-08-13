@@ -9,7 +9,11 @@ import soundfile as sf
 
 from jang_app.services.audio_export import AudioMixSource
 from jang_app.services.studio_realtime_audio import prepare_studio_playback_audio
-from jang_app.services.studio_session import StudioEffect, StudioReverbSettings
+from jang_app.services.studio_session import (
+    StudioEffect,
+    StudioLevelMatchSettings,
+    StudioReverbSettings,
+)
 
 
 class StudioRealtimeAudioTests(unittest.TestCase):
@@ -37,6 +41,31 @@ class StudioRealtimeAudioTests(unittest.TestCase):
             self.assertTrue(np.allclose(prepared.tracks[0][:4_410], 0.0))
             self.assertEqual(prepared.effect_chains, ((effect,),))
             self.assertGreater(prepared.duration_ms, 1_000)
+
+    def test_level_match_is_baked_into_preview_and_removed_from_live_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "converted.wav"
+            reference_path = root / "vocals.wav"
+            sf.write(source_path, np.full(44_100, 0.2, dtype=np.float32), 44_100)
+            sf.write(reference_path, np.full(44_100, 0.4, dtype=np.float32), 44_100)
+            effect = StudioEffect(
+                "fx-level",
+                "level_match",
+                level_match=StudioLevelMatchSettings(100, 100, 12, -60),
+            )
+            source = AudioMixSource(
+                "Converted",
+                source_path,
+                source_end_ms=1_000,
+                effects=(effect,),
+                reference_path=reference_path,
+            )
+
+            prepared = prepare_studio_playback_audio((source,))
+
+            self.assertAlmostEqual(float(np.mean(prepared.tracks[0])), 0.4, places=2)
+            self.assertEqual(prepared.effect_chains, ((),))
 
 
 if __name__ == "__main__":

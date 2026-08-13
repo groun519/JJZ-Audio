@@ -18,6 +18,7 @@ from jang_app.services.song_export import (
 from jang_app.services.song_package import SongPackageStore
 from jang_app.services.song_library import SongLibrary
 from jang_app.services.studio_session import (
+    TRACK_CONVERTED_VOCAL,
     TRACK_ORIGINAL_VOCAL,
     TRACK_VIDEO,
     StudioAssetRef,
@@ -26,6 +27,7 @@ from jang_app.services.studio_session import (
     StudioSession,
     StudioTrack,
     StudioTrackState,
+    StudioLevelMatchSettings,
     load_studio_session,
 )
 from jang_app.services.studio_assets import studio_sound_pool
@@ -63,6 +65,42 @@ class SongExportTests(unittest.TestCase):
 
             self.assertEqual(sources[0].effects, (effect,))
 
+    def test_level_match_resolves_original_vocal_from_the_same_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            output = package.active_output
+            effect = StudioEffect(
+                "fx-level",
+                "level_match",
+                level_match=StudioLevelMatchSettings(),
+            )
+            clip = StudioClip(
+                "converted",
+                StudioAssetRef(
+                    output.output_id,
+                    TRACK_CONVERTED_VOCAL,
+                    "vocals_rvc_second.wav",
+                ),
+                0,
+                0,
+                1_000,
+                effects=(effect,),
+            )
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "track-converted",
+                        "Converted Vocal",
+                        role=TRACK_CONVERTED_VOCAL,
+                        clips=(clip,),
+                    ),
+                )
+            )
+
+            source = build_song_mix_sources(package, session)[0]
+
+            self.assertEqual(source.reference_path, (output.job_dir / "vocals.wav").resolve())
+
     def test_mix_sources_use_active_output_converted_version_and_studio_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             package = _package_with_output(Path(temporary))
@@ -82,17 +120,17 @@ class SongExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             package = _package_with_output(Path(temporary))
 
-            def fake_export(_sources, output_path: Path, **_options) -> Path:
+            def fake_export(_sources, output_path: Path, *_args, **_options) -> Path:
                 output_path.write_bytes(b"mix")
                 return output_path
 
-            with patch("jang_app.services.song_export.export_mix", side_effect=fake_export):
+            with patch("jang_app.services.song_export.export_final_audio_mix", side_effect=fake_export):
                 first = export_song_mix(package, StudioSession())
                 second = export_song_mix(package, StudioSession())
 
             self.assertNotEqual(first, second)
-            self.assertEqual(first.name, "Song - Audio Mix.wav")
-            self.assertEqual(second.name, "Song - Audio Mix (2).wav")
+            self.assertEqual(first.name, "Song - Master WAV.wav")
+            self.assertEqual(second.name, "Song - Master WAV (2).wav")
             self.assertEqual(first.parent, song_audio_export_dir(package))
             records = list_song_audio_exports(package)
             self.assertEqual({record.path for record in records}, {first, second})
@@ -110,6 +148,18 @@ class SongExportTests(unittest.TestCase):
 
             self.assertFalse(legacy.exists())
             self.assertEqual([record.path.name for record in records], ["Song - Audio Mix.wav"])
+
+    def test_opus_exports_are_included_in_the_audio_export_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            output_dir = song_audio_export_dir(package)
+            output_dir.mkdir(parents=True)
+            opus = output_dir / "Song - Discord 10MB.ogg"
+            opus.write_bytes(b"opus")
+
+            records = list_song_audio_exports(package)
+
+            self.assertEqual([record.path for record in records], [opus.resolve()])
 
     def test_export_rejects_a_session_with_every_track_muted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

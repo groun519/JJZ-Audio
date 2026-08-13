@@ -10,6 +10,7 @@ from PySide6.QtCore import QElapsedTimer, QTimer
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink
 
 from jang_app.services.realtime_effects import RealtimeEffectChain
+from jang_app.services.studio_audio_levels import clamp_studio_source_volume
 from jang_app.services.studio_session import StudioEffect
 
 
@@ -396,7 +397,7 @@ def _resolve_volumes(source_count: int, volumes: Sequence[float] | None) -> list
 
 
 def _clamp_volume(volume: float) -> float:
-    return max(0.0, min(2.0, volume))
+    return clamp_studio_source_volume(volume)
 
 
 def _frames_to_bytes(frame_count: int) -> int:

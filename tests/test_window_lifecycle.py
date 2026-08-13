@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMenu, QVBoxLayout, QWidget
 
 from jang_app.qt_app.library_details_panel import LibraryDetailsPanel
@@ -41,7 +42,7 @@ class WindowLifecycleGuardTests(unittest.TestCase):
 
         with self.assertLogs("jang_app", level="ERROR") as captured:
             label.show()
-            self.app.processEvents()
+            QTest.qWait(260)
 
         self.assertFalse(label.isVisible())
         self.assertEqual(guard.blocked_count, 1)
@@ -113,6 +114,24 @@ class WindowLifecycleGuardTests(unittest.TestCase):
         child.show()
         layout.addWidget(child)
         self.app.processEvents()
+
+        self.assertTrue(child.isVisible())
+        self.assertFalse(child.isWindow())
+        self.assertEqual(guard.blocked_count, 0)
+        host.close()
+
+    def test_slowly_parented_child_is_not_reported_as_an_unexpected_window(self) -> None:
+        guard = install_window_lifecycle_guard(self.app)
+        host = QWidget()
+        host.setProperty("allowTopLevelWindow", True)
+        layout = QVBoxLayout(host)
+        host.show()
+
+        child = QLabel("Slow child")
+        child.setObjectName("SlowChild")
+        child.show()
+        QTimer.singleShot(120, lambda: layout.addWidget(child))
+        QTest.qWait(260)
 
         self.assertTrue(child.isVisible())
         self.assertFalse(child.isWindow())

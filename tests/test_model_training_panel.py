@@ -201,7 +201,8 @@ class ModelTrainingPanelTests(unittest.TestCase):
 
             self.assertEqual(panel.batch_size_spin.value(), 2)
             self.assertIn("Current recommendation: 2", panel.batch_size_info.toolTip())
-            self.assertIn("CPU mode", panel.training_device_info.toolTip())
+            self.assertIn("No GPU index is required", panel.training_device_info.toolTip())
+            self.assertIn("AMD GPU", panel.training_device_info.toolTip())
 
             set_language(LANGUAGE_KOREAN)
             panel.apply_language()
@@ -307,7 +308,9 @@ class ModelTrainingPanelTests(unittest.TestCase):
 
         self.assertEqual(panel.device_stack.currentWidget(), panel.cpu_device_label)
         self.assertEqual(panel.cpu_device_label.text(), "CPU")
-        self.assertIn("DirectML / CPU Training", panel.profile_label.text())
+        self.assertEqual(panel.conversion_device_label.text(), "Conversion: DirectML GPU")
+        self.assertEqual(panel.training_device_label.text(), "Training: CPU")
+        self.assertIn("AMD GPU", panel.training_device_info.toolTip())
         panel.close()
 
     def test_complete_state_marks_every_workflow_stage_complete(self) -> None:

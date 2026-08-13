@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 import math
+from collections.abc import Callable
+from pathlib import Path
 
 from jang_app.services.audio_export import AudioExportError, AudioMixSource, export_mix
+from jang_app.services.audio_export_settings import AudioExportSettings
 from jang_app.services.export_names import (
     migrate_legacy_song_exports,
     next_song_export_path,
@@ -11,8 +13,17 @@ from jang_app.services.export_names import (
 )
 from jang_app.services.export_catalog import ExportedFile, list_exported_files
 from jang_app.services.output_catalog import load_output_sound_set
+from jang_app.services.final_audio_export import export_final_audio_mix
 from jang_app.services.song_package import EXPORT_STAGE, VOCAL_STAGE, SongPackage
-from jang_app.services.studio_session import TRACK_VIDEO, StudioSession, StudioTrackState
+from jang_app.services.studio_session import (
+    STUDIO_EFFECT_LEVEL_MATCH,
+    TRACK_CONVERTED_VOCAL,
+    TRACK_ORIGINAL_VOCAL,
+    TRACK_VIDEO,
+    StudioAssetRef,
+    StudioSession,
+    StudioTrackState,
+)
 from jang_app.services.studio_assets import resolve_studio_asset
 
 
@@ -20,15 +31,26 @@ SongAudioExport = ExportedFile
 _LEGACY_MIX_PATTERN = timestamp_export_pattern("mix", ".wav")
 
 
-def export_song_mix(package: SongPackage, session: StudioSession) -> Path:
+def export_song_mix(
+    package: SongPackage,
+    session: StudioSession,
+    settings: AudioExportSettings | None = None,
+    progress: Callable[[int], None] | None = None,
+) -> Path:
+    export_settings = settings or AudioExportSettings()
     sources = build_song_mix_sources(package, session)
     output_path = next_song_export_path(
         song_audio_export_dir(package),
         package.title,
-        "Audio Mix",
-        ".wav",
+        export_settings.output_label,
+        export_settings.extension,
     )
-    return export_mix(sources, output_path)
+    return export_final_audio_mix(
+        sources,
+        output_path,
+        export_settings,
+        progress,
+    )
 
 
 def build_song_mix_sources(package: SongPackage, session: StudioSession) -> tuple[AudioMixSource, ...]:
@@ -82,7 +104,7 @@ def list_song_audio_exports(package: SongPackage) -> tuple[SongAudioExport, ...]
         ".wav",
         _LEGACY_MIX_PATTERN,
     )
-    return list_exported_files(output_dir, "*.wav")
+    return list_exported_files(output_dir, ("*.wav", "*.flac", "*.mp3", "*.ogg"))
 
 
 def song_audio_export_dir(package: SongPackage) -> Path:
@@ -111,6 +133,18 @@ def _timeline_mix_sources(
             if path is None:
                 continue
             clip_gain = math.pow(10.0, clip.gain_db / 20.0)
+            reference_path = None
+            if (
+                clip.asset.role == TRACK_CONVERTED_VOCAL
+                and any(
+                    effect.enabled and effect.kind == STUDIO_EFFECT_LEVEL_MATCH
+                    for effect in clip.effects
+                )
+            ):
+                reference_path = resolve_studio_asset(
+                    package,
+                    StudioAssetRef(clip.asset.output_id, TRACK_ORIGINAL_VOCAL),
+                )
             sources.append(
                 AudioMixSource(
                     label=f"{track.name} / {clip.clip_id}",
@@ -123,6 +157,7 @@ def _timeline_mix_sources(
                     fade_out_ms=clip.fade_out_ms,
                     pan_percent=track.pan_percent,
                     effects=clip.effects,
+                    reference_path=reference_path,
                 )
             )
     return tuple(sources)

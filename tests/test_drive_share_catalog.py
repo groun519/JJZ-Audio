@@ -39,6 +39,26 @@ class DriveShareCatalogTests(unittest.TestCase):
             self.assertIsNone(catalog.find(source, "exports"))
             self.assertFalse(catalog.remove(source, "exports"))
 
+    def test_move_source_preserves_share_after_local_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "mix.wav"
+            target = root / "Final Mix.wav"
+            source.write_bytes(b"audio")
+            catalog = DriveShareCatalog(root / "shares.json")
+            catalog.record(
+                source,
+                "exports",
+                GoogleDriveFile("id", "mix.wav", 5, "https://share", ""),
+            )
+            source.rename(target)
+
+            self.assertTrue(catalog.move_source(source, target, "exports"))
+            self.assertIsNone(catalog.find(source, "exports"))
+            moved = catalog.find(target, "exports")
+            self.assertIsNotNone(moved)
+            self.assertEqual(moved.share_link, "https://share")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,8 +21,14 @@ from jang_app.services.export_catalog import ExportedFile, list_exported_files
 from jang_app.services.song_export import build_song_mix_sources
 from jang_app.services.song_package import EXPORT_STAGE, SongPackage
 from jang_app.services.studio_assets import resolve_studio_asset
-from jang_app.services.studio_session import TRACK_VIDEO, StudioSession
+from jang_app.services.studio_session import (
+    MEDIA_FILL,
+    TRACK_VIDEO,
+    StudioMediaSettings,
+    StudioSession,
+)
 from jang_app.services.video_source import VideoSource
+from jang_app.services.video_export_settings import VideoExportSettings
 
 
 class SongVideoExportError(RuntimeError):
@@ -40,6 +46,8 @@ class _VisualClip:
     timeline_start_ms: int
     source_start_ms: int
     duration_ms: int
+    media: StudioMediaSettings
+    source_audio_enabled: bool = False
 
 
 def render_song_video(
@@ -47,7 +55,9 @@ def render_song_video(
     source: VideoSource,
     session: StudioSession,
     progress: Callable[[int], None] | None = None,
+    settings: VideoExportSettings | None = None,
 ) -> Path:
+    resolved_settings = settings or VideoExportSettings()
     try:
         executable = require_executable(
             "ffmpeg",
@@ -61,7 +71,7 @@ def render_song_video(
     output_path = next_song_export_path(
         output_dir,
         package.title,
-        "Video",
+        resolved_settings.output_label,
         ".mp4",
     )
     temporary_output = output_path.with_name(f"{output_path.stem}.{uuid.uuid4().hex}.rendering.mp4")
@@ -88,6 +98,7 @@ def render_song_video(
                     mix_path,
                     temporary_output,
                     duration_ms,
+                    resolved_settings,
                 ),
                 output_callback=_ffmpeg_progress(duration_ms, progress),
             )
@@ -124,7 +135,9 @@ def _render_command(
     mix_path: Path,
     output_path: Path,
     duration_ms: int,
+    settings: VideoExportSettings | None = None,
 ) -> list[str]:
+    resolved_settings = settings or VideoExportSettings()
     command = [
         executable,
         "-y",
@@ -135,7 +148,9 @@ def _render_command(
     for clip in visual_clips:
         duration = _seconds(clip.duration_ms)
         if clip.media_kind == "image":
-            command.extend(("-loop", "1", "-framerate", "30", "-t", duration))
+            command.extend(
+                ("-loop", "1", "-framerate", str(resolved_settings.frame_rate), "-t", duration)
+            )
         else:
             if clip.source_start_ms > 0:
                 command.extend(("-ss", _seconds(clip.source_start_ms)))
@@ -146,11 +161,11 @@ def _render_command(
     command.extend(
         (
             "-filter_complex",
-            _visual_filter(visual_clips, duration_ms),
+            _render_filter(visual_clips, duration_ms, audio_index, resolved_settings),
             "-map",
             f"[visual{len(visual_clips)}]",
             "-map",
-            f"{audio_index}:a:0",
+            _audio_map(visual_clips, audio_index),
         )
     )
     command.extend([
@@ -159,15 +174,15 @@ def _render_command(
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        resolved_settings.encoding_preset,
         "-crf",
-        "18",
+        str(resolved_settings.quality_crf),
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-b:a",
-        "320k",
+        f"{resolved_settings.audio_bitrate_kbps}k",
         "-movflags",
         "+faststart",
         "-progress",
@@ -200,6 +215,12 @@ def _visual_clips(
                     clip.timeline_start_ms,
                     clip.source_start_ms,
                     duration_ms,
+                    clip.media,
+                    (
+                        clip.media.source_audio_enabled
+                        and _media_kind(path) == "video"
+                        and _has_audio_stream(path)
+                    ),
                 )
             )
     if clips:
@@ -215,28 +236,73 @@ def _visual_clips(
             0,
             0,
             output_duration_ms,
+            StudioMediaSettings(),
         ),
     )
 
 
-def _visual_filter(clips: tuple[_VisualClip, ...], duration_ms: int) -> str:
+def _render_filter(
+    clips: tuple[_VisualClip, ...],
+    duration_ms: int,
+    audio_index: int,
+    settings: VideoExportSettings | None = None,
+) -> str:
+    resolved_settings = settings or VideoExportSettings()
     filters = [
-        f"color=c=black:s=1920x1080:r=30:d={_seconds(duration_ms)}[visual0]"
+        f"color=c=black:s={resolved_settings.width}x{resolved_settings.height}:"
+        f"r={resolved_settings.frame_rate}:d={_seconds(duration_ms)}[visual0]"
     ]
     for index, clip in enumerate(clips):
         start = _seconds(clip.timeline_start_ms)
         end = _seconds(clip.timeline_start_ms + clip.duration_ms)
         duration = _seconds(clip.duration_ms)
+        width = max(1, round(resolved_settings.width * clip.media.scale_percent / 100))
+        height = max(1, round(resolved_settings.height * clip.media.scale_percent / 100))
+        aspect_mode = "increase" if clip.media.fit_mode == MEDIA_FILL else "decrease"
+        offset_x = clip.media.offset_x_percent * resolved_settings.width / 100
+        offset_y = clip.media.offset_y_percent * resolved_settings.height / 100
         filters.append(
-            f"[{index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
-            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30,"
+            f"[{index}:v]scale={width}:{height}:force_original_aspect_ratio={aspect_mode},"
+            f"setsar=1,fps={resolved_settings.frame_rate},"
             f"trim=duration={duration},setpts=PTS-STARTPTS+{start}/TB[media{index}]"
         )
         filters.append(
-            f"[visual{index}][media{index}]overlay=eof_action=pass:shortest=0:"
+            f"[visual{index}][media{index}]overlay="
+            f"x='(W-w)/2+{offset_x:.3f}':y='(H-h)/2+{offset_y:.3f}':"
+            "eof_action=pass:shortest=0:"
             f"enable='between(t\\,{start}\\,{end})'[visual{index + 1}]"
         )
+    audio_clips = tuple(
+        (index, clip)
+        for index, clip in enumerate(clips)
+        if clip.source_audio_enabled
+    )
+    if audio_clips:
+        filters.append(f"[{audio_index}:a:0]anull[audio0]")
+        for mix_index, (input_index, clip) in enumerate(audio_clips, start=1):
+            filters.append(
+                f"[{input_index}:a:0]atrim=duration={_seconds(clip.duration_ms)},"
+                f"asetpts=PTS-STARTPTS,adelay={clip.timeline_start_ms}:all=1"
+                f"[mediaaudio{mix_index}]"
+            )
+            filters.append(
+                f"[audio{mix_index - 1}][mediaaudio{mix_index}]"
+                "amix=inputs=2:duration=longest:dropout_transition=0:normalize=0"
+                f"[audio{mix_index}]"
+            )
     return ";".join(filters)
+
+
+def _audio_map(clips: tuple[_VisualClip, ...], audio_index: int) -> str:
+    count = sum(clip.source_audio_enabled for clip in clips)
+    return f"[audio{count}]" if count else f"{audio_index}:a:0"
+
+
+def _has_audio_stream(path: Path) -> bool:
+    try:
+        return read_audio_metadata(path).channels > 0
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _media_kind(path: Path) -> str:

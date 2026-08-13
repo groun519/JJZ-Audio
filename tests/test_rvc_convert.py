@@ -19,6 +19,7 @@ from jang_app.services.command import (
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_inference_runtime import RvcDeviceSelection, RvcInferenceCapabilities
 from jang_app.services.settings import RvcSettings
+from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 
 
 class RvcConvertTests(unittest.TestCase):
@@ -125,6 +126,12 @@ class RvcConvertTests(unittest.TestCase):
                 voice_model="weights/voice.pth",
                 pitch=-12,
                 device="cuda:0",
+                inference=RvcInferenceSettings(
+                    index_rate=0.62,
+                    filter_radius=5,
+                    rms_mix_rate=0.4,
+                    protect=0.18,
+                ),
             )
 
             def complete_conversion(args, **_kwargs):
@@ -141,11 +148,13 @@ class RvcConvertTests(unittest.TestCase):
             args = command.call_args.args[0]
             self.assertEqual(args[3], "-12")
             self.assertEqual(args[8], "cpu")
+            self.assertEqual(args[10:14], ["0.62", "5", "0.40", "0.18"])
             self.assertTrue(result.output_path.is_file())
             self.assertEqual(result.voice_model, settings.voice_model)
             self.assertEqual(result.pitch, -12)
             self.assertEqual(result.requested_device, settings.device)
             self.assertEqual(result.effective_device, "cpu")
+            self.assertEqual(result.inference, settings.inference)
 
     def test_conversion_failure_includes_rvc_process_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -9,7 +9,12 @@ import soundfile as sf
 
 from jang_app.services.audio_export import AudioMixSource, export_audio_file, export_mix
 from jang_app.services.audio_mix_processing import process_mix_source
-from jang_app.services.studio_session import StudioEffect, StudioReverbSettings
+from jang_app.services.studio_character_fx_presets import character_effect_chain
+from jang_app.services.studio_session import (
+    StudioEffect,
+    StudioLevelMatchSettings,
+    StudioReverbSettings,
+)
 
 
 class AudioExportTests(unittest.TestCase):
@@ -51,6 +56,42 @@ class AudioExportTests(unittest.TestCase):
         self.assertGreater(float(processed[100, 1]), 1.3)
         self.assertAlmostEqual(float(processed[-1, 1]), 0.0, places=5)
         self.assertAlmostEqual(float(np.max(np.abs(processed[:, 0]))), 0.0, places=5)
+
+    def test_mix_processing_keeps_studio_gain_above_the_legacy_ceiling(self) -> None:
+        source = np.full((8, 1), 0.001, dtype=np.float32)
+
+        processed = process_mix_source(source, 8_000, volume=32.0)
+
+        self.assertAlmostEqual(float(processed[0, 0]), 0.032, places=5)
+
+    def test_mix_processing_applies_character_chain_in_declared_order(self) -> None:
+        source = np.linspace(-0.5, 0.5, 8_000, dtype=np.float32)[:, None]
+        effects = character_effect_chain("broken_robot")
+
+        processed = process_mix_source(source, 8_000, effects=effects)
+
+        self.assertEqual(processed.shape, source.shape)
+        self.assertTrue(np.isfinite(processed).all())
+        self.assertGreater(float(np.max(np.abs(processed - source))), 0.05)
+
+    def test_export_level_match_uses_optional_reference_audio(self) -> None:
+        source = np.full((8_000, 1), 0.2, dtype=np.float32)
+        reference = np.full((8_000, 1), 0.4, dtype=np.float32)
+        effect = StudioEffect(
+            "fx-level",
+            "level_match",
+            level_match=StudioLevelMatchSettings(100, 100, 12, -60),
+        )
+
+        processed = process_mix_source(
+            source,
+            8_000,
+            effects=(effect,),
+            reference_audio=reference,
+        )
+
+        self.assertAlmostEqual(float(np.mean(processed)), 0.4, places=2)
+
     def test_export_uses_the_same_output_ceiling_as_realtime_playback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

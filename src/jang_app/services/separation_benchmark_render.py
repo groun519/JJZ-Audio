@@ -11,6 +11,7 @@ from jang_app.pipeline.rvc_convert import convert_vocal_with_rvc
 from jang_app.services.audio_export import AudioMixSource, export_mix
 from jang_app.services.managed_files import file_sha256, write_json_atomic
 from jang_app.services.settings import RvcSettings
+from jang_app.services.rvc_inference_settings import rvc_inference_settings_from_data
 
 
 BENCHMARK_RENDER_SCHEMA = 1
@@ -236,6 +237,7 @@ def _rvc_settings(data: Mapping[str, object]) -> RvcSettings:
         pitch=_required_integer(data.get("pitch"), "rvc.pitch"),
         device=_required_text(data.get("device"), "rvc.device"),
         f0_method=_required_text(data.get("f0_method"), "rvc.f0_method"),
+        inference=rvc_inference_settings_from_data(data.get("inference")),
     )
 
 

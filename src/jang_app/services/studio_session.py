@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.services.managed_files import write_json_atomic
 from jang_app.services.song_package import STUDIO_STAGE, SongPackage
+from jang_app.services.studio_audio_levels import clamp_studio_clip_gain_db
 
 
-STUDIO_SESSION_VERSION = 5
-STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4}
+STUDIO_SESSION_VERSION = 8
+STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4, 5, 6, 7}
 STUDIO_SESSION_LEGACY_VERSION = 1
 STUDIO_SESSION_NAME = "session.json"
 TRACK_ORIGINAL_VOCAL = "original_vocal"
@@ -20,6 +21,22 @@ TRACK_CONVERTED_VOCAL = "converted_vocal"
 TRACK_AUDIO = "audio"
 TRACK_VIDEO = "video"
 STUDIO_EFFECT_REVERB = "reverb"
+STUDIO_EFFECT_RADIO_FILTER = "radio_filter"
+STUDIO_EFFECT_RING_MODULATOR = "ring_modulator"
+STUDIO_EFFECT_BITCRUSHER = "bitcrusher"
+STUDIO_EFFECT_DISTORTION = "distortion"
+STUDIO_EFFECT_LEVEL_MATCH = "level_match"
+SUPPORTED_STUDIO_EFFECTS = {
+    STUDIO_EFFECT_REVERB,
+    STUDIO_EFFECT_RADIO_FILTER,
+    STUDIO_EFFECT_RING_MODULATOR,
+    STUDIO_EFFECT_BITCRUSHER,
+    STUDIO_EFFECT_DISTORTION,
+    STUDIO_EFFECT_LEVEL_MATCH,
+}
+MEDIA_FIT = "fit"
+MEDIA_FILL = "fill"
+SUPPORTED_MEDIA_FIT_MODES = {MEDIA_FIT, MEDIA_FILL}
 SUPPORTED_TRACK_ROLES = {
     TRACK_ORIGINAL_VOCAL,
     TRACK_INSTRUMENTAL,
@@ -72,11 +89,61 @@ class StudioReverbSettings:
 
 
 @dataclass(frozen=True)
+class StudioRadioFilterSettings:
+    low_cut_hz: int = 280
+    high_cut_hz: int = 4_800
+    mix_percent: int = 100
+
+
+@dataclass(frozen=True)
+class StudioRingModulatorSettings:
+    frequency_hz: int = 72
+    mix_percent: int = 28
+
+
+@dataclass(frozen=True)
+class StudioBitcrusherSettings:
+    bit_depth: int = 10
+    sample_rate_hz: int = 16_000
+    mix_percent: int = 35
+
+
+@dataclass(frozen=True)
+class StudioDistortionSettings:
+    drive_percent: int = 35
+    mix_percent: int = 28
+
+
+@dataclass(frozen=True)
+class StudioLevelMatchSettings:
+    strength_percent: int = 75
+    response_ms: int = 180
+    max_correction_db: int = 6
+    silence_threshold_db: int = -50
+
+
+@dataclass(frozen=True)
 class StudioEffect:
     effect_id: str
     kind: str
     enabled: bool = True
     reverb: StudioReverbSettings = field(default_factory=StudioReverbSettings)
+    radio_filter: StudioRadioFilterSettings = field(default_factory=StudioRadioFilterSettings)
+    ring_modulator: StudioRingModulatorSettings = field(
+        default_factory=StudioRingModulatorSettings
+    )
+    bitcrusher: StudioBitcrusherSettings = field(default_factory=StudioBitcrusherSettings)
+    distortion: StudioDistortionSettings = field(default_factory=StudioDistortionSettings)
+    level_match: StudioLevelMatchSettings = field(default_factory=StudioLevelMatchSettings)
+
+
+@dataclass(frozen=True)
+class StudioMediaSettings:
+    fit_mode: str = MEDIA_FIT
+    scale_percent: int = 100
+    offset_x_percent: int = 0
+    offset_y_percent: int = 0
+    source_audio_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +158,7 @@ class StudioClip:
     fade_in_ms: int = 0
     fade_out_ms: int = 0
     effects: tuple[StudioEffect, ...] = ()
+    media: StudioMediaSettings = field(default_factory=StudioMediaSettings)
 
     @property
     def duration_ms(self) -> int:
@@ -332,6 +400,7 @@ def _clip_from_data(value: object) -> StudioClip | None:
         fade_in_ms=fade_in,
         fade_out_ms=fade_out,
         effects=_effects_from_data(value.get("effects")),
+        media=_media_settings_from_data(value.get("media")),
     )
 
 
@@ -380,6 +449,7 @@ def _normalize_clip(clip: StudioClip) -> StudioClip | None:
         fade_in_ms=fade_in,
         fade_out_ms=fade_out,
         effects=_normalize_effects(clip.effects),
+        media=_normalize_media_settings(clip.media),
     )
 
 
@@ -413,6 +483,45 @@ def _clip_to_data(clip: StudioClip) -> dict[str, object]:
         "fade_in_ms": clip.fade_in_ms,
         "fade_out_ms": clip.fade_out_ms,
         "effects": [_effect_to_data(effect) for effect in clip.effects],
+        "media": _media_settings_to_data(clip.media),
+    }
+
+
+def _media_settings_from_data(value: object) -> StudioMediaSettings:
+    if not isinstance(value, dict):
+        return StudioMediaSettings()
+    return _normalize_media_settings(
+        StudioMediaSettings(
+            fit_mode=str(value.get("fit_mode", MEDIA_FIT)),
+            scale_percent=value.get("scale_percent", 100),
+            offset_x_percent=value.get("offset_x_percent", 0),
+            offset_y_percent=value.get("offset_y_percent", 0),
+            source_audio_enabled=value.get("source_audio_enabled") is True,
+        )
+    )
+
+
+def _normalize_media_settings(settings: StudioMediaSettings) -> StudioMediaSettings:
+    fit_mode = str(settings.fit_mode)
+    if fit_mode not in SUPPORTED_MEDIA_FIT_MODES:
+        fit_mode = MEDIA_FIT
+    return StudioMediaSettings(
+        fit_mode=fit_mode,
+        scale_percent=max(25, min(400, _integer(settings.scale_percent, 100))),
+        offset_x_percent=max(-100, min(100, _integer(settings.offset_x_percent, 0))),
+        offset_y_percent=max(-100, min(100, _integer(settings.offset_y_percent, 0))),
+        source_audio_enabled=bool(settings.source_audio_enabled),
+    )
+
+
+def _media_settings_to_data(settings: StudioMediaSettings) -> dict[str, object]:
+    normalized = _normalize_media_settings(settings)
+    return {
+        "fit_mode": normalized.fit_mode,
+        "scale_percent": normalized.scale_percent,
+        "offset_x_percent": normalized.offset_x_percent,
+        "offset_y_percent": normalized.offset_y_percent,
+        "source_audio_enabled": normalized.source_audio_enabled,
     }
 
 
@@ -435,15 +544,24 @@ def _effect_from_data(value: object) -> StudioEffect | None:
         return None
     effect_id = str(value.get("effect_id", "")).strip()
     kind = str(value.get("kind", "")).strip()
-    if not effect_id or kind != STUDIO_EFFECT_REVERB:
+    if not effect_id or kind not in SUPPORTED_STUDIO_EFFECTS:
         return None
     settings = value.get("settings")
-    return StudioEffect(
+    effect = StudioEffect(
         effect_id=effect_id,
         kind=kind,
         enabled=value.get("enabled") is not False,
-        reverb=_reverb_settings_from_data(settings),
     )
+    settings_loader = {
+        STUDIO_EFFECT_REVERB: ("reverb", _reverb_settings_from_data),
+        STUDIO_EFFECT_RADIO_FILTER: ("radio_filter", _radio_filter_settings_from_data),
+        STUDIO_EFFECT_RING_MODULATOR: ("ring_modulator", _ring_modulator_settings_from_data),
+        STUDIO_EFFECT_BITCRUSHER: ("bitcrusher", _bitcrusher_settings_from_data),
+        STUDIO_EFFECT_DISTORTION: ("distortion", _distortion_settings_from_data),
+        STUDIO_EFFECT_LEVEL_MATCH: ("level_match", _level_match_settings_from_data),
+    }
+    field_name, loader = settings_loader[kind]
+    return _normalized_effect(replace(effect, **{field_name: loader(settings)}))
 
 
 def _normalize_effects(effects: tuple[StudioEffect, ...]) -> tuple[StudioEffect, ...]:
@@ -451,27 +569,172 @@ def _normalize_effects(effects: tuple[StudioEffect, ...]) -> tuple[StudioEffect,
     seen: set[str] = set()
     for effect in effects:
         effect_id = str(effect.effect_id).strip()
-        if not effect_id or effect_id in seen or effect.kind != STUDIO_EFFECT_REVERB:
+        if not effect_id or effect_id in seen or effect.kind not in SUPPORTED_STUDIO_EFFECTS:
             continue
         seen.add(effect_id)
-        normalized.append(
-            StudioEffect(
-                effect_id=effect_id,
-                kind=STUDIO_EFFECT_REVERB,
-                enabled=bool(effect.enabled),
-                reverb=_normalized_reverb_settings(effect.reverb),
-            )
-        )
+        normalized.append(_normalized_effect(replace(effect, effect_id=effect_id)))
     return tuple(normalized)
 
 
+def _normalized_effect(effect: StudioEffect) -> StudioEffect:
+    return StudioEffect(
+        effect_id=str(effect.effect_id).strip(),
+        kind=effect.kind,
+        enabled=bool(effect.enabled),
+        reverb=_normalized_reverb_settings(effect.reverb),
+        radio_filter=_normalized_radio_filter_settings(effect.radio_filter),
+        ring_modulator=_normalized_ring_modulator_settings(effect.ring_modulator),
+        bitcrusher=_normalized_bitcrusher_settings(effect.bitcrusher),
+        distortion=_normalized_distortion_settings(effect.distortion),
+        level_match=_normalized_level_match_settings(effect.level_match),
+    )
+
+
 def _effect_to_data(effect: StudioEffect) -> dict[str, object]:
+    settings = {
+        STUDIO_EFFECT_REVERB: _reverb_settings_to_data(effect.reverb),
+        STUDIO_EFFECT_RADIO_FILTER: _settings_to_data(
+            _normalized_radio_filter_settings(effect.radio_filter)
+        ),
+        STUDIO_EFFECT_RING_MODULATOR: _settings_to_data(
+            _normalized_ring_modulator_settings(effect.ring_modulator)
+        ),
+        STUDIO_EFFECT_BITCRUSHER: _settings_to_data(
+            _normalized_bitcrusher_settings(effect.bitcrusher)
+        ),
+        STUDIO_EFFECT_DISTORTION: _settings_to_data(
+            _normalized_distortion_settings(effect.distortion)
+        ),
+        STUDIO_EFFECT_LEVEL_MATCH: _settings_to_data(
+            _normalized_level_match_settings(effect.level_match)
+        ),
+    }.get(effect.kind, {})
     return {
         "effect_id": effect.effect_id,
         "kind": effect.kind,
         "enabled": effect.enabled,
-        "settings": _reverb_settings_to_data(effect.reverb),
+        "settings": settings,
     }
+
+
+def _radio_filter_settings_from_data(value: object) -> StudioRadioFilterSettings:
+    data = value if isinstance(value, dict) else {}
+    defaults = StudioRadioFilterSettings()
+    return _normalized_radio_filter_settings(
+        StudioRadioFilterSettings(
+            low_cut_hz=_integer(data.get("low_cut_hz"), defaults.low_cut_hz),
+            high_cut_hz=_integer(data.get("high_cut_hz"), defaults.high_cut_hz),
+            mix_percent=_integer(data.get("mix_percent"), defaults.mix_percent),
+        )
+    )
+
+
+def _ring_modulator_settings_from_data(value: object) -> StudioRingModulatorSettings:
+    data = value if isinstance(value, dict) else {}
+    defaults = StudioRingModulatorSettings()
+    return _normalized_ring_modulator_settings(
+        StudioRingModulatorSettings(
+            frequency_hz=_integer(data.get("frequency_hz"), defaults.frequency_hz),
+            mix_percent=_integer(data.get("mix_percent"), defaults.mix_percent),
+        )
+    )
+
+
+def _bitcrusher_settings_from_data(value: object) -> StudioBitcrusherSettings:
+    data = value if isinstance(value, dict) else {}
+    defaults = StudioBitcrusherSettings()
+    return _normalized_bitcrusher_settings(
+        StudioBitcrusherSettings(
+            bit_depth=_integer(data.get("bit_depth"), defaults.bit_depth),
+            sample_rate_hz=_integer(data.get("sample_rate_hz"), defaults.sample_rate_hz),
+            mix_percent=_integer(data.get("mix_percent"), defaults.mix_percent),
+        )
+    )
+
+
+def _distortion_settings_from_data(value: object) -> StudioDistortionSettings:
+    data = value if isinstance(value, dict) else {}
+    defaults = StudioDistortionSettings()
+    return _normalized_distortion_settings(
+        StudioDistortionSettings(
+            drive_percent=_integer(data.get("drive_percent"), defaults.drive_percent),
+            mix_percent=_integer(data.get("mix_percent"), defaults.mix_percent),
+        )
+    )
+
+
+def _level_match_settings_from_data(value: object) -> StudioLevelMatchSettings:
+    data = value if isinstance(value, dict) else {}
+    defaults = StudioLevelMatchSettings()
+    return _normalized_level_match_settings(
+        StudioLevelMatchSettings(
+            strength_percent=_integer(
+                data.get("strength_percent"), defaults.strength_percent
+            ),
+            response_ms=_integer(data.get("response_ms"), defaults.response_ms),
+            max_correction_db=_integer(
+                data.get("max_correction_db"), defaults.max_correction_db
+            ),
+            silence_threshold_db=_integer(
+                data.get("silence_threshold_db"), defaults.silence_threshold_db
+            ),
+        )
+    )
+
+
+def _normalized_radio_filter_settings(
+    settings: StudioRadioFilterSettings,
+) -> StudioRadioFilterSettings:
+    low_cut = int(_clamp(settings.low_cut_hz, 20, 4_000))
+    high_cut = int(_clamp(settings.high_cut_hz, low_cut + 100, 20_000))
+    return StudioRadioFilterSettings(
+        low_cut_hz=low_cut,
+        high_cut_hz=high_cut,
+        mix_percent=int(_clamp(settings.mix_percent, 0, 100)),
+    )
+
+
+def _normalized_ring_modulator_settings(
+    settings: StudioRingModulatorSettings,
+) -> StudioRingModulatorSettings:
+    return StudioRingModulatorSettings(
+        frequency_hz=int(_clamp(settings.frequency_hz, 1, 2_000)),
+        mix_percent=int(_clamp(settings.mix_percent, 0, 100)),
+    )
+
+
+def _normalized_bitcrusher_settings(
+    settings: StudioBitcrusherSettings,
+) -> StudioBitcrusherSettings:
+    return StudioBitcrusherSettings(
+        bit_depth=int(_clamp(settings.bit_depth, 4, 16)),
+        sample_rate_hz=int(_clamp(settings.sample_rate_hz, 2_000, 48_000)),
+        mix_percent=int(_clamp(settings.mix_percent, 0, 100)),
+    )
+
+
+def _normalized_distortion_settings(
+    settings: StudioDistortionSettings,
+) -> StudioDistortionSettings:
+    return StudioDistortionSettings(
+        drive_percent=int(_clamp(settings.drive_percent, 0, 100)),
+        mix_percent=int(_clamp(settings.mix_percent, 0, 100)),
+    )
+
+
+def _normalized_level_match_settings(
+    settings: StudioLevelMatchSettings,
+) -> StudioLevelMatchSettings:
+    return StudioLevelMatchSettings(
+        strength_percent=int(_clamp(settings.strength_percent, 0, 100)),
+        response_ms=int(_clamp(settings.response_ms, 40, 1_000)),
+        max_correction_db=int(_clamp(settings.max_correction_db, 1, 12)),
+        silence_threshold_db=int(_clamp(settings.silence_threshold_db, -80, -30)),
+    )
+
+
+def _settings_to_data(settings: object) -> dict[str, object]:
+    return {item.name: getattr(settings, item.name) for item in fields(settings)}
 
 
 def _reverb_settings_from_data(value: object) -> StudioReverbSettings:
@@ -609,6 +872,6 @@ def _non_negative_int(value: object) -> int:
 
 def _gain_db(value: object) -> float:
     try:
-        return max(-60.0, min(12.0, float(value)))
+        return clamp_studio_clip_gain_db(float(value))
     except (TypeError, ValueError):
         return 0.0

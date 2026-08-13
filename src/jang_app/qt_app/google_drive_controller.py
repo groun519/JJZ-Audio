@@ -164,6 +164,16 @@ class GoogleDriveController(QObject):
     def is_export_shared(self, path: Path) -> bool:
         return self._target_is_shared(self._export_target(path))
 
+    def move_export_share(self, source: Path, target: Path) -> bool:
+        service = self._get_service()
+        if service is None:
+            return False
+        try:
+            return service.move_shared_source(source, target, "exports")
+        except OSError as exc:
+            self._logger.warning("Could not move Google Drive share record: %s", exc)
+            return False
+
     def is_model_shared(self, record: RvcModelRecord) -> bool:
         if not record.can_convert:
             return False

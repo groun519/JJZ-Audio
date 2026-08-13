@@ -6,6 +6,10 @@ from pathlib import Path
 
 from jang_app.config import DEFAULT_RVC_ROOT, SEPARATION_OUTPUT_DIR, SETTINGS_FILE
 from jang_app.services.i18n import LANGUAGE_KOREAN, normalize_language
+from jang_app.services.rvc_inference_settings import (
+    RvcInferenceSettings,
+    rvc_inference_settings_from_data,
+)
 
 RVC_DEVICE_AUTO = "auto"
 RVC_DEVICE_GPU = "gpu"
@@ -22,6 +26,7 @@ class RvcSettings:
     pitch: int = 0
     device: str = RVC_DEVICE_AUTO
     f0_method: str = "rmvpe"
+    inference: RvcInferenceSettings = field(default_factory=RvcInferenceSettings)
 
 
 @dataclass(frozen=True)
@@ -81,6 +86,7 @@ def load_app_settings() -> AppSettings:
         pitch=_int_from_data(rvc_data.get("pitch"), default_settings.rvc.pitch),
         device=normalize_rvc_device(rvc_data.get("device")),
         f0_method="rmvpe",
+        inference=rvc_inference_settings_from_data(rvc_data.get("inference")),
     )
     return AppSettings(
         output_root=output_root,
@@ -110,6 +116,12 @@ def save_app_settings(settings: AppSettings) -> None:
             "pitch": settings.rvc.pitch,
             "device": settings.rvc.device,
             "f0_method": settings.rvc.f0_method,
+            "inference": {
+                "index_rate": settings.rvc.inference.index_rate,
+                "filter_radius": settings.rvc.inference.filter_radius,
+                "rms_mix_rate": settings.rvc.inference.rms_mix_rate,
+                "protect": settings.rvc.inference.protect,
+            },
         },
     }
     SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")

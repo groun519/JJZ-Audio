@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+from PySide6.QtCore import QEvent, QObject
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -108,6 +109,11 @@ class StudioSoundPoolTests(unittest.TestCase):
 
     def test_cards_are_parented_and_create_no_popup_windows(self) -> None:
         pool = StudioSoundPool()
+        probe = _TopLevelShowProbe()
+        self.app.installEventFilter(probe)
+        pool.show()
+        self.app.processEvents()
+        probe.events.clear()
         pool.set_assets(_assets())
         pool.set_assets(_assets()[:1])
         self.app.processEvents()
@@ -115,6 +121,35 @@ class StudioSoundPoolTests(unittest.TestCase):
         self.assertTrue(all(card.parentWidget() is pool.content for card in pool._cards.values()))
         child_windows = [child for child in pool.findChildren(QWidget) if child.isWindow()]
         self.assertEqual(child_windows, [])
+        self.assertEqual(probe.events, [])
+        self.app.removeEventFilter(probe)
+        pool.close()
+
+    def test_identical_assets_reuse_existing_cards(self) -> None:
+        pool = StudioSoundPool()
+        assets = _assets()
+        pool.set_assets(assets)
+        cards = dict(pool._cards)
+        pool._select_asset(assets[0].asset_id)
+
+        pool.set_assets(assets)
+
+        self.assertEqual(pool._cards, cards)
+        self.assertIs(pool._cards[assets[0].asset_id], cards[assets[0].asset_id])
+        self.assertTrue(pool._cards[assets[0].asset_id].property("selected"))
+
+    def test_changed_asset_replaces_only_its_card(self) -> None:
+        pool = StudioSoundPool()
+        assets = _assets()
+        pool.set_assets(assets)
+        cards = dict(pool._cards)
+        changed = replace(assets[1], label="Maximum / Updated Instrumental")
+
+        pool.set_assets((assets[0], changed, assets[2]))
+
+        self.assertIs(pool._cards[assets[0].asset_id], cards[assets[0].asset_id])
+        self.assertIsNot(pool._cards[changed.asset_id], cards[changed.asset_id])
+        self.assertIs(pool._cards[assets[2].asset_id], cards[assets[2].asset_id])
 
     def test_cards_use_consistent_role_badge_and_card_sizes(self) -> None:
         pool = StudioSoundPool()
@@ -234,6 +269,21 @@ def _assets() -> tuple[StudioSoundAsset, ...]:
             151_000,
         ),
     )
+
+
+class _TopLevelShowProbe(QObject):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[tuple[str, str]] = []
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.Show
+            and isinstance(watched, QWidget)
+            and watched.isWindow()
+        ):
+            self.events.append((type(watched).__name__, watched.objectName()))
+        return False
 
 
 if __name__ == "__main__":

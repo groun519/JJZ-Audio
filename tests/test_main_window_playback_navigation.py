@@ -107,6 +107,10 @@ class _LibraryAssetPlaybackTarget:
         self.is_playing = is_playing
 
 
+class _ExportPlaybackTarget(_LibraryAssetPlaybackTarget):
+    pass
+
+
 class _PlayheadTarget:
     def __init__(self) -> None:
         self.ratios: list[float] = []
@@ -563,6 +567,51 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
             separation_transport_bar=separation,
             conversion_transport_bar=conversion,
             library_details_panel=preview,
+            _playback_position_ms=15_000,
+            _sync_playback_surfaces=lambda: None,
+            _sync_video_playback=lambda _is_playing: None,
+        )
+
+        MainWindow._refresh_playback_ui(window, is_playing=True)
+
+        self.assertEqual(preview.path, path)
+        self.assertEqual(preview.position, (15_000, 90_000))
+        self.assertTrue(preview.is_playing)
+        self.assertEqual(separation.duration_ms, 0)
+
+    def test_export_queue_previews_only_the_selected_audio_file(self) -> None:
+        source = Path(__file__).resolve()
+        audio_path = source.with_suffix(".wav")
+        window = SimpleNamespace(
+            _duration_ms_for_paths=lambda paths: 42_000 if paths == [audio_path] else 0,
+        )
+        with patch.object(Path, "is_file", return_value=True):
+            queue = MainWindow._export_playback_queue(window, audio_path)
+
+        self.assertIsNotNone(queue)
+        self.assertEqual(queue.context, "export")
+        self.assertEqual(queue.source_id, str(audio_path))
+        self.assertEqual(queue.paths, (audio_path,))
+        self.assertEqual(queue.duration_ms, 42_000)
+
+    def test_export_queue_state_updates_the_inline_export_player(self) -> None:
+        separation = _WorkspacePlaybackTarget()
+        conversion = _WorkspacePlaybackTarget()
+        preview = _ExportPlaybackTarget()
+        path = Path("mix.wav")
+        queue = PlaybackQueue(
+            context="export",
+            source_id=str(path),
+            title="mix.wav",
+            paths=(path,),
+            volumes=(1.0,),
+            duration_ms=90_000,
+        )
+        window = SimpleNamespace(
+            current_playback_queue=queue,
+            separation_transport_bar=separation,
+            conversion_transport_bar=conversion,
+            export_page=preview,
             _playback_position_ms=15_000,
             _sync_playback_surfaces=lambda: None,
             _sync_video_playback=lambda _is_playing: None,

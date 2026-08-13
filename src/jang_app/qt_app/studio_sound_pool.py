@@ -214,22 +214,35 @@ class StudioSoundPool(QFrame):
         self.apply_language()
 
     def set_assets(self, assets: tuple[StudioSoundAsset, ...]) -> None:
+        if assets == self._assets:
+            return
+        previous_cards = self._cards
         self._assets = assets
         self._take_layout_items()
-        for card in self._cards.values():
+        next_cards: dict[str, StudioSoundCard] = {}
+        for asset in assets:
+            card = previous_cards.pop(asset.asset_id, None)
+            if card is None or card.asset != asset:
+                if card is not None:
+                    card.hide()
+                    card.deleteLater()
+                card = self._create_card(asset)
+            next_cards[asset.asset_id] = card
+        for card in previous_cards.values():
             card.hide()
             card.deleteLater()
-        self._cards.clear()
-        for asset in assets:
-            card = StudioSoundCard(asset, self.content)
-            card.selected.connect(self._select_asset)
-            card.remove_requested.connect(self.remove_requested.emit)
-            card.set_theme_mode(self._theme_mode)
-            card.set_list_mode(self._list_mode)
-            self._cards[asset.asset_id] = card
+        self._cards = next_cards
         if self._selected_asset_id not in self._cards:
             self._selected_asset_id = ""
         self._rebuild_layout()
+
+    def _create_card(self, asset: StudioSoundAsset) -> StudioSoundCard:
+        card = StudioSoundCard(asset, self.content)
+        card.selected.connect(self._select_asset)
+        card.remove_requested.connect(self.remove_requested.emit)
+        card.set_theme_mode(self._theme_mode)
+        card.set_list_mode(self._list_mode)
+        return card
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 
 
 VOCAL_PROJECT_SCHEMA_VERSION = 2
@@ -49,6 +51,7 @@ class VocalConversionSettings:
     requested_device: str
     effective_device: str
     f0_method: str
+    inference: RvcInferenceSettings = field(default_factory=RvcInferenceSettings)
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,7 @@ import soundfile as sf
 from unittest.mock import patch
 
 from jang_app.services.audio_player import AudioPlayer, PreparedPlaybackAudio
+from jang_app.services.studio_character_fx_presets import character_effect
 from jang_app.services.studio_session import StudioEffect, StudioReverbSettings
 
 
@@ -101,6 +103,26 @@ class AudioPlayerTests(unittest.TestCase):
         self.assertGreater(float(np.mean(dry_chunk)), 0.99)
         self.assertLess(float(np.mean(np.abs(wet_chunk))), 0.01)
 
+    def test_character_effect_settings_update_the_existing_live_chain(self) -> None:
+        player = AudioPlayer()
+        player._tracks = [np.linspace(-0.8, 0.8, 2_000, dtype=np.float32)[:, None]]
+        player._volumes = [1.0]
+        subtle = character_effect("distortion", "warm")
+        strong = StudioEffect(
+            subtle.effect_id,
+            subtle.kind,
+            distortion=replace(subtle.distortion, drive_percent=100, mix_percent=100),
+        )
+
+        self.assertTrue(player.set_effect_chains(((subtle,),)))
+        chain = player._effect_chains[0]
+        player._mix_live_chunk(0, 128)
+        self.assertTrue(player.set_effect_chains(((strong,),)))
+        processed = player._mix_live_chunk(128, 128)
+
+        self.assertIs(player._effect_chains[0], chain)
+        self.assertTrue(np.isfinite(processed).all())
+
     def test_paused_prepared_audio_resumes_without_reloading_track_arrays(self) -> None:
         player = AudioPlayer()
         track = np.ones((44_100, 2), dtype=np.float32)
@@ -132,6 +154,17 @@ class AudioPlayerTests(unittest.TestCase):
         self.assertIs(player._tracks[0], replacement.tracks[0])
         self.assertEqual(player._volumes, [0.5])
         self.assertEqual(player._duration_ms, 500)
+
+    def test_prepared_audio_keeps_studio_gain_above_the_legacy_ceiling(self) -> None:
+        player = AudioPlayer()
+        prepared = PreparedPlaybackAudio(
+            (np.ones((100, 2), dtype=np.float32),),
+            100,
+        )
+
+        self.assertTrue(player.set_prepared(prepared, (32.0,)))
+
+        self.assertEqual(player._volumes, [32.0])
 
 
 if __name__ == "__main__":

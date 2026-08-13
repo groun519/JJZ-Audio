@@ -38,8 +38,12 @@ class SystemDiagnosticsTests(unittest.TestCase):
                 profile_detector=lambda: "directml",
             )
 
+            checks = {check.key: check for check in diagnostics.checks}
             self.assertTrue(diagnostics.ready)
-            self.assertEqual(diagnostics.checks[-1].status, DiagnosticStatus.PASS)
+            self.assertEqual(checks["cuda"].status, DiagnosticStatus.PASS)
+            self.assertEqual(checks["cuda"].detail, "AMD Radeon RX 6800 XT")
+            self.assertEqual(checks["training_device"].status, DiagnosticStatus.PASS)
+            self.assertIn("CPU training", checks["training_device"].detail)
 
     def test_rocm_profile_requires_hip_runtime_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -63,7 +67,9 @@ class SystemDiagnosticsTests(unittest.TestCase):
             )
 
             self.assertFalse(diagnostics.ready)
-            self.assertIn("ROCm", diagnostics.checks[-2].detail)
+            checks = {check.key: check for check in diagnostics.checks}
+            self.assertIn("ROCm", checks["ai_runtime"].detail)
+            self.assertEqual(checks["training_device"].status, DiagnosticStatus.SKIPPED)
 
     def test_failed_rocm_activation_accepts_directml_as_a_visible_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -102,9 +108,11 @@ class SystemDiagnosticsTests(unittest.TestCase):
                 profile_detector=lambda: "rocm-win",
             )
 
+            checks = {check.key: check for check in diagnostics.checks}
             self.assertTrue(diagnostics.ready)
-            self.assertEqual(diagnostics.checks[-1].status, DiagnosticStatus.WARNING)
-            self.assertIn("HIP unavailable", diagnostics.checks[-1].detail)
+            self.assertEqual(checks["cuda"].status, DiagnosticStatus.WARNING)
+            self.assertIn("HIP unavailable", checks["cuda"].detail)
+            self.assertEqual(checks["training_device"].status, DiagnosticStatus.WARNING)
 
     def test_blackwell_without_cu128_profile_requires_runtime_repair(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -152,7 +160,9 @@ class SystemDiagnosticsTests(unittest.TestCase):
 
             self.assertTrue(diagnostics.ready)
             self.assertTrue(all(check.status == DiagnosticStatus.PASS for check in diagnostics.checks))
-            self.assertEqual(diagnostics.checks[-1].detail, "Test GPU")
+            checks = {check.key: check for check in diagnostics.checks}
+            self.assertEqual(checks["cuda"].detail, "Test GPU")
+            self.assertEqual(checks["training_device"].detail, "Test GPU")
 
     def test_blackwell_cu128_profile_requires_a_working_cuda_probe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -201,6 +211,7 @@ class SystemDiagnosticsTests(unittest.TestCase):
             self.assertEqual(statuses["ffmpeg"], DiagnosticStatus.REQUIRED)
             self.assertEqual(statuses["rvc_assets"], DiagnosticStatus.REQUIRED)
             self.assertEqual(statuses["cuda"], DiagnosticStatus.SKIPPED)
+            self.assertEqual(statuses["training_device"], DiagnosticStatus.SKIPPED)
 
     def test_incomplete_managed_runtime_is_reported_as_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -218,6 +229,7 @@ class SystemDiagnosticsTests(unittest.TestCase):
             self.assertEqual(checks["ffmpeg"].status, DiagnosticStatus.FAIL)
             self.assertEqual(checks["ai_runtime"].status, DiagnosticStatus.FAIL)
             self.assertEqual(checks["cuda"].status, DiagnosticStatus.SKIPPED)
+            self.assertEqual(checks["training_device"].status, DiagnosticStatus.SKIPPED)
 
     def test_reports_each_diagnostic_stage_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -230,12 +242,13 @@ class SystemDiagnosticsTests(unittest.TestCase):
             self.assertEqual(
                 stages,
                 [
-                    ("storage", 1, 6),
-                    ("ffmpeg", 2, 6),
-                    ("demucs", 3, 6),
-                    ("rvc_assets", 4, 6),
-                    ("ai_runtime", 5, 6),
-                    ("cuda", 6, 6),
+                    ("storage", 1, 7),
+                    ("ffmpeg", 2, 7),
+                    ("demucs", 3, 7),
+                    ("rvc_assets", 4, 7),
+                    ("ai_runtime", 5, 7),
+                    ("cuda", 6, 7),
+                    ("training_device", 7, 7),
                 ],
             )
 
@@ -262,6 +275,7 @@ class SystemDiagnosticsTests(unittest.TestCase):
 
             self.assertEqual(checks["ai_runtime"].status, DiagnosticStatus.FAIL)
             self.assertEqual(checks["cuda"].status, DiagnosticStatus.SKIPPED)
+            self.assertEqual(checks["training_device"].status, DiagnosticStatus.SKIPPED)
 
     def test_cpu_ready_without_cuda_is_supported(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -286,7 +300,9 @@ class SystemDiagnosticsTests(unittest.TestCase):
             self.assertTrue(diagnostics.ready)
             self.assertEqual(statuses["ai_runtime"], DiagnosticStatus.PASS)
             self.assertEqual(statuses["cuda"], DiagnosticStatus.WARNING)
-            self.assertIn("CPU conversion", diagnostics.checks[-1].detail)
+            self.assertEqual(statuses["training_device"], DiagnosticStatus.WARNING)
+            checks = {check.key: check for check in diagnostics.checks}
+            self.assertIn("CPU conversion", checks["cuda"].detail)
 
     def test_cpu_runtime_crash_blocks_setup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

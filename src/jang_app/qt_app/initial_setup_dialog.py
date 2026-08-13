@@ -62,6 +62,7 @@ _DIAGNOSTIC_KEYS = (
     "rvc_assets",
     "ai_runtime",
     "cuda",
+    "training_device",
 )
 _DIAGNOSTIC_STAGE_LABELS = (
     "Storage",
@@ -69,7 +70,8 @@ _DIAGNOSTIC_STAGE_LABELS = (
     "Separation",
     "Voice Tools",
     "Audio Engine",
-    "GPU",
+    "Conversion",
+    "Training",
 )
 _INSTALL_STAGE_LABELS = (
     "Prepare",
@@ -486,7 +488,8 @@ class InitialSetupDialog(AppDialog):
             ("demucs", "Vocal Separation Model"),
             ("rvc_assets", "Voice Conversion Tools"),
             ("ai_runtime", "Audio Engine"),
-            ("cuda", "GPU Acceleration"),
+            ("cuda", "Voice Conversion Acceleration"),
+            ("training_device", "Model Training Device"),
         )
         self.diagnostic_rows: dict[str, DiagnosticRow] = {}
         checks_layout = QVBoxLayout()

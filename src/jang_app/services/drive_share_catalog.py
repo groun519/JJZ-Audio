@@ -97,6 +97,32 @@ class DriveShareCatalog:
         self._save(remaining)
         return True
 
+    def move_source(self, source: Path, target: Path, category: str) -> bool:
+        source_path = str(source.expanduser().resolve()).casefold()
+        resolved_target = target.expanduser().resolve()
+        if not resolved_target.is_file():
+            return False
+        target_stat = resolved_target.stat()
+        changed = False
+        records: list[DriveShareRecord] = []
+        for record in self.records():
+            if record.source_path.casefold() == source_path and record.category == category:
+                record = DriveShareRecord(
+                    source_path=str(resolved_target),
+                    source_size=target_stat.st_size,
+                    source_modified_ns=target_stat.st_mtime_ns,
+                    category=record.category,
+                    file_id=record.file_id,
+                    file_name=record.file_name,
+                    share_link=record.share_link,
+                    shared_at=record.shared_at,
+                )
+                changed = True
+            records.append(record)
+        if changed:
+            self._save(records)
+        return changed
+
     def records(self) -> tuple[DriveShareRecord, ...]:
         if not self._path.is_file():
             return ()

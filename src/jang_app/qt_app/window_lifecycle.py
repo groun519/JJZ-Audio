@@ -9,6 +9,8 @@ from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QMenu, QWidget
 
 _LOGGER = logging.getLogger("jang_app")
 _EXPLICIT_WINDOW_PROPERTY = "allowTopLevelWindow"
+_PARENTING_RETRY_INTERVAL_MS = 40
+_PARENTING_RETRY_COUNT = 5
 _FRAMEWORK_WINDOW_TYPES = frozenset(
     (
         Qt.WindowType.Popup,
@@ -55,21 +57,43 @@ class WindowLifecycleGuard(QObject):
         widget_reference = weakref.ref(widget)
         QTimer.singleShot(
             0,
-            lambda: self._finish_resolution(widget_id, widget_reference),
+            lambda: self._finish_resolution(
+                widget_id,
+                widget_reference,
+                _PARENTING_RETRY_COUNT,
+            ),
         )
 
-    def _finish_resolution(self, widget_id: int, widget_reference) -> None:
-        self._pending_widget_ids.discard(widget_id)
+    def _finish_resolution(
+        self,
+        widget_id: int,
+        widget_reference,
+        retries_remaining: int,
+    ) -> None:
         widget = widget_reference()
         if widget is None:
+            self._pending_widget_ids.discard(widget_id)
             return
         try:
             if not widget.isWindow() or self.is_expected_window(widget):
+                self._pending_widget_ids.discard(widget_id)
                 widget.show()
+                return
+            if retries_remaining > 0:
+                QTimer.singleShot(
+                    _PARENTING_RETRY_INTERVAL_MS,
+                    lambda: self._finish_resolution(
+                        widget_id,
+                        widget_reference,
+                        retries_remaining - 1,
+                    ),
+                )
                 return
             description = _window_description(widget)
         except RuntimeError:
+            self._pending_widget_ids.discard(widget_id)
             return
+        self._pending_widget_ids.discard(widget_id)
         self._blocked_count += 1
         self._last_blocked = description
         _LOGGER.error("Blocked unexpected top-level widget: %s", description)

@@ -42,6 +42,10 @@ class InitialSetupDialogTests(unittest.TestCase):
             dialog.primary_button.click()
             self.assertEqual(dialog.stack.currentIndex(), 1)
             self.assertEqual(dialog.diagnostic_rows["cuda"].property("status"), "pass")
+            self.assertEqual(
+                dialog.diagnostic_rows["training_device"].property("status"),
+                "pass",
+            )
             dialog.primary_button.click()
 
             self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
@@ -178,6 +182,7 @@ class _ReadyWorker(QObject):
                 ("rvc_assets", "RVC Assets"),
                 ("ai_runtime", "AI Runtime"),
                 ("cuda", "NVIDIA GPU"),
+                ("training_device", "Training Device"),
             )
         )
         for position, check in enumerate(checks, start=1):

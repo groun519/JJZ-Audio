@@ -10,6 +10,7 @@ from jang_app.services.studio_session import (
     TRACK_VIDEO,
     StudioAssetRef,
     StudioClip,
+    StudioMediaSettings,
     StudioSession,
     StudioTrack,
 )
@@ -19,6 +20,7 @@ from jang_app.services.studio_timeline import (
     add_studio_track,
     remove_studio_track,
     set_studio_clip_mix,
+    set_studio_clip_media,
     set_studio_track_collapsed,
     set_studio_track_mix,
     split_studio_clip,
@@ -26,6 +28,24 @@ from jang_app.services.studio_timeline import (
 
 
 class StudioTimelineTests(unittest.TestCase):
+    def test_media_settings_only_update_media_clips(self) -> None:
+        clip = StudioClip(
+            "media",
+            StudioAssetRef("media", TRACK_VIDEO, "cover.png"),
+            0,
+            0,
+            5_000,
+        )
+        session = StudioSession(tracks=(StudioTrack("media-track", "Media", TRACK_VIDEO, clips=(clip,)),))
+        settings = StudioMediaSettings(scale_percent=125, source_audio_enabled=True)
+
+        updated = set_studio_clip_media(session, clip.clip_id, settings)
+
+        self.assertEqual(updated.tracks[0].clips[0].media, settings)
+        audio_clip = StudioClip("audio", _asset("audio"), 0, 0, 1_000)
+        with self.assertRaises(StudioTimelineError):
+            set_studio_clip_media(_session(audio_clip), audio_clip.clip_id, settings)
+
     def test_clip_effect_add_update_remove_targets_one_clip(self) -> None:
         self.assertTrue(hasattr(studio_timeline, "add_studio_clip_effect"))
         first = StudioClip("first", _asset("first"), 0, 0, 1_000)
@@ -167,6 +187,19 @@ class StudioTimelineTests(unittest.TestCase):
         self.assertTrue(clip.muted)
         self.assertEqual((clip.fade_in_ms, clip.fade_out_ms), (800, 200))
         self.assertEqual(updated.tracks[0].pan_percent, 100)
+
+    def test_clip_gain_supports_configured_range_and_clamps_outside_it(self) -> None:
+        session = _session(StudioClip("first", _asset("first"), 0, 0, 1_000))
+
+        at_upper_limit = set_studio_clip_mix(session, "first", gain_db=30.0)
+        above_limit = set_studio_clip_mix(at_upper_limit, "first", gain_db=80.0)
+        at_lower_limit = set_studio_clip_mix(above_limit, "first", gain_db=-100.0)
+        below_limit = set_studio_clip_mix(at_lower_limit, "first", gain_db=-140.0)
+
+        self.assertEqual(at_upper_limit.tracks[0].clips[0].gain_db, 30.0)
+        self.assertEqual(above_limit.tracks[0].clips[0].gain_db, 30.0)
+        self.assertEqual(at_lower_limit.tracks[0].clips[0].gain_db, -100.0)
+        self.assertEqual(below_limit.tracks[0].clips[0].gain_db, -100.0)
 
     def test_track_collapsed_state_is_non_destructive(self) -> None:
         session = _session(StudioClip("first", _asset("first"), 0, 0, 1_000))

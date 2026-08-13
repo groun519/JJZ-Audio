@@ -18,6 +18,8 @@ from jang_app.services.studio_session import (
     TRACK_INSTRUMENTAL,
     TRACK_ORIGINAL_VOCAL,
     TRACK_VIDEO,
+    MEDIA_FILL,
+    StudioMediaSettings,
     StudioSession,
     StudioTrack,
     StudioTrackState,
@@ -38,7 +40,7 @@ from jang_app.services.vocal_project_store import VocalProjectStore
 
 
 class StudioSessionTests(unittest.TestCase):
-    def test_version_five_reverb_effect_round_trips_and_version_four_defaults_empty(self) -> None:
+    def test_current_reverb_effect_round_trips_and_version_four_defaults_empty(self) -> None:
         self.assertTrue(hasattr(studio_session, "StudioEffect"))
         with tempfile.TemporaryDirectory() as temporary:
             package = _package_with_audio_output(Path(temporary))
@@ -64,7 +66,7 @@ class StudioSessionTests(unittest.TestCase):
 
             self.assertEqual(restored.tracks[0].clips[0].effects, (effect,))
             saved = json.loads(studio_session_path(package).read_text(encoding="utf-8"))
-            self.assertEqual(saved["version"], 5)
+            self.assertEqual(saved["version"], STUDIO_SESSION_VERSION)
             self.assertEqual(saved["tracks"][0]["clips"][0]["effects"][0]["kind"], "reverb")
 
             saved["version"] = 4
@@ -94,6 +96,13 @@ class StudioSessionTests(unittest.TestCase):
                     },
                 }
             ]
+            data["tracks"][0]["clips"][0]["media"] = {
+                "fit_mode": "unknown",
+                "scale_percent": "bad",
+                "offset_x_percent": 999,
+                "offset_y_percent": -999,
+                "source_audio_enabled": True,
+            }
             studio_session_path(package).write_text(json.dumps(data), encoding="utf-8")
 
             settings = load_studio_session(package).tracks[0].clips[0].effects[0].reverb
@@ -103,6 +112,64 @@ class StudioSessionTests(unittest.TestCase):
             self.assertEqual(settings.decay_ms, 4_000)
             self.assertEqual(settings.dry_wet_percent, 100)
             self.assertEqual(settings.early_high_hz, 1_000)
+            media = load_studio_session(package).tracks[0].clips[0].media
+            self.assertEqual(media.fit_mode, "fit")
+            self.assertEqual(media.scale_percent, 100)
+            self.assertEqual(media.offset_x_percent, 100)
+            self.assertEqual(media.offset_y_percent, -100)
+            self.assertTrue(media.source_audio_enabled)
+
+    def test_character_effect_settings_round_trip_and_clamp(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            session = load_studio_session(package)
+            track = session.tracks[0]
+            clip = track.clips[0]
+            effects = (
+                studio_session.StudioEffect(
+                    "fx-radio",
+                    "radio_filter",
+                    radio_filter=studio_session.StudioRadioFilterSettings(300, 3_400, 90),
+                ),
+                studio_session.StudioEffect(
+                    "fx-ring",
+                    "ring_modulator",
+                    ring_modulator=studio_session.StudioRingModulatorSettings(75, 35),
+                ),
+                studio_session.StudioEffect(
+                    "fx-bits",
+                    "bitcrusher",
+                    bitcrusher=studio_session.StudioBitcrusherSettings(8, 8_000, 55),
+                ),
+                studio_session.StudioEffect(
+                    "fx-drive",
+                    "distortion",
+                    distortion=studio_session.StudioDistortionSettings(65, 45),
+                ),
+                studio_session.StudioEffect(
+                    "fx-level",
+                    "level_match",
+                    level_match=studio_session.StudioLevelMatchSettings(85, 120, 8, -55),
+                ),
+            )
+            edited = replace(
+                session,
+                tracks=(replace(track, clips=(replace(clip, effects=effects),)), *session.tracks[1:]),
+            )
+            save_studio_session(package, edited)
+
+            restored = load_studio_session(package)
+
+            self.assertEqual(restored.tracks[0].clips[0].effects, effects)
+            data = json.loads(studio_session_path(package).read_text(encoding="utf-8"))
+            data["tracks"][0]["clips"][0]["effects"][2]["settings"] = {
+                "bit_depth": 2,
+                "sample_rate_hz": 100,
+                "mix_percent": 500,
+            }
+            studio_session_path(package).write_text(json.dumps(data), encoding="utf-8")
+            clamped = load_studio_session(package).tracks[0].clips[0].effects[2].bitcrusher
+            self.assertEqual(clamped, studio_session.StudioBitcrusherSettings(4, 2_000, 100))
 
     def test_legacy_mix_state_migrates_to_non_destructive_full_length_clips(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -366,6 +433,52 @@ class StudioSessionTests(unittest.TestCase):
             self.assertGreaterEqual(image_asset.duration_ms, image_asset.clip_duration_ms)
             self.assertEqual(media_track.name, "Media")
             self.assertEqual(media_track.clips[0].duration_ms, 5_000)
+
+    def test_media_settings_round_trip_and_version_five_uses_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_audio_output(root)
+            source_image = root / "cover.png"
+            source_image.write_bytes(b"image")
+            VideoSourceStore().import_file(package, source_image)
+            session = load_studio_session(package)
+            media_track = next(track for track in session.tracks if track.role == TRACK_VIDEO)
+            settings = StudioMediaSettings(
+                fit_mode=MEDIA_FILL,
+                scale_percent=135,
+                offset_x_percent=-20,
+                offset_y_percent=15,
+                source_audio_enabled=True,
+            )
+            edited_track = replace(
+                media_track,
+                clips=(replace(media_track.clips[0], media=settings),),
+            )
+
+            save_studio_session(
+                package,
+                replace(
+                    session,
+                    tracks=tuple(
+                        edited_track if track.track_id == media_track.track_id else track
+                        for track in session.tracks
+                    ),
+                ),
+            )
+            restored = load_studio_session(package)
+            restored_track = next(track for track in restored.tracks if track.role == TRACK_VIDEO)
+            self.assertEqual(restored_track.clips[0].media, settings)
+
+            saved = json.loads(studio_session_path(package).read_text(encoding="utf-8"))
+            saved["version"] = 5
+            next(track for track in saved["tracks"] if track["role"] == TRACK_VIDEO)["clips"][0].pop(
+                "media"
+            )
+            studio_session_path(package).write_text(json.dumps(saved), encoding="utf-8")
+
+            migrated = load_studio_session(package)
+            migrated_track = next(track for track in migrated.tracks if track.role == TRACK_VIDEO)
+            self.assertEqual(migrated_track.clips[0].media, StudioMediaSettings())
 
     def test_video_only_session_restores_required_audio_tracks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

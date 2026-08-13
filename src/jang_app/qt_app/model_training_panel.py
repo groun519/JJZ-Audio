@@ -116,6 +116,8 @@ class ModelTrainingPanel(QWidget):
         self._state: RvcTrainingState | None = None
         self._is_running = False
         self._training_accelerated = True
+        self._inference_backend = RvcComputeBackend.CUDA
+        self._training_backend = RvcComputeBackend.CUDA
         self._adapter_name = ""
         self._adapter_memory_bytes = 0
         self._ready_items = 0
@@ -163,10 +165,16 @@ class ModelTrainingPanel(QWidget):
 
         self.profile_label = QLabel("RVC v2 / 40k / RMVPE / CUDA")
         self.profile_label.setObjectName("TrainingProfileBadge")
+        self.conversion_device_label = QLabel("Conversion: CUDA GPU")
+        self.conversion_device_label.setObjectName("TrainingComputeBadge")
+        self.training_device_label = QLabel("Training: CUDA GPU")
+        self.training_device_label.setObjectName("TrainingComputeBadge")
         self.epoch_label = QLabel("0 / 20")
         self.epoch_label.setObjectName("TrainingEpochBadge")
         summary_header.addLayout(summary_text, 1)
         summary_header.addWidget(self.profile_label)
+        summary_header.addWidget(self.conversion_device_label)
+        summary_header.addWidget(self.training_device_label)
         summary_header.addWidget(self.epoch_label)
         summary_layout.addLayout(summary_header)
 
@@ -648,24 +656,39 @@ class ModelTrainingPanel(QWidget):
         adapter_name: str = "",
         adapter_memory_bytes: int = 0,
     ) -> None:
+        self._inference_backend = inference_backend
+        self._training_backend = training_backend
         self._adapter_name = adapter_name.strip()
         self._adapter_memory_bytes = max(0, int(adapter_memory_bytes))
         self._training_accelerated = training_backend in {
             RvcComputeBackend.CUDA,
             RvcComputeBackend.ROCM,
         }
-        backend_label = {
-            RvcComputeBackend.CUDA: "CUDA Training",
-            RvcComputeBackend.ROCM: "ROCm Training",
-            RvcComputeBackend.DIRECTML: "DirectML",
-            RvcComputeBackend.CPU: "CPU Training",
-        }[training_backend]
-        if inference_backend == RvcComputeBackend.DIRECTML:
-            backend_label = "DirectML / CPU Training"
         set_translated_text(
             self.profile_label,
-            "RVC v2 / 40k / RMVPE / {backend}",
-            backend=tr(backend_label),
+            "RVC v2 / 40k / RMVPE",
+        )
+        conversion_label = {
+            RvcComputeBackend.CUDA: "CUDA GPU",
+            RvcComputeBackend.ROCM: "ROCm GPU",
+            RvcComputeBackend.DIRECTML: "DirectML GPU",
+            RvcComputeBackend.CPU: "CPU",
+        }[inference_backend]
+        training_label = {
+            RvcComputeBackend.CUDA: "CUDA GPU",
+            RvcComputeBackend.ROCM: "ROCm GPU",
+            RvcComputeBackend.DIRECTML: "DirectML GPU",
+            RvcComputeBackend.CPU: "CPU",
+        }[training_backend]
+        set_translated_text(
+            self.conversion_device_label,
+            "Conversion: {device}",
+            device=tr(conversion_label),
+        )
+        set_translated_text(
+            self.training_device_label,
+            "Training: {device}",
+            device=tr(training_label),
         )
         if self._training_accelerated:
             set_translated_text(self.device_field_label, "GPU")
@@ -1192,13 +1215,27 @@ class ModelTrainingPanel(QWidget):
                 value=self.save_interval_spin.value(),
             ),
         )
-        self.training_device_info.set_content(
-            tr("Training Device"),
-            tr(
+        if self._training_accelerated:
+            device_body = tr(
                 "GPU index 0 selects the first detected training GPU. CPU mode ignores "
                 "this value and trains more slowly."
-            ),
-            tr("Use GPU 0 unless this PC has multiple training GPUs."),
+            )
+            device_recommendation = tr(
+                "Use GPU 0 unless this PC has multiple training GPUs."
+            )
+        else:
+            device_body = tr(
+                "This hardware profile uses the CPU for model training. No GPU index is required."
+            )
+            device_recommendation = (
+                tr("Voice conversion still uses the AMD GPU through DirectML.")
+                if self._inference_backend == RvcComputeBackend.DIRECTML
+                else tr("CPU training takes longer but remains fully supported.")
+            )
+        self.training_device_info.set_content(
+            tr("Training Device"),
+            device_body,
+            device_recommendation,
         )
 
     def _training_environment_summary(self) -> str:

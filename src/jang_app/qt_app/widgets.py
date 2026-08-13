@@ -1001,6 +1001,50 @@ class DangerIconButton(SvgIconButton):
         self.lock_outer_size(size)
 
 
+class ToggleSwitchButton(FeedbackButton):
+    """Compact on/off switch without embedding state text in the control."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent=parent)
+        self._theme_mode = "white"
+        self.setText("")
+        self.setObjectName("ToggleSwitchButton")
+        self.setCheckable(True)
+        self.setFixedSize(42, 24)
+
+    def set_theme_mode(self, theme_mode: str) -> None:
+        self._theme_mode = theme_mode
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        colors = _toggle_switch_palette(
+            self._theme_mode,
+            self.isChecked(),
+            self.isEnabled(),
+            self._is_pointer_hovered(),
+            self._is_pointer_pressed() or self.isDown(),
+        )
+        track = QRectF(self.rect()).adjusted(1.5, 3.5, -1.5, -3.5)
+        painter.setPen(QPen(colors["border"], 1))
+        painter.setBrush(QBrush(colors["track"]))
+        painter.drawRoundedRect(track, 8.5, 8.5)
+
+        diameter = 13.0
+        knob_x = (
+            track.right() - diameter - 2
+            if self.isChecked()
+            else track.left() + 2
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(colors["knob"]))
+        painter.drawEllipse(
+            QRectF(knob_x, track.center().y() - diameter / 2, diameter, diameter)
+        )
+        self._draw_keyboard_focus(painter, QRectF(self.rect()), 10)
+
+
 class ThemeToggleButton(FeedbackButton):
     def __init__(self) -> None:
         super().__init__()
@@ -1451,7 +1495,11 @@ def _track_button_palette(
         return _shared_icon_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
     if object_name == "DangerIconButton":
         return _danger_icon_button_palette(theme_mode, is_enabled, is_hovered, is_pressed)
-    if object_name in {"SeparationPairButton", "WorkSongRevealButton"}:
+    if object_name in {
+        "SeparationPairButton",
+        "StudioSplitButton",
+        "WorkSongRevealButton",
+    }:
         return _separation_pair_button_palette(
             theme_mode,
             is_checked,
@@ -1968,6 +2016,42 @@ def _theme_toggle_palette(theme_mode: str, is_hovered: bool, is_pressed: bool) -
         "knob": colors["knob"],
         "icon": colors["icon"],
     }
+
+
+def _toggle_switch_palette(
+    theme_mode: str,
+    is_checked: bool,
+    is_enabled: bool,
+    is_hovered: bool,
+    is_pressed: bool,
+) -> dict[str, QColor]:
+    if theme_mode == "dark":
+        off_track = QColor("#151515")
+        off_border = QColor("#5c5b57")
+        off_knob = QColor("#aaa8a1")
+        on_track = QColor("#3f6b53")
+        on_border = QColor("#6e9a7d")
+        on_knob = QColor("#ecebe7")
+    else:
+        off_track = QColor("#ebe7dd")
+        off_border = QColor("#aaa397")
+        off_knob = QColor("#6e6a61")
+        on_track = QColor("#3f6b53")
+        on_border = QColor("#315642")
+        on_knob = QColor("#fffdf7")
+
+    track = on_track if is_checked else off_track
+    border = on_border if is_checked else off_border
+    knob = on_knob if is_checked else off_knob
+    if not is_enabled:
+        track.setAlpha(100)
+        border.setAlpha(100)
+        knob.setAlpha(120)
+    elif is_pressed:
+        track = track.lighter(125)
+    elif is_hovered:
+        border = border.lighter(135)
+    return {"track": track, "border": border, "knob": knob}
 
 
 def _keyboard_focus_color(theme_mode: str) -> QColor:

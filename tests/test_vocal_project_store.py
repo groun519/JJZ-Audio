@@ -17,6 +17,7 @@ from jang_app.services.vocal_project import (
     VocalTake,
 )
 from jang_app.services.vocal_project_store import VOCAL_PROJECT_MANIFEST, VocalProjectStore
+from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 
 
 class VocalProjectStoreTests(unittest.TestCase):
@@ -82,6 +83,7 @@ class VocalProjectStoreTests(unittest.TestCase):
                 requested_device="gpu",
                 effective_device="cuda:0",
                 f0_method="rmvpe",
+                inference=RvcInferenceSettings(index_rate=0.62, protect=0.18),
             )
             store = VocalProjectStore()
 
@@ -93,6 +95,11 @@ class VocalProjectStoreTests(unittest.TestCase):
             self.assertEqual(project.takes[0].conversion, settings)
             self.assertEqual(manifest["schema_version"], VOCAL_PROJECT_SCHEMA_VERSION)
             self.assertEqual(manifest["takes"][0]["conversion"]["effective_device"], "cuda:0")
+            self.assertEqual(
+                manifest["takes"][0]["conversion"]["inference"]["index_rate"],
+                0.62,
+            )
+            self.assertEqual(store.load(job_dir).takes[0].conversion, settings)
 
     def test_take_can_be_renamed_and_removed_without_touching_other_results(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

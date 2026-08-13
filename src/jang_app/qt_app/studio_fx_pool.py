@@ -18,16 +18,29 @@ from jang_app.services.i18n import tr
 
 STUDIO_EFFECT_MIME = "application/x-jjzero-studio-effect"
 
+_CARD_SPECS = {
+    "preset:animatronic": ("AN", "Animatronic", "Metallic machine voice chain"),
+    "preset:walkie_talkie": ("WT", "Walkie-Talkie", "Narrow radio transmission chain"),
+    "preset:broken_robot": ("BR", "Broken Robot", "Damaged unstable robot chain"),
+    "reverb": ("RV", "Reverb", "Room and ambience"),
+    "radio_filter": ("RF", "Radio Filter", "Narrow speaker tone"),
+    "ring_modulator": ("RM", "Ring Modulator", "Metallic robot texture"),
+    "bitcrusher": ("BT", "Bitcrusher", "Digital resolution damage"),
+    "distortion": ("DS", "Distortion", "Saturation and grit"),
+    "level_match": ("LM", "Level Match", "Follow the original vocal volume"),
+}
+
 
 class StudioFxCard(QFrame):
-    def __init__(self, effect_kind: str, parent: QWidget | None = None) -> None:
+    def __init__(self, payload: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.effect_kind = effect_kind
+        self.payload = payload
+        self.effect_kind = payload
         self.setObjectName("StudioFxCard")
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self._drag_origin = QPoint()
 
-        self.icon_label = QLabel("RV")
+        self.icon_label = QLabel()
         self.icon_label.setObjectName("StudioFxCardIcon")
         self.name_label = QLabel()
         self.name_label.setObjectName("StudioFxCardName")
@@ -48,13 +61,19 @@ class StudioFxCard(QFrame):
         self.apply_language()
 
     def apply_language(self) -> None:
-        self.name_label.setText(tr("Reverb"))
-        self.detail_label.setText(tr("Room and ambience"))
-        self.setToolTip(tr("Drag onto a timeline clip to add Reverb."))
+        icon, name, detail = _CARD_SPECS[self.payload]
+        self.icon_label.setText(icon)
+        self.name_label.setText(tr(name))
+        self.detail_label.setText(tr(detail))
+        self.setToolTip(
+            tr("Drag onto a timeline clip to add this preset.")
+            if self.payload.startswith("preset:")
+            else tr("Drag onto a timeline clip to add this effect.")
+        )
 
     def mime_data(self) -> QMimeData:
         mime = QMimeData()
-        mime.setData(STUDIO_EFFECT_MIME, self.effect_kind.encode("utf-8"))
+        mime.setData(STUDIO_EFFECT_MIME, self.payload.encode("utf-8"))
         return mime
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -82,7 +101,7 @@ class StudioFxPool(QFrame):
 
         self.title_label = QLabel("FX")
         self.title_label.setObjectName("SectionTitle")
-        self.count_label = QLabel("1")
+        self.count_label = QLabel(str(len(_CARD_SPECS)))
         self.count_label.setObjectName("StudioSoundCount")
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -97,8 +116,20 @@ class StudioFxPool(QFrame):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
         content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.cards = {"reverb": StudioFxCard("reverb", self.content)}
-        content_layout.addWidget(self.cards["reverb"])
+        self.cards = {
+            payload: StudioFxCard(payload, self.content)
+            for payload in _CARD_SPECS
+        }
+        self.preset_label = QLabel()
+        self.preset_label.setObjectName("StudioFxGroupLabel")
+        self.effect_label = QLabel()
+        self.effect_label.setObjectName("StudioFxGroupLabel")
+        content_layout.addWidget(self.preset_label)
+        for payload in tuple(_CARD_SPECS)[:3]:
+            content_layout.addWidget(self.cards[payload])
+        content_layout.addWidget(self.effect_label)
+        for payload in tuple(_CARD_SPECS)[3:]:
+            content_layout.addWidget(self.cards[payload])
 
         self.scroll = QScrollArea()
         self.scroll.setObjectName("StudioFxPoolScroll")
@@ -117,5 +148,7 @@ class StudioFxPool(QFrame):
 
     def apply_language(self) -> None:
         self.title_label.setText("FX")
+        self.preset_label.setText(tr("Presets"))
+        self.effect_label.setText(tr("Effects"))
         for card in self.cards.values():
             card.apply_language()

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from jang_app.services.audio_character_fx import (
+    CharacterEffectProcessor,
+    create_character_effect_processor,
+)
 from jang_app.services.realtime_reverb import RealtimeReverb
+from jang_app.services.studio_character_fx_presets import CHARACTER_EFFECT_KINDS
 from jang_app.services.studio_session import STUDIO_EFFECT_REVERB, StudioEffect
 
 
@@ -11,6 +16,7 @@ class RealtimeEffectChain:
         self._sample_rate = sample_rate
         self._effects: tuple[StudioEffect, ...] = ()
         self._reverbs: dict[str, RealtimeReverb] = {}
+        self._character_effects: dict[str, CharacterEffectProcessor] = {}
         self.update(effects)
 
     @property
@@ -28,6 +34,16 @@ class RealtimeEffectChain:
             for effect_id, processor in self._reverbs.items()
             if effect_id in active_ids
         }
+        character_ids = {
+            effect.effect_id
+            for effect in effects
+            if effect.enabled and effect.kind in CHARACTER_EFFECT_KINDS
+        }
+        self._character_effects = {
+            effect_id: processor
+            for effect_id, processor in self._character_effects.items()
+            if effect_id in character_ids
+        }
         for effect in effects:
             if not effect.enabled or effect.kind != STUDIO_EFFECT_REVERB:
                 continue
@@ -37,14 +53,26 @@ class RealtimeEffectChain:
                 self._reverbs[effect.effect_id] = processor
             else:
                 processor.update(effect.reverb)
+        for effect in effects:
+            if not effect.enabled or effect.kind not in CHARACTER_EFFECT_KINDS:
+                continue
+            processor = self._character_effects.get(effect.effect_id)
+            if processor is None or processor.kind != effect.kind:
+                processor = create_character_effect_processor(self._sample_rate, effect)
+                self._character_effects[effect.effect_id] = processor
+            else:
+                processor.update(effect)
         self._effects = effects
 
     def process(self, audio: np.ndarray) -> np.ndarray:
         processed = audio
         for effect in self._effects:
-            if not effect.enabled or effect.kind != STUDIO_EFFECT_REVERB:
+            if not effect.enabled:
                 continue
-            processor = self._reverbs.get(effect.effect_id)
+            if effect.kind == STUDIO_EFFECT_REVERB:
+                processor = self._reverbs.get(effect.effect_id)
+            else:
+                processor = self._character_effects.get(effect.effect_id)
             if processor is not None:
                 processed = processor.process(processed)
         return processed

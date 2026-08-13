@@ -171,7 +171,10 @@ class SoundPoolItemCard(QFrame):
         self.update()
 
     def set_list_mode(self, enabled: bool) -> None:
-        self._list_mode = bool(enabled)
+        enabled = bool(enabled)
+        if self._list_mode == enabled:
+            return
+        self._list_mode = enabled
         self.setProperty("viewMode", "list" if enabled else "grid")
         self._arrange_content()
         self._sync_mode_content()
@@ -224,8 +227,6 @@ class SoundPoolItemCard(QFrame):
         self.content_layout.setContentsMargins(8, 7, 8, 8)
         self.content_layout.setHorizontalSpacing(7)
         self.content_layout.setVerticalSpacing(5)
-        self.role_strip.show()
-        self.preview_widget.show()
         self.content_layout.addWidget(self.role_strip, 0, 0, 1, 5)
         self.content_layout.addWidget(self.preview_widget, 1, 0, 1, 5)
         self.content_layout.addWidget(self.title_label, 2, 0, 1, 4)
@@ -235,6 +236,10 @@ class SoundPoolItemCard(QFrame):
         self.content_layout.addWidget(self.detail_label, 3, 1, 1, 3)
         self.content_layout.addWidget(self.duration_label, 3, 4)
         self.content_layout.setColumnStretch(1, 1)
+        # Adding first assigns the card as parent. Showing these widgets before
+        # that briefly creates native top-level windows on Windows.
+        self.role_strip.show()
+        self.preview_widget.show()
         self.setMinimumHeight(108)
         self.setMaximumHeight(16_777_215)
 

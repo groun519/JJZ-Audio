@@ -11,6 +11,7 @@ from uuid import uuid4
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.managed_files import write_json_atomic
 from jang_app.services.output_catalog import converted_vocal_paths
+from jang_app.services.rvc_inference_settings import rvc_inference_settings_from_data
 from jang_app.services.vocal_project import (
     UNASSIGNED_SPEAKER_ID,
     VOCAL_PROJECT_SCHEMA_VERSION,
@@ -368,6 +369,12 @@ def _conversion_to_data(conversion: VocalConversionSettings) -> dict[str, object
         "requested_device": conversion.requested_device,
         "effective_device": conversion.effective_device,
         "f0_method": conversion.f0_method,
+        "inference": {
+            "index_rate": conversion.inference.index_rate,
+            "filter_radius": conversion.inference.filter_radius,
+            "rms_mix_rate": conversion.inference.rms_mix_rate,
+            "protect": conversion.inference.protect,
+        },
     }
 
 
@@ -382,6 +389,7 @@ def _conversion_from_data(value: object) -> VocalConversionSettings | None:
         requested_device=_text(data.get("requested_device"), "conversion requested device"),
         effective_device=_text(data.get("effective_device"), "conversion effective device"),
         f0_method=_text(data.get("f0_method"), "conversion F0 method"),
+        inference=rvc_inference_settings_from_data(data.get("inference")),
     )
 
 

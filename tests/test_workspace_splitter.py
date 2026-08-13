@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QEnterEvent
+from PySide6.QtGui import QColor, QEnterEvent, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -32,6 +32,10 @@ class WorkspaceSplitterTests(unittest.TestCase):
         self.assertEqual(splitter.handleWidth(), 6)
         self.assertEqual(splitter.property("workspaceSplitter"), True)
         self.assertIsInstance(splitter.handle(1), SoftWorkspaceSplitterHandle)
+        self.assertEqual(
+            splitter.handle(1).cursor().shape(),
+            Qt.CursorShape.SplitHCursor,
+        )
         self.assertFalse(splitter.isCollapsible(0))
         self.assertFalse(splitter.isCollapsible(1))
         splitter.resize(1_200, 400)
@@ -66,6 +70,42 @@ class WorkspaceSplitterTests(unittest.TestCase):
         self.assertAlmostEqual(handle.visual_strength(), resting, places=2)
         splitter.close()
 
+    def test_hover_highlights_panel_edges_with_a_soft_center(self) -> None:
+        splitter = create_workspace_splitter(
+            (QWidget(), QWidget()),
+            object_name="HighlightedWorkspaceSplitter",
+        )
+        palette = splitter.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#171717"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#f2f2f2"))
+        splitter.setPalette(palette)
+        splitter.resize(800, 400)
+        splitter.show()
+        self.app.processEvents()
+        handle = splitter.handle(1)
+
+        handle.set_visual_strength(0.0)
+        self.app.processEvents()
+        resting_image = handle.grab().toImage()
+
+        handle.set_visual_strength(0.52)
+        self.app.processEvents()
+        hover_image = handle.grab().toImage()
+
+        y = handle.height() // 2
+        resting_edge = resting_image.pixelColor(0, y).lightness()
+        hover_edge = hover_image.pixelColor(0, y).lightness()
+        hover_center = hover_image.pixelColor(handle.width() // 2, y).lightness()
+        brightness_delta = hover_edge - resting_edge
+        self.assertGreaterEqual(brightness_delta, 2)
+        self.assertLessEqual(brightness_delta, 16)
+        self.assertGreater(hover_edge, hover_center)
+        self.assertEqual(
+            hover_image.pixelColor(0, 0).lightness(),
+            resting_image.pixelColor(0, 0).lightness(),
+        )
+        splitter.close()
+
     def test_supports_vertical_and_selectively_collapsible_panels(self) -> None:
         splitter = create_workspace_splitter(
             (QWidget(), QWidget(), QWidget()),
@@ -75,6 +115,10 @@ class WorkspaceSplitterTests(unittest.TestCase):
         )
 
         self.assertEqual(splitter.orientation(), Qt.Orientation.Vertical)
+        self.assertEqual(
+            splitter.handle(1).cursor().shape(),
+            Qt.CursorShape.SplitVCursor,
+        )
         self.assertTrue(splitter.isCollapsible(0))
         self.assertFalse(splitter.isCollapsible(1))
         self.assertTrue(splitter.isCollapsible(2))

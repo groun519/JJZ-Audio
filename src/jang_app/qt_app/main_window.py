@@ -51,6 +51,7 @@ from jang_app.pipeline.rvc_convert import (
 )
 from jang_app.pipeline.separate import SeparationResult, separate_audio
 from jang_app.qt_app.confirmation_dialog import ConfirmationDialog
+from jang_app.qt_app.collapsible_card_header import CollapsibleCardHeader
 from jang_app.qt_app.conversion_result_browser import ConversionResultBrowser
 from jang_app.qt_app.export_page import ExportPage
 from jang_app.qt_app.google_account_button import GoogleAccountButton
@@ -69,6 +70,7 @@ from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.processing_queue_panel import ProcessingQueueButton, ProcessingQueuePanel
 from jang_app.qt_app.primary_navigation import PrimaryNavigationBar
 from jang_app.qt_app.result_transport_bar import ResultTransportBar
+from jang_app.qt_app.rvc_inference_controls import RvcInferenceControls
 from jang_app.qt_app.separation_recipe_selector import SeparationRecipeSelector
 from jang_app.qt_app.separation_stem_pool import SeparationStemPoolPanel
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
@@ -117,12 +119,14 @@ from jang_app.services.app_update import (
     fetch_release_manifest_if_changed,
 )
 from jang_app.services.audio_export import AudioExportError, AudioMixSource, export_audio_file
+from jang_app.services.audio_export_settings import AudioExportSettings
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.audio_player import (
     AudioPlaybackError,
     AudioPlayer,
     PreparedPlaybackAudio,
 )
+from jang_app.services.video_export_settings import VideoExportSettings
 from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.command import start_detached_command
 from jang_app.services.distribution_channel import application_updates_enabled
@@ -137,6 +141,7 @@ from jang_app.services.playback_queue import PlaybackQueue
 from jang_app.services.playback_session import PlaybackSession
 from jang_app.services.processing_queue import ProcessingQueue
 from jang_app.services.rvc_execution_runtime import settings_for_managed_rvc_runtime
+from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 from jang_app.services.rvc_model_choices import (
     RvcModelChoice,
     collect_rvc_model_choices,
@@ -951,6 +956,12 @@ class MainWindow(QMainWindow):
         self.export_page.delete_share_requested.connect(
             self._delete_export_drive_share
         )
+        self.export_page.preview_requested.connect(self._toggle_export_preview)
+        self.export_page.preview_play_toggled.connect(
+            self._toggle_export_preview_playback
+        )
+        self.export_page.preview_seek_requested.connect(self._seek_export_preview)
+        self.export_page.rename_requested.connect(self._rename_export)
         return self.export_page
 
     def _build_models_page(self) -> QWidget:
@@ -1011,9 +1022,24 @@ class MainWindow(QMainWindow):
         rvc_panel.setObjectName("Card")
         rvc_layout = QVBoxLayout(rvc_panel)
         rvc_layout.setContentsMargins(22, 22, 22, 22)
-        rvc_layout.setSpacing(16)
+        rvc_layout.setSpacing(12)
         rvc_title = QLabel("RVC Convert")
         rvc_title.setObjectName("SectionTitle")
+
+        self.rvc_settings_scroll = QScrollArea()
+        self.rvc_settings_scroll.setObjectName("RvcSettingsScroll")
+        self.rvc_settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.rvc_settings_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        rvc_settings_content = TransparentContainer(
+            object_name="RvcSettingsScrollContent"
+        )
+        rvc_settings_layout = QVBoxLayout(rvc_settings_content)
+        rvc_settings_layout.setContentsMargins(0, 0, 6, 0)
+        rvc_settings_layout.setSpacing(14)
 
         self.conversion_input_pool = VocalVersionPool(
             "vocal",
@@ -1025,10 +1051,27 @@ class MainWindow(QMainWindow):
 
         self.rvc_settings_frame = QFrame()
         self.rvc_settings_frame.setObjectName("InsetCard")
-        form = QGridLayout(self.rvc_settings_frame)
-        form.setContentsMargins(14, 14, 14, 14)
-        form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(12)
+        settings_layout = QVBoxLayout(self.rvc_settings_frame)
+        settings_layout.setContentsMargins(14, 12, 14, 14)
+        settings_layout.setSpacing(10)
+
+        self.rvc_settings_header = CollapsibleCardHeader("Model Settings")
+
+        primary_form = QGridLayout()
+        primary_form.setContentsMargins(0, 0, 0, 0)
+        primary_form.setHorizontalSpacing(8)
+        primary_form.setVerticalSpacing(10)
+
+        self.rvc_advanced_settings_panel = QFrame()
+        self.rvc_advanced_settings_panel.setObjectName("RvcAdvancedSettingsPanel")
+        advanced_form = QGridLayout(self.rvc_advanced_settings_panel)
+        advanced_form.setContentsMargins(0, 2, 0, 0)
+        advanced_form.setHorizontalSpacing(8)
+        advanced_form.setVerticalSpacing(10)
+        self.rvc_advanced_settings_panel.hide()
+        self.rvc_settings_header.toggled.connect(
+            self.rvc_advanced_settings_panel.setVisible
+        )
 
         self.rvc_root_edit = QLineEdit(str(self.settings.rvc.root))
         self.rvc_root_edit.editingFinished.connect(self._save_rvc_settings_from_controls)
@@ -1038,8 +1081,18 @@ class MainWindow(QMainWindow):
         self.browse_rvc_button.clicked.connect(self._choose_rvc_root)
 
         self.model_combo = ScrollSafeComboBox()
+        self.model_combo.setMinimumWidth(0)
+        self.model_combo.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
         self.model_combo.currentIndexChanged.connect(self._on_rvc_model_changed)
         self.index_combo = ScrollSafeComboBox()
+        self.index_combo.setMinimumWidth(0)
+        self.index_combo.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
         self.index_combo.currentIndexChanged.connect(self._save_rvc_settings_from_controls)
         self.refresh_rvc_button = SvgIconButton("refresh", size=34)
         self.refresh_rvc_button.setObjectName("ControlIconButton")
@@ -1052,33 +1105,61 @@ class MainWindow(QMainWindow):
         self.pitch_spin.valueChanged.connect(self._save_rvc_settings_from_controls)
 
         self.device_combo = ScrollSafeComboBox()
+        self.device_combo.setMinimumWidth(0)
         self.device_combo.addItems(list(RVC_DEVICE_OPTIONS))
         selected_device = normalize_rvc_device(self.settings.rvc.device)
         self.device_combo.setCurrentText(selected_device)
         self.device_combo.currentIndexChanged.connect(self._save_rvc_settings_from_controls)
 
-        form.addWidget(_field_label("Root"), 0, 0)
-        form.addWidget(self.rvc_root_edit, 0, 1)
-        form.addWidget(self.browse_rvc_button, 0, 2)
-        form.addWidget(_field_label("Model"), 1, 0)
-        form.addWidget(self.model_combo, 1, 1)
-        form.addWidget(self.refresh_rvc_button, 1, 2)
-        form.addWidget(_field_label("Index"), 2, 0)
-        form.addWidget(self.index_combo, 2, 1, 1, 2)
-        form.addWidget(_field_label("Pitch"), 3, 0)
-        form.addWidget(self.pitch_spin, 3, 1)
-        form.addWidget(_field_label("Device"), 4, 0)
-        form.addWidget(self.device_combo, 4, 1)
+        self.rvc_root_edit.setMinimumWidth(0)
+        self.rvc_root_edit.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
+
+        self.rvc_inference_controls = RvcInferenceControls(self.settings.rvc.inference)
+        self.rvc_inference_controls.settings_changed.connect(
+            self._on_rvc_inference_settings_changed
+        )
+
+        primary_form.addWidget(_field_label("Model"), 0, 0)
+        primary_form.addWidget(self.model_combo, 0, 1)
+        primary_form.addWidget(self.refresh_rvc_button, 0, 2)
+        primary_form.addWidget(_field_label("Pitch"), 1, 0)
+        primary_form.addWidget(self.pitch_spin, 1, 1)
+
+        advanced_form.addWidget(_field_label("Root"), 0, 0)
+        advanced_form.addWidget(self.rvc_root_edit, 0, 1)
+        advanced_form.addWidget(self.browse_rvc_button, 0, 2)
+        advanced_form.addWidget(_field_label("Index"), 1, 0)
+        advanced_form.addWidget(self.index_combo, 1, 1, 1, 2)
+        advanced_form.addWidget(_field_label("Device"), 2, 0)
+        advanced_form.addWidget(self.device_combo, 2, 1)
+
+        settings_layout.addWidget(self.rvc_settings_header)
+        settings_layout.addLayout(primary_form)
+        settings_layout.addWidget(self.rvc_advanced_settings_panel)
 
         self.rvc_action = TaskActionWidget("Convert Vocal", "Convert")
         self.rvc_action.triggered.connect(self._start_rvc_conversion)
         self.rvc_action.set_action_enabled(False)
+        self.rvc_action.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
 
-        rvc_layout.addWidget(rvc_title)
-        rvc_layout.addWidget(self.conversion_input_pool)
-        rvc_layout.addWidget(self.rvc_settings_frame)
-        rvc_layout.addWidget(self.rvc_action)
-        rvc_layout.addStretch(1)
+        rvc_settings_layout.addWidget(self.conversion_input_pool)
+        rvc_settings_layout.addWidget(self.rvc_settings_frame)
+        rvc_settings_layout.addWidget(self.rvc_inference_controls)
+        rvc_settings_layout.addStretch(1)
+        attach_transparent_scroll_widget(
+            self.rvc_settings_scroll,
+            rvc_settings_content,
+        )
+
+        rvc_layout.addWidget(rvc_title, 0)
+        rvc_layout.addWidget(self.rvc_settings_scroll, 1)
+        rvc_layout.addWidget(self.rvc_action, 0)
         return rvc_panel
 
     def _build_output_panel(self) -> QWidget:
@@ -1170,6 +1251,10 @@ class MainWindow(QMainWindow):
             self.separation_stem_pool.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "conversion_input_pool"):
             self.conversion_input_pool.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "rvc_inference_controls"):
+            self.rvc_inference_controls.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "rvc_settings_header"):
+            self.rvc_settings_header.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "conversion_result_browser"):
             self.conversion_result_browser.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "vocal_results_panel"):
@@ -1212,6 +1297,8 @@ class MainWindow(QMainWindow):
         self.separation_results_panel.apply_language()
         self.separation_stem_pool.apply_language()
         self.conversion_input_pool.apply_language()
+        self.rvc_inference_controls.apply_language()
+        self.rvc_settings_header.apply_language()
         self.vocal_results_panel.apply_language()
         self.conversion_result_browser.apply_language()
         self.library_details_panel.apply_language()
@@ -1867,7 +1954,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.video_preview_panel.set_status(f"Open failed: {_last_error_line(str(exc))}")
 
-    def _start_video_render(self, song_id: str) -> None:
+    def _start_video_render(self, song_id: str, settings: VideoExportSettings) -> None:
         item = self._song_items_by_id.get(song_id)
         if item is None:
             self.export_page.set_video_status("Select a song.")
@@ -1878,7 +1965,9 @@ class MainWindow(QMainWindow):
         self.export_page.set_video_running(True)
         self.export_page.set_video_progress(1)
         self.export_page.set_video_status("Rendering video")
-        worker = TaskWorker(lambda progress: self.library.render_video(scope.song_id, progress))
+        worker = TaskWorker(
+            lambda progress: self.library.render_video(scope.song_id, settings, progress)
+        )
         self._run_worker(
             worker,
             lambda result: self._on_video_rendered(scope, result),
@@ -2192,6 +2281,46 @@ class MainWindow(QMainWindow):
         if (
             queue is None
             or queue.context != "library_asset"
+            or queue.source_id != str(path.expanduser().resolve())
+        ):
+            return
+        self._seek_global_playback(position_ms)
+
+    def _toggle_export_preview(self, path: Path) -> None:
+        resolved = path.expanduser().resolve()
+        source_id = str(resolved)
+        queue = self.current_playback_queue
+        if queue is not None and queue.context == "export" and queue.source_id == source_id:
+            self._playback_resume_positions.pop(("export", source_id), None)
+            self._stop_playback(clear_queue=True)
+            return
+
+        if queue is not None:
+            self._suspend_playback()
+        preview_queue = self._export_playback_queue(resolved)
+        if preview_queue is None:
+            return
+        self.export_page.set_preview_expanded(resolved, True)
+        self._set_playback_queue(
+            preview_queue,
+            position_ms=self._resume_position(preview_queue),
+        )
+
+    def _toggle_export_preview_playback(self, path: Path) -> None:
+        resolved = path.expanduser().resolve()
+        source_id = str(resolved)
+        queue = self.current_playback_queue
+        if queue is None or queue.context != "export" or queue.source_id != source_id:
+            self._toggle_export_preview(resolved)
+        queue = self.current_playback_queue
+        if queue is not None and queue.context == "export" and queue.source_id == source_id:
+            self._toggle_global_playback()
+
+    def _seek_export_preview(self, path: Path, position_ms: int) -> None:
+        queue = self.current_playback_queue
+        if (
+            queue is None
+            or queue.context != "export"
             or queue.source_id != str(path.expanduser().resolve())
         ):
             return
@@ -2627,12 +2756,13 @@ class MainWindow(QMainWindow):
             if media is None:
                 self.video_preview_panel.sync_timeline_media(None, "", 0, False)
             else:
-                asset, source_position_ms = media
+                asset, source_position_ms, media_settings = media
                 self.video_preview_panel.sync_timeline_media(
                     asset.path,
                     asset.media_kind,
                     source_position_ms,
                     is_playing and self._current_playback_context() == "output",
+                    media_settings,
                 )
             return
         self.video_preview_panel.sync_playback(
@@ -2765,29 +2895,46 @@ class MainWindow(QMainWindow):
         )
 
     def _library_asset_playback_queue(self, path: Path) -> PlaybackQueue | None:
+        return MainWindow._single_file_playback_queue(self, path, context="library_asset")
+
+    def _export_playback_queue(self, path: Path) -> PlaybackQueue | None:
+        return MainWindow._single_file_playback_queue(self, path, context="export")
+
+    def _single_file_playback_queue(
+        self,
+        path: Path,
+        *,
+        context: str,
+    ) -> PlaybackQueue | None:
         resolved = path.expanduser().resolve()
         if resolved.suffix.casefold() not in SUPPORTED_AUDIO_EXTENSIONS or not resolved.is_file():
-            _set_optional_label(self.library_status_label, "Cannot preview.")
+            self._set_file_preview_error(context, "Cannot preview.")
             return None
         try:
             duration_ms = self._duration_ms_for_paths([resolved])
         except Exception as exc:
-            _set_optional_label(
-                self.library_status_label,
+            self._set_file_preview_error(
+                context,
                 f"Load failed: {_last_error_line(str(exc))}",
             )
             return None
         if duration_ms <= 0:
-            _set_optional_label(self.library_status_label, "Cannot preview.")
+            self._set_file_preview_error(context, "Cannot preview.")
             return None
         return PlaybackQueue(
-            context="library_asset",
+            context=context,
             source_id=str(resolved),
             title=resolved.name,
             paths=(resolved,),
             volumes=(1.0,),
             duration_ms=duration_ms,
         )
+
+    def _set_file_preview_error(self, context: str, message: str) -> None:
+        if context == "export":
+            self.export_page.set_audio_status(message)
+        else:
+            _set_optional_label(self.library_status_label, message)
 
     def _song_playback_paths(self, song: SongItem) -> list[Path]:
         if song.kind != "output":
@@ -3095,12 +3242,14 @@ class MainWindow(QMainWindow):
             pitch=conversion.pitch,
             device=conversion.requested_device,
             f0_method=conversion.f0_method,
+            inference=conversion.inference,
         )
         self.settings = replace(self.settings, rvc=rvc_settings)
         save_app_settings(self.settings)
         self._refresh_rvc_choices()
         self.pitch_spin.setValue(rvc_settings.pitch)
         self.device_combo.setCurrentText(normalize_rvc_device(rvc_settings.device))
+        self.rvc_inference_controls.set_settings(rvc_settings.inference, emit=False)
         self._navigate_to_page(PAGE_CONVERSION)
         self._start_rvc_conversion()
 
@@ -3432,6 +3581,7 @@ class MainWindow(QMainWindow):
                 pitch=choice.pitch,
                 device=normalize_rvc_device(choice.device),
                 f0_method="rmvpe",
+                inference=self.settings.rvc.inference,
             ),
         )
         save_app_settings(self.settings)
@@ -3469,8 +3619,22 @@ class MainWindow(QMainWindow):
             pitch=self.pitch_spin.value(),
             device=self.device_combo.currentText(),
             f0_method="rmvpe",
+            inference=(
+                self.rvc_inference_controls.settings()
+                if hasattr(self, "rvc_inference_controls")
+                else self.settings.rvc.inference
+            ),
         )
         self.settings = replace(self.settings, rvc=rvc_settings)
+        save_app_settings(self.settings)
+
+    def _on_rvc_inference_settings_changed(self, inference: RvcInferenceSettings) -> None:
+        if self._is_loading_rvc_settings:
+            return
+        self.settings = replace(
+            self.settings,
+            rvc=replace(self.settings.rvc, inference=inference),
+        )
         save_app_settings(self.settings)
 
     def _start_rvc_conversion(self, *_args) -> None:
@@ -3530,6 +3694,7 @@ class MainWindow(QMainWindow):
                             requested_device=result.requested_device,
                             effective_device=result.effective_device,
                             f0_method=result.f0_method,
+                            inference=result.inference,
                         ),
                     )
                 except Exception as exc:
@@ -4155,6 +4320,8 @@ class MainWindow(QMainWindow):
                 self._library_preview_song_id = ""
             elif queue is not None and queue.context == "library_asset":
                 self.library_details_panel.set_preview_expanded(Path(queue.source_id), False)
+            elif queue is not None and queue.context == "export":
+                self.export_page.set_preview_expanded(Path(queue.source_id), False)
             self._sync_playback_surfaces()
             self._update_output_playheads(0, 0)
             return
@@ -4177,6 +4344,8 @@ class MainWindow(QMainWindow):
                 self._set_library_preview_expanded(queue.source_id, False)
             elif queue.context == "library_asset":
                 self.library_details_panel.set_preview_expanded(Path(queue.source_id), False)
+            elif queue.context == "export":
+                self.export_page.set_preview_expanded(Path(queue.source_id), False)
         self._stop_playback(clear_queue=True)
 
     def _resume_position(self, queue: PlaybackQueue) -> int:
@@ -4274,6 +4443,15 @@ class MainWindow(QMainWindow):
                 queue.duration_ms,
             )
             self.library_details_panel.set_preview_playing(path, is_playing)
+        elif queue.context == "export":
+            path = Path(queue.source_id)
+            self.export_page.set_preview_queue(path, queue.duration_ms)
+            self.export_page.set_preview_position(
+                path,
+                self._playback_position_ms,
+                queue.duration_ms,
+            )
+            self.export_page.set_preview_playing(path, is_playing)
         elif queue.scope == WorkspacePlaybackScope.STUDIO.value:
             self.studio_transport_bar.set_queue(queue.duration_ms)
             self.studio_transport_bar.set_position(
@@ -4312,8 +4490,12 @@ class MainWindow(QMainWindow):
             tuple(str(path) for path in queue.paths),
             error,
         )
-        target_label = self.output_status_label if queue.context == "output" else self.library_status_label
-        _set_optional_label(target_label, f"Playback failed: {_last_error_line(str(error))}")
+        message = f"Playback failed: {_last_error_line(str(error))}"
+        if queue.context == "export":
+            self.export_page.set_audio_status(message)
+        else:
+            target_label = self.output_status_label if queue.context == "output" else self.library_status_label
+            _set_optional_label(target_label, message)
         self._stop_playback()
 
     def _playback_track_paths(
@@ -4535,28 +4717,37 @@ class MainWindow(QMainWindow):
             export_dir = None
             video_source = VideoSource()
         capabilities = build_work_song_capabilities(
-            song,
             output_available=(
                 song.output_job_dir is not None
                 and load_output_sound_set(song.output_job_dir, self.settings.output_root) is not None
             ),
+            item=song,
         )
         has_local_media = video_source.path is not None and video_source.path.is_file()
+        try:
+            export_duration_ms = read_audio_metadata(song.path).duration_ms
+        except Exception:
+            export_duration_ms = 0
         self.export_page.set_exports(audio_exports, video_exports, export_dir)
         self.export_page.set_target_song(
             song.id,
             audio_enabled=capabilities.can_export,
             video_enabled=capabilities.can_export and has_local_media,
+            duration_ms=export_duration_ms,
         )
+        if self._current_playback_context() == "export":
+            self._refresh_playback_ui(is_playing=self.player.is_playing())
 
     def _on_export_song_changed(self, song_id: str) -> None:
+        if self._current_playback_context() == "export":
+            self._suspend_playback()
         self._export_song_id = song_id
         self._refresh_export_page()
 
     def _is_export_song(self, song_id: str) -> bool:
         return bool(song_id) and self._export_song_id == song_id
 
-    def _start_audio_mix_export(self, song_id: str) -> None:
+    def _start_audio_mix_export(self, song_id: str, settings: AudioExportSettings) -> None:
         song = self._song_items_by_id.get(song_id)
         if song is None:
             self.export_page.set_audio_status("Select a song.")
@@ -4565,18 +4756,18 @@ class MainWindow(QMainWindow):
         self.studio_session_autosave.flush()
         self.export_page.set_audio_running(True)
         self.export_page.set_audio_progress(0)
-        self.export_page.set_audio_status("Exporting audio mix")
+        self.export_page.set_audio_status(f"Exporting {settings.output_label}")
         scope = WorkTaskScope(song_id)
         worker = TaskWorker(
-            lambda progress: _run_with_progress(lambda: self.library.export_audio_mix(song_id), progress)
+            lambda progress: self.library.export_audio_mix(song_id, settings, progress)
         )
         self._run_worker(
             worker,
             lambda result: self._on_audio_mix_export_succeeded(scope, result),
             lambda error: self._on_audio_mix_export_failed(scope, error),
-            self.export_page.audio_action,
+            self.export_page.audio_controls,
             task_title="Export Mix",
-            task_detail=song.title,
+            task_detail=f"{song.title} / {settings.output_label}",
             action_scope=lambda: self._is_export_song(scope.song_id),
         )
 
@@ -4660,6 +4851,26 @@ class MainWindow(QMainWindow):
     def _delete_export_drive_share(self, path: Path) -> None:
         if self._confirm_drive_share_delete(path.name):
             self.google_drive.delete_export_share(path)
+
+    def _rename_export(self, path: Path, name: str) -> None:
+        song_id = self._export_song_id
+        if not song_id:
+            return
+        resolved = path.expanduser().resolve()
+        queue = self.current_playback_queue
+        if queue is not None and queue.context == "export" and queue.source_id == str(resolved):
+            MainWindow._playback_session(self).pop_resume_position("export", str(resolved))
+            self._stop_playback(clear_queue=True)
+        try:
+            renamed = self.library.rename_export(song_id, resolved, name)
+            self.google_drive.move_export_share(resolved, renamed)
+        except Exception as exc:
+            self.export_page.set_audio_status(
+                f"Rename failed: {_last_error_line(str(exc))}",
+                str(exc),
+            )
+            return
+        self._refresh_export_page()
 
     def _delete_model_drive_share(self, record: RvcModelRecord) -> None:
         if self._confirm_drive_share_delete(record.title):

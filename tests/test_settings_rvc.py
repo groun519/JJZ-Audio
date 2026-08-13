@@ -13,6 +13,7 @@ from jang_app.services.settings import (
     load_app_settings,
     save_app_settings,
 )
+from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 
 
 class RvcSettingsTests(unittest.TestCase):
@@ -34,6 +35,21 @@ class RvcSettingsTests(unittest.TestCase):
             self.assertEqual(loaded.rvc.model_id, "voice-id")
             self.assertEqual(loaded.rvc.voice_model, expected.rvc.voice_model)
 
+    def test_inference_quality_values_are_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_file = Path(temporary) / "settings.json"
+            expected = RvcInferenceSettings(
+                index_rate=0.62,
+                filter_radius=5,
+                rms_mix_rate=0.4,
+                protect=0.18,
+            )
+            with patch.object(settings_module, "SETTINGS_FILE", settings_file):
+                save_app_settings(AppSettings(rvc=RvcSettings(inference=expected)))
+                loaded = load_app_settings()
+
+            self.assertEqual(loaded.rvc.inference, expected)
+
     def test_legacy_settings_without_model_id_remain_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             settings_file = Path(temporary) / "settings.json"
@@ -47,6 +63,7 @@ class RvcSettingsTests(unittest.TestCase):
 
             self.assertEqual(loaded.rvc.model_id, "")
             self.assertEqual(loaded.rvc.voice_model, "weights/voice.pth")
+            self.assertEqual(loaded.rvc.inference, RvcInferenceSettings())
 
     def test_studio_layout_sizes_are_persisted_and_invalid_values_use_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
+    QButtonGroup,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -16,24 +17,39 @@ from PySide6.QtWidgets import (
 )
 
 from jang_app.qt_app.localization import set_translated_tooltip
+from jang_app.qt_app.studio_character_effect_editor import (
+    StudioCharacterEffectEditor,
+    character_effect_name,
+)
 from jang_app.qt_app.studio_reverb_editor import StudioReverbEditor
 from jang_app.qt_app.widgets import (
     COMPACT_ICON_BUTTON_SIZE,
     FeedbackButton,
     ScrollSafeDoubleSpinBox,
     ScrollSafeSlider,
+    ScrollSafeSpinBox,
     SvgIconButton,
     TimecodeSpinBox,
 )
 from jang_app.services.i18n import tr
 from jang_app.services.studio_assets import StudioSoundAsset
+from jang_app.services.studio_audio_levels import (
+    STUDIO_CLIP_GAIN_MAX_DB,
+    STUDIO_CLIP_GAIN_MIN_DB,
+)
+from jang_app.services.studio_character_fx_presets import EDITABLE_EFFECT_KINDS
 from jang_app.services.studio_session import (
     TRACK_AUDIO,
     TRACK_CONVERTED_VOCAL,
     TRACK_INSTRUMENTAL,
     TRACK_ORIGINAL_VOCAL,
     TRACK_VIDEO,
+    MEDIA_FILL,
+    MEDIA_FIT,
+    STUDIO_EFFECT_LEVEL_MATCH,
     StudioClip,
+    StudioEffect,
+    StudioMediaSettings,
     StudioTrack,
 )
 
@@ -117,6 +133,11 @@ class InspectorSection(QFrame):
     def add_header_action(self, widget: QWidget) -> None:
         self.header_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
 
+    def set_expanded(self, expanded: bool) -> None:
+        if self.toggle_button is None:
+            return
+        self.toggle_button.setChecked(expanded)
+
     def apply_language(self) -> None:
         self.title_label.setText(tr(self._title_key))
         if self.toggle_button is not None:
@@ -167,6 +188,7 @@ class InspectorHeader(QFrame):
 
 class StudioInspector(QFrame):
     clip_values_changed = Signal(str, int, int, int, float, bool, int, int)
+    media_values_changed = Signal(str, int, object)
     track_mix_changed = Signal(str, bool, bool, int, int)
     track_name_changed = Signal(str, str)
     open_location_requested = Signal(object)
@@ -185,10 +207,11 @@ class StudioInspector(QFrame):
         self._track: StudioTrack | None = None
         self._clip: StudioClip | None = None
         self._asset: StudioSoundAsset | None = None
+        self._theme_mode = "white"
         self._loading = False
         self._active_effect_id = ""
         self.effect_tab_buttons: dict[str, FeedbackButton] = {}
-        self.effect_editors: dict[str, StudioReverbEditor] = {}
+        self.effect_editors: dict[str, StudioReverbEditor | StudioCharacterEffectEditor] = {}
 
         self.title_label = QLabel()
         self.title_label.setObjectName("SectionTitle")
@@ -238,27 +261,26 @@ class StudioInspector(QFrame):
         self.clip_mute_button.clicked.connect(self._toggle_clip_mute)
         self.clip_section.add_header_action(self.clip_mute_button)
         self.gain_slider = ScrollSafeSlider(Qt.Orientation.Horizontal)
-        self.gain_slider.setRange(-600, 120)
+        self.gain_slider.setRange(
+            round(STUDIO_CLIP_GAIN_MIN_DB * 10),
+            round(STUDIO_CLIP_GAIN_MAX_DB * 10),
+        )
         self.gain_slider.valueChanged.connect(self._sync_gain_from_slider)
         self.gain_slider.sliderReleased.connect(self._emit_clip_values)
         self.gain_spin = ScrollSafeDoubleSpinBox()
         self.gain_spin.setObjectName("StudioInspectorGainSpin")
         self.gain_spin.setFixedWidth(112)
-        self.gain_spin.setRange(-60.0, 12.0)
+        self.gain_spin.setRange(STUDIO_CLIP_GAIN_MIN_DB, STUDIO_CLIP_GAIN_MAX_DB)
         self.gain_spin.setDecimals(1)
         self.gain_spin.setSingleStep(0.5)
         self.gain_spin.setSuffix(" dB")
         self.gain_spin.editingFinished.connect(self._sync_gain_from_spin)
-        self.gain_reset = FeedbackButton()
-        self.gain_reset.setObjectName("StudioInspectorResetButton")
-        self.gain_reset.clicked.connect(self._reset_gain)
         self.gain_label = QLabel()
         self.gain_label.setObjectName("MutedText")
         gain_header = QHBoxLayout()
         gain_header.setContentsMargins(0, 0, 0, 0)
         gain_header.addWidget(self.gain_label)
         gain_header.addStretch(1)
-        gain_header.addWidget(self.gain_reset, 0)
         gain_row = QHBoxLayout()
         gain_row.setContentsMargins(0, 0, 0, 0)
         gain_row.addWidget(self.gain_slider, 1)
@@ -294,6 +316,68 @@ class StudioInspector(QFrame):
         source_grid.addWidget(out_field, 1, 0)
         self.source_section.content_layout.addLayout(source_grid)
 
+        self.media_section = InspectorSection("Media")
+        self.image_duration_label, self.image_duration_field = _field_widget(
+            "Display Duration",
+            TimecodeSpinBox(),
+        )
+        self.image_duration_spin = self.image_duration_field.control
+        self.image_duration_spin.setRange(100, 86_400_000)
+        self.image_duration_spin.editingFinished.connect(self._emit_media_values)
+
+        self.fit_control = QFrame()
+        self.fit_control.setObjectName("StudioInspectorTabs")
+        fit_layout = QHBoxLayout(self.fit_control)
+        fit_layout.setContentsMargins(3, 3, 3, 3)
+        fit_layout.setSpacing(2)
+        self.fit_button_group = QButtonGroup(self)
+        self.fit_button_group.setExclusive(True)
+        self.fit_buttons: dict[str, FeedbackButton] = {}
+        for mode in (MEDIA_FIT, MEDIA_FILL):
+            button = FeedbackButton()
+            button.setObjectName("StudioInspectorTab")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, selected=mode: self._select_fit_mode(selected)
+            )
+            self.fit_button_group.addButton(button)
+            self.fit_buttons[mode] = button
+            fit_layout.addWidget(button, 1)
+        self.fit_label, self.fit_field = _field_widget("Frame Mode", self.fit_control)
+        self._fit_mode = MEDIA_FIT
+        self.scale_label, self.scale_field = _field_widget("Scale", ScrollSafeSpinBox())
+        self.scale_spin = self.scale_field.control
+        self.scale_spin.setRange(25, 400)
+        self.scale_spin.setSuffix("%")
+        self.scale_spin.editingFinished.connect(self._emit_media_values)
+        self.offset_x_label, self.offset_x_field = _field_widget("Horizontal Position", ScrollSafeSpinBox())
+        self.offset_x_spin = self.offset_x_field.control
+        self.offset_x_spin.setRange(-100, 100)
+        self.offset_x_spin.setSuffix("%")
+        self.offset_x_spin.editingFinished.connect(self._emit_media_values)
+        self.offset_y_label, self.offset_y_field = _field_widget("Vertical Position", ScrollSafeSpinBox())
+        self.offset_y_spin = self.offset_y_field.control
+        self.offset_y_spin.setRange(-100, 100)
+        self.offset_y_spin.setSuffix("%")
+        self.offset_y_spin.editingFinished.connect(self._emit_media_values)
+
+        self.image_controls = QWidget()
+        image_layout = QGridLayout(self.image_controls)
+        image_layout.setContentsMargins(0, 0, 0, 0)
+        image_layout.setHorizontalSpacing(8)
+        image_layout.setVerticalSpacing(8)
+        image_layout.addWidget(self.image_duration_field, 0, 0, 1, 2)
+        image_layout.addWidget(self.fit_field, 1, 0)
+        image_layout.addWidget(self.scale_field, 1, 1)
+        image_layout.addWidget(self.offset_x_field, 2, 0)
+        image_layout.addWidget(self.offset_y_field, 2, 1)
+
+        self.source_audio_button = FeedbackButton()
+        self.source_audio_button.setCheckable(True)
+        self.source_audio_button.clicked.connect(self._emit_media_values)
+        self.media_section.content_layout.addWidget(self.image_controls)
+        self.media_section.content_layout.addWidget(self.source_audio_button)
+
         self.fade_section = InspectorSection("Fade")
         self.fade_in_label, fade_in_field = _field_widget("Fade In", TimecodeSpinBox())
         self.fade_out_label, fade_out_field = _field_widget("Fade Out", TimecodeSpinBox())
@@ -322,6 +406,7 @@ class StudioInspector(QFrame):
         properties_layout.addWidget(self.clip_section)
         properties_layout.addWidget(self.time_section)
         properties_layout.addWidget(self.source_section)
+        properties_layout.addWidget(self.media_section)
         properties_layout.addWidget(self.fade_section)
         properties_layout.addLayout(actions)
         properties_layout.addStretch(1)
@@ -433,8 +518,12 @@ class StudioInspector(QFrame):
         self.set_selection(None, None, None)
 
     def set_theme_mode(self, theme_mode: str) -> None:
+        self._theme_mode = theme_mode
         self.open_button.set_theme_mode(theme_mode)
         self.clip_mute_button.set_theme_mode(theme_mode)
+        for editor in self.effect_editors.values():
+            if isinstance(editor, StudioReverbEditor):
+                editor.set_theme_mode(theme_mode)
 
     def apply_language(self) -> None:
         self.title_label.setText(tr("Inspector"))
@@ -445,6 +534,7 @@ class StudioInspector(QFrame):
             self.clip_section,
             self.time_section,
             self.source_section,
+            self.media_section,
             self.fade_section,
             self.mix_section,
             self.track_section,
@@ -452,11 +542,22 @@ class StudioInspector(QFrame):
             section.apply_language()
         self._refresh_clip_mute_control()
         self.gain_label.setText(tr("Clip Gain"))
-        self.gain_reset.setText(tr("Reset"))
         self.position_label.setText(tr("Timeline Position"))
         self.duration_label.setText(tr("Clip Duration"))
         self.in_label.setText(tr("Source In"))
         self.out_label.setText(tr("Source Out"))
+        self.image_duration_label.setText(tr("Display Duration"))
+        self.fit_label.setText(tr("Frame Mode"))
+        self.scale_label.setText(tr("Scale"))
+        self.offset_x_label.setText(tr("Horizontal Position"))
+        self.offset_y_label.setText(tr("Vertical Position"))
+        self.source_audio_button.setText(tr("Use Original Audio"))
+        self.fit_buttons[MEDIA_FIT].setText(tr("Fit Inside"))
+        self.fit_buttons[MEDIA_FILL].setText(tr("Fill Frame"))
+        if self._asset is not None and self._asset.media_kind in {"image", "video"}:
+            self.media_section.title_label.setText(
+                tr("Image") if self._asset.media_kind == "image" else tr("Video")
+            )
         self.fade_in_label.setText(tr("Fade In"))
         self.fade_out_label.setText(tr("Fade Out"))
         self.mute_button.setText(tr("Mute"))
@@ -487,7 +588,7 @@ class StudioInspector(QFrame):
         effects = {
             effect.effect_id: effect
             for effect in clip.effects
-            if effect.kind == "reverb"
+            if effect.kind == "reverb" or effect.kind in EDITABLE_EFFECT_KINDS
         }
         for effect_id in tuple(self.effect_tab_buttons):
             if effect_id in effects:
@@ -505,8 +606,9 @@ class StudioInspector(QFrame):
             editor = self.effect_editors.get(effect_id)
             if editor is not None:
                 editor.set_effect(effect)
+                self._sync_effect_reference(editor, effect, clip)
                 continue
-            button = FeedbackButton(tr("Reverb"))
+            button = FeedbackButton(tr(character_effect_name(effect.kind)))
             button.setObjectName("StudioInspectorTab")
             button.setCheckable(True)
             button.clicked.connect(
@@ -516,8 +618,10 @@ class StudioInspector(QFrame):
                 max(1, self.clip_tabs_layout.count() - 1),
                 button,
             )
-            editor = StudioReverbEditor()
-            editor.set_effect(effect)
+            editor = self._effect_editor(effect)
+            self._sync_effect_reference(editor, effect, clip)
+            if isinstance(editor, StudioReverbEditor):
+                editor.set_theme_mode(self._theme_mode)
             editor.effect_changed.connect(self._forward_effect_changed)
             editor.remove_requested.connect(self._forward_effect_remove)
             self.clip_detail_stack.addWidget(editor)
@@ -526,6 +630,29 @@ class StudioInspector(QFrame):
         if self._active_effect_id not in self.effect_editors:
             self._active_effect_id = ""
         self.open_effect_tab(self._active_effect_id)
+
+    @staticmethod
+    def _sync_effect_reference(
+        editor: StudioReverbEditor | StudioCharacterEffectEditor,
+        effect: StudioEffect,
+        clip: StudioClip,
+    ) -> None:
+        if (
+            isinstance(editor, StudioCharacterEffectEditor)
+            and effect.kind == STUDIO_EFFECT_LEVEL_MATCH
+        ):
+            editor.set_reference_available(clip.asset.role == TRACK_CONVERTED_VOCAL)
+
+    @staticmethod
+    def _effect_editor(
+        effect: StudioEffect,
+    ) -> StudioReverbEditor | StudioCharacterEffectEditor:
+        if effect.kind == "reverb":
+            editor = StudioReverbEditor()
+        else:
+            editor = StudioCharacterEffectEditor(effect.kind)
+        editor.set_effect(effect)
+        return editor
 
     def _forward_effect_changed(self, effect) -> None:
         if self._clip is None:
@@ -544,6 +671,21 @@ class StudioInspector(QFrame):
         clip: StudioClip,
         asset: StudioSoundAsset | None,
     ) -> None:
+        media_kind = asset.media_kind if asset is not None else (
+            "video" if track.role == TRACK_VIDEO else "audio"
+        )
+        is_media = media_kind in {"video", "image"}
+        is_image = media_kind == "image"
+        is_video = media_kind == "video"
+        self.clip_section.setVisible(not is_media)
+        self.fade_section.setVisible(not is_media)
+        self.source_section.setVisible(not is_image)
+        self.source_section.set_expanded(is_video)
+        self.media_section.setVisible(is_media)
+        self.image_controls.setVisible(is_image)
+        self.source_audio_button.setVisible(is_video)
+        self.media_section.title_label.setText(tr("Image") if is_image else tr("Video"))
+
         limit = max(clip.source_end_ms, asset.duration_ms if asset is not None else 0)
         self.in_spin.setMaximum(limit)
         self.out_spin.setMaximum(limit)
@@ -557,6 +699,13 @@ class StudioInspector(QFrame):
         self.gain_spin.setValue(clip.gain_db)
         self.gain_slider.setValue(round(clip.gain_db * 10))
         self.clip_mute_button.setChecked(clip.muted)
+        self.image_duration_spin.setValue(clip.duration_ms)
+        self._fit_mode = clip.media.fit_mode
+        self.fit_buttons[self._fit_mode].setChecked(True)
+        self.scale_spin.setValue(clip.media.scale_percent)
+        self.offset_x_spin.setValue(clip.media.offset_x_percent)
+        self.offset_y_spin.setValue(clip.media.offset_y_percent)
+        self.source_audio_button.setChecked(clip.media.source_audio_enabled)
         self._refresh_clip_mute_control()
         self.duration_value.setText(_format_timecode(clip.duration_ms))
         self.open_button.setEnabled(bool(asset and asset.path.is_file()))
@@ -599,13 +748,6 @@ class StudioInspector(QFrame):
         self._loading = False
         self._emit_clip_values()
 
-    def _reset_gain(self) -> None:
-        self._loading = True
-        self.gain_spin.setValue(0.0)
-        self.gain_slider.setValue(0)
-        self._loading = False
-        self._emit_clip_values()
-
     def _toggle_clip_mute(self) -> None:
         self._refresh_clip_mute_control()
         self._emit_clip_values()
@@ -628,6 +770,30 @@ class StudioInspector(QFrame):
             self.fade_in_spin.value(),
             self.fade_out_spin.value(),
         )
+
+    def _emit_media_values(self) -> None:
+        if self._loading or self._clip is None or self._track is None:
+            return
+        duration_ms = (
+            self.image_duration_spin.value()
+            if self._asset is not None and self._asset.media_kind == "image"
+            else self._clip.duration_ms
+        )
+        self.media_values_changed.emit(
+            self._clip.clip_id,
+            duration_ms,
+            StudioMediaSettings(
+                fit_mode=self._fit_mode,
+                scale_percent=self.scale_spin.value(),
+                offset_x_percent=self.offset_x_spin.value(),
+                offset_y_percent=self.offset_y_spin.value(),
+                source_audio_enabled=self.source_audio_button.isChecked(),
+            ),
+        )
+
+    def _select_fit_mode(self, mode: str) -> None:
+        self._fit_mode = mode if mode in {MEDIA_FIT, MEDIA_FILL} else MEDIA_FIT
+        self._emit_media_values()
 
     def _open_asset_location(self) -> None:
         if self._asset is not None:
