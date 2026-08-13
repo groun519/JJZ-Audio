@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -44,9 +45,19 @@ from jang_app.qt_app.model_training_panel import (
     format_training_elapsed,
 )
 from jang_app.qt_app.share_progress_action import ShareProgressAction
-from jang_app.qt_app.localization import apply_widget_language, set_translated_text
+from jang_app.qt_app.localization import (
+    apply_widget_language,
+    set_translated_placeholder,
+    set_translated_text,
+    set_translated_tooltip,
+)
 from jang_app.qt_app.text_input_dialog import TextInputDialog
-from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton, attach_list_item_widget
+from jang_app.qt_app.widgets import (
+    FeedbackButton,
+    ScrollSafeComboBox,
+    SvgIconButton,
+    attach_list_item_widget,
+)
 from jang_app.qt_app.workspace_splitter import create_workspace_splitter
 from jang_app.qt_app.workers import TaskWorker
 from jang_app.services.clip_edit_history import REVIEW_READY
@@ -278,6 +289,8 @@ class ModelWorkspacePage(QWidget):
         library_heading.setContentsMargins(0, 0, 0, 0)
         title = QLabel("Model Library")
         title.setObjectName("SectionTitle")
+        self.model_library_count_label = QLabel("0 / 0")
+        self.model_library_count_label.setObjectName("MutedText")
         self.add_model_button = FeedbackButton("Add Model")
         self.add_model_button.setObjectName("ModelAddButton")
         self.add_model_button.clicked.connect(self._show_add_model_dialog)
@@ -286,9 +299,25 @@ class ModelWorkspacePage(QWidget):
         self.refresh_button.setToolTip("Refresh models")
         self.refresh_button.clicked.connect(self.refresh_models)
         library_heading.addWidget(title)
+        library_heading.addWidget(self.model_library_count_label)
         library_heading.addStretch(1)
         library_heading.addWidget(self.add_model_button)
         library_heading.addWidget(self.refresh_button)
+
+        filter_layout = QHBoxLayout()
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(8)
+        self.model_search_edit = QLineEdit()
+        self.model_search_edit.setClearButtonEnabled(True)
+        set_translated_placeholder(self.model_search_edit, "Search models")
+        self.model_search_edit.textChanged.connect(self._apply_model_filters)
+        self.model_filter_combo = ScrollSafeComboBox()
+        self.model_filter_combo.setFixedWidth(170)
+        set_translated_tooltip(self.model_filter_combo, "Filter models")
+        self.model_filter_combo.currentIndexChanged.connect(self._apply_model_filters)
+        self._populate_model_filter_combo()
+        filter_layout.addWidget(self.model_search_edit, 1)
+        filter_layout.addWidget(self.model_filter_combo)
 
         list_surface = QFrame()
         list_surface.setObjectName("ModelListSurface")
@@ -302,6 +331,7 @@ class ModelWorkspacePage(QWidget):
         list_layout.addWidget(self.model_list)
 
         library_layout.addLayout(library_heading)
+        library_layout.addLayout(filter_layout)
         library_layout.addWidget(list_surface, 1)
         return library
 
@@ -350,6 +380,9 @@ class ModelWorkspacePage(QWidget):
             copy_tooltip="Copy model work Google Drive link",
             delete_tooltip="Delete model work from Google Drive",
             copied_text="Copied",
+            button_text="Share Work",
+            shared_button_text="Work Link",
+            button_width=96,
             parent=header,
         )
         self.workspace_work_share_action.setObjectName("WorkspaceModelWorkShareAction")
@@ -558,6 +591,7 @@ class ModelWorkspacePage(QWidget):
             self.model_list.setCurrentRow(selected_index)
 
         self._update_summary(records)
+        self._apply_model_filters()
         self.models_changed.emit()
         if not records:
             self._selected_model_id = None
@@ -674,6 +708,7 @@ class ModelWorkspacePage(QWidget):
 
     def apply_language(self) -> None:
         apply_widget_language(self)
+        self._populate_model_filter_combo()
         self.detail_panel.apply_language()
         self.dataset_panel.apply_language()
         self.analysis_panel.apply_language()
@@ -687,6 +722,75 @@ class ModelWorkspacePage(QWidget):
             apply_widget_language(row)
         if self.model_list.count() == 1 and self.model_list.item(0).data(Qt.ItemDataRole.UserRole) is None:
             self.model_list.item(0).setText(tr("No models added"))
+        self._apply_model_filters()
+
+    def _populate_model_filter_combo(self) -> None:
+        current = (
+            self.model_filter_combo.currentData()
+            if self.model_filter_combo.count()
+            else "all"
+        )
+        self.model_filter_combo.blockSignals(True)
+        self.model_filter_combo.clear()
+        for label, value in (
+            ("All Models", "all"),
+            ("Managed", "managed"),
+            ("Linked", "linked"),
+            ("Conversion Ready", "convert"),
+            ("Needs Attention", "attention"),
+        ):
+            self.model_filter_combo.addItem(tr(label), value)
+        index = self.model_filter_combo.findData(current)
+        self.model_filter_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.model_filter_combo.blockSignals(False)
+
+    def _apply_model_filters(self, *_args: object) -> None:
+        query = self.model_search_edit.text().strip().casefold()
+        filter_mode = str(self.model_filter_combo.currentData() or "all")
+        visible_count = 0
+        for index in range(self.model_list.count()):
+            item = self.model_list.item(index)
+            model_id = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(model_id, str):
+                continue
+            record = self._records_by_id.get(model_id)
+            is_visible = record is not None and self._record_matches_model_filter(
+                record,
+                query,
+                filter_mode,
+            )
+            item.setHidden(not is_visible)
+            visible_count += int(is_visible)
+        self.model_library_count_label.setText(
+            f"{visible_count} / {len(self._records_by_id)}"
+        )
+
+    @staticmethod
+    def _record_matches_model_filter(
+        record: RvcModelRecord,
+        query: str,
+        filter_mode: str,
+    ) -> bool:
+        searchable = " ".join(
+            (
+                record.title,
+                record.name,
+                *record.tags,
+                record.status_label,
+                record.mode_label,
+            )
+        ).casefold()
+        if query and query not in searchable:
+            return False
+        if filter_mode == "managed":
+            return record.is_managed
+        if filter_mode == "linked":
+            return not record.is_managed
+        if filter_mode == "convert":
+            return record.can_convert
+        if filter_mode == "attention":
+            return record.status_key in {"missing", "checkpoint", "incomplete"}
+        return True
 
     def show_status(self, message: str) -> None:
         set_translated_text(self.status_label, message)
@@ -1773,6 +1877,7 @@ class ModelWorkspacePage(QWidget):
                 self._ensure_model_section_loaded(current_section)
             self._update_workspace_header(record)
         self._update_summary(list(self._records_by_id.values()))
+        self._apply_model_filters()
         self.models_changed.emit()
 
     def _update_summary(self, records: list[RvcModelRecord]) -> None:

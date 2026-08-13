@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QMenu, QWidget
 
 _LOGGER = logging.getLogger("jang_app")
 _EXPLICIT_WINDOW_PROPERTY = "allowTopLevelWindow"
+_QUARANTINED_WINDOW_PROPERTY = "windowLifecycleQuarantined"
 _PARENTING_RETRY_INTERVAL_MS = 40
 _PARENTING_RETRY_COUNT = 5
 _FRAMEWORK_WINDOW_TYPES = frozenset(
@@ -44,6 +45,8 @@ class WindowLifecycleGuard(QObject):
             and watched.isWindow()
             and not self.is_expected_window(watched)
         ):
+            watched.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            watched.setProperty(_QUARANTINED_WINDOW_PROPERTY, True)
             watched.hide()
             self._resolve_after_parenting(watched)
             return True
@@ -77,6 +80,7 @@ class WindowLifecycleGuard(QObject):
         try:
             if not widget.isWindow() or self.is_expected_window(widget):
                 self._pending_widget_ids.discard(widget_id)
+                self._release_quarantine(widget)
                 widget.show()
                 return
             if retries_remaining > 0:
@@ -97,6 +101,13 @@ class WindowLifecycleGuard(QObject):
         self._blocked_count += 1
         self._last_blocked = description
         _LOGGER.error("Blocked unexpected top-level widget: %s", description)
+
+    @staticmethod
+    def _release_quarantine(widget: QWidget) -> None:
+        if not bool(widget.property(_QUARANTINED_WINDOW_PROPERTY)):
+            return
+        widget.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+        widget.setProperty(_QUARANTINED_WINDOW_PROPERTY, False)
 
     @staticmethod
     def is_expected_window(widget: QWidget) -> bool:

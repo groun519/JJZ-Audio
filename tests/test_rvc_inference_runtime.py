@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from jang_app.services import rvc_inference_runtime as runtime_module
+from jang_app.services.command import CommandResult
 from jang_app.services.rvc_cuda_compatibility import cuda_architecture_error
 from jang_app.services.rvc_inference_runtime import (
     RvcInferenceCapabilities,
@@ -27,7 +28,8 @@ class RvcInferenceRuntimeTests(unittest.TestCase):
             python = root / "runtime" / "python.exe"
             python.parent.mkdir(parents=True)
             python.write_bytes(b"python")
-            result = runtime_module._ProbeResult(
+            result = CommandResult(
+                (),
                 0,
                 json.dumps(
                     {
@@ -126,6 +128,59 @@ class RvcInferenceRuntimeTests(unittest.TestCase):
                 "directml",
                 runtime_probe=lambda _root: capabilities,
             )
+
+    def test_directml_probe_rejects_runtime_when_rmvpe_smoke_test_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            runtime.mkdir(parents=True)
+            (runtime / "python.exe").write_bytes(b"python")
+            (runtime / "jjzero-runtime-profile.json").write_text(
+                json.dumps({"profile": "directml"}),
+                encoding="utf-8",
+            )
+            cpu_result = runtime_module.CommandResult(
+                (),
+                0,
+                json.dumps(
+                    {
+                        "imports_ready": True,
+                        "cpu_ready": True,
+                        "faiss_ready": True,
+                        "torch_version": "2.4.1+cpu",
+                        "detail": "",
+                    }
+                ),
+                "",
+            )
+            directml_result = runtime_module.CommandResult(
+                (),
+                0,
+                json.dumps(
+                    {
+                        "directml_available": True,
+                        "directml_ready": True,
+                        "directml_device": "privateuseone:0",
+                        "device_name": "AMD Radeon(TM) RX Vega 11 Graphics",
+                        "detail": "",
+                    }
+                ),
+                "",
+            )
+            runtime_module.clear_rvc_inference_probe_cache()
+            with (
+                patch.object(runtime_module, "_run_probe", side_effect=[cpu_result, directml_result]),
+                patch.object(
+                    runtime_module,
+                    "_run_directml_rmvpe_probe",
+                    return_value="DirectML RMVPE probe crashed with Windows status 0xC00000FD.",
+                ),
+            ):
+                capabilities = runtime_module.probe_rvc_inference_runtime(root)
+            self.assertTrue(capabilities.directml_available)
+            self.assertFalse(capabilities.directml_ready)
+            self.assertIn("RMVPE probe", capabilities.directml_detail)
+            runtime_module.clear_rvc_inference_probe_cache()
 
     def test_legacy_cuda_preference_uses_directml_after_amd_migration(self) -> None:
         capabilities = _capabilities(cuda_available=False, cuda_ready=False)

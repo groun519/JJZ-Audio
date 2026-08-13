@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
 from jang_app.config import FFMPEG_BIN_DIR
-from jang_app.services.command import hidden_subprocess_kwargs
+from jang_app.services.command import run_binary_command
 from jang_app.services.environment import require_executable
+from jang_app.services.studio_session import StudioLevelMatchSettings
 
 
 _FFMPEG_WAVEFORM_SAMPLE_RATE = 800
@@ -40,6 +40,55 @@ def build_waveform_peaks(path: Path, point_count: int) -> list[float]:
     return (peaks / max_peak).tolist()
 
 
+def build_waveform_amplitude_peaks(path: Path, point_count: int) -> list[float]:
+    """Build non-normalized peaks so a shared timeline can display actual levels."""
+    if point_count <= 0:
+        return []
+    try:
+        peaks = _read_soundfile_peaks(path, point_count)
+    except (OSError, RuntimeError):
+        peaks = _sample_peaks(_decode_with_ffmpeg(path), point_count)
+    return peaks.tolist()
+
+
+def build_level_matched_waveform_peaks(
+    path: Path,
+    reference_path: Path,
+    point_count: int,
+    settings: StudioLevelMatchSettings,
+) -> list[float]:
+    """Build peaks from the same level-matched signal used by playback and export."""
+    if point_count <= 0:
+        return []
+    try:
+        peaks = _read_soundfile_peaks(path, point_count)
+    except (OSError, RuntimeError):
+        peaks = _sample_peaks(_decode_with_ffmpeg(path), point_count)
+    source_rms = _read_rms_envelope(path)
+    reference_rms = _read_rms_envelope(reference_path)
+    shared_points = min(source_rms.size, reference_rms.size)
+    if shared_points <= 0 or settings.strength_percent <= 0:
+        return peaks.tolist()
+    source_rms = _windowed_rms(source_rms[:shared_points], settings.response_ms)
+    reference_rms = _windowed_rms(reference_rms[:shared_points], settings.response_ms)
+    floor = 10.0 ** (settings.silence_threshold_db / 20.0)
+    valid = (source_rms >= floor) & (reference_rms >= floor)
+    gain_db = np.zeros(shared_points, dtype=np.float64)
+    gain_db[valid] = 20.0 * np.log10(
+        np.maximum(reference_rms[valid], 1e-8)
+        / np.maximum(source_rms[valid], 1e-8)
+    )
+    gain_db *= settings.strength_percent / 100.0
+    gain_db = np.clip(gain_db, -settings.max_correction_db, settings.max_correction_db)
+    gain_db = _smooth_envelope(gain_db, settings.response_ms)
+    visual_positions = np.linspace(0, shared_points - 1, len(peaks))
+    visual_gain = np.power(
+        10.0,
+        np.interp(visual_positions, np.arange(shared_points), gain_db) / 20.0,
+    )
+    return (peaks * visual_gain).tolist()
+
+
 def _read_soundfile_peaks(path: Path, point_count: int) -> np.ndarray:
     with sf.SoundFile(path) as audio:
         frame_count = len(audio)
@@ -56,7 +105,7 @@ def _decode_with_ffmpeg(path: Path) -> np.ndarray:
         "Place FFmpeg under third_party/ffmpeg/bin or add it to PATH.",
         [FFMPEG_BIN_DIR],
     )
-    completed = subprocess.run(
+    completed = run_binary_command(
         [
             executable,
             "-nostdin",
@@ -78,10 +127,6 @@ def _decode_with_ffmpeg(path: Path) -> np.ndarray:
             "pcm_f32le",
             "pipe:1",
         ],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **hidden_subprocess_kwargs(),
     )
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
@@ -121,3 +166,50 @@ def _stream_peaks(audio: sf.SoundFile, bucket_count: int, bucket_size: int) -> n
             block_cursor += take
             cursor += take
     return peaks
+
+
+def _read_rms_envelope(path: Path, hop_ms: int = 10) -> np.ndarray:
+    with sf.SoundFile(path) as audio:
+        hop_frames = max(1, round(audio.samplerate * hop_ms / 1_000))
+        values: list[np.ndarray] = []
+        carry = np.zeros((0, audio.channels), dtype=np.float32)
+        while True:
+            block = audio.read(65_536, always_2d=True, dtype="float32")
+            if block.size == 0:
+                break
+            if carry.size:
+                block = np.concatenate((carry, block), axis=0)
+            groups = block.shape[0] // hop_frames
+            usable = groups * hop_frames
+            if groups:
+                frames = block[:usable].reshape(groups, hop_frames, audio.channels)
+                values.append(np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=(1, 2))))
+            carry = block[usable:]
+        if carry.size:
+            values.append(
+                np.asarray(
+                    [np.sqrt(np.mean(np.square(carry, dtype=np.float64)))],
+                    dtype=np.float64,
+                )
+            )
+    return np.concatenate(values) if values else np.zeros(0, dtype=np.float64)
+
+
+def _windowed_rms(rms: np.ndarray, response_ms: int, hop_ms: int = 10) -> np.ndarray:
+    points = max(1, round(response_ms / hop_ms))
+    if points <= 1 or rms.size <= 1:
+        return rms
+    points = min(points, rms.size)
+    kernel = np.ones(points, dtype=np.float64) / points
+    power = np.square(rms, dtype=np.float64)
+    return np.sqrt(np.convolve(power, kernel, mode="same"))
+
+
+def _smooth_envelope(gain_db: np.ndarray, response_ms: int, hop_ms: int = 10) -> np.ndarray:
+    radius = max(1, round(response_ms / hop_ms / 3.0))
+    radius = min(radius, max(0, (gain_db.size - 1) // 2))
+    if radius <= 0:
+        return gain_db
+    kernel = np.hanning(radius * 2 + 1)
+    kernel /= np.sum(kernel)
+    return np.convolve(np.pad(gain_db, radius, mode="edge"), kernel, mode="valid")

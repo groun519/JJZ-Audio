@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QWidget
 
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
-from jang_app.qt_app.widgets import DangerIconButton, SvgIconButton
+from jang_app.qt_app.widgets import DangerIconButton, FeedbackButton, SvgIconButton
 
 
 class ShareProgressAction(QWidget):
@@ -22,13 +22,18 @@ class ShareProgressAction(QWidget):
         copy_tooltip: str = "Copy Google Drive link",
         delete_tooltip: str = "Delete from Google Drive",
         copied_text: str = "Copied",
+        button_text: str = "",
+        shared_button_text: str = "",
+        button_width: int = 0,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("ShareProgressAction")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         button_extent = button_size + 4
-        self.setFixedSize(120, max(38, button_extent + 4))
+        action_width = max(88, int(button_width)) if button_text else 0
+        widget_width = 120 if not button_text else action_width + button_extent + 9
+        self.setFixedSize(widget_width, max(38, button_extent + 4))
         self._feature_enabled = True
         self._idle_visible = not reveal_on_hover
         self._reserve_idle_space = reveal_on_hover
@@ -40,6 +45,8 @@ class ShareProgressAction(QWidget):
         self._copy_tooltip = copy_tooltip
         self._delete_tooltip = delete_tooltip
         self._copied_text = copied_text
+        self._button_text = button_text
+        self._shared_button_text = shared_button_text
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("RowShareProgress")
@@ -58,9 +65,15 @@ class ShareProgressAction(QWidget):
         self.copied_label.setFixedSize(66, 28)
         set_translated_text(self.copied_label, self._copied_text)
 
-        self.button = SvgIconButton("link", size=button_extent, paint_inset=2)
-        self.button.setObjectName("RowShareButton")
-        set_translated_tooltip(self.button, self._share_tooltip)
+        if self._button_text:
+            self.button = FeedbackButton()
+            self.button.setFixedSize(action_width, button_extent)
+            self.button.setObjectName("WorkShareButton")
+            set_translated_text(self.button, self._button_text)
+        else:
+            self.button = SvgIconButton("link", size=button_extent, paint_inset=2)
+            self.button.setObjectName("RowShareButton")
+        self._sync_share_tooltip()
         self.button.clicked.connect(self.requested.emit)
 
         self.delete_button = DangerIconButton(size=button_extent, paint_inset=2)
@@ -88,11 +101,13 @@ class ShareProgressAction(QWidget):
         self._sync_visibility()
 
     def set_theme_mode(self, theme_mode: str) -> None:
-        self.button.set_theme_mode(theme_mode)
+        if isinstance(self.button, SvgIconButton):
+            self.button.set_theme_mode(theme_mode)
         self.delete_button.set_theme_mode(theme_mode)
 
     def apply_language(self) -> None:
         set_translated_text(self.copied_label, self._copied_text)
+        self._sync_button_text()
         self._sync_share_tooltip()
         set_translated_tooltip(self.delete_button, self._delete_tooltip)
 
@@ -112,8 +127,16 @@ class ShareProgressAction(QWidget):
 
     def set_shared(self, is_shared: bool) -> None:
         self._shared = is_shared
-        self.button.setObjectName("RowSharedButton" if is_shared else "RowShareButton")
-        self.button.set_icon_name("cloud_check" if is_shared else "link")
+        if isinstance(self.button, SvgIconButton):
+            self.button.setObjectName("RowSharedButton" if is_shared else "RowShareButton")
+            self.button.set_icon_name("cloud_check" if is_shared else "link")
+        else:
+            self.button.setObjectName(
+                "WorkSharedButton" if is_shared else "WorkShareButton"
+            )
+            self._sync_button_text()
+        self.button.style().unpolish(self.button)
+        self.button.style().polish(self.button)
         self._sync_share_tooltip()
         self._sync_visibility()
 
@@ -172,3 +195,13 @@ class ShareProgressAction(QWidget):
             self.button,
             self._copy_tooltip if self._shared else self._share_tooltip,
         )
+
+    def _sync_button_text(self) -> None:
+        if not self._button_text:
+            return
+        source = (
+            self._shared_button_text
+            if self._shared and self._shared_button_text
+            else self._button_text
+        )
+        set_translated_text(self.button, source)

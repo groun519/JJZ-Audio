@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from jang_app.services.managed_files import link_or_copy_file, write_text_atomic
+from jang_app.services.rvc_training_performance import RvcTrainingDataLoaderSettings
 
 
 class RvcScriptLauncherError(ValueError):
@@ -33,7 +34,7 @@ def prepare_rvc_script_launcher(
     *,
     atomic_torch_saves: bool = False,
     compact_rvc_checkpoints: bool = False,
-    conservative_data_loading: bool = False,
+    data_loader_settings: RvcTrainingDataLoaderSettings | None = None,
     rocm_single_process_training: bool = False,
     legacy_i18n: bool = False,
 ) -> Path:
@@ -65,8 +66,20 @@ def prepare_rvc_script_launcher(
         lines.extend(("", _ATOMIC_TORCH_SAVE_BOOTSTRAP.rstrip(), ""))
     if compact_rvc_checkpoints:
         lines.extend(("", _COMPACT_RVC_CHECKPOINT_BOOTSTRAP.rstrip(), ""))
-    if conservative_data_loading:
-        lines.extend(("", _CONSERVATIVE_DATA_LOADER_BOOTSTRAP.rstrip(), ""))
+    if data_loader_settings is not None:
+        data_loader_settings.validate()
+        lines.extend(
+            (
+                "",
+                f"JJZERO_DATA_LOADER_WORKERS = {data_loader_settings.workers}",
+                f"JJZERO_DATA_LOADER_PREFETCH = {data_loader_settings.prefetch_factor}",
+                f"JJZERO_DATA_LOADER_PIN_MEMORY = {data_loader_settings.pin_memory!r}",
+                "JJZERO_DATA_LOADER_PERSISTENT = "
+                f"{data_loader_settings.persistent_workers!r}",
+                _OPTIMIZED_DATA_LOADER_BOOTSTRAP.rstrip(),
+                "",
+            )
+        )
     if rocm_single_process_training:
         lines.extend(("", _ROCM_SINGLE_PROCESS_TRAINING_BOOTSTRAP.rstrip(), ""))
     lines.extend(
@@ -253,25 +266,36 @@ _jjzero_train_utils.save_checkpoint_d = _jjzero_save_checkpoint_d
 '''
 
 
-_CONSERVATIVE_DATA_LOADER_BOOTSTRAP = '''import torch.utils.data
+_OPTIMIZED_DATA_LOADER_BOOTSTRAP = '''import torch.utils.data
 
 
 _jjzero_original_data_loader = torch.utils.data.DataLoader
 
 
-class _JjzeroConservativeDataLoader(_jjzero_original_data_loader):
+class _JjzeroOptimizedDataLoader(_jjzero_original_data_loader):
     def __init__(self, *args, **kwargs):
-        requested_workers = max(0, int(kwargs.get("num_workers", 0)))
-        if requested_workers > 0:
-            # Embedded Python workers can briefly create console windows on
-            # some CUDA runtime profiles. RVC datasets are already prepared
-            # locally, so loading them in the trainer process is predictable.
-            kwargs["num_workers"] = 0
+        workers = max(0, int(JJZERO_DATA_LOADER_WORKERS))
+        kwargs["num_workers"] = workers
+        kwargs["pin_memory"] = bool(JJZERO_DATA_LOADER_PIN_MEMORY and workers)
+        if workers > 0:
+            kwargs["prefetch_factor"] = max(1, int(JJZERO_DATA_LOADER_PREFETCH))
+            kwargs["persistent_workers"] = bool(JJZERO_DATA_LOADER_PERSISTENT)
+        else:
             kwargs.pop("prefetch_factor", None)
             kwargs["persistent_workers"] = False
         super().__init__(*args, **kwargs)
+        self._jjzero_configuration_reported = False
 
     def __iter__(self):
+        if not self._jjzero_configuration_reported:
+            print(
+                "JJZERO_DATA_LOADER_CONFIG "
+                f"workers={self.num_workers} "
+                f"pin_memory={int(bool(self.pin_memory))} "
+                f"persistent={int(bool(self.persistent_workers))}",
+                flush=True,
+            )
+            self._jjzero_configuration_reported = True
         print("JJZERO_TRAINING_DATA_LOADER_START", flush=True)
         for index, batch in enumerate(super().__iter__()):
             if index == 0:
@@ -279,12 +303,13 @@ class _JjzeroConservativeDataLoader(_jjzero_original_data_loader):
             yield batch
 
 
-torch.utils.data.DataLoader = _JjzeroConservativeDataLoader
+torch.utils.data.DataLoader = _JjzeroOptimizedDataLoader
 '''
 
 
 _ROCM_SINGLE_PROCESS_TRAINING_BOOTSTRAP = '''import torch
 import torch.distributed
+import torch.multiprocessing
 import torch.nn.parallel
 
 
@@ -304,7 +329,33 @@ if getattr(torch.version, "hip", None) or torch.cuda.device_count() <= 1:
         return None
 
 
+    class _JjzeroInlineTrainingProcess:
+        def __init__(self, group=None, target=None, name=None, args=(), kwargs=None, daemon=None):
+            self._target = target
+            self._args = tuple(args)
+            self._kwargs = dict(kwargs or {})
+            self.exitcode = None
+
+        def start(self):
+            print("JJZERO_SINGLE_DEVICE_WORKER_START", flush=True)
+            try:
+                if self._target is not None:
+                    self._target(*self._args, **self._kwargs)
+            except BaseException:
+                self.exitcode = 1
+                raise
+            else:
+                self.exitcode = 0
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+
     torch.distributed.init_process_group = _jjzero_skip_single_process_group
+    torch.multiprocessing.Process = _JjzeroInlineTrainingProcess
     torch.nn.parallel.DistributedDataParallel = (
         _JjzeroSingleProcessDistributedDataParallel
     )

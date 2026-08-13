@@ -8,10 +8,55 @@ from unittest import mock
 
 import numpy as np
 
-from jang_app.services.waveform import build_waveform_peaks
+from jang_app.services.studio_session import StudioLevelMatchSettings
+from jang_app.services.waveform import (
+    build_level_matched_waveform_peaks,
+    build_waveform_amplitude_peaks,
+    build_waveform_peaks,
+)
 
 
 class WaveformTests(unittest.TestCase):
+    def test_level_matched_peaks_follow_reference_scale(self) -> None:
+        source = np.concatenate((np.full(4, 0.05), np.full(4, 0.4))).astype(np.float32)
+        reference = np.concatenate((np.full(4, 0.4), np.full(4, 0.05))).astype(np.float32)
+        settings = StudioLevelMatchSettings(
+            strength_percent=100,
+            response_ms=10,
+            max_correction_db=24,
+            silence_threshold_db=-80,
+        )
+
+        with (
+            mock.patch(
+                "jang_app.services.waveform._read_soundfile_peaks",
+                return_value=source,
+            ),
+            mock.patch(
+                "jang_app.services.waveform._read_rms_envelope",
+                side_effect=(source, reference),
+            ),
+        ):
+            peaks = build_level_matched_waveform_peaks(
+                Path("source.wav"),
+                Path("reference.wav"),
+                8,
+                settings,
+            )
+
+        self.assertGreater(np.mean(peaks[:4]), np.mean(peaks[4:]))
+        self.assertAlmostEqual(max(peaks), 0.4, delta=0.06)
+
+    def test_amplitude_peaks_preserve_source_level(self) -> None:
+        with mock.patch(
+            "jang_app.services.waveform._read_soundfile_peaks",
+            return_value=np.asarray([0.1, 0.25, 0.05], dtype=np.float32),
+        ):
+            peaks = build_waveform_amplitude_peaks(Path("source.wav"), 3)
+
+        self.assertEqual(len(peaks), 3)
+        self.assertAlmostEqual(max(peaks), 0.25)
+
     def test_builds_requested_peaks_without_loading_whole_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "voice.wav"

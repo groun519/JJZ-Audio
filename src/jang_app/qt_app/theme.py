@@ -1584,6 +1584,22 @@ def _stylesheet(
             font-weight: 900;
         }}
 
+        QPushButton#WorkShareButton,
+        QPushButton#WorkSharedButton {{
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0 12px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 900;
+        }}
+
+        QPushButton#WorkSharedButton {{
+            color: {success_text};
+            background: {success_background};
+            border-color: {success_border};
+        }}
+
         QProgressBar#RowShareProgress {{
             min-height: 4px;
             max-height: 4px;

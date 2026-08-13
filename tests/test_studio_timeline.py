@@ -21,6 +21,7 @@ from jang_app.services.studio_timeline import (
     remove_studio_track,
     set_studio_clip_mix,
     set_studio_clip_media,
+    set_studio_clip_pitch,
     set_studio_track_collapsed,
     set_studio_track_mix,
     split_studio_clip,
@@ -120,8 +121,16 @@ class StudioTimelineTests(unittest.TestCase):
         with self.assertRaises(StudioTimelineError):
             remove_studio_track(updated, "missing-track")
 
-    def test_split_clip_preserves_timeline_source_and_gain(self) -> None:
-        clip = StudioClip("first", _asset("first"), 2_000, 500, 4_500, gain_db=-3.0)
+    def test_split_clip_preserves_timeline_source_gain_and_pitch(self) -> None:
+        clip = StudioClip(
+            "first",
+            _asset("first"),
+            2_000,
+            500,
+            4_500,
+            gain_db=-3.0,
+            pitch_semitones=7,
+        )
 
         updated = split_studio_clip(
             _session(clip),
@@ -139,6 +148,7 @@ class StudioTimelineTests(unittest.TestCase):
             (3_500, 2_000, 4_500),
         )
         self.assertEqual((left.gain_db, right.gain_db), (-3.0, -3.0))
+        self.assertEqual((left.pitch_semitones, right.pitch_semitones), (7, 7))
         self.assertEqual(left.asset, right.asset)
         self.assertNotEqual(left.clip_id, right.clip_id)
 
@@ -200,6 +210,16 @@ class StudioTimelineTests(unittest.TestCase):
         self.assertEqual(above_limit.tracks[0].clips[0].gain_db, 30.0)
         self.assertEqual(at_lower_limit.tracks[0].clips[0].gain_db, -100.0)
         self.assertEqual(below_limit.tracks[0].clips[0].gain_db, -100.0)
+
+    def test_clip_pitch_is_non_destructive_and_clamped(self) -> None:
+        session = _session(StudioClip("first", _asset("first"), 0, 0, 1_000))
+
+        shifted = set_studio_clip_pitch(session, "first", 12)
+        clamped = set_studio_clip_pitch(shifted, "first", 999)
+
+        self.assertEqual(session.tracks[0].clips[0].pitch_semitones, 0)
+        self.assertEqual(shifted.tracks[0].clips[0].pitch_semitones, 12)
+        self.assertEqual(clamped.tracks[0].clips[0].pitch_semitones, 48)
 
     def test_track_collapsed_state_is_non_destructive(self) -> None:
         session = _session(StudioClip("first", _asset("first"), 0, 0, 1_000))

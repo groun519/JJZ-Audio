@@ -373,7 +373,13 @@ class StudioSessionTests(unittest.TestCase):
             session = load_studio_session(package)
             track = session.tracks[0]
             clip = track.clips[0]
-            edited_clip = replace(clip, muted=True, fade_in_ms=250, fade_out_ms=400)
+            edited_clip = replace(
+                clip,
+                muted=True,
+                fade_in_ms=250,
+                fade_out_ms=400,
+                pitch_semitones=-7,
+            )
             edited_track = replace(track, pan_percent=-35, clips=(edited_clip,))
             edited = replace(session, tracks=(edited_track, *session.tracks[1:]))
 
@@ -382,6 +388,7 @@ class StudioSessionTests(unittest.TestCase):
 
             self.assertEqual(restored.tracks[0].pan_percent, -35)
             self.assertTrue(restored.tracks[0].clips[0].muted)
+            self.assertEqual(restored.tracks[0].clips[0].pitch_semitones, -7)
             self.assertEqual(
                 (restored.tracks[0].clips[0].fade_in_ms, restored.tracks[0].clips[0].fade_out_ms),
                 (250, 400),

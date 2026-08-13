@@ -39,11 +39,14 @@ from jang_app.services.studio_character_fx_presets import (
     studio_effect_name,
 )
 from jang_app.services.studio_session import (
+    STUDIO_EFFECT_LEVEL_MATCH,
     STUDIO_EFFECT_REVERB,
     TRACK_AUDIO,
+    TRACK_ORIGINAL_VOCAL,
     TRACK_VIDEO,
     StudioClip,
     StudioEffect,
+    StudioLevelMatchSettings,
     StudioMediaSettings,
     StudioSession,
     StudioTrack,
@@ -61,6 +64,7 @@ from jang_app.services.studio_timeline import (
     session_duration_ms,
     set_studio_clip_media,
     set_studio_clip_mix,
+    set_studio_clip_pitch,
     set_studio_track_collapsed,
     set_studio_track_name,
     set_studio_track_mix,
@@ -68,12 +72,17 @@ from jang_app.services.studio_timeline import (
     trim_studio_clip,
     update_studio_clip_effect,
 )
-from jang_app.services.waveform import build_waveform_peaks, waveform_cache_key
+from jang_app.services.waveform import (
+    build_level_matched_waveform_peaks,
+    build_waveform_amplitude_peaks,
+    waveform_cache_key,
+)
 
 
 _WAVEFORM_POINTS = 900
 _WAVEFORM_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="studio-waveform")
 _WAVEFORM_CACHE: dict[tuple[str, int, int, int], list[float]] = {}
+_LEVEL_MATCHED_WAVEFORM_CACHE: dict[tuple[object, ...], list[float]] = {}
 _ROLE_COLORS = {
     "original_vocal": QColor("#d6a85f"),
     "instrumental": QColor("#58a88f"),
@@ -99,6 +108,7 @@ class StudioTimelineView(QWidget):
     seek_requested = Signal(int)
     clip_split_requested = Signal(str, int)
     _peaks_ready = Signal(object, object)
+    _level_matched_peaks_ready = Signal(object, object)
 
     HEADER_WIDTH = 184
     RULER_HEIGHT = 34
@@ -121,6 +131,8 @@ class StudioTimelineView(QWidget):
         self._assets: dict[str, StudioSoundAsset] = {}
         self._peaks: dict[str, list[float]] = {}
         self._pending_peak_keys: set[tuple[str, int, int, int]] = set()
+        self._level_matched_peaks: dict[str, tuple[tuple[object, ...], list[float]]] = {}
+        self._pending_level_matched_peak_keys: set[tuple[object, ...]] = set()
         self._pixels_per_second = 7
         self._horizontal_offset = 0
         self._vertical_offset = 0
@@ -148,6 +160,7 @@ class StudioTimelineView(QWidget):
         self._waveform_request_timer.setInterval(70)
         self._waveform_request_timer.timeout.connect(self._request_waveforms)
         self._peaks_ready.connect(self._apply_peaks)
+        self._level_matched_peaks_ready.connect(self._apply_level_matched_peaks)
 
     def set_context(
         self,
@@ -170,6 +183,8 @@ class StudioTimelineView(QWidget):
             self._hover_track_id = ""
         self._update_extent()
         self.update()
+        if self.isVisible():
+            self._queue_waveform_request()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -620,10 +635,12 @@ class StudioTimelineView(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         for effect, chip_rect, remove_rect in regions:
             hovered = self._hover_effect == (clip.clip_id, effect.effect_id)
-            painter.setPen(QPen(QColor(self._theme["focus"]), 1))
-            painter.setBrush(QColor(self._theme["selection"] if hovered else self._theme["card"]))
+            border = self._theme["focus"] if effect.enabled else self._theme["button_border"]
+            background = self._theme["selection"] if hovered else self._theme["card"]
+            painter.setPen(QPen(QColor(border), 1))
+            painter.setBrush(QColor(background))
             painter.drawRoundedRect(chip_rect, 5, 5)
-            painter.setPen(QColor(self._theme["text"]))
+            painter.setPen(QColor(self._theme["text"] if effect.enabled else self._theme["muted"]))
             if chip_rect.width() >= 58:
                 text_rect = chip_rect.adjusted(6, 0, -18 if hovered else -6, 0)
                 label = painter.fontMetrics().elidedText(
@@ -635,12 +652,18 @@ class StudioTimelineView(QWidget):
             elif not hovered:
                 painter.drawText(chip_rect, Qt.AlignmentFlag.AlignCenter, "FX")
             if hovered:
-                painter.drawText(remove_rect, Qt.AlignmentFlag.AlignCenter, "×")
+                render_app_icon(
+                    painter,
+                    remove_rect.adjusted(4, 4, -4, -4),
+                    "close",
+                    QColor(self._theme["text"]),
+                )
         painter.restore()
 
     @staticmethod
     def _effect_label(effect: StudioEffect) -> str:
-        return tr(studio_effect_name(effect.kind))
+        label = tr(studio_effect_name(effect.kind))
+        return label if effect.enabled else f"{label} · {tr('Off')}"
 
     def _effect_chip_rects(
         self,
@@ -737,7 +760,7 @@ class StudioTimelineView(QWidget):
         rect: QRectF,
     ) -> None:
         asset = self._assets.get(clip.asset.asset_id)
-        peaks = self._peaks.get(clip.asset.asset_id, [])
+        peaks = self._waveform_peaks_for_clip(clip)
         if asset is None or not peaks or asset.duration_ms <= 0 or rect.width() < 20:
             return
         start_index = max(0, int(clip.source_start_ms / asset.duration_ms * len(peaks)))
@@ -750,16 +773,7 @@ class StudioTimelineView(QWidget):
         painter.setPen(
             QPen(QColor(255, 255, 255, 65 if track.muted or clip.muted else 150), 1)
         )
-        center = rect.center().y() + 8
-        nominal_height = max(2.0, rect.height() * 0.26)
-        bottom_margin = rect.bottom() - 5
-        if clip.effects:
-            effect_height = min(20.0, max(12.0, rect.height() * 0.28))
-            bottom_margin -= effect_height + 4
-        available_height = max(
-            1.0,
-            min(center - (rect.top() + 22), bottom_margin - center),
-        )
+        center, nominal_height, available_height = self._waveform_vertical_metrics(rect)
         display_gain = studio_source_gain(
             self._display_track_volume(track),
             clip.gain_db,
@@ -769,6 +783,20 @@ class StudioTimelineView(QWidget):
             x = rect.left() + index * x_step
             height = min(available_height, max(0.5, peak * nominal_height * display_gain))
             painter.drawLine(int(x), int(center - height), int(x), int(center + height))
+
+    @staticmethod
+    def _waveform_vertical_metrics(rect: QRectF) -> tuple[float, float, float]:
+        """Keep waveform geometry independent from overlay badges such as clip effects."""
+        center = rect.center().y() + 8
+        nominal_height = max(2.0, rect.height() * 0.26)
+        available_height = max(
+            1.0,
+            min(
+                center - (rect.top() + 22),
+                (rect.bottom() - 5) - center,
+            ),
+        )
+        return center, nominal_height, available_height
 
     def _paint_playhead(self, painter: QPainter) -> None:
         x = self._ms_to_x(self._playhead_ms)
@@ -1220,7 +1248,11 @@ class StudioTimelineView(QWidget):
             if key in self._pending_peak_keys:
                 continue
             self._pending_peak_keys.add(key)
-            future = _WAVEFORM_EXECUTOR.submit(build_waveform_peaks, asset.path, _WAVEFORM_POINTS)
+            future = _WAVEFORM_EXECUTOR.submit(
+                build_waveform_amplitude_peaks,
+                asset.path,
+                _WAVEFORM_POINTS,
+            )
             future.add_done_callback(
                 lambda completed, cache_key=key, asset_id=asset.asset_id: self._emit_peaks(
                     cache_key,
@@ -1228,6 +1260,35 @@ class StudioTimelineView(QWidget):
                     completed,
                 )
             )
+        self._request_level_matched_waveforms()
+
+    def _request_level_matched_waveforms(self) -> None:
+        for track in self._session.tracks:
+            for clip in track.clips:
+                request = self._level_matched_waveform_request(clip)
+                if request is None:
+                    self._level_matched_peaks.pop(clip.clip_id, None)
+                    continue
+                key, source, reference, settings = request
+                cached = _LEVEL_MATCHED_WAVEFORM_CACHE.get(key)
+                if cached is not None:
+                    self._level_matched_peaks[clip.clip_id] = (key, cached)
+                    continue
+                if key in self._pending_level_matched_peak_keys:
+                    continue
+                self._pending_level_matched_peak_keys.add(key)
+                future = _WAVEFORM_EXECUTOR.submit(
+                    build_level_matched_waveform_peaks,
+                    source,
+                    reference,
+                    _WAVEFORM_POINTS,
+                    settings,
+                )
+                future.add_done_callback(
+                    lambda completed, cache_key=key, clip_id=clip.clip_id: (
+                        self._emit_level_matched_peaks(cache_key, clip_id, completed)
+                    )
+                )
 
     def _queue_waveform_request(self) -> None:
         self._waveform_request_timer.start()
@@ -1249,6 +1310,72 @@ class StudioTimelineView(QWidget):
             _WAVEFORM_CACHE[key] = peaks
             self._peaks[asset_id] = peaks
             self.update()
+
+    def _emit_level_matched_peaks(self, key, clip_id: str, completed) -> None:
+        try:
+            peaks = completed.result()
+        except Exception:
+            peaks = []
+        try:
+            self._level_matched_peaks_ready.emit((key, clip_id), peaks)
+        except RuntimeError:
+            pass
+
+    def _apply_level_matched_peaks(self, key_and_clip, peaks: list[float]) -> None:
+        key, clip_id = key_and_clip
+        self._pending_level_matched_peak_keys.discard(key)
+        if peaks:
+            _LEVEL_MATCHED_WAVEFORM_CACHE[key] = peaks
+            clip = self._clip(clip_id)
+            request = self._level_matched_waveform_request(clip) if clip is not None else None
+            if request is not None and request[0] == key:
+                self._level_matched_peaks[clip_id] = (key, peaks)
+                self.update()
+
+    def _waveform_peaks_for_clip(self, clip: StudioClip) -> list[float]:
+        request = self._level_matched_waveform_request(clip)
+        if request is not None:
+            cached = self._level_matched_peaks.get(clip.clip_id)
+            if cached is not None and cached[0] == request[0]:
+                return cached[1]
+            shared = _LEVEL_MATCHED_WAVEFORM_CACHE.get(request[0])
+            if shared is not None:
+                return shared
+        return self._peaks.get(clip.asset.asset_id, [])
+
+    def _level_matched_waveform_request(
+        self,
+        clip: StudioClip,
+    ) -> tuple[tuple[object, ...], Path, Path, StudioLevelMatchSettings] | None:
+        effect = next(
+            (
+                item
+                for item in clip.effects
+                if item.enabled and item.kind == STUDIO_EFFECT_LEVEL_MATCH
+            ),
+            None,
+        )
+        if effect is None:
+            return None
+        source = self._assets.get(clip.asset.asset_id)
+        reference = next(
+            (
+                asset
+                for asset in self._assets.values()
+                if asset.reference.output_id == clip.asset.output_id
+                and asset.reference.role == TRACK_ORIGINAL_VOCAL
+            ),
+            None,
+        )
+        if source is None or reference is None:
+            return None
+        try:
+            source_key = waveform_cache_key(source.path, _WAVEFORM_POINTS)
+            reference_key = waveform_cache_key(reference.path, _WAVEFORM_POINTS)
+        except OSError:
+            return None
+        key = (source_key, reference_key, effect.level_match)
+        return key, source.path, reference.path, effect.level_match
 
 
 class StudioEditor(QWidget):
@@ -1334,6 +1461,7 @@ class StudioEditor(QWidget):
 
         self.inspector = StudioInspector(self)
         self.inspector.clip_values_changed.connect(self._set_clip_values)
+        self.inspector.clip_pitch_changed.connect(self._set_clip_pitch)
         self.inspector.media_values_changed.connect(self._set_media_values)
         self.inspector.track_mix_changed.connect(self._set_track_mix)
         self.inspector.track_name_changed.connect(self._set_track_name)
@@ -1638,6 +1766,15 @@ class StudioEditor(QWidget):
             self.set_status(str(exc))
             self._sync_inspector(clip_id=clip_id)
 
+    def _set_clip_pitch(self, clip_id: str, pitch_semitones: int) -> None:
+        try:
+            self._commit(
+                set_studio_clip_pitch(self._session, clip_id, pitch_semitones)
+            )
+        except StudioTimelineError as exc:
+            self.set_status(str(exc))
+            self._sync_inspector(clip_id=clip_id)
+
     def _remove_clip(self, clip_id: str) -> None:
         self._commit(remove_studio_clip(self._session, clip_id))
 
@@ -1776,6 +1913,7 @@ def _playback_layout_signature(session: StudioSession) -> tuple[object, ...]:
                     clip.timeline_start_ms,
                     clip.source_start_ms,
                     clip.source_end_ms,
+                    clip.pitch_semitones,
                     clip.fade_in_ms,
                     clip.fade_out_ms,
                 )

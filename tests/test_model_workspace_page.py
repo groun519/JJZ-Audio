@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from PySide6.QtCore import QEvent, QObject, QPointF
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt
 from PySide6.QtGui import QEnterEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -68,6 +68,48 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual(changes, [True])
             page.training_section_button.click()
             self.assertEqual(page.workspace_content_stack.currentIndex(), 4)
+            page.close()
+
+    def test_model_library_search_filter_and_count_preserve_all_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            managed = workspace.create_model("Managed Voice", root / "rvc")
+            inference_file = root / "linked_voice.pth"
+            inference_file.write_bytes(b"inference")
+            linked = workspace.link_inference_file(inference_file)
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            items = {}
+            for index in range(page.model_list.count()):
+                item = page.model_list.item(index)
+                items[item.data(Qt.ItemDataRole.UserRole)] = item
+
+            self.assertEqual(page.model_library_count_label.text(), "2 / 2")
+
+            page.model_search_edit.setText("managed voice")
+            self.assertFalse(items[managed.model_id].isHidden())
+            self.assertTrue(items[linked.model_id].isHidden())
+            self.assertEqual(page.model_library_count_label.text(), "1 / 2")
+
+            page.model_search_edit.clear()
+            page.model_filter_combo.setCurrentIndex(
+                page.model_filter_combo.findData("linked")
+            )
+            self.assertTrue(items[managed.model_id].isHidden())
+            self.assertFalse(items[linked.model_id].isHidden())
+
+            page.model_filter_combo.setCurrentIndex(
+                page.model_filter_combo.findData("convert")
+            )
+            self.assertTrue(items[managed.model_id].isHidden())
+            self.assertFalse(items[linked.model_id].isHidden())
+
+            page.model_filter_combo.setCurrentIndex(
+                page.model_filter_combo.findData("attention")
+            )
+            self.assertFalse(items[managed.model_id].isHidden())
+            self.assertTrue(items[linked.model_id].isHidden())
+            self.assertEqual(len(page._rows_by_id), 2)
             page.close()
 
     def test_excluded_preprocess_input_opens_its_original_clip(self) -> None:
@@ -394,9 +436,18 @@ class ModelWorkspacePageTests(unittest.TestCase):
             page.work_share_requested.connect(shared.append)
 
             page._open_model(record.model_id)
+            self.assertEqual(
+                page.workspace_work_share_action.button.text(),
+                tr("Share Work"),
+            )
             page.workspace_work_share_action.button.click()
 
             self.assertEqual(shared, [record])
+            page.workspace_work_share_action.set_shared(True)
+            self.assertEqual(
+                page.workspace_work_share_action.button.text(),
+                tr("Work Link"),
+            )
             page.close()
 
     def test_model_share_progress_replaces_redundant_badges_inline(self) -> None:
@@ -408,6 +459,8 @@ class ModelWorkspacePageTests(unittest.TestCase):
             record = workspace.link_inference_file(model_file)
             page = ModelWorkspacePage(root / "rvc", workspace)
             row = page._rows_by_id[record.model_id]
+
+            self.assertEqual(row.share_button.text(), "")
 
             page.set_share_started(record.model_id)
             page.set_share_progress(record.model_id, 46)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
@@ -18,6 +19,28 @@ from jang_app.services.studio_session import (
 
 
 class AudioExportTests(unittest.TestCase):
+    def test_export_reads_the_cached_pitch_render_for_a_shifted_clip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.wav"
+            shifted = root / "shifted.wav"
+            output = root / "mix.wav"
+            sf.write(source, np.full(800, 0.1, dtype=np.float32), 8_000)
+            sf.write(shifted, np.full(800, 0.3, dtype=np.float32), 8_000)
+
+            with patch(
+                "jang_app.services.audio_export.prepare_pitch_shifted_audio",
+                return_value=shifted,
+            ) as prepare:
+                export_mix(
+                    (AudioMixSource("Shifted", source, pitch_semitones=12),),
+                    output,
+                )
+
+            rendered, _sample_rate = sf.read(output, dtype="float32")
+            prepare.assert_called_once_with(source, 12)
+            self.assertAlmostEqual(float(np.mean(rendered)), 0.3, places=3)
+
     def test_exported_reverb_keeps_the_effect_tail(self) -> None:
         self.assertIn("effects", AudioMixSource.__dataclass_fields__)
         with tempfile.TemporaryDirectory() as temporary:

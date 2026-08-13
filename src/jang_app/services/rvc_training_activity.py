@@ -93,6 +93,10 @@ def describe_rvc_training_activity(line: str) -> str | None:
         )
 
     lowered = text.casefold()
+    if "jjzero_data_loader_fallback" in lowered:
+        return tr("Parallel loading was unavailable; retrying with safe loading")
+    if "jjzero_data_loader_config" in lowered:
+        return tr("Loading training batches in the background")
     if "jjzero_single_device_training" in lowered:
         return tr("Initializing single-GPU training")
     if "jjzero_training_data_loader_start" in lowered:

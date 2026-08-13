@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Protocol, Sequence
 
-from jang_app.services.command import hidden_subprocess_kwargs
+from jang_app.services.command import CommandResult, run_command
 from jang_app.services.rvc_hardware import (
     RvcHardwareSelection,
     clear_graphics_adapter_cache,
@@ -157,20 +156,8 @@ def probe_nvidia_gpus(command_runner: GpuCommandRunner | None = None) -> tuple[N
     )
 
 
-def _run_nvidia_smi(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            list(args),
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=15,
-            **hidden_subprocess_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return subprocess.CompletedProcess(list(args), 1, "", str(exc))
+def _run_nvidia_smi(args: Sequence[str]) -> CommandResult:
+    return run_command(args, timeout_seconds=15)
 
 
 def _parse_gpu_rows(

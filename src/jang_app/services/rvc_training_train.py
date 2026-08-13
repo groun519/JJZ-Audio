@@ -4,10 +4,12 @@ import re
 import shutil
 import uuid
 import json
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import RLock
 
 from jang_app.services.app_logging import get_logger
 from jang_app.services.command import (
@@ -16,11 +18,16 @@ from jang_app.services.command import (
     run_cancellable_command,
 )
 from jang_app.services.managed_files import copy_file_atomic, file_sha256, write_json_atomic
+from jang_app.services.live_text_file import LiveTextFile
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_script_launcher import (
     prepare_rvc_script_launcher,
     prepare_rvc_script_workspace,
+)
+from jang_app.services.rvc_training_performance import (
+    conservative_rvc_training_data_loader,
+    recommend_rvc_training_data_loader,
 )
 from jang_app.services.rvc_training_filelist import load_rvc_training_filelist
 from jang_app.services.rvc_training_runtime import (
@@ -51,6 +58,14 @@ _WEIGHT_SAVE_PATTERN = re.compile(
 )
 _CHECKPOINT_PATTERN = re.compile(r"^(?P<kind>[GD])_(?P<step>\d+)\.pth$", re.IGNORECASE)
 _COMPLETE_MARKER = "training is done"
+_DATA_LOADER_FAILURE_MARKERS = (
+    "dataloader worker",
+    "data loader worker",
+    "brokenpipeerror",
+    "can't pickle",
+    "cannot pickle",
+    "paging file is too small",
+)
 
 
 class RvcTrainingRunError(RuntimeError):
@@ -127,13 +142,17 @@ def train_rvc_model(
         raise RvcTrainingRunError(str(exc)) from exc
     _prepare_package_config(runtime, layout, use_half=inspection.training_accelerated)
     prepare_rvc_script_workspace(layout.root, runtime)
+    data_loader_settings = recommend_rvc_training_data_loader(
+        inspection,
+        windowless_workers_available=(runtime / "runtime" / "pythonw.exe").is_file(),
+    )
     launcher = prepare_rvc_script_launcher(
         layout.root / ".jjzero" / "train_rvc.py",
         runtime,
         runtime / "train_nsf_sim_cache_sid_load_pretrain.py",
         atomic_torch_saves=True,
         compact_rvc_checkpoints=True,
-        conservative_data_loading=True,
+        data_loader_settings=data_loader_settings,
         rocm_single_process_training=True,
         legacy_i18n=True,
     )
@@ -162,38 +181,55 @@ def train_rvc_model(
     _report(progress, epoch_callback, state.current_epoch, settings.target_epoch)
     logger = get_logger()
     logger.info(
-        "Starting RVC training: model=%s target_epoch=%s resumed=%s backend=%s accelerated=%s free_space_gib=%.1f",
+        "Starting RVC training: model=%s target_epoch=%s resumed=%s backend=%s "
+        "accelerated=%s data_workers=%s pin_memory=%s free_space_gib=%.1f",
         model_id,
         settings.target_epoch,
         resumed,
         inspection.backend.value,
         inspection.training_accelerated,
+        data_loader_settings.workers,
+        data_loader_settings.pin_memory,
         storage.available_bytes / 1024**3,
     )
 
+    output_lock = RLock()
+    recent_output: deque[str] = deque()
+    recent_output_set: set[str] = set()
+
     def handle_output(line: str) -> None:
-        step_match = _EPOCH_STEP_PATTERN.search(line)
-        if step_match is not None:
-            _report_epoch_step(
-                progress,
-                int(step_match.group("epoch")),
-                float(step_match.group("progress")),
-                settings.target_epoch,
-            )
-        match = _EPOCH_PATTERN.search(line)
-        if match is not None:
-            epoch = min(settings.target_epoch, int(match.group("epoch")))
-            state_store.record_epoch(epoch)
-            _report(progress, epoch_callback, epoch, settings.target_epoch)
-        save_match = _WEIGHT_SAVE_PATTERN.search(line)
-        if save_match is not None:
-            epoch = min(settings.target_epoch, int(save_match.group("epoch")))
-            state_store.record_epoch(epoch)
-            _keep_latest_checkpoint_pair(layout, int(save_match.group("step")))
-            state_store.refresh_checkpoint_pair()
-            _report(progress, epoch_callback, epoch, settings.target_epoch)
-        if output_callback is not None:
-            output_callback(line)
+        text = line.strip()
+        if not text:
+            return
+        with output_lock:
+            if text in recent_output_set:
+                return
+            recent_output.append(text)
+            recent_output_set.add(text)
+            if len(recent_output) > 2048:
+                recent_output_set.discard(recent_output.popleft())
+            step_match = _EPOCH_STEP_PATTERN.search(text)
+            if step_match is not None:
+                _report_epoch_step(
+                    progress,
+                    int(step_match.group("epoch")),
+                    float(step_match.group("progress")),
+                    settings.target_epoch,
+                )
+            match = _EPOCH_PATTERN.search(text)
+            if match is not None:
+                epoch = min(settings.target_epoch, int(match.group("epoch")))
+                state_store.record_epoch(epoch)
+                _report(progress, epoch_callback, epoch, settings.target_epoch)
+            save_match = _WEIGHT_SAVE_PATTERN.search(text)
+            if save_match is not None:
+                epoch = min(settings.target_epoch, int(save_match.group("epoch")))
+                state_store.record_epoch(epoch)
+                _keep_latest_checkpoint_pair(layout, int(save_match.group("step")))
+                state_store.refresh_checkpoint_pair()
+                _report(progress, epoch_callback, epoch, settings.target_epoch)
+            if output_callback is not None:
+                output_callback(text)
 
     try:
         if output_callback is not None:
@@ -201,19 +237,52 @@ def train_rvc_model(
                 "JJZERO_TRAINING_START "
                 f"current={state.current_epoch} target={settings.target_epoch}"
             )
-        result = command_runner(
-            _training_command(
-                runtime,
-                layout,
-                settings,
-                launcher,
-                accelerated=inspection.training_accelerated,
-            ),
-            cwd=layout.root,
-            env=build_rvc_environment(runtime),
-            output_callback=handle_output,
-            cancellation=token,
+        command = _training_command(
+            runtime,
+            layout,
+            settings,
+            launcher,
+            accelerated=inspection.training_accelerated,
         )
+        with LiveTextFile(log_path, log_offset, handle_output):
+            result = command_runner(
+                command,
+                cwd=layout.root,
+                env=build_rvc_environment(runtime),
+                output_callback=handle_output,
+                cancellation=token,
+            )
+            loader_diagnostics = f"{result.output}\n{_log_delta(log_path, log_offset)}"
+            if (
+                data_loader_settings.workers > 0
+                and not result.cancelled
+                and not token.is_requested
+                and _is_data_loader_failure(loader_diagnostics)
+            ):
+                logger.warning(
+                    "Parallel RVC data loading failed; retrying safely: "
+                    "model=%s workers=%s",
+                    model_id,
+                    data_loader_settings.workers,
+                )
+                handle_output("JJZERO_DATA_LOADER_FALLBACK workers=0")
+                prepare_rvc_script_launcher(
+                    launcher,
+                    runtime,
+                    runtime / "train_nsf_sim_cache_sid_load_pretrain.py",
+                    atomic_torch_saves=True,
+                    compact_rvc_checkpoints=True,
+                    data_loader_settings=conservative_rvc_training_data_loader(),
+                    rocm_single_process_training=True,
+                    legacy_i18n=True,
+                )
+                result = command_runner(
+                    command,
+                    cwd=layout.root,
+                    env=build_rvc_environment(runtime),
+                    output_callback=handle_output,
+                    cancellation=token,
+                )
         refreshed = state_store.refresh_checkpoint_pair()
         if result.cancelled or token.is_requested:
             _restore_final_model(final_model, backup, layout)
@@ -290,6 +359,11 @@ def _training_command(
         "-v",
         RVC_TRAINING_VERSION,
     ]
+
+
+def _is_data_loader_failure(output: str) -> bool:
+    lowered = str(output).casefold()
+    return any(marker in lowered for marker in _DATA_LOADER_FAILURE_MARKERS)
 
 
 def _prepare_package_config(

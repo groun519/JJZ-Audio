@@ -4,14 +4,13 @@ import hashlib
 import json
 import logging
 import re
-import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import lru_cache
 from typing import Protocol
 
-from jang_app.services.command import hidden_subprocess_kwargs
+from jang_app.services.command import CommandResult, run_command
 
 
 class RvcComputeBackend(StrEnum):
@@ -232,17 +231,5 @@ def _adapter_from_row(row: dict[str, object]) -> GraphicsAdapter | None:
     )
 
 
-def _run_powershell(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            list(args),
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=20,
-            **hidden_subprocess_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return subprocess.CompletedProcess(list(args), 1, "", str(exc))
+def _run_powershell(args: Sequence[str]) -> CommandResult:
+    return run_command(args, timeout_seconds=20)

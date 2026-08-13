@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from jang_app.services.command import background_command_args, hidden_subprocess_kwargs
+from jang_app.services.command import CommandResult, run_command
+from jang_app.services.rvc_directml_probe import (
+    create_directml_rmvpe_probe,
+    directml_rmvpe_probe_command,
+    missing_directml_rmvpe_outputs,
+)
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_cuda_compatibility import (
     cuda_architecture_error,
@@ -192,6 +196,21 @@ def _probe_rvc_inference_runtime_cached(rvc_root: str) -> RvcInferenceCapabiliti
     directml_profile = profile == RVC_PROFILE_DIRECTML
     cuda_ready = bool(cuda_data.get("cuda_ready")) if not directml_profile else False
     cuda_detail = cuda_error or str(cuda_data.get("detail", "")).strip()
+    directml_available = bool(cuda_data.get("directml_available"))
+    directml_device = (
+        str(cuda_data.get("directml_device", "privateuseone:0")).strip() or "privateuseone:0"
+    )
+    directml_ready = bool(cuda_data.get("directml_ready"))
+    directml_detail = (
+        cuda_error or str(cuda_data.get("detail", "")).strip()
+        if directml_profile
+        else ""
+    )
+    if directml_profile and directml_ready:
+        rmvpe_detail = _run_directml_rmvpe_probe(python, root, directml_device)
+        if rmvpe_detail:
+            directml_ready = False
+            directml_detail = rmvpe_detail
     compatibility_error = cuda_architecture_error(
         torch_version,
         cuda_version,
@@ -216,16 +235,11 @@ def _probe_rvc_inference_runtime_cached(rvc_root: str) -> RvcInferenceCapabiliti
         device_capability=device_capability,
         cuda_arch_list=cuda_arch_list,
         hip_version=str(cuda_data.get("hip_version", "")).strip(),
-        directml_available=bool(cuda_data.get("directml_available")),
-        directml_ready=bool(cuda_data.get("directml_ready")),
-        directml_device=str(cuda_data.get("directml_device", "privateuseone:0")).strip()
-        or "privateuseone:0",
+        directml_available=directml_available,
+        directml_ready=directml_ready,
+        directml_device=directml_device,
         directml_device_name=str(cuda_data.get("device_name", "")).strip(),
-        directml_detail=(
-            cuda_error or str(cuda_data.get("detail", "")).strip()
-            if directml_profile
-            else ""
-        ),
+        directml_detail=directml_detail,
     )
 
 
@@ -238,37 +252,16 @@ def _installed_profile(root: Path) -> str:
     return str(data.get("profile", "")).strip().lower() if isinstance(data, dict) else ""
 
 
-@dataclass(frozen=True)
-class _ProbeResult:
-    returncode: int
-    stdout: str
-    stderr: str
-
-    @property
-    def output(self) -> str:
-        return (self.stderr or self.stdout).strip()
+def _run_probe(python: Path, rvc_root: Path, script: str) -> CommandResult:
+    return run_command(
+        [str(python), "-c", script],
+        cwd=rvc_root,
+        env=build_rvc_environment(rvc_root),
+        timeout_seconds=90,
+    )
 
 
-def _run_probe(python: Path, rvc_root: Path, script: str) -> _ProbeResult:
-    try:
-        completed = subprocess.run(
-            background_command_args([str(python), "-c", script]),
-            cwd=rvc_root,
-            env=build_rvc_environment(rvc_root),
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=90,
-            **hidden_subprocess_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return _ProbeResult(1, "", str(exc))
-    return _ProbeResult(completed.returncode, completed.stdout, completed.stderr)
-
-
-def _parse_probe_result(result: _ProbeResult, label: str) -> tuple[dict[str, object] | None, str]:
+def _parse_probe_result(result: CommandResult, label: str) -> tuple[dict[str, object] | None, str]:
     if result.returncode != 0:
         return None, _process_failure_detail(label, result.returncode, result.output)
     try:
@@ -282,6 +275,11 @@ def _parse_probe_result(result: _ProbeResult, label: str) -> tuple[dict[str, obj
 
 def _process_failure_detail(label: str, returncode: int, output: str) -> str:
     windows_code = returncode & 0xFFFFFFFF
+    if windows_code == 0xC00000FD:
+        return (
+            f"{label} crashed with Windows status 0xC00000FD (stack overflow). "
+            "The selected GPU runtime is unstable on this PC."
+        )
     if windows_code == 0xC0000094:
         return (
             f"{label} crashed with Windows status 0xC0000094 (integer divide by zero). "
@@ -302,6 +300,35 @@ def _safe_int(value: object) -> int:
 def _last_line(output: str) -> str:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     return lines[-1] if lines else ""
+
+
+def _run_directml_rmvpe_probe(python: Path, rvc_root: Path, device: str) -> str:
+    script = rvc_root / "extract_f0_rmvpe.py"
+    if not script.is_file():
+        return f"DirectML RMVPE probe could not find the RVC extraction script: {script}"
+    temporary, probe_root = create_directml_rmvpe_probe()
+    try:
+        result = run_command(
+            directml_rmvpe_probe_command(python, rvc_root, probe_root, device=device),
+            cwd=rvc_root,
+            env=build_rvc_environment(rvc_root),
+            timeout_seconds=180,
+        )
+        if result.returncode != 0:
+            return _process_failure_detail(
+                "DirectML RMVPE probe",
+                result.returncode,
+                result.output,
+            )
+        missing = missing_directml_rmvpe_outputs(probe_root)
+        if missing:
+            return (
+                "DirectML RMVPE probe did not create the expected outputs: "
+                + ", ".join(missing)
+            )
+        return ""
+    finally:
+        temporary.cleanup()
 
 
 _CPU_PROBE = """

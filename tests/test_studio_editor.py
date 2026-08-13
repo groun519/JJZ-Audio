@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
@@ -195,6 +195,24 @@ class StudioEditorTests(unittest.TestCase):
 
         self.assertEqual(len(set(labels)), len(kinds))
         self.assertNotEqual(labels[1:], (labels[0],) * (len(kinds) - 1))
+
+    def test_timeline_effect_chip_identifies_bypassed_effect(self) -> None:
+        effect = StudioEffect("fx-level", "level_match", enabled=False)
+
+        label = StudioTimelineView._effect_label(effect)
+
+        self.assertIn("꺼짐", label)
+
+    def test_waveform_height_is_not_reduced_by_effect_badge_space(self) -> None:
+        rect = QRectF(10, 20, 320, 90)
+
+        center, nominal_height, available_height = (
+            StudioTimelineView._waveform_vertical_metrics(rect)
+        )
+
+        self.assertEqual(center, rect.center().y() + 8)
+        self.assertAlmostEqual(nominal_height, 23.4)
+        self.assertAlmostEqual(available_height, 31.0)
 
     def test_clip_follows_pointer_before_release_and_commits_once(self) -> None:
         timeline = StudioTimelineView()
@@ -737,7 +755,10 @@ class StudioEditorTests(unittest.TestCase):
             editor = StudioEditor()
             layout.addWidget(editor)
             with (
-                patch("jang_app.qt_app.studio_editor.build_waveform_peaks", return_value=[]),
+                patch(
+                    "jang_app.qt_app.studio_editor.build_waveform_amplitude_peaks",
+                    return_value=[],
+                ),
                 patch.object(_THUMBNAIL_WAVEFORM_EXECUTOR, "submit"),
             ):
                 editor.set_context(_session(), (asset,))

@@ -38,6 +38,10 @@ from jang_app.services.studio_audio_levels import (
     STUDIO_CLIP_GAIN_MIN_DB,
 )
 from jang_app.services.studio_character_fx_presets import EDITABLE_EFFECT_KINDS
+from jang_app.services.studio_pitch import (
+    STUDIO_CLIP_PITCH_MAX,
+    STUDIO_CLIP_PITCH_MIN,
+)
 from jang_app.services.studio_session import (
     TRACK_AUDIO,
     TRACK_CONVERTED_VOCAL,
@@ -188,6 +192,7 @@ class InspectorHeader(QFrame):
 
 class StudioInspector(QFrame):
     clip_values_changed = Signal(str, int, int, int, float, bool, int, int)
+    clip_pitch_changed = Signal(str, int)
     media_values_changed = Signal(str, int, object)
     track_mix_changed = Signal(str, bool, bool, int, int)
     track_name_changed = Signal(str, str)
@@ -287,6 +292,19 @@ class StudioInspector(QFrame):
         gain_row.addWidget(self.gain_spin, 0)
         self.clip_section.content_layout.addLayout(gain_header)
         self.clip_section.content_layout.addLayout(gain_row)
+
+        self.pitch_spin = ScrollSafeSpinBox()
+        self.pitch_spin.setRange(STUDIO_CLIP_PITCH_MIN, STUDIO_CLIP_PITCH_MAX)
+        self.pitch_spin.setSingleStep(1)
+        self.pitch_spin.setSuffix(" st")
+        self.pitch_spin.editingFinished.connect(self._emit_clip_pitch)
+        self.pitch_label, self.pitch_field = _field_widget("Clip Pitch", self.pitch_spin)
+        pitch_tooltip = tr(
+            "Changes pitch in semitones without changing the clip length."
+        )
+        self.pitch_field.setToolTip(pitch_tooltip)
+        self.pitch_spin.setToolTip(pitch_tooltip)
+        self.clip_section.content_layout.addWidget(self.pitch_field)
 
         self.time_section = InspectorSection("Time")
         self.position_label, position_field = _field_widget("Timeline Position", TimecodeSpinBox())
@@ -542,6 +560,12 @@ class StudioInspector(QFrame):
             section.apply_language()
         self._refresh_clip_mute_control()
         self.gain_label.setText(tr("Clip Gain"))
+        self.pitch_label.setText(tr("Clip Pitch"))
+        pitch_tooltip = tr(
+            "Changes pitch in semitones without changing the clip length."
+        )
+        self.pitch_field.setToolTip(pitch_tooltip)
+        self.pitch_spin.setToolTip(pitch_tooltip)
         self.position_label.setText(tr("Timeline Position"))
         self.duration_label.setText(tr("Clip Duration"))
         self.in_label.setText(tr("Source In"))
@@ -698,6 +722,7 @@ class StudioInspector(QFrame):
         self.fade_out_spin.setValue(clip.fade_out_ms)
         self.gain_spin.setValue(clip.gain_db)
         self.gain_slider.setValue(round(clip.gain_db * 10))
+        self.pitch_spin.setValue(clip.pitch_semitones)
         self.clip_mute_button.setChecked(clip.muted)
         self.image_duration_spin.setValue(clip.duration_ms)
         self._fit_mode = clip.media.fit_mode
@@ -751,6 +776,11 @@ class StudioInspector(QFrame):
     def _toggle_clip_mute(self) -> None:
         self._refresh_clip_mute_control()
         self._emit_clip_values()
+
+    def _emit_clip_pitch(self) -> None:
+        if self._loading or self._clip is None:
+            return
+        self.clip_pitch_changed.emit(self._clip.clip_id, self.pitch_spin.value())
 
     def _refresh_clip_mute_control(self) -> None:
         tooltip = "Unmute Clip" if self.clip_mute_button.isChecked() else "Mute Clip"

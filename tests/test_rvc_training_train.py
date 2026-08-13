@@ -105,6 +105,43 @@ class RvcTrainingRunTests(unittest.TestCase):
             self.assertTrue(any(0 < value < 5 for value in progress))
             self.assertIn("Train Epoch: 1 [50%]", output)
 
+    def test_follows_train_log_when_hidden_trainer_has_no_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            progress: list[int] = []
+            output: list[str] = []
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                _checkpoint_pair(layout, 100)
+                (layout.weights_dir / f"{layout.rvc_name}.pth").write_bytes(
+                    b"inference model"
+                )
+                with (layout.experiment_dir / "train.log").open(
+                    "a",
+                    encoding="utf-8",
+                ) as log:
+                    log.write(
+                        "Train Epoch: 1 [50%]\n"
+                        "====> Epoch: 20\n"
+                        "Training is done. The program is closed.\n"
+                    )
+                return CommandResult(args, 2333333, "", "")
+
+            result = train_rvc_model(
+                model_id,
+                layout,
+                runtime,
+                RvcTrainingRunSettings(),
+                progress=progress.append,
+                output_callback=output.append,
+                command_runner=runner,
+                runtime_inspector=_ready_runtime,
+            )
+
+            self.assertTrue(result.completed)
+            self.assertTrue(any(0 < value < 100 for value in progress))
+            self.assertIn("Train Epoch: 1 [50%]", output)
+
     def test_cpu_training_disables_half_precision_and_gpu_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             model_id, layout, runtime = _training_setup(Path(temporary))
@@ -140,6 +177,73 @@ class RvcTrainingRunTests(unittest.TestCase):
             )
 
             self.assertTrue(result.completed)
+
+    def test_cuda_training_uses_parallel_windowless_data_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            (runtime / "runtime" / "pythonw.exe").write_bytes(b"pythonw")
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                launcher = Path(args[1]).read_text(encoding="utf-8")
+                self.assertIn("JJZERO_DATA_LOADER_WORKERS = 4", launcher)
+                self.assertIn("JJZERO_DATA_LOADER_PIN_MEMORY = True", launcher)
+                self.assertIn("JJZERO_DATA_LOADER_PERSISTENT = True", launcher)
+                _write_training_success(layout, output_callback, target_epoch=20)
+                return CommandResult(args, 2333333, "", "Training is done.")
+
+            with patch(
+                "jang_app.services.rvc_training_performance.os.cpu_count",
+                return_value=16,
+            ):
+                result = train_rvc_model(
+                    model_id,
+                    layout,
+                    runtime,
+                    RvcTrainingRunSettings(),
+                    command_runner=runner,
+                    runtime_inspector=_ready_runtime,
+                )
+
+            self.assertTrue(result.completed)
+
+    def test_parallel_data_loader_failure_retries_with_safe_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            (runtime / "runtime" / "pythonw.exe").write_bytes(b"pythonw")
+            worker_settings: list[int] = []
+            activity: list[str] = []
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                launcher = Path(args[1]).read_text(encoding="utf-8")
+                workers = 4 if "JJZERO_DATA_LOADER_WORKERS = 4" in launcher else 0
+                worker_settings.append(workers)
+                if workers:
+                    return CommandResult(
+                        args,
+                        1,
+                        "",
+                        "RuntimeError: DataLoader worker exited unexpectedly",
+                    )
+                _write_training_success(layout, output_callback, target_epoch=20)
+                return CommandResult(args, 2333333, "", "Training is done.")
+
+            with patch(
+                "jang_app.services.rvc_training_performance.os.cpu_count",
+                return_value=16,
+            ):
+                result = train_rvc_model(
+                    model_id,
+                    layout,
+                    runtime,
+                    RvcTrainingRunSettings(),
+                    output_callback=activity.append,
+                    command_runner=runner,
+                    runtime_inspector=_ready_runtime,
+                )
+
+            self.assertTrue(result.completed)
+            self.assertEqual(worker_settings, [4, 0])
+            self.assertIn("JJZERO_DATA_LOADER_FALLBACK workers=0", activity)
 
     def test_existing_checkpoint_pair_is_resumed_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

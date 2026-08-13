@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from unittest.mock import patch
 from jang_app.services.command import (
     CommandCancellation,
     hidden_subprocess_kwargs,
+    run_binary_command,
     run_cancellable_command,
     run_command,
     start_detached_command,
@@ -30,7 +32,7 @@ class CancellableCommandTests(unittest.TestCase):
         self.assertEqual(startupinfo.wShowWindow, subprocess.SW_HIDE)
 
     @unittest.skipUnless(os.name == "nt", "Windows-only windowless Python behavior")
-    def test_background_runner_prefers_pythonw_for_child_processes(self) -> None:
+    def test_background_runner_keeps_python_for_captured_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)
             python = runtime / "python.exe"
@@ -46,7 +48,44 @@ class CancellableCommandTests(unittest.TestCase):
                 result = run_command([str(python), "-c", "print('ready')"])
 
             self.assertEqual(result.returncode, 0)
-            self.assertEqual(Path(runner.call_args.args[0][0]), pythonw)
+            self.assertEqual(Path(runner.call_args.args[0][0]), python)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-only process visibility behavior")
+    def test_binary_runner_uses_the_same_hidden_window_policy(self) -> None:
+        completed = subprocess.CompletedProcess((), 0, b"audio", b"")
+
+        with patch(
+            "jang_app.services.command.subprocess.run",
+            return_value=completed,
+        ) as runner:
+            result = run_binary_command(["ffmpeg.exe", "-version"])
+
+        options = runner.call_args.kwargs
+        self.assertEqual(result.stdout, b"audio")
+        self.assertTrue(int(options["creationflags"]) & subprocess.CREATE_NO_WINDOW)
+        self.assertTrue(options["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW)
+
+    def test_operational_launch_failures_are_closed_by_command_owner(self) -> None:
+        with patch(
+            "jang_app.services.command.subprocess.run",
+            side_effect=OSError("launch failed"),
+        ):
+            result = run_command(["missing-tool"], timeout_seconds=1)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("launch failed", result.output)
+
+    def test_application_services_cannot_bypass_the_process_owner(self) -> None:
+        source_root = Path(__file__).resolve().parents[1] / "src" / "jang_app"
+        offenders = []
+        import_pattern = re.compile(r"^\s*(?:import subprocess|from subprocess import)", re.MULTILINE)
+        for path in source_root.rglob("*.py"):
+            if path.name == "command.py":
+                continue
+            if import_pattern.search(path.read_text(encoding="utf-8")):
+                offenders.append(str(path.relative_to(source_root)))
+
+        self.assertEqual(offenders, [], f"Use services.command instead: {offenders}")
 
     @unittest.skipUnless(os.name == "nt", "Windows-only detached process behavior")
     def test_detached_runner_is_windowless_and_prefers_pythonw(self) -> None:

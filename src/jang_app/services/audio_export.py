@@ -11,6 +11,7 @@ import soundfile as sf
 from jang_app.services.file_names import safe_display_filename_stem, unique_display_path
 from jang_app.services.audio_mix_processing import process_mix_source
 from jang_app.services.studio_session import StudioEffect
+from jang_app.services.studio_pitch import prepare_pitch_shifted_audio
 
 
 class AudioExportError(RuntimeError):
@@ -33,6 +34,7 @@ class AudioMixSource:
     pan_percent: int = 0
     effects: tuple[StudioEffect, ...] = ()
     reference_path: Path | None = None
+    pitch_semitones: int = 0
 
 
 @dataclass(frozen=True)
@@ -66,7 +68,9 @@ def render_audio_mix(sources: Sequence[AudioMixSource]) -> RenderedAudioMix:
     max_channels = 0
 
     for source in sources:
-        audio, current_sample_rate = _read_audio(source.path)
+        audio, current_sample_rate = _read_audio(
+            prepare_pitch_shifted_audio(source.path, source.pitch_semitones)
+        )
         if sample_rate is None:
             sample_rate = current_sample_rate
         else:

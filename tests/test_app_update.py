@@ -6,7 +6,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
 from urllib.request import Request
 from unittest.mock import patch
 
@@ -22,6 +21,7 @@ from jang_app.services.app_update import (
     parse_release_manifest,
     verify_authenticode_signature,
 )
+from jang_app.services.command import CommandResult
 
 
 class _Response(io.BytesIO):
@@ -702,13 +702,13 @@ class AppUpdateTests(unittest.TestCase):
             self.assertFalse((destination / "app.exe.part").exists())
 
     def test_authenticode_requires_valid_expected_publisher(self) -> None:
-        completed = CompletedProcess(
+        completed = CommandResult(
             [],
             0,
             stdout='{"Status":"Valid","Subject":"CN=JJZero Software"}',
             stderr="",
         )
-        with patch("jang_app.services.app_update.subprocess.run", return_value=completed):
+        with patch("jang_app.services.app_update.run_command", return_value=completed):
             self.assertTrue(
                 verify_authenticode_signature(Path("installer.exe"), "JJZero Software")
             )

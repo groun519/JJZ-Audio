@@ -193,6 +193,32 @@ class RvcTrainingExtractTests(unittest.TestCase):
                 (layout.model_dir / "training" / "diagnostics" / "extract-failed.log").is_file()
             )
 
+    def test_failed_f0_command_writes_parent_diagnostic_when_process_output_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _extraction_setup(Path(temporary))
+
+            def runner(args, cwd=None, env=None, output_callback=None):
+                if Path(args[1]).name == "extract_f0_rmvpe.py":
+                    return CommandResult(args, 1, "", "")
+                return CommandResult(args, 0, "", "")
+
+            with self.assertRaises(RvcTrainingExtractError) as raised:
+                extract_rvc_training_features(
+                    model_id,
+                    layout,
+                    runtime,
+                    command_runner=runner,
+                    runtime_inspector=_ready_runtime,
+                )
+
+            self.assertIn("No process output was captured.", str(raised.exception))
+            diagnostic = layout.model_dir / "training" / "diagnostics" / "extract-failed.log"
+            self.assertTrue(diagnostic.is_file())
+            self.assertIn(
+                "RMVPE F0 extraction failed with exit code 1",
+                diagnostic.read_text(encoding="utf-8"),
+            )
+
     def test_cuda_unavailable_is_rejected_before_state_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             model_id, layout, runtime = _extraction_setup(Path(temporary))

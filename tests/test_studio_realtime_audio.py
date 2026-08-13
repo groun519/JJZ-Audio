@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
@@ -17,6 +18,29 @@ from jang_app.services.studio_session import (
 
 
 class StudioRealtimeAudioTests(unittest.TestCase):
+    def test_preview_reads_the_cached_pitch_render_for_a_shifted_clip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "source.wav"
+            shifted_path = root / "shifted.wav"
+            sf.write(source_path, np.full(44_100, 0.1, dtype=np.float32), 44_100)
+            sf.write(shifted_path, np.full(44_100, 0.3, dtype=np.float32), 44_100)
+            source = AudioMixSource(
+                "Shifted",
+                source_path,
+                source_end_ms=1_000,
+                pitch_semitones=12,
+            )
+
+            with patch(
+                "jang_app.services.studio_realtime_audio.prepare_pitch_shifted_audio",
+                return_value=shifted_path,
+            ) as prepare:
+                playback = prepare_studio_playback_audio((source,))
+
+            prepare.assert_called_once_with(source_path, 12)
+            self.assertAlmostEqual(float(np.mean(playback.tracks[0])), 0.3, places=3)
+
     def test_prepared_clip_keeps_timeline_alignment_and_reverb_tail(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "voice.wav"

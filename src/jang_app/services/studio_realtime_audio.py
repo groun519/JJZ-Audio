@@ -8,6 +8,7 @@ from jang_app.services.audio_export import AudioMixSource
 from jang_app.services.audio_mix_processing import process_mix_source
 from jang_app.services.audio_player import PreparedPlaybackAudio, read_playback_audio
 from jang_app.services.audio_preview import prepare_preview_audio
+from jang_app.services.studio_pitch import prepare_pitch_shifted_audio
 from jang_app.services.studio_session import (
     STUDIO_EFFECT_LEVEL_MATCH,
     STUDIO_EFFECT_REVERB,
@@ -25,7 +26,8 @@ def prepare_studio_playback_audio(
     effect_chains = []
     duration_frames = 0
     for source in sources:
-        audio = read_playback_audio(prepare_preview_audio(source.path))
+        pitched_path = prepare_pitch_shifted_audio(source.path, source.pitch_semitones)
+        audio = read_playback_audio(prepare_preview_audio(pitched_path))
         source_start = max(0, round(source.source_start_ms * STUDIO_PREVIEW_SAMPLE_RATE / 1_000))
         source_end = (
             audio.shape[0]
@@ -90,6 +92,7 @@ def studio_source_layout_signature(sources: Sequence[AudioMixSource]) -> tuple[o
             source.fade_in_ms,
             source.fade_out_ms,
             source.pan_percent,
+            source.pitch_semitones,
             source.reference_path.expanduser().resolve()
             if source.reference_path is not None
             else None,

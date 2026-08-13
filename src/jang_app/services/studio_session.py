@@ -9,10 +9,11 @@ from pathlib import Path
 from jang_app.services.managed_files import write_json_atomic
 from jang_app.services.song_package import STUDIO_STAGE, SongPackage
 from jang_app.services.studio_audio_levels import clamp_studio_clip_gain_db
+from jang_app.services.studio_pitch import clamp_studio_clip_pitch
 
 
-STUDIO_SESSION_VERSION = 8
-STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4, 5, 6, 7}
+STUDIO_SESSION_VERSION = 9
+STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4, 5, 6, 7, 8}
 STUDIO_SESSION_LEGACY_VERSION = 1
 STUDIO_SESSION_NAME = "session.json"
 TRACK_ORIGINAL_VOCAL = "original_vocal"
@@ -154,6 +155,7 @@ class StudioClip:
     source_start_ms: int
     source_end_ms: int
     gain_db: float = 0.0
+    pitch_semitones: int = 0
     muted: bool = False
     fade_in_ms: int = 0
     fade_out_ms: int = 0
@@ -396,6 +398,7 @@ def _clip_from_data(value: object) -> StudioClip | None:
         source_start_ms=source_start,
         source_end_ms=source_end,
         gain_db=_gain_db(value.get("gain_db")),
+        pitch_semitones=clamp_studio_clip_pitch(value.get("pitch_semitones")),
         muted=value.get("muted") is True,
         fade_in_ms=fade_in,
         fade_out_ms=fade_out,
@@ -445,6 +448,7 @@ def _normalize_clip(clip: StudioClip) -> StudioClip | None:
         source_start_ms=start,
         source_end_ms=end,
         gain_db=_gain_db(clip.gain_db),
+        pitch_semitones=clamp_studio_clip_pitch(clip.pitch_semitones),
         muted=bool(clip.muted),
         fade_in_ms=fade_in,
         fade_out_ms=fade_out,
@@ -479,6 +483,7 @@ def _clip_to_data(clip: StudioClip) -> dict[str, object]:
         "source_start_ms": clip.source_start_ms,
         "source_end_ms": clip.source_end_ms,
         "gain_db": clip.gain_db,
+        "pitch_semitones": clip.pitch_semitones,
         "muted": clip.muted,
         "fade_in_ms": clip.fade_in_ms,
         "fade_out_ms": clip.fade_out_ms,

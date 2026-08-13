@@ -161,7 +161,7 @@ class SongListRow(QWidget):
         self.source_badge.setObjectName("SourceBadge")
         self.source_badge.setProperty("sourceType", metadata.source_type)
         self.source_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.source_badge.setFixedWidth(52)
+        self.source_badge.setFixedSize(52, 52)
 
         self.title_label = OverflowTitleLabel(title)
 
@@ -244,7 +244,14 @@ class SongListRow(QWidget):
         identity_layout.addWidget(self.source_badge, 0)
         identity_layout.addLayout(text_layout, 1)
 
-        body_layout = QHBoxLayout()
+        self.body_container = QWidget()
+        self.body_container.setObjectName("LibraryRowBody")
+        self.body_container.setFixedHeight(60)
+        self.body_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        body_layout = QHBoxLayout(self.body_container)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(14)
         body_layout.addWidget(identity_container, 2)
@@ -258,6 +265,7 @@ class SongListRow(QWidget):
 
         self.preview_transport = TransportControls()
         self.preview_transport.setObjectName("LibraryPreviewTransport")
+        self.preview_transport.setFixedHeight(34)
         self.preview_transport.play_toggled.connect(
             lambda: self.preview_play_toggled.emit(self._item_id)
         )
@@ -269,7 +277,7 @@ class SongListRow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(9)
-        layout.addLayout(body_layout)
+        layout.addWidget(self.body_container)
         layout.addWidget(self.preview_divider)
         layout.addWidget(self.preview_transport)
 

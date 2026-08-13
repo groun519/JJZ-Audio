@@ -156,6 +156,7 @@ def _timeline_mix_sources(
                     pan_percent=track.pan_percent,
                     effects=clip.effects,
                     reference_path=reference_path,
+                    pitch_semitones=clip.pitch_semitones,
                 )
             )
     return tuple(sources)

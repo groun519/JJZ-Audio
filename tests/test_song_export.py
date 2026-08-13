@@ -54,6 +54,7 @@ class SongExportTests(unittest.TestCase):
                                 0,
                                 0,
                                 1_000,
+                                pitch_semitones=5,
                                 effects=(effect,),
                             ),
                         ),
@@ -64,6 +65,7 @@ class SongExportTests(unittest.TestCase):
             sources = build_song_mix_sources(package, session)
 
             self.assertEqual(sources[0].effects, (effect,))
+            self.assertEqual(sources[0].pitch_semitones, 5)
 
     def test_level_match_resolves_original_vocal_from_the_same_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

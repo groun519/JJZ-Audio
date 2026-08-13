@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +13,7 @@ from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 
 from jang_app.runtime_version import AI_RUNTIME_VERSION
-from jang_app.services.command import hidden_subprocess_kwargs
+from jang_app.services.command import run_command
 from jang_app.services.rvc_runtime_profile import (
     RVC_BASE_RUNTIME_PROFILES,
     RVC_PROFILE_CU118,
@@ -484,20 +483,14 @@ def verify_authenticode_signature(path: Path, publisher: str = "") -> bool:
         "[pscustomobject]@{Status=[string]$signature.Status; "
         "Subject=[string]$signature.SignerCertificate.Subject} | ConvertTo-Json -Compress"
     )
+    completed = run_command(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        env=environment,
+        timeout_seconds=30,
+    )
     try:
-        completed = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            **hidden_subprocess_kwargs(),
-        )
         data = json.loads(completed.stdout.strip())
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return False
     subject = str(data.get("Subject", "")) if isinstance(data, Mapping) else ""
     return (

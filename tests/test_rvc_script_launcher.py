@@ -13,6 +13,7 @@ from jang_app.services.rvc_script_launcher import (
     prepare_rvc_script_launcher,
     prepare_rvc_script_workspace,
 )
+from jang_app.services.rvc_training_performance import RvcTrainingDataLoaderSettings
 
 
 class RvcScriptLauncherTests(unittest.TestCase):
@@ -166,11 +167,14 @@ class RvcScriptLauncherTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout.strip(), "ready")
 
-    def test_launcher_keeps_rvc_data_loading_in_the_hidden_trainer(self) -> None:
+    def test_launcher_configures_parallel_windowless_data_loading(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime = root / "runtime"
             runtime.mkdir()
+            pythonw = runtime / "runtime" / "pythonw.exe"
+            pythonw.parent.mkdir()
+            pythonw.write_bytes(b"pythonw")
             script = runtime / "loader_probe.py"
             script.write_text(_DATA_LOADER_PROBE, encoding="utf-8")
             workspace = root / "workspace"
@@ -178,13 +182,18 @@ class RvcScriptLauncherTests(unittest.TestCase):
                 workspace / "launcher.py",
                 runtime,
                 script,
-                conservative_data_loading=True,
+                data_loader_settings=RvcTrainingDataLoaderSettings(
+                    workers=4,
+                    prefetch_factor=2,
+                    pin_memory=True,
+                    persistent_workers=True,
+                ),
             )
 
             completed = _run_python((str(launcher),), cwd=workspace)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "0 None False")
+            self.assertEqual(completed.stdout.strip(), "4 2 True True")
 
     def test_launcher_replaces_unnecessary_ddp_for_single_device_training(self) -> None:
         probe = (
@@ -285,17 +294,22 @@ loader = DataLoader(
     prefetch_factor=8,
     persistent_workers=True,
 )
-print(loader.num_workers, loader.prefetch_factor, loader.persistent_workers)
+print(loader.num_workers, loader.prefetch_factor, loader.persistent_workers, loader.pin_memory)
 """
 
 _ROCM_SINGLE_PROCESS_PROBE = """\
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+events = []
+process = torch.multiprocessing.Process(target=lambda: events.append("ran"))
+process.start()
+process.join()
 model = DDP(torch.nn.Linear(3, 2), device_ids=[0])
 result = model(torch.ones(1, 3)).sum()
 result.backward()
 torch.distributed.init_process_group(backend="gloo")
-print("ready" if hasattr(model, "module") else "failed")
+ready = events == ["ran"] and process.exitcode == 0 and hasattr(model, "module")
+print("ready" if ready else "failed")
 """
 
 

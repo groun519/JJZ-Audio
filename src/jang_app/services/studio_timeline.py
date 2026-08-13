@@ -4,6 +4,7 @@ import uuid
 from dataclasses import replace
 
 from jang_app.services.studio_audio_levels import clamp_studio_clip_gain_db
+from jang_app.services.studio_pitch import clamp_studio_clip_pitch
 from jang_app.services.studio_session import (
     TRACK_AUDIO,
     TRACK_VIDEO,
@@ -303,6 +304,28 @@ def set_studio_clip_gain(session: StudioSession, clip_id: str, gain_db: float) -
             current,
             clips=tuple(
                 replace(candidate, gain_db=clamped)
+                if candidate.clip_id == clip_id
+                else candidate
+                for candidate in current.clips
+            ),
+        ),
+    )
+
+
+def set_studio_clip_pitch(
+    session: StudioSession,
+    clip_id: str,
+    pitch_semitones: int,
+) -> StudioSession:
+    track, _clip = _find_clip(session, clip_id)
+    pitch = clamp_studio_clip_pitch(pitch_semitones)
+    return _replace_track(
+        session,
+        track.track_id,
+        lambda current: replace(
+            current,
+            clips=tuple(
+                replace(candidate, pitch_semitones=pitch)
                 if candidate.clip_id == clip_id
                 else candidate
                 for candidate in current.clips

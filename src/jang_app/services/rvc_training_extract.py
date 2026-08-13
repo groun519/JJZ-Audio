@@ -320,8 +320,10 @@ def _load_array(path: Path, *, expected_dimensions: int) -> np.ndarray:
 
 def _require_command_success(label: str, result: CommandResult) -> None:
     if result.returncode != 0:
+        detail = result.output.strip()
         raise RvcTrainingExtractError(
-            f"{label} failed with exit code {result.returncode}: {result.output}"
+            f"{label} failed with exit code {result.returncode}: "
+            f"{detail or 'No process output was captured.'}"
         )
 
 
@@ -334,6 +336,7 @@ def _run_f0_extraction(
     accelerated: bool,
     runner_kwargs: dict[str, object],
 ) -> None:
+    log_path = staging / "extract_f0_feature.log"
     result = runner(
         [
             str(runtime / "runtime" / "python.exe"),
@@ -348,6 +351,7 @@ def _run_f0_extraction(
     )
     if result.cancelled:
         raise RvcTrainingCancelled("RVC F0 extraction was stopped.")
+    _append_failed_command_diagnostic(log_path, "RMVPE F0 extraction", result)
     _require_command_success("RMVPE F0 extraction", result)
 
 
@@ -360,12 +364,14 @@ def _run_feature_extraction(
     launcher: Path,
     runner_kwargs: dict[str, object],
 ) -> None:
+    log_path = staging / "extract_f0_feature.log"
     result = runner(
         _feature_command(runtime, staging, device, gpu_index, launcher),
         **runner_kwargs,
     )
     if result.cancelled:
         raise RvcTrainingCancelled("RVC feature extraction was stopped.")
+    _append_failed_command_diagnostic(log_path, "HuBERT feature extraction", result)
     _require_command_success("HuBERT feature extraction", result)
 
 
@@ -487,6 +493,19 @@ def _extract_log_tail(root: Path, *, limit: int = 2000) -> str:
         return ""
     compact = " | ".join(line.strip() for line in text.splitlines() if line.strip())
     return compact[-limit:]
+
+
+def _append_failed_command_diagnostic(log_path: Path, label: str, result: CommandResult) -> None:
+    if result.returncode == 0:
+        return
+    detail = result.output.strip() or "No process output was captured."
+    try:
+        with log_path.open("a", encoding="utf-8") as output:
+            output.write(
+                f"[JJZero] {label} failed with exit code {result.returncode}: {detail}\n"
+            )
+    except OSError:
+        pass
 
 
 def _preserve_failed_extract_log(

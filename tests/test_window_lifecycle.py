@@ -42,6 +42,7 @@ class WindowLifecycleGuardTests(unittest.TestCase):
 
         with self.assertLogs("jang_app", level="ERROR") as captured:
             label.show()
+            self.assertTrue(label.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen))
             QTest.qWait(260)
 
         self.assertFalse(label.isVisible())
@@ -117,6 +118,7 @@ class WindowLifecycleGuardTests(unittest.TestCase):
 
         self.assertTrue(child.isVisible())
         self.assertFalse(child.isWindow())
+        self.assertFalse(child.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen))
         self.assertEqual(guard.blocked_count, 0)
         host.close()
 
@@ -135,6 +137,7 @@ class WindowLifecycleGuardTests(unittest.TestCase):
 
         self.assertTrue(child.isVisible())
         self.assertFalse(child.isWindow())
+        self.assertFalse(child.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen))
         self.assertEqual(guard.blocked_count, 0)
         host.close()
 

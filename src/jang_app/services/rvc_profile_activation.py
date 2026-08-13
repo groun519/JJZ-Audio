@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from jang_app.services.app_logging import get_logger
-from jang_app.services.command import background_command_args, hidden_subprocess_kwargs
+from jang_app.services.command import CommandResult, run_command
+from jang_app.services.rvc_directml_probe import (
+    create_directml_rmvpe_probe,
+    directml_rmvpe_probe_command,
+    missing_directml_rmvpe_outputs,
+)
 from jang_app.services.rvc_runtime_profile import (
     RVC_PROFILE_CU118,
     RVC_PROFILE_CU128,
@@ -84,6 +88,8 @@ def validate_rvc_profile_activation(
         str(data.get("torch", "")),
         str(data.get("accelerator", "")),
     )
+    if normalized == RVC_PROFILE_DIRECTML:
+        _validate_directml_rmvpe_probe(root, python, runner)
     get_logger().info(
         "RVC profile activation passed: profile=%s backend=%s device=%s torch=%s accelerator=%s",
         activation.profile,
@@ -168,21 +174,35 @@ print(json.dumps(result, ensure_ascii=False))
 """.strip()
 
 
-def _run_command(args: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run_command(args: Sequence[str], cwd: Path) -> CommandResult:
+    return run_command(args, cwd=cwd, timeout_seconds=180)
+
+
+def _validate_directml_rmvpe_probe(
+    runtime_root: Path,
+    python: Path,
+    runner: ActivationCommandRunner,
+) -> None:
+    temporary, probe_root = create_directml_rmvpe_probe()
     try:
-        return subprocess.run(
-            background_command_args(args),
-            cwd=cwd,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=180,
-            **hidden_subprocess_kwargs(),
+        result = runner(
+            directml_rmvpe_probe_command(python, runtime_root, probe_root),
+            runtime_root,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return subprocess.CompletedProcess(list(args), 1, "", str(exc))
+        output = "\n".join(value for value in (result.stdout, result.stderr) if value.strip())
+        if result.returncode != 0:
+            raise RvcProfileActivationError(
+                "RVC directml activation failed during RMVPE validation: "
+                f"{_last_line(output) or f'exit code {result.returncode}'}"
+            )
+        missing = missing_directml_rmvpe_outputs(probe_root)
+        if missing:
+            raise RvcProfileActivationError(
+                "RVC directml activation failed during RMVPE validation: "
+                f"missing outputs {', '.join(missing)}"
+            )
+    finally:
+        temporary.cleanup()
 
 
 def _last_json_line(output: str) -> str:

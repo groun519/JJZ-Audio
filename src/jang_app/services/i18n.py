@@ -339,6 +339,8 @@ _KOREAN = {
     "Source In": "소스 시작",
     "Source Out": "소스 끝",
     "Clip Gain": "클립 음량",
+    "Clip Pitch": "클립 피치",
+    "Changes pitch in semitones without changing the clip length.": "클립 길이는 유지하면서 반음 단위로 음정을 바꿉니다.",
     "Mute Clip": "클립 음소거",
     "Unmute Clip": "클립 음소거 해제",
     "Reset": "초기화",
@@ -1124,6 +1126,15 @@ _KOREAN.update(
         "Share model work with Google Drive": "\ubaa8\ub378 \uc791\uc5c5\uc744 \uad6c\uae00 \ub4dc\ub77c\uc774\ube0c\ub85c \uacf5\uc720",
         "Copy model work Google Drive link": "\ubaa8\ub378 \uc791\uc5c5 \uad6c\uae00 \ub4dc\ub77c\uc774\ube0c \ub9c1\ud06c \ubcf5\uc0ac",
         "Delete model work from Google Drive": "\uad6c\uae00 \ub4dc\ub77c\uc774\ube0c\uc5d0\uc11c \ubaa8\ub378 \uc791\uc5c5 \uc0ad\uc81c",
+        "Share Work": "\uc791\uc5c5 \uacf5\uc720",
+        "Work Link": "\uc791\uc5c5 \ub9c1\ud06c",
+        "Search models": "\ubaa8\ub378 \uac80\uc0c9",
+        "Filter models": "\ubaa8\ub378 \ud544\ud130",
+        "All Models": "\uc804\uccb4 \ubaa8\ub378",
+        "Managed": "\uad00\ub9ac\ub428",
+        "Linked": "\uc5f0\uacb0\ub428",
+        "Conversion Ready": "\ubcc0\ud658 \uac00\ub2a5",
+        "Needs Attention": "\ud655\uc778 \ud544\uc694",
         "Remove Google Drive Share": "\uad6c\uae00 \ub4dc\ub77c\uc774\ube0c \uacf5\uc720 \uc81c\uac70",
         "Delete '{name}' from Google Drive? The local file will not be deleted.": "\uad6c\uae00 \ub4dc\ub77c\uc774\ube0c\uc5d0\uc11c '{name}'\uc744(\ub97c) \uc0ad\uc81c\ud560\uae4c\uc694? \ub85c\uceec \ud30c\uc77c\uc740 \uc0ad\uc81c\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
         "Delete Google Drive Share": "\uad6c\uae00 \ub4dc\ub77c\uc774\ube0c \uacf5\uc720 \uc0ad\uc81c",
@@ -1333,6 +1344,8 @@ _KOREAN.update(
         "Model optimization completed": "\ubaa8\ub378 \ucd5c\uc801\ud654 \uc644\ub8cc",
         "Preparing epoch {epoch} / {target}; the first epoch can take longer": "\uc5d0\ud3ec\ud06c {epoch} / {target} \uc900\ube44 \uc911\uc785\ub2c8\ub2e4. \uccab \uc5d0\ud3ec\ud06c\ub294 \ub354 \uc624\ub798 \uac78\ub9b4 \uc218 \uc788\uc2b5\ub2c8\ub2e4",
         "Training epoch {epoch}; current epoch {progress}%": "\uc5d0\ud3ec\ud06c {epoch} \ud559\uc2b5 \uc911 \u00b7 \ud604\uc7ac \uc5d0\ud3ec\ud06c {progress}%",
+        "Parallel loading was unavailable; retrying with safe loading": "\ubcd1\ub82c \ub85c\ub529\uc744 \uc0ac\uc6a9\ud560 \uc218 \uc5c6\uc5b4 \uc548\uc804 \ub85c\ub529\uc73c\ub85c \ub2e4\uc2dc \uc2dc\ub3c4\ud558\ub294 \uc911",
+        "Loading training batches in the background": "\ud559\uc2b5 \ubc30\uce58\ub97c \ubc31\uadf8\ub77c\uc6b4\ub4dc\uc5d0\uc11c \ubd88\ub7ec\uc624\ub294 \uc911",
         "Initializing single-GPU training": "\ub2e8\uc77c GPU \ud559\uc2b5\uc744 \ucd08\uae30\ud654\ud558\ub294 \uc911",
         "Loading the first training batch": "\uccab \ud559\uc2b5 \ubc30\uce58\ub97c \ubd88\ub7ec\uc624\ub294 \uc911",
         "First training batch loaded; starting model optimization": "\uccab \ud559\uc2b5 \ubc30\uce58 \ub85c\ub4dc \uc644\ub8cc \u00b7 \ubaa8\ub378 \ucd5c\uc801\ud654\ub97c \uc2dc\uc791\ud558\ub294 \uc911",
@@ -1348,6 +1361,16 @@ _KOREAN.update(
         "Remove '{name}' and all JJZero Audio training work for it? Linked external model files will not be deleted. This cannot be undone.": "'{name}' 모델 등록과 JJZero Audio에서 만든 학습 작업을 모두 삭제할까요? 연결된 외부 모델 파일은 삭제하지 않습니다. 이 작업은 되돌릴 수 없습니다.",
         "Stop the current model task before deleting it.": "삭제하기 전에 현재 모델 작업을 중지하세요.",
         "Model deleted.": "모델을 삭제했습니다.",
+    }
+)
+
+_KOREAN.update(
+    {
+        "Quick Create": "빠른 제작",
+        "Start Quick Create": "빠른 제작 시작",
+        "Select a work song.": "작업곡을 선택하세요.",
+        "Link the original audio before quick creation.": "빠른 제작 전에 원본 음원을 연결하세요.",
+        "Reusing fast separation": "빠른 분리 결과 재사용 중",
     }
 )
 

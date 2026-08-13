@@ -58,6 +58,7 @@ class StudioInspectorTests(unittest.TestCase):
                 0,
                 2_000,
                 gain_db=-2.5,
+                pitch_semitones=7,
                 fade_in_ms=100,
                 fade_out_ms=200,
             )
@@ -70,11 +71,14 @@ class StudioInspectorTests(unittest.TestCase):
             )
             inspector = StudioInspector()
             changed = QSignalSpy(inspector.clip_values_changed)
+            pitch_changed = QSignalSpy(inspector.clip_pitch_changed)
 
             inspector.set_selection(track, clip, asset)
             self.assertEqual(inspector.stack.currentIndex(), inspector.CLIP_PAGE)
             self.assertEqual(inspector.duration_value.text(), "00:02.000")
             self.assertEqual(inspector.gain_spin.value(), -2.5)
+            self.assertEqual(inspector.pitch_spin.value(), 7)
+            self.assertEqual(inspector.pitch_spin.suffix(), " st")
             self.assertEqual(inspector.gain_spin.minimum(), -100.0)
             self.assertEqual(inspector.gain_spin.maximum(), 30.0)
             self.assertEqual(inspector.gain_slider.minimum(), -1_000)
@@ -106,6 +110,11 @@ class StudioInspectorTests(unittest.TestCase):
             self.assertEqual(changed.count(), 2)
             self.assertTrue(changed.at(1)[5])
             self.assertEqual(inspector.clip_mute_button.toolTip(), tr("Unmute Clip"))
+
+            inspector.pitch_spin.setValue(-5)
+            inspector._emit_clip_pitch()
+            self.assertEqual(pitch_changed.count(), 1)
+            self.assertEqual(pitch_changed.at(0), ["clip-1", -5])
 
             inspector.set_selection(track, None, None)
             self.assertEqual(inspector.stack.currentIndex(), inspector.TRACK_PAGE)

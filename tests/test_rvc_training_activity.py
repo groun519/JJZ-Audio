@@ -5,6 +5,16 @@ from jang_app.services.i18n import tr
 
 
 class RvcTrainingActivityTests(unittest.TestCase):
+    def test_describes_parallel_loader_and_safe_fallback(self) -> None:
+        self.assertIsNotNone(
+            describe_rvc_training_activity(
+                "JJZERO_DATA_LOADER_CONFIG workers=4 pin_memory=1 persistent=1"
+            )
+        )
+        self.assertIsNotNone(
+            describe_rvc_training_activity("JJZERO_DATA_LOADER_FALLBACK workers=0")
+        )
+
     def test_describes_pitch_and_feature_progress_without_exposing_paths(self) -> None:
         self.assertEqual(
             describe_rvc_training_activity(

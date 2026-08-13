@@ -5,7 +5,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from jang_app.services import rvc_profile_activation as activation_module
 from jang_app.services.rvc_profile_activation import (
     _activation_probe,
     RvcProfileActivationError,
@@ -72,6 +74,32 @@ class RvcProfileActivationTests(unittest.TestCase):
                         (), 0, payload, ""
                     ),
                 )
+
+    def test_directml_activation_runs_rmvpe_smoke_test(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = _runtime(Path(temporary))
+            payload = json.dumps(
+                {
+                    "ready": True,
+                    "backend": "directml",
+                    "device_name": "AMD Radeon(TM) RX Vega 11 Graphics",
+                    "torch": "2.4.1+cpu",
+                    "accelerator": "0.2.5.dev240914",
+                    "detail": "",
+                }
+            )
+
+            with patch.object(activation_module, "_validate_directml_rmvpe_probe") as probe:
+                result = validate_rvc_profile_activation(
+                    "directml",
+                    runtime,
+                    command_runner=lambda _args, _cwd: subprocess.CompletedProcess(
+                        (), 0, payload, ""
+                    ),
+                )
+
+            self.assertEqual(result.backend, "directml")
+            probe.assert_called_once()
 
 
 def _runtime(root: Path) -> Path:

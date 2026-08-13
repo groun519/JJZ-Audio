@@ -31,6 +31,18 @@ class CommandResult:
         return (self.stderr or self.stdout).strip()
 
 
+@dataclass(frozen=True)
+class BinaryCommandResult:
+    args: Sequence[str]
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+    @property
+    def output(self) -> bytes:
+        return self.stderr or self.stdout
+
+
 class CommandCancellation:
     def __init__(self) -> None:
         self._lock = RLock()
@@ -83,8 +95,9 @@ def run_command(
     output_callback: Callable[[str], None] | None = None,
     *,
     diagnostics: JobDiagnostics | None = None,
+    timeout_seconds: float | None = None,
 ) -> CommandResult:
-    command_args = background_command_args(args)
+    command_args = background_command_args(args, prefer_windowless_python=False)
     logger = get_logger()
     logger.info("Running command: %s", " ".join(redact_command(command_args)))
     task_id, recorder, command_id, started = _start_diagnostic_command(
@@ -106,6 +119,7 @@ def run_command(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                timeout=timeout_seconds,
                 **hidden_subprocess_kwargs(),
             )
             result = CommandResult(
@@ -119,11 +133,67 @@ def run_command(
                     recorder.append_command_output(task_id, completed.stdout)
                 if completed.stderr:
                     recorder.append_command_output(task_id, completed.stderr)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        result = CommandResult(
+            args=command_args,
+            returncode=1,
+            stdout="",
+            stderr=str(exc),
+        )
+        logger.warning("Command could not complete: %s", exc)
+        _finish_diagnostic_command(
+            task_id,
+            recorder,
+            command_id,
+            started,
+            result.returncode,
+            error=str(exc),
+        )
+        return result
     except Exception as exc:
         _finish_diagnostic_command(task_id, recorder, command_id, started, None, error=str(exc))
         raise
     logger.info("Command exited with code %s", result.returncode)
     _finish_diagnostic_command(task_id, recorder, command_id, started, result.returncode)
+    return result
+
+
+def run_binary_command(
+    args: Sequence[str],
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    *,
+    timeout_seconds: float | None = None,
+) -> BinaryCommandResult:
+    """Run a byte-oriented child process under the application window policy."""
+    command_args = background_command_args(args, prefer_windowless_python=False)
+    logger = get_logger()
+    logger.info("Running binary command: %s", " ".join(redact_command(command_args)))
+    try:
+        completed = subprocess.run(
+            command_args,
+            cwd=str(cwd) if cwd else None,
+            env=dict(env) if env is not None else None,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            **hidden_subprocess_kwargs(),
+        )
+        result = BinaryCommandResult(
+            args=command_args,
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        result = BinaryCommandResult(
+            args=command_args,
+            returncode=1,
+            stdout=b"",
+            stderr=str(exc).encode("utf-8", errors="replace"),
+        )
+    logger.info("Binary command exited with code %s", result.returncode)
     return result
 
 
@@ -136,7 +206,7 @@ def run_cancellable_command(
     *,
     diagnostics: JobDiagnostics | None = None,
 ) -> CommandResult:
-    command_args = background_command_args(args)
+    command_args = background_command_args(args, prefer_windowless_python=False)
     token = cancellation or CommandCancellation()
     logger = get_logger()
     logger.info("Running cancellable command: %s", " ".join(redact_command(command_args)))
@@ -192,10 +262,14 @@ def run_cancellable_command(
     return result
 
 
-def background_command_args(args: Sequence[str]) -> list[str]:
+def background_command_args(
+    args: Sequence[str],
+    *,
+    prefer_windowless_python: bool = True,
+) -> list[str]:
     """Normalize commands for background execution without visible windows."""
     command = [str(arg) for arg in args]
-    if os.name != "nt" or not command:
+    if os.name != "nt" or not command or not prefer_windowless_python:
         return command
     executable = Path(command[0])
     if executable.name.casefold() != "python.exe":
@@ -213,7 +287,7 @@ def start_detached_command(
     env: Mapping[str, str] | None = None,
 ) -> bool:
     """Start a long-lived child without creating or inheriting a console window."""
-    command_args = background_command_args(args)
+    command_args = background_command_args(args, prefer_windowless_python=True)
     logger = get_logger()
     logger.info("Starting detached command: %s", " ".join(redact_command(command_args)))
     options: dict[str, object]

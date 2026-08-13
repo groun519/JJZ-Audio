@@ -49,6 +49,11 @@ from jang_app.pipeline.rvc_convert import (
     convert_vocal_with_rvc,
     list_index_files,
 )
+from jang_app.pipeline.quick_production import (
+    QuickProductionResult,
+    reusable_fast_separation,
+    run_quick_production,
+)
 from jang_app.pipeline.separate import SeparationResult, separate_audio
 from jang_app.qt_app.confirmation_dialog import ConfirmationDialog
 from jang_app.qt_app.collapsible_card_header import CollapsibleCardHeader
@@ -69,6 +74,7 @@ from jang_app.qt_app.log_drawer import LogDrawer
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.processing_queue_panel import ProcessingQueueButton, ProcessingQueuePanel
 from jang_app.qt_app.primary_navigation import PrimaryNavigationBar
+from jang_app.qt_app.quick_create_panel import QuickCreatePanel
 from jang_app.qt_app.result_transport_bar import ResultTransportBar
 from jang_app.qt_app.rvc_inference_controls import RvcInferenceControls
 from jang_app.qt_app.separation_recipe_selector import SeparationRecipeSelector
@@ -141,7 +147,11 @@ from jang_app.services.playback_queue import PlaybackQueue
 from jang_app.services.playback_session import PlaybackSession
 from jang_app.services.processing_queue import ProcessingQueue
 from jang_app.services.rvc_execution_runtime import settings_for_managed_rvc_runtime
-from jang_app.services.rvc_inference_settings import RvcInferenceSettings
+from jang_app.services.rvc_inference_settings import (
+    PRESET_BALANCED,
+    RvcInferenceSettings,
+    rvc_inference_preset,
+)
 from jang_app.services.rvc_model_choices import (
     RvcModelChoice,
     collect_rvc_model_choices,
@@ -164,7 +174,7 @@ from jang_app.services.studio_realtime_audio import (
 )
 from jang_app.services.runtime_bootstrap import install_update_runtime_components
 from jang_app.services.rvc_runtime_profile import detect_rvc_runtime_profile
-from jang_app.services.separation_recipe import SeparationRecipe
+from jang_app.services.separation_recipe import FAST_RECIPE, SeparationRecipe
 from jang_app.services.separation_assets import separation_recipe_asset_status
 from jang_app.services.settings import (
     RVC_DEVICE_OPTIONS,
@@ -648,13 +658,20 @@ class MainWindow(QMainWindow):
         self.youtube_card.download_requested.connect(self._start_youtube_download)
 
         self.drop_card = FileDropCard()
+        self.drop_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         self.drop_card.browse_requested.connect(self._choose_audio_files)
         self.drop_card.files_dropped.connect(self._add_songs)
 
+        self.quick_create_panel = QuickCreatePanel()
+        self.quick_create_panel.start_requested.connect(self._start_quick_creation)
+
         import_layout.addLayout(heading_layout)
         import_layout.addWidget(self.youtube_card, 0)
-        import_layout.addWidget(self.drop_card, 0)
-        import_layout.addStretch(1)
+        import_layout.addWidget(self.drop_card, 1)
+        import_layout.addWidget(self.quick_create_panel, 0)
 
         list_panel = QFrame()
         list_panel.setObjectName("Panel")
@@ -1327,6 +1344,7 @@ class MainWindow(QMainWindow):
         self.studio_editor.apply_language()
         self.studio_transport_bar.apply_language()
         self.separation_recipe_selector.apply_language()
+        self.quick_create_panel.apply_language()
         self._populate_library_sort_combo()
         set_translated_tooltip(self.library_sort_combo, "Sort songs")
 
@@ -2738,6 +2756,21 @@ class MainWindow(QMainWindow):
         if capabilities.can_attach_source:
             self.separation_action.set_status("Link the original audio to separate it again.")
         self.rvc_action.set_action_enabled(capabilities.can_convert)
+        self._sync_quick_create_panel()
+
+    def _sync_quick_create_panel(self) -> None:
+        if not hasattr(self, "quick_create_panel"):
+            return
+        song = self.current_work_item
+        fast_version = self._reusable_fast_separation(song)
+        has_source = bool(
+            song is not None
+            and song.kind == "source"
+            and song.path.is_file()
+        )
+        self.quick_create_panel.set_work_song(
+            can_create=fast_version is not None or has_source,
+        )
 
     def _current_output_matches_work_song(self) -> bool:
         return MainWindow._work_output_session(self).matches_work_item(
@@ -3039,6 +3072,135 @@ class MainWindow(QMainWindow):
     def _selected_separation_recipe(self) -> SeparationRecipe:
         return self.separation_recipe_selector.selected_recipe()
 
+    def _reusable_fast_separation(
+        self,
+        song: SongItem | None,
+    ) -> SongVocalVersion | None:
+        if song is None:
+            return None
+        try:
+            versions = self.library.vocal_versions(song.id)
+        except KeyError:
+            return None
+        return reusable_fast_separation(versions)
+
+    def _start_quick_creation(
+        self,
+        choice: RvcModelChoice,
+        pitch: int,
+    ) -> None:
+        song = self.current_work_item
+        if song is None:
+            self.quick_create_panel.set_status("Select a work song.")
+            return
+
+        fast_version = self._reusable_fast_separation(song)
+        reusable_sound_set = (
+            load_output_sound_set(fast_version.job_dir, self.settings.output_root)
+            if fast_version is not None
+            else None
+        )
+        if reusable_sound_set is None and (
+            song.kind != "source" or not song.path.is_file()
+        ):
+            self.quick_create_panel.set_status(
+                "Link the original audio before quick creation."
+            )
+            return
+
+        source_path = song.path if reusable_sound_set is None else None
+        separation_output_root = (
+            self.library.create_vocal_separation_run(song.id)
+            if reusable_sound_set is None
+            else None
+        )
+        quick_settings = settings_for_managed_rvc_runtime(
+            RvcSettings(
+                root=choice.root,
+                model_id=choice.model_id,
+                voice_model=str(choice.model_path),
+                index_file=(
+                    str(choice.index_path)
+                    if choice.index_path is not None and choice.index_path.is_file()
+                    else ""
+                ),
+                pitch=int(pitch),
+                device=normalize_rvc_device(choice.device),
+                f0_method="rmvpe",
+                inference=rvc_inference_preset(PRESET_BALANCED),
+            ),
+            RVC_RUNTIME_DIR,
+        )
+
+        self._stop_playback()
+        self.quick_create_panel.set_running(True)
+        self.quick_create_panel.set_progress(
+            45 if reusable_sound_set is not None else 0
+        )
+        self.quick_create_panel.set_status(
+            "Reusing fast separation" if reusable_sound_set is not None else "Separating"
+        )
+        scope = WorkTaskScope(song.id)
+        worker = TaskWorker(
+            lambda progress: run_quick_production(
+                source_path=source_path,
+                separation_output_root=separation_output_root,
+                reusable_sound_set=reusable_sound_set,
+                rvc_settings=quick_settings,
+                progress_callback=progress,
+            )
+        )
+        self._run_worker(
+            worker,
+            lambda result: self._on_quick_creation_succeeded(scope, result),
+            lambda error: self._on_quick_creation_failed(scope, error),
+            self.quick_create_panel,
+            task_title="Quick Create",
+            task_detail=song.title,
+            action_scope=lambda: scope.is_current(self.current_work_item),
+        )
+
+    def _on_quick_creation_succeeded(
+        self,
+        scope: WorkTaskScope,
+        result: object,
+    ) -> None:
+        quick_result = result if isinstance(result, QuickProductionResult) else None
+        if quick_result is None:
+            self._on_quick_creation_failed(scope, "Quick creation returned no result.")
+            return
+
+        if quick_result.separation is not None:
+            updated_song = self.library.register_output(
+                scope.song_id,
+                quick_result.separation.job_dir,
+                FAST_RECIPE.label,
+            )
+            self._song_items_by_id[updated_song.id] = updated_song
+
+        self._on_rvc_succeeded(
+            scope,
+            quick_result.sound_set.job_dir,
+            quick_result.conversion,
+            preferred_job_dir=quick_result.sound_set.job_dir,
+        )
+        if not scope.is_current(self.current_work_item):
+            self._refresh_song_list()
+            return
+
+        self.quick_create_panel.set_progress(100)
+        self.quick_create_panel.set_status("Done")
+        self._sync_quick_create_panel()
+        self._navigate_to_page(PAGE_STUDIO)
+
+    def _on_quick_creation_failed(self, scope: WorkTaskScope, error: str) -> None:
+        if not scope.is_current(self.current_work_item):
+            return
+        self.quick_create_panel.set_status("Failed")
+        self.quick_create_panel.status_label.setToolTip(
+            f"{LOG_FILE}\n{_last_error_line(error)}"
+        )
+
     def _start_separation(self, *_args) -> None:
         song = self.current_work_item
         if song is not None and (song.kind != "source" or not song.path.is_file()):
@@ -3115,6 +3277,7 @@ class MainWindow(QMainWindow):
         if scope.is_current(self.current_work_item):
             self.separation_action.set_progress(100)
             self.separation_action.set_status("Done")
+            self._sync_quick_create_panel()
 
     def _on_separation_failed(self, scope: WorkTaskScope, error: str) -> None:
         self.separation_recipe_selector.refresh_asset_status()
@@ -3656,6 +3819,15 @@ class MainWindow(QMainWindow):
                 self.settings.rvc.root,
                 self.settings.rvc.voice_model,
             )
+            if hasattr(self, "quick_create_panel"):
+                self.quick_create_panel.set_model_choices(
+                    choices,
+                    selected_model_id=self.settings.rvc.model_id,
+                    selected_model_path=resolve_optional_rvc_setting_path(
+                        self.settings.rvc.root,
+                        self.settings.rvc.voice_model,
+                    ),
+                )
             selected_model = self.model_combo.currentData()
             preferred_index = self.settings.rvc.index_file
             if (
@@ -3862,7 +4034,14 @@ class MainWindow(QMainWindow):
             return None
         return load_output_sound_set(job_dir, self.settings.output_root)
 
-    def _on_rvc_succeeded(self, scope: WorkTaskScope, job_dir: Path, result: object) -> None:
+    def _on_rvc_succeeded(
+        self,
+        scope: WorkTaskScope,
+        job_dir: Path,
+        result: object,
+        *,
+        preferred_job_dir: Path | None = None,
+    ) -> None:
         output_path = getattr(result, "output_path", None)
         should_monitor = scope.is_current(self.current_work_item)
         if isinstance(output_path, Path):
@@ -3888,12 +4067,12 @@ class MainWindow(QMainWindow):
                 except Exception as exc:
                     self._logger.warning("Could not register vocal take metadata: %s", exc)
         current_job_dir = MainWindow._work_output_session(self).job_dir
-        preferred_job_dir = current_job_dir or (
+        selected_job_dir = preferred_job_dir or current_job_dir or (
             job_dir if scope.is_current(self.current_work_item) else None
         )
         self._refresh_output_sets(
-            preferred_job_dir=preferred_job_dir,
-            select_fallback=preferred_job_dir is not None,
+            preferred_job_dir=selected_job_dir,
+            select_fallback=selected_job_dir is not None,
         )
         if should_monitor and isinstance(output_path, Path):
             self._activate_vocal_converted_version(output_path)
