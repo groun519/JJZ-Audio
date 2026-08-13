@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QWidget
 
 from jang_app.qt_app.studio_sound_pool import StudioSoundPool
@@ -63,6 +65,46 @@ class StudioSoundPoolTests(unittest.TestCase):
         pool.list_button.click()
         self.assertEqual(pool.column_count(), 1)
         host.close()
+
+    def test_list_mode_uses_one_compact_metadata_row_without_waveforms(self) -> None:
+        pool = StudioSoundPool()
+        assets = _assets()
+        pool.resize(360, 500)
+        pool.set_assets(assets)
+        pool.show()
+        self.app.processEvents()
+
+        pool.list_button.click()
+        self.app.processEvents()
+
+        card = pool._cards[assets[0].asset_id]
+        self.assertEqual(card.height(), 48)
+        self.assertFalse(card.preview_widget.isVisible())
+        self.assertEqual(card.source_badge.text(), tr("Vocal"))
+        self.assertEqual(card.title_label.text(), tr("Maximum"))
+        self.assertEqual(card.detail_label.text(), "maximum-vocals")
+        self.assertEqual(card.duration_label.text(), "02:31")
+        pool.close()
+
+    def test_removable_pool_asset_exposes_one_delete_entry_point(self) -> None:
+        pool = StudioSoundPool()
+        asset = replace(_assets()[0], can_remove=True)
+        removed = QSignalSpy(pool.remove_requested)
+        pool.set_assets((asset,))
+        card = pool._cards[asset.asset_id]
+
+        self.assertIsNotNone(card.remove_button)
+        card.remove_button.click()
+
+        self.assertEqual(removed.count(), 1)
+        self.assertIs(removed.at(0)[0], asset)
+
+    def test_protected_pool_asset_has_no_misleading_delete_button(self) -> None:
+        pool = StudioSoundPool()
+        asset = _assets()[0]
+        pool.set_assets((asset,))
+
+        self.assertIsNone(pool._cards[asset.asset_id].remove_button)
 
     def test_cards_are_parented_and_create_no_popup_windows(self) -> None:
         pool = StudioSoundPool()

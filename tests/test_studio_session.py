@@ -177,6 +177,7 @@ class StudioSessionTests(unittest.TestCase):
                 [asset.reference.role for asset in assets],
                 ["original_vocal", "instrumental", "converted_vocal", "converted_vocal"],
             )
+            self.assertTrue(all(asset.can_remove for asset in assets))
             self.assertTrue(all(resolve_studio_asset(package, asset.reference) == asset.path for asset in assets))
 
     def test_sound_pool_includes_compact_rvc_output_names(self) -> None:

@@ -33,6 +33,7 @@ class StudioSoundAsset:
     take: VocalTake | None = None
     media_kind: str = "audio"
     default_clip_duration_ms: int | None = None
+    can_remove: bool = False
 
     @property
     def asset_id(self) -> str:
@@ -54,7 +55,20 @@ def studio_sound_pool(package: SongPackage) -> tuple[StudioSoundAsset, ...]:
     for output in outputs:
         assets.extend(_assets_for_output(output))
     assets.extend(_video_assets(package, assets))
-    return tuple(assets)
+    from jang_app.services.song_assets import build_song_asset_details
+
+    removable_paths = {
+        asset.path.expanduser().resolve()
+        for asset in build_song_asset_details(package).assets
+        if asset.can_remove
+    }
+    return tuple(
+        replace(
+            asset,
+            can_remove=asset.path.expanduser().resolve() in removable_paths,
+        )
+        for asset in assets
+    )
 
 
 def resolve_studio_asset(package: SongPackage, reference: StudioAssetRef) -> Path | None:

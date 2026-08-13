@@ -25,6 +25,7 @@ from jang_app.qt_app.vocal_result_labels import (
 from jang_app.qt_app.waveform_thumbnail import WaveformThumbnail
 from jang_app.qt_app.widgets import (
     COMPACT_ICON_BUTTON_SIZE,
+    DangerIconButton,
     FeedbackButton,
     SvgIconButton,
     attach_transparent_scroll_widget,
@@ -42,6 +43,7 @@ _GRID_SPACING = 10
 
 class StudioSoundCard(SoundPoolItemCard):
     selected = Signal(str)
+    remove_requested = Signal(object)
 
     def __init__(self, asset: StudioSoundAsset, parent: QWidget | None = None) -> None:
         self.asset = asset
@@ -60,6 +62,13 @@ class StudioSoundCard(SoundPoolItemCard):
             object_name="StudioSoundCard",
             parent=parent,
         )
+        self.remove_button: DangerIconButton | None = None
+        if asset.can_remove:
+            self.remove_button = DangerIconButton(size=28)
+            self.remove_button.clicked.connect(
+                lambda: self.remove_requested.emit(self.asset)
+            )
+            self.set_action_widget(self.remove_button)
         self._drag_origin = QPoint()
         self.activated.connect(self.selected.emit)
         self.apply_language()
@@ -72,8 +81,12 @@ class StudioSoundCard(SoundPoolItemCard):
             badge=_short_role_label(role),
             detail=_studio_card_detail(self.asset, source, detail),
             duration_ms=self.asset.clip_duration_ms,
+            list_category=_studio_list_category(self.asset, source),
+            list_name=_studio_list_name(self.asset, source, detail),
         )
         self.setToolTip(_asset_tooltip(self.asset))
+        if self.remove_button is not None:
+            self.remove_button.setToolTip(tr("Remove"))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -92,6 +105,8 @@ class StudioSoundCard(SoundPoolItemCard):
         drag.exec(Qt.DropAction.CopyAction)
 
 class StudioSoundPool(QFrame):
+    remove_requested = Signal(object)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("StudioSoundPool")
@@ -208,6 +223,7 @@ class StudioSoundPool(QFrame):
         for asset in assets:
             card = StudioSoundCard(asset, self.content)
             card.selected.connect(self._select_asset)
+            card.remove_requested.connect(self.remove_requested.emit)
             card.set_theme_mode(self._theme_mode)
             card.set_list_mode(self._list_mode)
             self._cards[asset.asset_id] = card
@@ -369,6 +385,26 @@ def _studio_card_detail(
 ) -> str:
     if asset.reference.role == "converted_vocal":
         return vocal_take_card_detail(asset.take, source)
+    return tr(detail)
+
+
+def _studio_list_category(asset: StudioSoundAsset, source: str) -> str:
+    if asset.media_kind == "image":
+        return tr("Image")
+    if asset.media_kind == "video":
+        return tr("Video")
+    return tr(source)
+
+
+def _studio_list_name(
+    asset: StudioSoundAsset,
+    source: str,
+    detail: str,
+) -> str:
+    if asset.reference.role == "converted_vocal":
+        return vocal_take_label(asset.take, asset.path)
+    if asset.media_kind in {"video", "image"}:
+        return _studio_card_title(asset, source)
     return tr(detail)
 
 

@@ -1149,6 +1149,7 @@ class StudioEditor(QWidget):
     split_mode_changed = Signal(bool)
     split_tool_available_changed = Signal(bool)
     history_availability_changed = Signal(bool, bool)
+    asset_remove_requested = Signal(object)
 
     def __init__(self, *, include_sidebars: bool = True) -> None:
         super().__init__()
@@ -1162,6 +1163,7 @@ class StudioEditor(QWidget):
         self._history_availability = (False, False)
 
         self.sound_pool = StudioSoundPool(self)
+        self.sound_pool.remove_requested.connect(self.asset_remove_requested.emit)
         self.fx_pool = StudioFxPool(self)
         self.left_sidebar = create_workspace_splitter(
             (self.sound_pool, self.fx_pool),

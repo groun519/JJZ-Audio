@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QMouseEvent, QPixmap, QResizeEvent
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 from jang_app.qt_app.overflow_title_label import OverflowTextLabel
 from jang_app.qt_app.waveform_thumbnail import WaveformThumbnail
@@ -36,6 +36,13 @@ class SoundPoolItemCard(QFrame):
         self.media_kind = media_kind
         self._theme_mode = "white"
         self._list_mode = False
+        self._hovered = False
+        self._title_text = title
+        self._detail_text = detail
+        self._list_category_text = title
+        self._list_name_text = detail
+        self._action_widget: QWidget | None = None
+        self._action_slot: QWidget | None = None
 
         self.setObjectName(object_name)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -98,20 +105,11 @@ class SoundPoolItemCard(QFrame):
             True,
         )
 
-        meta_row = QHBoxLayout()
-        meta_row.setContentsMargins(0, 0, 0, 0)
-        meta_row.setSpacing(7)
-        meta_row.addWidget(self.source_badge)
-        meta_row.addWidget(self.detail_label, 1)
-        meta_row.addWidget(self.duration_label)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 7, 8, 8)
-        layout.setSpacing(5)
-        layout.addWidget(self.role_strip)
-        layout.addWidget(self.preview_widget)
-        layout.addWidget(self.title_label)
-        layout.addLayout(meta_row)
+        self.content_layout = QGridLayout(self)
+        self.content_layout.setContentsMargins(8, 7, 8, 8)
+        self.content_layout.setHorizontalSpacing(7)
+        self.content_layout.setVerticalSpacing(5)
+        self._arrange_content()
         self.set_content(
             title=title,
             badge=badge,
@@ -126,15 +124,43 @@ class SoundPoolItemCard(QFrame):
         badge: str,
         detail: str = "",
         duration_ms: int | None = None,
+        list_category: str | None = None,
+        list_name: str | None = None,
     ) -> None:
-        self.title_label.setText(title)
+        self._title_text = title
+        self._detail_text = detail
+        self._list_category_text = list_category if list_category is not None else title
+        self._list_name_text = list_name if list_name is not None else detail
         self.source_badge.setText(badge)
-        self.detail_label.setText(detail)
-        self.detail_label.setVisible(True)
         self.duration_label.setText(
             _format_time(duration_ms) if duration_ms is not None else ""
         )
         self.duration_label.setVisible(duration_ms is not None)
+        self._sync_mode_content()
+
+    def set_action_widget(self, widget: QWidget) -> None:
+        if self._action_widget is widget:
+            return
+        if self._action_slot is None:
+            self._action_slot = QWidget(self)
+            self._action_slot.setObjectName("SoundPoolActionSlot")
+            self._action_slot.setFixedSize(widget.size())
+            slot_layout = QHBoxLayout(self._action_slot)
+            slot_layout.setContentsMargins(0, 0, 0, 0)
+            slot_layout.addWidget(widget)
+        else:
+            layout = self._action_slot.layout()
+            if layout is not None:
+                while layout.count():
+                    layout.takeAt(0)
+                layout.addWidget(widget)
+            self._action_slot.setFixedSize(widget.size())
+        widget.setParent(self._action_slot)
+        self._action_widget = widget
+        if hasattr(widget, "set_theme_mode"):
+            widget.set_theme_mode(self._theme_mode)
+        self._arrange_content()
+        self._sync_action_visibility()
 
     def set_selected(self, selected: bool) -> None:
         if self.property("selected") == selected:
@@ -147,24 +173,83 @@ class SoundPoolItemCard(QFrame):
     def set_list_mode(self, enabled: bool) -> None:
         self._list_mode = bool(enabled)
         self.setProperty("viewMode", "list" if enabled else "grid")
-        self.waveform.setFixedHeight(24 if enabled else 40)
-        self.video_thumbnail.setFixedHeight(24 if enabled else 40)
-        layout = self.layout()
-        if layout is not None:
-            layout.setContentsMargins(*(7, 6, 7, 6) if enabled else (8, 7, 8, 8))
-            layout.setSpacing(3 if enabled else 5)
-        self.setMinimumHeight(88 if enabled else 108)
+        self._arrange_content()
+        self._sync_mode_content()
         self.style().unpolish(self)
         self.style().polish(self)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
         self.waveform.set_theme_mode(theme_mode)
+        if self._action_widget is not None and hasattr(self._action_widget, "set_theme_mode"):
+            self._action_widget.set_theme_mode(theme_mode)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self.activated.emit(self.card_id)
         super().mousePressEvent(event)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hovered = True
+        self._sync_action_visibility()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hovered = False
+        self._sync_action_visibility()
+        super().leaveEvent(event)
+
+    def _arrange_content(self) -> None:
+        while self.content_layout.count():
+            self.content_layout.takeAt(0)
+        for column in range(5):
+            self.content_layout.setColumnStretch(column, 0)
+
+        if self._list_mode:
+            self.content_layout.setContentsMargins(8, 6, 8, 6)
+            self.content_layout.setHorizontalSpacing(9)
+            self.role_strip.hide()
+            self.preview_widget.hide()
+            self.content_layout.addWidget(self.source_badge, 0, 0)
+            self.content_layout.addWidget(self.title_label, 0, 1)
+            self.content_layout.addWidget(self.detail_label, 0, 2)
+            self.content_layout.addWidget(self.duration_label, 0, 3)
+            if self._action_slot is not None:
+                self.content_layout.addWidget(self._action_slot, 0, 4)
+            self.content_layout.setColumnStretch(1, 3)
+            self.content_layout.setColumnStretch(2, 5)
+            self.setFixedHeight(48)
+            return
+
+        self.content_layout.setContentsMargins(8, 7, 8, 8)
+        self.content_layout.setHorizontalSpacing(7)
+        self.content_layout.setVerticalSpacing(5)
+        self.role_strip.show()
+        self.preview_widget.show()
+        self.content_layout.addWidget(self.role_strip, 0, 0, 1, 5)
+        self.content_layout.addWidget(self.preview_widget, 1, 0, 1, 5)
+        self.content_layout.addWidget(self.title_label, 2, 0, 1, 4)
+        if self._action_slot is not None:
+            self.content_layout.addWidget(self._action_slot, 2, 4)
+        self.content_layout.addWidget(self.source_badge, 3, 0)
+        self.content_layout.addWidget(self.detail_label, 3, 1, 1, 3)
+        self.content_layout.addWidget(self.duration_label, 3, 4)
+        self.content_layout.setColumnStretch(1, 1)
+        self.setMinimumHeight(108)
+        self.setMaximumHeight(16_777_215)
+
+    def _sync_mode_content(self) -> None:
+        self.title_label.setText(
+            self._list_category_text if self._list_mode else self._title_text
+        )
+        self.detail_label.setText(
+            self._list_name_text if self._list_mode else self._detail_text
+        )
+        self.detail_label.setVisible(bool(self.detail_label.text()))
+
+    def _sync_action_visibility(self) -> None:
+        if self._action_widget is not None:
+            self._action_widget.setVisible(self._hovered or self.hasFocus())
 
 
 class _MediaThumbnail(QLabel):

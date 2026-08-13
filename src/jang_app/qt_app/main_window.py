@@ -178,6 +178,7 @@ from jang_app.services.song_assets import (
 )
 from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion, sort_song_items
 from jang_app.services.song_metadata import build_song_display_metadata
+from jang_app.services.studio_assets import StudioSoundAsset
 from jang_app.services.studio_session import StudioSession, StudioTrackState
 from jang_app.services.studio_timeline import session_duration_ms, set_studio_track_mix
 from jang_app.services.update_polling import UpdateCheckOutcome, UpdatePollingPolicy
@@ -839,6 +840,7 @@ class MainWindow(QMainWindow):
         self.video_preview_panel.set_compact_mode(True)
         self.studio_editor = StudioEditor(include_sidebars=False)
         self.studio_editor.session_committed.connect(self._on_studio_editor_session_changed)
+        self.studio_editor.asset_remove_requested.connect(self._remove_studio_pool_asset)
         self.studio_editor.seek_requested.connect(self._seek_studio_timeline)
         self.studio_editor.open_location_requested.connect(self._open_track_location)
         self.studio_transport_bar = StudioTransportBar()
@@ -2235,6 +2237,29 @@ class MainWindow(QMainWindow):
             return
 
         self._execute_library_asset_removal(song_id, (asset,))
+
+    def _remove_studio_pool_asset(self, asset: StudioSoundAsset) -> None:
+        song = self.current_song or self.current_work_item
+        if song is None:
+            return
+        try:
+            details = self.library.asset_details(song.id)
+        except KeyError:
+            return
+        target = next(
+            (
+                candidate
+                for candidate in details.assets
+                if candidate.can_remove and _same_path(candidate.path, asset.path)
+            ),
+            None,
+        )
+        if target is None:
+            self.studio_editor.set_status(
+                tr("This file can only be removed by deleting the entire song.")
+            )
+            return
+        self._remove_library_asset(song.id, target)
 
     def _remove_library_assets(self, song_id: str, assets: tuple[SongAsset, ...]) -> None:
         removable = tuple(asset for asset in assets if asset.can_remove)
