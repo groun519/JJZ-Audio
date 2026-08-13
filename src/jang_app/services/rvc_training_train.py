@@ -41,6 +41,10 @@ from jang_app.services.rvc_training_storage import (
 
 
 _EPOCH_PATTERN = re.compile(r"====>\s*Epoch:\s*(?P<epoch>\d+)", re.IGNORECASE)
+_EPOCH_STEP_PATTERN = re.compile(
+    r"Train\s+Epoch:\s*(?P<epoch>\d+)\s*\[\s*(?P<progress>\d+(?:\.\d+)?)%\s*\]",
+    re.IGNORECASE,
+)
 _WEIGHT_SAVE_PATTERN = re.compile(
     r"saving ckpt\s+.+_e(?P<epoch>\d+)_s(?P<step>\d+)",
     re.IGNORECASE,
@@ -168,6 +172,14 @@ def train_rvc_model(
     )
 
     def handle_output(line: str) -> None:
+        step_match = _EPOCH_STEP_PATTERN.search(line)
+        if step_match is not None:
+            _report_epoch_step(
+                progress,
+                int(step_match.group("epoch")),
+                float(step_match.group("progress")),
+                settings.target_epoch,
+            )
         match = _EPOCH_PATTERN.search(line)
         if match is not None:
             epoch = min(settings.target_epoch, int(match.group("epoch")))
@@ -184,6 +196,11 @@ def train_rvc_model(
             output_callback(line)
 
     try:
+        if output_callback is not None:
+            output_callback(
+                "JJZERO_TRAINING_START "
+                f"current={state.current_epoch} target={settings.target_epoch}"
+            )
         result = command_runner(
             _training_command(
                 runtime,
@@ -404,6 +421,20 @@ def _report(
         progress(max(0, min(100, round(epoch * 100 / target))))
     if epoch_callback is not None:
         epoch_callback(epoch, target)
+
+
+def _report_epoch_step(
+    progress: Callable[[int], None] | None,
+    epoch: int,
+    epoch_progress: float,
+    target: int,
+) -> None:
+    if progress is None or target <= 0:
+        return
+    completed_epochs = max(0.0, float(epoch - 1))
+    current_fraction = max(0.0, min(100.0, epoch_progress)) / 100.0
+    overall = 100.0 * min(float(target), completed_epochs + current_fraction) / target
+    progress(max(0, min(100, round(overall))))
 
 
 def _existing(path: Path) -> Path | None:

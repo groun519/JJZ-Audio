@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QPainter, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -44,6 +44,9 @@ class ModelDatasetPanel(QWidget):
         self._worker_success: Callable[[object], None] | None = None
         self._worker_tool = ""
         self._externally_locked = False
+        self._render_generation = 0
+        self._is_rendering = False
+        self._pending_open_request: tuple[str, str, int, int] | None = None
         self._theme_mode = "white"
         self._build_ui()
         self.set_model(None)
@@ -202,6 +205,8 @@ class ModelDatasetPanel(QWidget):
         return column
 
     def set_model(self, model_id: str | None) -> None:
+        self._cancel_deferred_render()
+        self._pending_open_request = None
         self.clip_editor.stop_preview()
         self._set_editor_visible(False)
         self._model_id = model_id or ""
@@ -220,9 +225,52 @@ class ModelDatasetPanel(QWidget):
         self._render()
         self._set_enabled(not self._externally_locked)
 
+    def prepare_model(self, model_id: str) -> None:
+        """Switch models without reading its potentially large manifest on the UI thread."""
+        self._cancel_deferred_render()
+        self._pending_open_request = None
+        self.clip_editor.stop_preview()
+        self._set_editor_visible(False)
+        self._model_id = model_id
+        self._dataset = ModelDataset(model_id)
+        self.source_list.clear()
+        self.training_list.clear()
+        self.source_count_label.setText("0")
+        self.training_count_label.setText("0")
+        self._refresh_summary()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.show()
+        self._set_status("Loading training materials...")
+        self._set_enabled(False)
+
+    def apply_dataset(self, dataset: ModelDataset, *, deferred: bool = False) -> None:
+        if dataset.model_id != self._model_id:
+            return
+        self._dataset = dataset
+        self._set_status("")
+        if deferred:
+            self._render_deferred()
+            return
+        self._render()
+        self._set_enabled(not self._externally_locked)
+
+    def set_load_failure(self, model_id: str, error: str) -> None:
+        if model_id != self._model_id:
+            return
+        self._cancel_deferred_render()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.hide()
+        self._set_status(f"Load failed: {_last_error_line(error)}")
+        self._set_enabled(False)
+
     def set_training_locked(self, is_locked: bool) -> None:
         self._externally_locked = is_locked
-        self._set_enabled(bool(self._model_id) and self._worker is None and not is_locked)
+        self._set_enabled(
+            bool(self._model_id)
+            and self._worker is None
+            and not self._is_rendering
+            and not is_locked
+        )
         self.clip_editor.set_busy(self._worker is not None or is_locked)
 
     def set_theme_mode(self, theme_mode: str) -> None:
@@ -689,6 +737,7 @@ class ModelDatasetPanel(QWidget):
         self.dataset_changed.emit(self._dataset)
 
     def _render(self, *, selected_training_id: str = "") -> None:
+        self._cancel_deferred_render()
         self._populate_list(self.source_list, self._dataset.source_items, "SOURCE")
         self._populate_list(self.training_list, self._dataset.training_items, "WORKING")
         self.source_count_label.setText(str(len(self._dataset.source_items)))
@@ -699,14 +748,88 @@ class ModelDatasetPanel(QWidget):
         self._sync_action_state()
         self._on_training_selection_changed()
 
+    def _render_deferred(self) -> None:
+        self._cancel_deferred_render()
+        self._render_generation += 1
+        generation = self._render_generation
+        self._is_rendering = True
+        self.source_list.clear()
+        self.training_list.clear()
+
+        source_items = self._dataset.source_items
+        training_items = self._dataset.training_items
+        rows = tuple(
+            (self.source_list, item, "SOURCE") for item in source_items
+        ) + tuple(
+            (self.training_list, item, "WORKING") for item in training_items
+        )
+        total = len(rows)
+        self.source_count_label.setText(str(len(source_items)))
+        self.training_count_label.setText(str(len(training_items)))
+        self._refresh_summary()
+        self._set_enabled(False)
+
+        if total == 0:
+            self._finish_deferred_render(generation)
+            return
+
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self._set_status("Loading training materials...")
+
+        def append_batch(offset: int = 0) -> None:
+            if generation != self._render_generation:
+                return
+            end = min(total, offset + 24)
+            for list_widget, dataset_item, badge_text in rows[offset:end]:
+                self._append_list_item(list_widget, dataset_item, badge_text)
+            self.progress_bar.setValue(end)
+            if end < total:
+                QTimer.singleShot(0, lambda: append_batch(end))
+                return
+            self._finish_deferred_render(generation)
+
+        QTimer.singleShot(0, append_batch)
+
+    def _finish_deferred_render(self, generation: int) -> None:
+        if generation != self._render_generation:
+            return
+        self._is_rendering = False
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.hide()
+        self._set_status("")
+        self._sync_action_state()
+        self._on_training_selection_changed()
+        self._set_enabled(not self._externally_locked)
+        pending = self._pending_open_request
+        self._pending_open_request = None
+        if pending is not None:
+            self.open_training_item(*pending)
+
+    def _cancel_deferred_render(self) -> None:
+        self._render_generation += 1
+        self._is_rendering = False
+        if self._worker is None:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.hide()
+
     def _populate_list(self, list_widget: QListWidget, items: tuple[ModelDatasetItem, ...], badge_text: str) -> None:
         list_widget.clear()
         for dataset_item in items:
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, dataset_item.item_id)
-            row = DatasetAudioRow(dataset_item, badge_text, list_widget.viewport())
-            row.apply_language()
-            attach_list_item_widget(list_widget, item, row)
+            self._append_list_item(list_widget, dataset_item, badge_text)
+
+    @staticmethod
+    def _append_list_item(
+        list_widget: QListWidget,
+        dataset_item: ModelDatasetItem,
+        badge_text: str,
+    ) -> None:
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, dataset_item.item_id)
+        row = DatasetAudioRow(dataset_item, badge_text, list_widget.viewport())
+        row.apply_language()
+        attach_list_item_widget(list_widget, item, row)
 
     def _set_busy(self, is_busy: bool) -> None:
         self.progress_bar.setVisible(is_busy)
@@ -731,7 +854,12 @@ class ModelDatasetPanel(QWidget):
             self._sync_action_state()
 
     def _sync_action_state(self) -> None:
-        available = bool(self._model_id) and self._worker is None and not self._externally_locked
+        available = (
+            bool(self._model_id)
+            and self._worker is None
+            and not self._is_rendering
+            and not self._externally_locked
+        )
         source_selected = bool(self.source_list.selectedItems())
         training_selected = self.training_list.selectedItems()
         self.remove_button.setEnabled(available and source_selected)
@@ -775,6 +903,9 @@ class ModelDatasetPanel(QWidget):
     ) -> bool:
         if not item_id or not any(item.item_id == item_id for item in self._dataset.training_items):
             return False
+        if self._is_rendering:
+            self._pending_open_request = (item_id, clip_id, start_ms, end_ms)
+            return True
         _select_item(self.training_list, item_id)
         selected = self.training_list.currentItem()
         if selected is not None:

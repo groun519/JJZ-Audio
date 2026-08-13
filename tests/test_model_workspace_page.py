@@ -21,7 +21,11 @@ from jang_app.qt_app.theme import build_stylesheet
 from jang_app.services.clip_edit_history import REVIEW_READY
 from jang_app.services.i18n import tr
 from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem
-from jang_app.services.processing_queue import ProcessingQueue, TASK_COMPLETED
+from jang_app.services.processing_queue import (
+    ProcessingQueue,
+    TASK_COMPLETED,
+    TASK_FAILED,
+)
 from jang_app.services.rvc_model_workspace import RvcModelWorkspace
 from jang_app.services.rvc_training_pipeline import RvcTrainingStage
 from jang_app.services.rvc_training_preflight import RvcTrainingPreflight
@@ -60,10 +64,10 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual([record.name for record in records], ["Voice One"])
             self.assertEqual(page.view_stack.currentIndex(), 1)
             self.assertEqual(page.workspace_content_stack.currentIndex(), 1)
-            self.assertEqual(page.workspace_content_stack.count(), 4)
+            self.assertEqual(page.workspace_content_stack.count(), 5)
             self.assertEqual(changes, [True])
             page.training_section_button.click()
-            self.assertEqual(page.workspace_content_stack.currentIndex(), 3)
+            self.assertEqual(page.workspace_content_stack.currentIndex(), 4)
             page.close()
 
     def test_excluded_preprocess_input_opens_its_original_clip(self) -> None:
@@ -95,6 +99,7 @@ class ModelWorkspacePageTests(unittest.TestCase):
                 patch.object(page.detail_panel, "set_record") as detail,
                 patch.object(page.dataset_panel, "set_model") as dataset,
                 patch.object(page.analysis_panel, "set_model") as analysis,
+                patch.object(page.evaluation_panel, "set_model") as evaluation,
                 patch.object(page, "_refresh_training_panel") as training,
             ):
                 page._open_model(record.model_id)
@@ -102,8 +107,58 @@ class ModelWorkspacePageTests(unittest.TestCase):
             detail.assert_not_called()
             dataset.assert_not_called()
             analysis.assert_not_called()
+            evaluation.assert_not_called()
             training.assert_not_called()
             self.assertEqual(page.view_stack.currentIndex(), 1)
+            page.close()
+
+    def test_model_selection_defers_material_and_training_panels(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            workspace.create_model("Voice One", root / "rvc")
+            workspace.create_model("Voice Two", root / "rvc")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+
+            with (
+                patch.object(page.dataset_panel, "set_model") as dataset,
+                patch.object(page.analysis_panel, "set_model") as analysis,
+                patch.object(page.evaluation_panel, "set_model") as evaluation,
+                patch.object(page, "_refresh_training_panel") as training,
+            ):
+                page.model_list.setCurrentRow(1)
+
+            dataset.assert_not_called()
+            analysis.assert_not_called()
+            evaluation.assert_not_called()
+            training.assert_not_called()
+            page.close()
+
+    def test_model_dataset_is_loaded_once_and_reused_by_heavy_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.create_model("Voice One", root / "rvc")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+
+            with patch.object(
+                page._dataset_store,
+                "load",
+                wraps=page._dataset_store.load,
+            ) as load:
+                page._open_model(record.model_id)
+                self.app.processEvents()
+                worker = page._dataset_load_worker
+                self.assertIsNotNone(worker)
+                worker.wait()
+                self.app.processEvents()
+
+                page._navigate_model_section(1)
+                self.app.processEvents()
+                page._navigate_model_section(4)
+
+            self.assertEqual(load.call_count, 1)
+            self.assertEqual(page._loaded_dataset.model_id, record.model_id)
             page.close()
 
     def test_model_page_does_not_probe_hardware(self) -> None:
@@ -158,6 +213,61 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.app.removeEventFilter(probe)
 
         self.assertEqual(unexpected, [])
+
+    def test_precision_evaluation_updates_processing_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.create_model("Voice One", root / "rvc")
+            queue = ProcessingQueue()
+            page = ModelWorkspacePage(root / "rvc", workspace, processing_queue=queue)
+
+            page.evaluation_panel.benchmark_started.emit(record.model_id, record.title)
+            tasks = queue.tasks()
+            self.assertEqual(len(tasks), 1)
+            task_id = tasks[0].task_id
+            self.assertEqual(tasks[0].title, tr("Model Evaluation"))
+            self.assertEqual(tasks[0].detail, record.title)
+
+            page.evaluation_panel.benchmark_progress_reported.emit(
+                44,
+                tr("Preparing precise evaluation..."),
+            )
+            tasks = queue.tasks()
+            self.assertEqual(tasks[0].task_id, task_id)
+            self.assertEqual(tasks[0].progress, 44)
+            self.assertIn(record.title, tasks[0].detail)
+
+            page.evaluation_panel.benchmark_completed.emit(record.model_id, record.title)
+            tasks = queue.tasks()
+            self.assertEqual(tasks[0].status, TASK_COMPLETED)
+
+            page.evaluation_panel.benchmark_finished_reported.emit(record.model_id, record.title)
+            self.assertEqual(page._benchmark_task_id, "")
+            self.assertEqual(page._benchmark_model_id, "")
+            self.assertEqual(page._benchmark_model_title, "")
+            page.close()
+
+    def test_precision_evaluation_failure_updates_processing_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.create_model("Voice One", root / "rvc")
+            queue = ProcessingQueue()
+            page = ModelWorkspacePage(root / "rvc", workspace, processing_queue=queue)
+
+            page.evaluation_panel.benchmark_started.emit(record.model_id, record.title)
+            page.evaluation_panel.benchmark_failed_reported.emit(
+                record.model_id,
+                record.title,
+                "Traceback",
+            )
+
+            tasks = queue.tasks()
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0].status, TASK_FAILED)
+            self.assertEqual(tasks[0].error, "Traceback")
+            page.close()
 
     def test_add_model_dialog_routes_linked_inference_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -241,6 +351,52 @@ class ModelWorkspacePageTests(unittest.TestCase):
 
             self.assertEqual(shared, [record])
             self.assertTrue(row.share_button.isHidden())
+            page.close()
+
+    def test_model_row_removes_model_and_training_work_after_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.create_model("Voice One", root / "rvc")
+            work_dir = workspace.root / record.model_id
+            work_dir.mkdir(parents=True)
+            (work_dir / "dataset.json").write_text("{}", encoding="utf-8")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            row = page._rows_by_id[record.model_id]
+
+            row.enterEvent(
+                QEnterEvent(
+                    QPointF(1, 1),
+                    QPointF(1, 1),
+                    QPointF(1, 1),
+                )
+            )
+            self.assertFalse(row.remove_button.isHidden())
+            with patch(
+                "jang_app.qt_app.model_workspace.ConfirmationDialog.confirm",
+                return_value=True,
+            ):
+                row.remove_button.click()
+
+            self.assertEqual(workspace.records(), [])
+            self.assertFalse(work_dir.exists())
+            self.assertNotIn(record.model_id, page._rows_by_id)
+            self.assertEqual(page.status_label.text(), tr("Model deleted."))
+            page.close()
+
+    def test_selected_managed_model_can_request_work_share(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.create_model("Voice One", root / "rvc")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            shared: list[object] = []
+            page.work_share_requested.connect(shared.append)
+
+            page._open_model(record.model_id)
+            page.workspace_work_share_action.button.click()
+
+            self.assertEqual(shared, [record])
             page.close()
 
     def test_model_share_progress_replaces_redundant_badges_inline(self) -> None:

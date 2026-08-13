@@ -71,7 +71,7 @@ class RvcDeviceSelection:
 
 
 class RvcInferenceRuntimeError(RuntimeError):
-    """Raised when the bundled RVC runtime cannot perform CPU inference."""
+    """Raised when the bundled RVC runtime cannot honor the requested device."""
 
 
 RuntimeProbe = Callable[[Path], RvcInferenceCapabilities]
@@ -104,8 +104,11 @@ def select_rvc_inference_device(
     if requested in {"directml", "dml", "privateuseone", "privateuseone:0"}:
         if capabilities.directml_ready:
             return RvcDeviceSelection(requested, capabilities.directml_device, capabilities)
-        reason = capabilities.directml_detail or "DirectML is unavailable; using CPU."
-        return RvcDeviceSelection(requested, "cpu", capabilities, reason)
+        detail = capabilities.directml_detail or (
+            "DirectML GPU acceleration is unavailable. Repair the DirectML runtime "
+            "or select CPU explicitly."
+        )
+        raise RvcInferenceRuntimeError(detail)
 
     match = re.fullmatch(r"cuda(?::(?P<index>\d+))?", requested)
     is_automatic = requested in {"auto", "gpu", "accelerator"}
@@ -125,8 +128,12 @@ def select_rvc_inference_device(
     if capabilities.cuda_ready and index < capabilities.device_count:
         return RvcDeviceSelection(requested, f"cuda:{index}", capabilities)
 
-    reason = capabilities.accelerator_detail or "GPU acceleration is unavailable; using CPU."
-    return RvcDeviceSelection(requested, "cpu", capabilities, reason)
+    reason = capabilities.accelerator_detail or "GPU acceleration is unavailable."
+    if requested == "auto":
+        return RvcDeviceSelection(requested, "cpu", capabilities, reason)
+    raise RvcInferenceRuntimeError(
+        f"{reason} Select CPU explicitly if GPU acceleration is not required."
+    )
 
 
 @lru_cache(maxsize=4)

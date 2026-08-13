@@ -18,6 +18,12 @@ def build_rvc_environment(rvc_root: Path) -> dict[str, str]:
     environment["PATH"] = os.pathsep.join(part for part in path_parts if part)
     environment["PYTHONUTF8"] = "1"
     environment["PYTHONIOENCODING"] = "utf-8:replace"
+    environment["PYTHONUNBUFFERED"] = "1"
     environment["PYTHONFAULTHANDLER"] = "1"
+    environment["RVC_CUDA_GRAPH"] = "0"
     environment["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+    environment["OPENBLAS_NUM_THREADS"] = "1"
+    environment["OMP_NUM_THREADS"] = "1"
+    environment["MKL_NUM_THREADS"] = "1"
+    environment["NUMEXPR_NUM_THREADS"] = "1"
     return environment

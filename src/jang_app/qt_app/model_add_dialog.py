@@ -93,7 +93,7 @@ class ModelAddDialog(AppDialog):
         )
         self.existing_button.clicked.connect(lambda: self.stack.setCurrentIndex(1))
         self.drive_button = _choice_button(
-            tr("Import Drive Link\nDownload a JJZero RVC model shared through Google Drive."),
+            tr("Import Drive Link\nDownload a JJZero RVC model or model-work package shared through Google Drive."),
         )
         self.drive_button.clicked.connect(lambda: self.stack.setCurrentIndex(2))
         cancel = FeedbackButton(tr("Cancel"))
@@ -112,7 +112,7 @@ class ModelAddDialog(AppDialog):
     def _build_drive_page(self) -> QWidget:
         page, layout = _dialog_page(
             tr("Import Drive Link"),
-            tr("Paste a public JJZero RVC model link from Google Drive."),
+            tr("Paste a public JJZero share link from Google Drive."),
         )
         self.drive_link_edit = QLineEdit()
         self.drive_link_edit.setObjectName("ModelAddDriveLink")

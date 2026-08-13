@@ -71,12 +71,39 @@ class RvcTrainingRunTests(unittest.TestCase):
             self.assertEqual(_argument(args, "-l"), "0")
             self.assertEqual(_argument(args, "-sw"), "1")
             self.assertIn(str(runtime.resolve()), environment["PATH"])
+            self.assertEqual(environment["PYTHONUNBUFFERED"], "1")
+            self.assertEqual(environment["RVC_CUDA_GRAPH"], "0")
             self.assertTrue((layout.root / "configs" / "40k.json").is_file())
             self.assertTrue(result.completed)
             self.assertEqual(result.inference_model, layout.weights_dir / "voice.pth")
             self.assertEqual(result.state.current_epoch, 20)
             self.assertEqual(progress[-1], 100)
             self.assertFalse((runtime / "weights" / "voice.pth").exists())
+
+    def test_reports_progress_within_an_epoch_before_it_completes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            progress: list[int] = []
+            output: list[str] = []
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                output_callback("Train Epoch: 1 [50%]")
+                _write_training_success(layout, output_callback, target_epoch=20)
+                return CommandResult(args, 2333333, "", "Training is done.")
+
+            train_rvc_model(
+                model_id,
+                layout,
+                runtime,
+                RvcTrainingRunSettings(),
+                progress=progress.append,
+                output_callback=output.append,
+                command_runner=runner,
+                runtime_inspector=_ready_runtime,
+            )
+
+            self.assertTrue(any(0 < value < 5 for value in progress))
+            self.assertIn("Train Epoch: 1 [50%]", output)
 
     def test_cpu_training_disables_half_precision_and_gpu_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

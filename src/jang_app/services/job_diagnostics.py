@@ -103,6 +103,7 @@ def classify_error(error: str) -> ErrorClassification:
         (("3221225620", "0xc0000094", "integer division by zero"), "RVC_CPU_RUNTIME_INCOMPATIBLE", "RVC runtime crashed on the selected CPU path."),
         (("cuda out of memory", "cublas_status_alloc_failed"), "CUDA_OUT_OF_MEMORY", "The GPU did not have enough free memory."),
         (("no kernel image is available", "not compatible with the current pytorch", "cuda architecture sm_120", "requires torch 2.7.1+cu128"), "CUDA_ARCHITECTURE_UNSUPPORTED", "The bundled RVC runtime does not support this GPU architecture."),
+        (("rvc extraction outputs are incomplete",), "RVC_EXTRACTION_INCOMPLETE", "RVC pitch or voice features could not be extracted from every training segment."),
         (("cuda is not available", "no cuda gpus are available", "invalid device ordinal"), "CUDA_UNAVAILABLE", "The selected CUDA device is unavailable."),
         (("torch_directml", "privateuseone", "directml runtime", "directml device", "dmlexecutionprovider", "onnxruntime-directml", "rmvpe.onnx"), "DIRECTML_RUNTIME_FAILED", "The DirectML runtime or selected DirectML device failed."),
         (("rocm", "hip error", "hip runtime"), "ROCM_RUNTIME_FAILED", "The AMD ROCm runtime or selected AMD GPU failed."),

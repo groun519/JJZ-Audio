@@ -7,11 +7,13 @@ from pathlib import Path
 from urllib.request import Request
 
 from jang_app.services.google_drive import (
+    DRIVE_MODEL_WORK_FOLDER,
     GoogleDriveClient,
     GoogleDriveError,
     GoogleDriveStorageError,
     GoogleDriveUnavailableError,
     UPLOAD_CHUNK_SIZE,
+    _category_folder,
 )
 from jang_app.services.google_oauth import HttpResponse
 
@@ -178,6 +180,10 @@ class GoogleDriveTests(unittest.TestCase):
                 client.upload_shared_file(source, "exports")
 
         self.assertEqual(requester.requests, [])
+
+    def test_model_work_category_maps_to_dedicated_drive_folder(self) -> None:
+        self.assertEqual(_category_folder("model_work"), DRIVE_MODEL_WORK_FOLDER)
+        self.assertEqual(_category_folder("MODEL_WORK"), DRIVE_MODEL_WORK_FOLDER)
 
     def test_delete_file_uses_drive_delete_endpoint(self) -> None:
         requests: list[Request] = []

@@ -268,7 +268,13 @@ class ModelTrainingPanelTests(unittest.TestCase):
                 panel.workflow_progress.stage_state("features"),
                 "complete",
             )
-            self.assertTrue(panel.activity_label.text().startswith("Working"))
+            self.assertTrue(panel.activity_label.text().startswith("Running normally"))
+            self.assertEqual(panel.stage_progress_value_label.text(), "6 / 7  |  60%")
+            self.assertEqual(panel.stage_progress_bar.value(), 60)
+            self.assertEqual(
+                panel.activity_detail_label.text(),
+                "Optimizing the voice model epoch by epoch",
+            )
             self.assertEqual(
                 panel.runtime_label.text(),
                 "Elapsed 01:05  |  Last activity 00:04 ago",
@@ -280,6 +286,27 @@ class ModelTrainingPanelTests(unittest.TestCase):
             self.assertFalse(panel.target_epoch_spin.isEnabled())
             self.assertEqual(stopped, [True])
             panel.close()
+
+    def test_runtime_status_distinguishes_quiet_and_stale_processes(self) -> None:
+        panel = ModelTrainingPanel()
+        panel.set_running(True)
+
+        panel.set_runtime_status(90, 45)
+        self.assertTrue(
+            panel.activity_label.text().startswith(
+                "Processing; waiting for the next update"
+            )
+        )
+        self.assertEqual(panel.activity_label.property("state"), "quiet")
+
+        panel.set_runtime_status(700, 610)
+        self.assertTrue(
+            panel.activity_label.text().startswith(
+                "Still running, but no response for a long time"
+            )
+        )
+        self.assertEqual(panel.activity_label.property("state"), "stale")
+        panel.close()
 
     def test_elapsed_time_formatter_supports_long_training_runs(self) -> None:
         self.assertEqual(format_training_elapsed(5), "00:05")

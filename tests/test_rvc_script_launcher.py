@@ -166,7 +166,7 @@ class RvcScriptLauncherTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout.strip(), "ready")
 
-    def test_launcher_can_reduce_rvc_data_loader_memory(self) -> None:
+    def test_launcher_keeps_rvc_data_loading_in_the_hidden_trainer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime = root / "runtime"
@@ -184,9 +184,9 @@ class RvcScriptLauncherTests(unittest.TestCase):
             completed = _run_python((str(launcher),), cwd=workspace)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "1 2 False")
+            self.assertEqual(completed.stdout.strip(), "0 None False")
 
-    def test_launcher_can_replace_ddp_only_for_rocm_training(self) -> None:
+    def test_launcher_replaces_unnecessary_ddp_for_single_device_training(self) -> None:
         probe = (
             "import torch\n"
             "torch.version.hip = '7.2.1'\n"
@@ -196,7 +196,8 @@ class RvcScriptLauncherTests(unittest.TestCase):
         completed = _run_python(("-c", probe))
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(completed.stdout.strip(), "ready")
+        self.assertIn("JJZERO_SINGLE_DEVICE_TRAINING", completed.stdout)
+        self.assertTrue(completed.stdout.rstrip().endswith("ready"))
 
 
 def _run_python(

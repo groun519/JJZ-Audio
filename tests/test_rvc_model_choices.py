@@ -25,6 +25,25 @@ class RvcModelChoiceTests(unittest.TestCase):
             self.assertEqual(choices[0].label, "Library Voice")
             self.assertEqual(choices[0].model_id, record.model_id)
 
+    def test_library_model_uses_execution_root_when_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            execution_root = root / "execution"
+            execution_root.mkdir()
+            weights = root / "weights"
+            weights.mkdir()
+            model = weights / "voice.pth"
+            model.write_bytes(b"model")
+            record = _record(root, model, title="Library Voice")
+
+            choices = collect_rvc_model_choices(
+                (record,),
+                root,
+                execution_root=execution_root,
+            )
+
+            self.assertEqual(choices[0].root, execution_root.resolve())
+
     def test_legacy_weights_remain_available_without_registration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

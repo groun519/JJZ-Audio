@@ -59,6 +59,10 @@ class ImportedSharedModel:
     records: tuple[RvcModelRecord, ...]
 
 
+def estimate_model_share_size_bytes(record: RvcModelRecord) -> int:
+    return sum(path.stat().st_size for _, path in _model_share_artifacts(record))
+
+
 def create_model_share_package(
     record: RvcModelRecord,
     output_dir: Path,
@@ -75,7 +79,7 @@ def create_model_share_package(
         if progress is not None:
             progress(100)
         return existing
-    source_size = sum(path.stat().st_size for _, path in artifacts)
+    source_size = estimate_model_share_size_bytes(record)
     required = source_size + max(_MINIMUM_SPACE_BUFFER, source_size // 20)
     available = shutil.disk_usage(output_dir).free
     if available < required:

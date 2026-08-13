@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from math import floor
+
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
@@ -30,11 +32,14 @@ from jang_app.services.song_metadata import SongDisplayMetadata
 class WorkSongRevealButton(SvgIconButton):
     """Work-song action with a lightweight perimeter loading indicator."""
 
+    loading_finished = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("pin", size=34)
         self.setParent(parent)
         self._loading = False
         self._loading_phase = 0.0
+        self._loading_finish_target: float | None = None
         self._loading_color = QColor("#765814")
         self._loading_timer = QTimer(self)
         self._loading_timer.setInterval(24)
@@ -50,17 +55,21 @@ class WorkSongRevealButton(SvgIconButton):
 
     def set_loading(self, is_loading: bool) -> None:
         loading = bool(is_loading)
-        if loading == self._loading:
-            return
-        self._loading = loading
-        self.setProperty("loading", loading)
-        self.setEnabled(not loading)
         if loading:
-            self._loading_timer.start()
-        else:
-            self._loading_timer.stop()
+            if self._loading and self._loading_finish_target is None:
+                return
+            self._loading = True
             self._loading_phase = 0.0
-        self.update()
+            self._loading_finish_target = None
+            self.setProperty("loading", True)
+            self.setEnabled(False)
+            self._loading_timer.start()
+            self.update()
+            return
+        if not self._loading or self._loading_finish_target is not None:
+            return
+        self._loading_finish_target = floor(self._loading_phase) + 1.0
+        self._loading_timer.start()
 
     def is_loading(self) -> bool:
         return self._loading
@@ -93,8 +102,29 @@ class WorkSongRevealButton(SvgIconButton):
             previous = current
 
     def _advance_loading_border(self) -> None:
-        self._loading_phase = (self._loading_phase + 0.025) % 1.0
+        increment = 0.08 if self._loading_finish_target is not None else 0.025
+        self._loading_phase += increment
+        if (
+            self._loading_finish_target is not None
+            and self._loading_phase >= self._loading_finish_target
+        ):
+            self._loading_phase = self._loading_finish_target
+            self.update()
+            QTimer.singleShot(self._loading_timer.interval(), self._complete_loading)
+            self._loading_timer.stop()
+            return
         self.update()
+
+    def _complete_loading(self) -> None:
+        if not self._loading or self._loading_finish_target is None:
+            return
+        self._loading = False
+        self._loading_phase = 0.0
+        self._loading_finish_target = None
+        self.setProperty("loading", False)
+        self.setEnabled(True)
+        self.update()
+        self.loading_finished.emit()
 
 
 class SongListRow(QWidget):
@@ -155,6 +185,7 @@ class SongListRow(QWidget):
         self.work_song_button.clicked.connect(
             lambda: self.work_song_toggled.emit(self._item_id)
         )
+        self.work_song_button.loading_finished.connect(self._sync_action_visibility)
         self.work_song_reveal = HorizontalReveal(44)
         self.work_song_reveal.setObjectName("WorkSongRevealSlot")
         work_song_layout = QHBoxLayout(self.work_song_reveal)

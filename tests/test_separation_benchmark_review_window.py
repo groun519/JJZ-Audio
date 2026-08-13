@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -48,7 +49,7 @@ class SeparationBenchmarkReviewWindowTests(unittest.TestCase):
                 "keep",
             )
             self.assertEqual(window.candidate_group.button(0).text(), "A · 진행 중")
-            window.close()
+            _close_window(window)
 
     def test_marks_complete_combination_and_moves_to_next_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -64,7 +65,7 @@ class SeparationBenchmarkReviewWindowTests(unittest.TestCase):
             window.next_button.click()
             self.assertEqual(window.candidate_group.checkedId(), 1)
             self.assertIn("2 / 3", window.combination_label.text())
-            window.close()
+            _close_window(window)
 
     def test_conversion_review_uses_rvc_and_final_mix_stages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -87,7 +88,7 @@ class SeparationBenchmarkReviewWindowTests(unittest.TestCase):
             for group in window.decision_groups.values():
                 group.button(0).click()
             self.assertEqual(window.candidate_group.button(0).text(), "A · 완료")
-            window.close()
+            _close_window(window)
 
     def test_hybrid_review_starts_with_mix_and_keeps_diagnostic_stems_open(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -104,7 +105,7 @@ class SeparationBenchmarkReviewWindowTests(unittest.TestCase):
             self.assertEqual(set(window.decision_groups), {"final_mix"})
             self.assertIn("mix_original_vocal", window.issue_groups)
             self.assertNotIn("converted_pitch", window.issue_groups)
-            window.close()
+            _close_window(window)
 
 
 def _review(root: Path, *, review_type: str = "separation") -> Path:
@@ -157,6 +158,15 @@ def _audio(path: Path) -> Path:
     samples = np.zeros((44_100, 2), dtype=np.float32)
     sf.write(path, samples, 44_100, subtype="PCM_16")
     return path
+
+
+def _close_window(window: SeparationBenchmarkReviewWindow) -> None:
+    window.close()
+    deadline = time.monotonic() + 2.0
+    while window.waveform._is_loading and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.005)
+    QApplication.processEvents()
 
 
 if __name__ == "__main__":

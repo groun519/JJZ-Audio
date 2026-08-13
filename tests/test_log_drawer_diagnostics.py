@@ -33,6 +33,17 @@ class LogDrawerDiagnosticsTests(unittest.TestCase):
             self.assertIn("CUDA_OUT_OF_MEMORY", drawer.activity_detail.toPlainText())
             drawer.close()
 
+    def test_header_can_return_to_processing_queue(self) -> None:
+        drawer = LogDrawer(ProcessingQueue())
+        requests: list[bool] = []
+        drawer.queue_requested.connect(lambda: requests.append(True))
+
+        drawer.queue_button.click()
+
+        self.assertEqual(requests, [True])
+        self.assertTrue(drawer.queue_button.toolTip())
+        drawer.close()
+
 
 if __name__ == "__main__":
     unittest.main()

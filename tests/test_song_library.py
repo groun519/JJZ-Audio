@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.output_catalog import OutputSoundSet
 from jang_app.services.song_library import SongItem, SongLibrary, sort_song_items
@@ -141,6 +142,52 @@ class SongLibraryTests(unittest.TestCase):
             self.assertEqual(versions[0].job_dir, job_dir.resolve())
             self.assertEqual(versions[0].active_converted_path, versions[0].converted_vocal_paths[0])
 
+    def test_scanned_output_sound_set_is_reused_without_reloading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"source")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            song = library.add_paths([source])[0]
+            sound_set = _sound_set(project, source.stem)
+
+            library.add_output_sets([sound_set])
+
+            self.assertEqual(library.items()[0].output_job_dir, sound_set.job_dir.resolve())
+            with patch(
+                "jang_app.services.song_library.load_output_sound_set",
+                side_effect=AssertionError("output sound set should come from cache"),
+            ):
+                sound_sets = library.output_sound_sets()
+
+            self.assertEqual(len(sound_sets), 1)
+            self.assertEqual(sound_sets[0].job_dir, sound_set.job_dir.resolve())
+
+    def test_vocal_versions_reuse_cached_sound_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"source")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            song = library.add_paths([source])[0]
+            output_root = library.vocal_separation_root(song.id)
+            job_dir = output_root / "htdemucs" / source.stem
+            job_dir.mkdir(parents=True)
+            (job_dir / "vocals.wav").write_bytes(b"vocals")
+            (job_dir / "no_vocals.wav").write_bytes(b"instrumental")
+            library.register_output(song.id, job_dir, "htdemucs")
+
+            with patch(
+                "jang_app.services.song_library.load_output_sound_set",
+                side_effect=AssertionError("vocal version should reuse cached sound set"),
+            ):
+                versions = library.vocal_versions(song.id)
+
+            self.assertEqual(len(versions), 1)
+            self.assertEqual(versions[0].job_dir, job_dir.resolve())
+
     def test_selecting_output_version_updates_song_active_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)
@@ -254,6 +301,24 @@ class SongLibraryTests(unittest.TestCase):
                 [OutputSoundSet("Version", job_dir, job_dir / "vocals.wav", job_dir / "no_vocals.wav", (first, second))]
             )
             self.assertEqual(reloaded.vocal_versions(song.id), ())
+
+    def test_detaching_output_clears_cached_sound_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"source")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            song = library.add_paths([source])[0]
+            job_dir = project / "output"
+            job_dir.mkdir()
+            (job_dir / "vocals.wav").write_bytes(b"vocals")
+            (job_dir / "no_vocals.wav").write_bytes(b"instrumental")
+            library.register_output(song.id, job_dir, "Version")
+
+            library.detach_output(job_dir)
+
+            self.assertNotIn(job_dir.resolve(), library._output_sound_sets_by_job_dir)
 
 
 def _sound_set(project: Path, name: str) -> OutputSoundSet:

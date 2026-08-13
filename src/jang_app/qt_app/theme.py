@@ -1153,6 +1153,34 @@ def _stylesheet(
             font-weight: 900;
         }}
 
+        QLabel#TrainingActivityText[state="quiet"] {{
+            color: {muted};
+        }}
+
+        QLabel#TrainingActivityText[state="stale"] {{
+            color: {warning_text};
+        }}
+
+        QFrame#TrainingActivityCard {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QLabel#TrainingActivityDetail {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QLabel#TrainingProgressHeading {{
+            color: {text};
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
         QLabel#TrainingProgressText, QLabel#TrainingRuntimeText {{
             color: {muted};
             font-size: 10px;
@@ -1471,7 +1499,7 @@ def _stylesheet(
             max-height: 34px;
         }}
 
-        QProgressBar#TrainingProgress {{
+        QProgressBar#TrainingProgress, QProgressBar#TrainingStageProgress {{
             min-height: 8px;
             max-height: 8px;
             border: 0;
@@ -1480,7 +1508,7 @@ def _stylesheet(
             color: transparent;
         }}
 
-        QProgressBar#TrainingProgress::chunk {{
+        QProgressBar#TrainingProgress::chunk, QProgressBar#TrainingStageProgress::chunk {{
             background: {accent};
             border-radius: 4px;
         }}
@@ -3635,6 +3663,12 @@ def _stylesheet(
             border-color: {border};
         }}
 
+        QPushButton#GoogleAccountButton::menu-indicator {{
+            image: none;
+            width: 0;
+            height: 0;
+        }}
+
         QPushButton#TitleBarLanguageButton:hover,
         QPushButton#TitleBarLanguageButton[pointerState="hover"] {{
             background: {hover};
@@ -3681,6 +3715,55 @@ def _stylesheet(
             height: 7px;
             border-radius: 3px;
             background: {accent};
+        }}
+
+        QFrame#GoogleStorageSummary {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLabel#GoogleStorageIdentity {{
+            color: {text};
+            font-weight: 800;
+        }}
+
+        QLabel#GoogleStorageEmail,
+        QLabel#GoogleStorageDetail {{
+            color: {muted};
+            font-size: 11px;
+        }}
+
+        QLabel#GoogleStorageDetail[storageState="warning"] {{
+            color: {warning_text};
+        }}
+
+        QLabel#GoogleStorageDetail[storageState="danger"] {{
+            color: {danger_text};
+        }}
+
+        QProgressBar#GoogleStorageBar {{
+            min-height: 7px;
+            max-height: 7px;
+            border: 0;
+            border-radius: 3px;
+            background: {raised};
+        }}
+
+        QProgressBar#GoogleStorageBar::chunk {{
+            border-radius: 3px;
+            background: {success_text};
+        }}
+
+        QProgressBar#GoogleStorageBar[storageState="warning"]::chunk {{
+            background: {warning_text};
+        }}
+
+        QProgressBar#GoogleStorageBar[storageState="danger"]::chunk {{
+            background: {danger_text};
+        }}
+
+        QProgressBar#GoogleStorageBar[storageState="unknown"]::chunk {{
+            background: {faint};
         }}
 
         QPushButton#WindowControlButton, QPushButton#WindowCloseButton {{

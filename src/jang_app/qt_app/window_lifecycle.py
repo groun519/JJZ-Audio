@@ -117,6 +117,11 @@ def install_window_lifecycle_guard(application: QApplication) -> WindowLifecycle
     return guard
 
 
+def allow_top_level_window(widget: QWidget) -> None:
+    """Mark an intentional non-dialog window as safe for the lifecycle guard."""
+    widget.setProperty(_EXPLICIT_WINDOW_PROPERTY, True)
+
+
 def _window_description(widget: QWidget) -> str:
     return (
         f"class={type(widget).__name__} "

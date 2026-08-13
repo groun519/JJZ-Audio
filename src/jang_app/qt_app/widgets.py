@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import atexit
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
@@ -31,10 +33,19 @@ from PySide6.QtWidgets import (
 )
 
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
-from jang_app.services.waveform import build_waveform_peaks
+from jang_app.services.i18n import tr
+from jang_app.services.waveform import build_waveform_peaks, waveform_cache_key
 
 
 COMPACT_ICON_BUTTON_SIZE = 26
+_WAVEFORM_VIEW_EXECUTOR = ThreadPoolExecutor(
+    max_workers=3,
+    thread_name_prefix="workspace-waveform",
+)
+_WAVEFORM_VIEW_CACHE: dict[tuple[str, int, int, int], list[float]] = {}
+atexit.register(
+    lambda: _WAVEFORM_VIEW_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+)
 
 
 class TransparentContainer(QWidget):
@@ -806,6 +817,7 @@ class TaskActionWidget(QFrame):
 
 class WaveformView(QWidget):
     seek_requested = Signal(float)
+    _peaks_ready = Signal(object, object, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -815,9 +827,12 @@ class WaveformView(QWidget):
         self._muted = False
         self._theme_mode = "white"
         self._error = ""
+        self._is_loading = False
+        self._cache_key: tuple[str, int, int, int] | None = None
         self.setMinimumHeight(66)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._peaks_ready.connect(self._apply_loaded_peaks)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
@@ -827,17 +842,64 @@ class WaveformView(QWidget):
         self._path = path
         self._playhead_ratio = 0.0
         self._error = ""
+        self._peaks = []
+        self._is_loading = False
+        self._cache_key = None
         if path is None:
-            self._peaks = []
             self.update()
             return
 
         try:
             point_count = max(360, self.width() - 36)
-            self._peaks = build_waveform_peaks(path, point_count)
+            cache_key = waveform_cache_key(path, point_count)
         except Exception as exc:
-            self._peaks = []
             self._error = str(exc)
+            self.update()
+            return
+
+        self._cache_key = cache_key
+        cached = _WAVEFORM_VIEW_CACHE.get(cache_key)
+        if cached is not None:
+            self._peaks = cached
+            self.update()
+            return
+
+        self._is_loading = True
+        future = _WAVEFORM_VIEW_EXECUTOR.submit(
+            build_waveform_peaks,
+            path,
+            point_count,
+        )
+        future.add_done_callback(
+            lambda completed, key=cache_key: self._emit_loaded_peaks(key, completed)
+        )
+        self.update()
+
+    def _emit_loaded_peaks(self, cache_key, completed) -> None:
+        error = ""
+        try:
+            peaks = completed.result()
+        except Exception as exc:
+            peaks = []
+            error = str(exc)
+        try:
+            self._peaks_ready.emit(cache_key, peaks, error)
+        except RuntimeError:
+            pass
+
+    def _apply_loaded_peaks(
+        self,
+        cache_key: tuple[str, int, int, int],
+        peaks: list[float],
+        error: str,
+    ) -> None:
+        if cache_key != self._cache_key:
+            return
+        if peaks:
+            _WAVEFORM_VIEW_CACHE[cache_key] = peaks
+        self._peaks = peaks
+        self._error = error
+        self._is_loading = False
         self.update()
 
     def set_muted(self, is_muted: bool) -> None:
@@ -865,7 +927,10 @@ class WaveformView(QWidget):
 
         if not self._peaks:
             painter.setPen(QPen(palette["muted"], 1))
-            painter.drawText(content, Qt.AlignmentFlag.AlignCenter, self._error or "No waveform loaded")
+            placeholder = self._error or (
+                tr("Loading waveform...") if self._is_loading else tr("No waveform loaded")
+            )
+            painter.drawText(content, Qt.AlignmentFlag.AlignCenter, placeholder)
             return
 
         painter.setPen(QPen(palette["wave"], 1))

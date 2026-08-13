@@ -103,6 +103,40 @@ class WorkOutputSessionTests(unittest.TestCase):
         self.assertEqual(session.selected_index_for_job(maximum.job_dir), 1)
         self.assertEqual(session.selected_index_for_job(Path("output/missing")), -1)
 
+    def test_load_sound_set_reuses_cached_catalog_entry(self) -> None:
+        standard = _sound_set("standard")
+        session = WorkOutputSession(sound_sets=(standard,))
+        loaded: list[Path] = []
+
+        def loader(job_dir: Path, _output_root: Path) -> OutputSoundSet:
+            loaded.append(job_dir)
+            return _sound_set("reloaded")
+
+        result = session.load_sound_set(
+            standard.job_dir,
+            Path("output"),
+            loader=loader,
+        )
+
+        self.assertIs(result, standard)
+        self.assertEqual(loaded, [])
+
+    def test_load_sound_set_caches_loader_result(self) -> None:
+        session = WorkOutputSession()
+        loaded: list[Path] = []
+        fresh = _sound_set("fresh")
+
+        def loader(job_dir: Path, _output_root: Path) -> OutputSoundSet:
+            loaded.append(job_dir)
+            return fresh
+
+        first = session.load_sound_set(fresh.job_dir, Path("output"), loader=loader)
+        second = session.load_sound_set(fresh.job_dir, Path("output"), loader=loader)
+
+        self.assertIs(first, fresh)
+        self.assertIs(second, fresh)
+        self.assertEqual(loaded, [fresh.job_dir])
+
 
 if __name__ == "__main__":
     unittest.main()

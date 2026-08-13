@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
 from PySide6.QtGui import QActionGroup, QIcon
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -200,6 +200,7 @@ from jang_app.services.workspace_playback import (
     scope_track_ids,
 )
 from jang_app.services.work_scope import WorkTaskScope
+from jang_app.services.work_convert import WorkConvertSession
 from jang_app.services.work_output import WorkOutputSession
 from jang_app.services.work_song import (
     WorkSongSession,
@@ -216,9 +217,7 @@ PAGE_SEPARATION = 2
 PAGE_CONVERSION = 3
 PAGE_STUDIO = 4
 PAGE_EXPORT = 5
-WORK_SONG_REQUIRED_PAGES = frozenset(
-    (PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO)
-)
+WORK_SONG_REQUIRED_PAGES = frozenset((PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO))
 GOOGLE_DRIVE_FEATURE = "google_drive_sharing"
 
 
@@ -231,6 +230,7 @@ class MainWindow(QMainWindow):
         self.library = SongLibrary()
         self.work_song_store = work_song_store or WorkSongStore()
         self.work_song_session = WorkSongSession(self.work_song_store)
+        self.work_convert_session = WorkConvertSession()
         self.work_output_session = WorkOutputSession()
         self._work_song_ready = self.work_song_session.ready
         self._work_song_load_worker: TaskWorker | None = None
@@ -320,6 +320,7 @@ class MainWindow(QMainWindow):
             self.google_drive.disconnect_account
         )
         self.google_drive.account_changed.connect(self.google_account_button.set_account)
+        self.google_drive.quota_changed.connect(self.google_account_button.set_quota)
         self.google_drive.account_busy_changed.connect(self.google_account_button.set_running)
         self.google_drive.account_error.connect(self.google_account_button.set_error)
         self.google_drive.account_unavailable.connect(
@@ -335,6 +336,9 @@ class MainWindow(QMainWindow):
         self.google_drive.share_deleted.connect(self._on_drive_share_deleted)
         self.model_workspace_page.set_share_status_provider(
             self.google_drive.is_model_shared
+        )
+        self.model_workspace_page.set_work_share_status_provider(
+            self.google_drive.is_model_work_shared
         )
         self.export_page.set_share_status_provider(
             self.google_drive.is_export_shared
@@ -480,6 +484,10 @@ class MainWindow(QMainWindow):
         if self.isVisible() and not self.isMaximized():
             apply_window_corner_style(self, rounded=True)
 
+    def moveEvent(self, event) -> None:  # noqa: N802
+        super().moveEvent(event)
+        self._position_processing_queue()
+
     def _toggle_window_maximized(self) -> None:
         if self.isMaximized():
             self.showNormal()
@@ -536,6 +544,7 @@ class MainWindow(QMainWindow):
 
         self.log_drawer = LogDrawer(self.processing_queue, content_widget)
         self.log_drawer.close_requested.connect(self._close_log_drawer)
+        self.log_drawer.queue_requested.connect(self._open_processing_queue_drawer)
         self.log_drawer.open_location_requested.connect(self._open_log_location)
         QTimer.singleShot(0, self._position_update_status)
         QTimer.singleShot(0, self._position_processing_queue)
@@ -992,6 +1001,12 @@ class MainWindow(QMainWindow):
         self.model_workspace_page.delete_share_requested.connect(
             self._delete_model_drive_share
         )
+        self.model_workspace_page.work_share_requested.connect(
+            self._open_model_work_drive_share
+        )
+        self.model_workspace_page.delete_work_share_requested.connect(
+            self._delete_model_work_drive_share
+        )
         self.model_workspace_page.drive_import_requested.connect(
             self._start_drive_model_import
         )
@@ -1048,6 +1063,9 @@ class MainWindow(QMainWindow):
             title_key="Conversion Input",
         )
         self.conversion_input_pool.setProperty("poolContext", "conversionInput")
+        self.conversion_input_pool.selection_changed.connect(
+            self._on_conversion_input_version_changed
+        )
         self.conversion_input_pool.setMinimumHeight(190)
         self.conversion_input_pool.setMaximumHeight(300)
 
@@ -1370,17 +1388,17 @@ class MainWindow(QMainWindow):
         parent = self._content_widget
         player_top = parent.height() - 16
         drawer_open = hasattr(self, "log_drawer") and self.log_drawer.isVisible()
-        queue_open = self._processing_queue_drawer_open and panel.has_tasks()
-        if self._processing_queue_drawer_open and not queue_open:
-            self._processing_queue_drawer_open = False
-            self.processing_queue_button.setChecked(False)
-            self.processing_queue_button.apply_language()
+        queue_open = self._processing_queue_drawer_open
 
         if drawer_open:
             drawer = self.log_drawer
             top_position = 16
             drawer.setFixedHeight(max(260, player_top - top_position - 10))
-            drawer.move(max(16, parent.width() - drawer.width() - 16), top_position)
+            self._move_content_overlay(
+                drawer,
+                max(16, parent.width() - drawer.width() - 16),
+                top_position,
+            )
             drawer.raise_()
             panel.hide()
         elif queue_open:
@@ -1388,7 +1406,7 @@ class MainWindow(QMainWindow):
             top_position = 16
             panel.setFixedHeight(max(260, player_top - top_position - 10))
             x_position = max(16, parent.width() - panel.width() - 16)
-            panel.move(x_position, top_position)
+            self._move_content_overlay(panel, x_position, top_position)
             panel.raise_()
         else:
             panel.hide()
@@ -1406,6 +1424,12 @@ class MainWindow(QMainWindow):
                 toast_y = max(16, player_top - toast.height() - 10)
             toast.move(toast_x, toast_y)
             toast.raise_()
+
+    def _move_content_overlay(self, widget: QWidget, x: int, y: int) -> None:
+        position = QPoint(x, y)
+        if widget.isWindow():
+            position = self._content_widget.mapToGlobal(position)
+        widget.move(position)
 
     def _position_size_grip(self) -> None:
         if not hasattr(self, "size_grip"):
@@ -1443,10 +1467,6 @@ class MainWindow(QMainWindow):
             self._open_processing_queue_drawer()
 
     def _open_processing_queue_drawer(self) -> None:
-        if not self.processing_queue_panel.has_tasks():
-            self.processing_queue_button.setChecked(False)
-            self.processing_queue_button.apply_language()
-            return
         self._processing_queue_drawer_open = True
         self.log_drawer.hide()
         self.processing_queue_button.setChecked(True)
@@ -2505,7 +2525,7 @@ class MainWindow(QMainWindow):
         route = session.navigation_route(
             song_id,
             self._song_items_by_id,
-            load_in_progress=getattr(self, "_work_song_load_worker", None) is not None,
+            load_in_progress=MainWindow._work_song_change_in_progress(self),
         )
         if route.action == "sync_selector":
             self._sync_navigation_work_song_selector()
@@ -2611,16 +2631,18 @@ class MainWindow(QMainWindow):
             self.vocal_results_panel.set_song_title(title)
 
     def _set_current_song(self, song: SongItem | None, *, persist: bool = True) -> None:
+        session = MainWindow._work_output_session(self)
         sound_set = (
-            load_output_sound_set(song.output_job_dir, self.settings.output_root)
+            session.load_sound_set(song.output_job_dir, self.settings.output_root)
             if song is not None and song.output_job_dir is not None
             else None
         )
         self._apply_loaded_work_song(song, sound_set, persist=persist)
 
     def _set_output_work_song(self, song: SongItem, *, persist: bool = True) -> bool:
+        session = MainWindow._work_output_session(self)
         sound_set = (
-            load_output_sound_set(song.output_job_dir, self.settings.output_root)
+            session.load_sound_set(song.output_job_dir, self.settings.output_root)
             if song.output_job_dir is not None
             else None
         )
@@ -2642,20 +2664,44 @@ class MainWindow(QMainWindow):
         return True
 
     def _assign_work_item(self, item: SongItem | None, *, persist: bool = True) -> None:
+        for step in self._assign_work_item_steps(item, persist=persist):
+            step()
+
+    def _assign_work_item_steps(
+        self,
+        item: SongItem | None,
+        *,
+        persist: bool = True,
+    ) -> tuple[Callable[[], None], ...]:
         session = MainWindow._work_song_session(self)
-        try:
-            session.assign(item, persist=persist)
-        except OSError as exc:
-            _set_optional_label(self.output_status_label, f"Work song failed: {_last_error_line(str(exc))}")
-        MainWindow._sync_work_song_session_state(self, session)
-        self.separation_action.set_progress(0)
-        self.separation_action.set_status("")
-        self._sync_result_song_titles()
-        if hasattr(self, "song_list"):
-            self._sync_work_song_rows()
-        self._sync_work_song_navigation()
-        self._sync_work_song_capabilities()
-        self._refresh_video_source()
+
+        def assign_session() -> None:
+            try:
+                session.assign(item, persist=persist)
+            except OSError as exc:
+                _set_optional_label(
+                    self.output_status_label,
+                    f"Work song failed: {_last_error_line(str(exc))}",
+                )
+            MainWindow._sync_work_song_session_state(self, session)
+
+        def reset_result_state() -> None:
+            self.separation_action.set_progress(0)
+            self.separation_action.set_status("")
+            self._sync_result_song_titles()
+
+        def sync_library_row() -> None:
+            if hasattr(self, "song_list"):
+                self._sync_work_song_rows()
+
+        return (
+            assign_session,
+            reset_result_state,
+            sync_library_row,
+            self._sync_work_song_navigation,
+            self._sync_work_song_capabilities,
+            self._refresh_video_source,
+        )
 
     def _sync_work_song_navigation(self) -> None:
         if not hasattr(self, "primary_navigation"):
@@ -2788,7 +2834,7 @@ class MainWindow(QMainWindow):
         route = MainWindow._work_song_session(self).toggle_route(
             song_id,
             self._song_items_by_id,
-            load_in_progress=self._work_song_load_worker is not None,
+            load_in_progress=MainWindow._work_song_change_in_progress(self),
         )
         if route.action == "ignore":
             return
@@ -2806,6 +2852,10 @@ class MainWindow(QMainWindow):
         if song.output_job_dir is None:
             self._select_work_song(song)
             return
+        cached = MainWindow._work_output_session(self).sound_set_for_job(song.output_job_dir)
+        if cached is not None:
+            self._apply_loaded_work_song(song, cached)
+            return
         self._work_song_loading_id = song.id
         self._set_library_work_song_loading(song.id, True)
         worker = TaskWorker(
@@ -2819,14 +2869,14 @@ class MainWindow(QMainWindow):
 
         def complete(result: object) -> None:
             current = self._song_items_by_id.get(song.id)
-            try:
-                if current is not None:
-                    self._apply_loaded_work_song(
-                        current,
-                        result if isinstance(result, OutputSoundSet) else None,
-                    )
-            finally:
+            if current is None:
                 self._finish_library_work_song_load(song.id)
+                return
+            self._apply_loaded_work_song_deferred(
+                current,
+                result if isinstance(result, OutputSoundSet) else None,
+                completed=lambda: self._finish_library_work_song_load(song.id),
+            )
 
         def failed(error: str) -> None:
             self._logger.warning("Work-song load failed: %s", _last_error_line(error))
@@ -2848,6 +2898,31 @@ class MainWindow(QMainWindow):
         worker.failed.connect(failed)
         worker.finished.connect(cleanup)
         worker.start()
+
+    def _work_song_change_in_progress(self) -> bool:
+        return bool(
+            getattr(self, "_work_song_load_worker", None) is not None
+            or getattr(self, "_work_song_loading_id", "")
+        )
+
+    def _apply_loaded_work_song_deferred(
+        self,
+        song: SongItem,
+        sound_set: OutputSoundSet | None,
+        *,
+        completed: Callable[[], None],
+    ) -> None:
+        def apply_output() -> None:
+            if song.output_job_dir is None or sound_set is None:
+                self._apply_output_set(None, deferred=True, completed=completed)
+                return
+            self._select_output_set(sound_set.job_dir)
+            self._apply_output_set(sound_set, deferred=True, completed=completed)
+
+        self._run_ui_steps(
+            self._assign_work_item_steps(song),
+            completed=apply_output,
+        )
 
     def _finish_library_work_song_load(self, song_id: str) -> None:
         self._set_library_work_song_loading(song_id, False)
@@ -2939,7 +3014,10 @@ class MainWindow(QMainWindow):
         if song.output_job_dir is None:
             raise AudioPlaybackError("Output item has no job folder.")
 
-        sound_set = load_output_sound_set(song.output_job_dir, self.settings.output_root)
+        sound_set = MainWindow._work_output_session(self).load_sound_set(
+            song.output_job_dir,
+            self.settings.output_root,
+        )
         if sound_set is None:
             raise AudioPlaybackError("Could not load the selected output set.")
         return [sound_set.vocals_path, sound_set.instrumental_path]
@@ -3127,22 +3205,31 @@ class MainWindow(QMainWindow):
         if song is not None:
             self._song_items_by_id[song.id] = song
             self._assign_work_item(song)
-        sound_set = session.sound_set_for_job(job_dir)
-        if sound_set is None:
-            sound_set = load_output_sound_set(job_dir, self.settings.output_root)
+        sound_set = session.load_sound_set(job_dir, self.settings.output_root)
         self._apply_output_set(sound_set)
 
     def _activate_vocal_converted_version(self, path: Path | None) -> None:
         if path is None:
             return
-        owner = self.conversion_result_browser.version_for_path(path)
-        job_dir = owner.job_dir if owner is not None else (
-            self.current_output_set.job_dir if self.current_output_set is not None else None
+        convert_session = MainWindow._work_convert_session(self)
+        owner = (
+            convert_session.version_for_converted_path(path)
+            or self.conversion_result_browser.version_for_path(path)
+        )
+        job_dir = (
+            owner.job_dir
+            if owner is not None
+            else convert_session.job_dir_for_converted_path(
+                path,
+                fallback_job_dir=MainWindow._work_output_session(self).job_dir,
+            )
         )
         if job_dir is None:
             return
+        convert_session.remember_converted_owner(owner, path)
         try:
-            self.vocal_project_store.set_active_take(job_dir, path)
+            project = self.vocal_project_store.set_active_take(job_dir, path)
+            convert_session.remember_project(job_dir, project)
         except Exception as exc:
             self._logger.warning("Could not persist active vocal take: %s", exc)
         song = self.library.activate_converted_output(job_dir, path)
@@ -3150,7 +3237,7 @@ class MainWindow(QMainWindow):
             self._song_items_by_id[song.id] = song
         self.converted_track.select_path(path)
         self.conversion_result_browser.select_converted(path)
-        self._apply_conversion_result_context(owner, selected_converted_path=path)
+        MainWindow._sync_conversion_context_from_session(self)
 
     def _activate_separation_result(self, job_dir: Path) -> None:
         session = MainWindow._work_output_session(self)
@@ -3160,9 +3247,7 @@ class MainWindow(QMainWindow):
         self._song_items_by_id[song.id] = song
         if self.current_work_item is not None and self.current_work_item.id == song.id:
             self._assign_work_item(song, persist=False)
-        sound_set = session.sound_set_for_job(job_dir)
-        if sound_set is None:
-            sound_set = load_output_sound_set(job_dir, self.settings.output_root)
+        sound_set = session.load_sound_set(job_dir, self.settings.output_root)
         if sound_set is not None:
             self._apply_output_set(sound_set)
 
@@ -3179,10 +3264,14 @@ class MainWindow(QMainWindow):
             self.rvc_action.set_status(f"Open failed: {_last_error_line(str(exc))}")
 
     def _rename_vocal_take(self, path: Path) -> None:
-        if self.current_output_set is None:
-            return
         take = self.vocal_results_panel.current_take()
         if take is None or take.output_path.expanduser().resolve() != path.expanduser().resolve():
+            return
+        job_dir = MainWindow._work_convert_session(self).job_dir_for_converted_path(
+            path,
+            fallback_job_dir=MainWindow._work_output_session(self).job_dir,
+        )
+        if job_dir is None:
             return
         label, accepted = TextInputDialog.get_text(
             self,
@@ -3197,16 +3286,21 @@ class MainWindow(QMainWindow):
         if not accepted or label == take.label:
             return
         try:
-            self.vocal_project_store.rename_take(self.current_output_set.job_dir, path, label)
+            project = self.vocal_project_store.rename_take(job_dir, path, label)
+            MainWindow._work_convert_session(self).remember_project(job_dir, project)
             self._refresh_vocal_project_panel()
         except Exception as exc:
             self.rvc_action.set_status(f"Rename failed: {_last_error_line(str(exc))}")
 
     def _remove_vocal_take(self, path: Path) -> None:
-        if self.current_output_set is None:
-            return
         take = self.vocal_results_panel.current_take()
         label = take.label if take is not None else path.stem
+        job_dir = MainWindow._work_convert_session(self).job_dir_for_converted_path(
+            path,
+            fallback_job_dir=MainWindow._work_output_session(self).job_dir,
+        )
+        if job_dir is None:
+            return
         confirmed = ConfirmationDialog.confirm(
             self,
             tr("Remove Vocal Result"),
@@ -3218,14 +3312,18 @@ class MainWindow(QMainWindow):
         )
         if not confirmed:
             return
-        job_dir = self.current_output_set.job_dir
         try:
             project = self.vocal_project_store.remove_take(job_dir, path)
+            MainWindow._work_convert_session(self).remember_project(job_dir, project)
             active = _active_vocal_take_path(project)
             song = self.library.activate_converted_output(job_dir, active)
             if song is not None:
                 self._song_items_by_id[song.id] = song
-            refreshed = load_output_sound_set(job_dir, self.settings.output_root)
+            refreshed = MainWindow._work_output_session(self).load_sound_set(
+                job_dir,
+                self.settings.output_root,
+                reload=True,
+            )
             self._apply_output_set(refreshed)
         except Exception as exc:
             self.rvc_action.set_status(f"Remove failed: {_last_error_line(str(exc))}")
@@ -3255,51 +3353,123 @@ class MainWindow(QMainWindow):
         self._navigate_to_page(PAGE_CONVERSION)
         self._start_rvc_conversion()
 
-    def _apply_output_set(self, sound_set: OutputSoundSet | None) -> None:
-        self.studio_session_autosave.flush()
-        session = MainWindow._work_output_session(self)
-        session.assign(sound_set)
-        MainWindow._sync_work_output_session_state(self, session)
-        linked_item = session.linked_output_item(
-            self._song_items_by_id,
-            current_source_item=self.current_song,
-        )
-        if linked_item is not None and linked_item != self.current_work_item:
-            self._assign_work_item(linked_item)
-        if sound_set is None:
+    def _apply_output_set(
+        self,
+        sound_set: OutputSoundSet | None,
+        *,
+        deferred: bool = False,
+        completed: Callable[[], None] | None = None,
+    ) -> None:
+        state: dict[str, object] = {}
+
+        def assign_session() -> None:
+            self.studio_session_autosave.flush()
+            session = MainWindow._work_output_session(self)
+            session.assign(sound_set)
+            MainWindow._sync_work_output_session_state(self, session)
+            linked_item = session.linked_output_item(
+                self._song_items_by_id,
+                current_source_item=self.current_song,
+            )
+            if linked_item is not None and linked_item != self.current_work_item:
+                self._assign_work_item(linked_item)
+
+        def clear_tracks() -> None:
             self.vocal_track.set_single_path(None)
             self.instrumental_track.set_single_path(None)
             self.converted_track.set_options([])
             if self.page_stack.currentIndex() == PAGE_STUDIO:
                 self._apply_studio_session(StudioSession())
+
+        def clear_result_pools() -> None:
             self.separation_stem_pool.set_versions((), None)
             self._apply_separation_stem_selection(None, None)
             versions = self._current_vocal_versions()
             self._refresh_conversion_input_choices(versions, None)
+
+        def set_tracks() -> None:
+            if sound_set is None:
+                return
+            self.vocal_track.set_single_path(sound_set.vocals_path)
+            self.instrumental_track.set_single_path(sound_set.instrumental_path)
+            selected_version = self._current_vocal_result(sound_set)
+            state["selected_version"] = selected_version
+            selected_converted = (
+                selected_version.active_converted_path
+                if isinstance(selected_version, SongVocalVersion)
+                else None
+            )
+            self.converted_track.set_options(
+                list(sound_set.converted_vocal_paths),
+                selected_converted,
+            )
+            if self.page_stack.currentIndex() == PAGE_STUDIO:
+                self._restore_current_studio_session()
+
+        def refresh_separation_pool() -> None:
+            selected_version = state.get("selected_version")
+            self._refresh_separation_versions(
+                selected_version if isinstance(selected_version, SongVocalVersion) else None
+            )
+
+        def refresh_conversion_pool() -> None:
+            selected_version = state.get("selected_version")
+            versions = self._current_vocal_versions()
+            selected_job_dir = (
+                selected_version.job_dir
+                if isinstance(selected_version, SongVocalVersion)
+                else None
+            )
+            self._refresh_conversion_input_choices(versions, selected_job_dir)
+
+        def finalize_output() -> None:
             self.rvc_action.set_status("")
             _set_optional_label(self.output_status_label, "")
             self._refresh_output_playback_queue()
             self._sync_work_song_capabilities()
             self._refresh_export_page()
-            return
 
-        self.vocal_track.set_single_path(sound_set.vocals_path)
-        self.instrumental_track.set_single_path(sound_set.instrumental_path)
-        selected_version = self._current_vocal_result(sound_set)
-        selected_converted = selected_version.active_converted_path if selected_version is not None else None
-        self.converted_track.set_options(list(sound_set.converted_vocal_paths), selected_converted)
-        if self.page_stack.currentIndex() == PAGE_STUDIO:
-            self._restore_current_studio_session()
-        self._refresh_separation_versions(selected_version)
-        versions = self._current_vocal_versions()
-        selected_job_dir = selected_version.job_dir if selected_version is not None else None
-        self._refresh_conversion_input_choices(versions, selected_job_dir)
-        self.rvc_action.set_progress(0)
-        self.rvc_action.set_status("")
-        _set_optional_label(self.output_status_label, "")
-        self._refresh_output_playback_queue()
-        self._sync_work_song_capabilities()
-        self._refresh_export_page()
+        steps: tuple[Callable[[], None], ...]
+        if sound_set is None:
+            steps = (assign_session, clear_tracks, clear_result_pools, finalize_output)
+        else:
+            steps = (
+                assign_session,
+                set_tracks,
+                refresh_separation_pool,
+                refresh_conversion_pool,
+                lambda: self.rvc_action.set_progress(0),
+                finalize_output,
+            )
+        if deferred:
+            self._run_ui_steps(steps, completed=completed)
+            return
+        for step in steps:
+            step()
+        if completed is not None:
+            completed()
+
+    def _run_ui_steps(
+        self,
+        steps: tuple[Callable[[], None], ...],
+        *,
+        completed: Callable[[], None] | None = None,
+    ) -> None:
+        def run(index: int) -> None:
+            if index >= len(steps):
+                if completed is not None:
+                    completed()
+                return
+            try:
+                steps[index]()
+            except Exception:
+                self._logger.exception("Deferred UI update failed at step %s", index)
+                if completed is not None:
+                    completed()
+                return
+            QTimer.singleShot(1, lambda: run(index + 1))
+
+        QTimer.singleShot(0, lambda: run(0))
 
     def _current_vocal_result(self, sound_set: OutputSoundSet) -> SongVocalVersion | None:
         item = self.current_song or self.current_work_item
@@ -3380,22 +3550,47 @@ class MainWindow(QMainWindow):
         selected_job_dir: Path | None,
         preferred_converted_path: Path | None = None,
     ) -> None:
-        selected = self.conversion_input_pool.set_versions(
+        convert_session = MainWindow._work_convert_session(self)
+        context = convert_session.refresh(
             versions,
-            selected_job_dir,
-            preserve_selection=True,
+            current_output_job_dir=selected_job_dir,
+            preferred_converted_path=preferred_converted_path,
         )
-        projects = self._conversion_projects(versions)
+        self.conversion_input_pool.set_versions(
+            versions,
+            context.input_version.job_dir if context.input_version is not None else None,
+            preserve_selection=False,
+        )
+        projects = convert_session.projects(
+            self.vocal_project_store.load,
+            on_error=self._on_conversion_project_load_failed,
+        )
         self.conversion_result_browser.set_versions(
             versions,
             projects=projects,
-            preferred_path=preferred_converted_path,
+            preferred_path=context.selected_converted_path,
         )
-        selected_converted = self.conversion_result_browser.selected_path()
-        result_owner = self.conversion_result_browser.version_for_path(selected_converted)
+        convert_session.select_converted_path(
+            self.conversion_result_browser.selected_path()
+        )
+        MainWindow._sync_conversion_context_from_session(self)
+
+    def _on_conversion_input_version_changed(
+        self,
+        version: SongVocalVersion | None,
+    ) -> None:
+        MainWindow._work_convert_session(self).select_input_job_dir(
+            version.job_dir if version is not None else None,
+            clear_selected_converted=True,
+        )
+        self.conversion_result_browser.select_converted(None)
+        MainWindow._sync_conversion_context_from_session(self)
+
+    def _sync_conversion_context_from_session(self) -> None:
+        context = MainWindow._work_convert_session(self).context()
         self._apply_conversion_result_context(
-            result_owner or selected,
-            selected_converted_path=selected_converted,
+            context.result_version,
+            selected_converted_path=context.selected_converted_path,
         )
 
     def _apply_conversion_result_context(
@@ -3420,26 +3615,16 @@ class MainWindow(QMainWindow):
         if self.page_stack.currentIndex() == PAGE_CONVERSION:
             self._refresh_output_playback_queue(WorkspacePlaybackScope.CONVERSION)
 
-    def _conversion_projects(
+    def _on_conversion_project_load_failed(
         self,
-        versions: tuple[SongVocalVersion, ...],
-    ) -> dict[Path, VocalProject]:
-        projects: dict[Path, VocalProject] = {}
-        for version in versions:
-            if not version.converted_vocal_paths:
-                continue
-            try:
-                project = self.vocal_project_store.load(version.job_dir)
-            except Exception as exc:
-                self._logger.warning(
-                    "Could not load vocal project %s: %s",
-                    version.job_dir,
-                    exc,
-                )
-                continue
-            if project is not None:
-                projects[version.job_dir] = project
-        return projects
+        job_dir: Path,
+        exc: Exception,
+    ) -> None:
+        self._logger.warning(
+            "Could not load vocal project %s: %s",
+            job_dir,
+            exc,
+        )
 
     def _choose_rvc_root(self, *_args) -> None:
         selected = QFileDialog.getExistingDirectory(self, tr("Select RVC Root"), self.rvc_root_edit.text())
@@ -3463,6 +3648,7 @@ class MainWindow(QMainWindow):
                 root,
                 current_root=self.settings.rvc.root,
                 current_model=self.settings.rvc.voice_model,
+                execution_root=RVC_RUNTIME_DIR,
             )
             self._populate_model_combo(
                 choices,
@@ -3665,10 +3851,16 @@ class MainWindow(QMainWindow):
         )
 
     def _conversion_input_sound_set(self) -> OutputSoundSet | None:
-        version = self.conversion_input_pool.selected_version()
-        if version is None:
+        session = MainWindow._work_convert_session(self)
+        version = session.input_version()
+        job_dir = (
+            version.job_dir
+            if version is not None
+            else session.selected_input_job_dir
+        )
+        if job_dir is None:
             return None
-        return load_output_sound_set(version.job_dir, self.settings.output_root)
+        return load_output_sound_set(job_dir, self.settings.output_root)
 
     def _on_rvc_succeeded(self, scope: WorkTaskScope, job_dir: Path, result: object) -> None:
         output_path = getattr(result, "output_path", None)
@@ -3676,7 +3868,7 @@ class MainWindow(QMainWindow):
         if isinstance(output_path, Path):
             if isinstance(result, RvcConversionResult):
                 try:
-                    self.vocal_project_store.register_take(
+                    project = self.vocal_project_store.register_take(
                         job_dir,
                         output_path,
                         conversion=VocalConversionSettings(
@@ -3688,6 +3880,10 @@ class MainWindow(QMainWindow):
                             f0_method=result.f0_method,
                             inference=result.inference,
                         ),
+                    )
+                    MainWindow._work_convert_session(self).remember_project(
+                        job_dir,
+                        project,
                     )
                 except Exception as exc:
                     self._logger.warning("Could not register vocal take metadata: %s", exc)
@@ -3868,16 +4064,28 @@ class MainWindow(QMainWindow):
     def _on_output_track_source_changed(self) -> None:
         if self.current_output_set is not None:
             path = self.converted_track.current_path()
+            convert_session = MainWindow._work_convert_session(self)
+            job_dir = convert_session.job_dir_for_converted_path(
+                path,
+                fallback_job_dir=self.current_output_set.job_dir,
+            )
+            if job_dir is None:
+                self._refresh_output_playback_queue()
+                return
             try:
-                self.vocal_project_store.set_active_take(self.current_output_set.job_dir, path)
+                project = self.vocal_project_store.set_active_take(job_dir, path)
+                convert_session.remember_project(job_dir, project)
             except Exception as exc:
                 self._logger.warning("Could not persist active vocal take: %s", exc)
-            song = self.library.activate_converted_output(self.current_output_set.job_dir, path)
+            song = self.library.activate_converted_output(job_dir, path)
             if song is not None:
                 self._song_items_by_id[song.id] = song
                 if self.current_work_item is not None and self.current_work_item.id == song.id:
                     self._assign_work_item(song, persist=False)
+            convert_session.select_converted_path(path)
             self.vocal_results_panel.select_converted(path)
+            self.conversion_result_browser.select_converted(path)
+            MainWindow._sync_conversion_context_from_session(self)
         self._refresh_output_playback_queue()
 
     def _restore_current_studio_session(self) -> None:
@@ -4708,11 +4916,12 @@ class MainWindow(QMainWindow):
             video_exports = ()
             export_dir = None
             video_source = VideoSource()
+        output_available = MainWindow._work_output_session(self).output_available(
+            song.output_job_dir,
+            self.settings.output_root,
+        )
         capabilities = build_work_song_capabilities(
-            output_available=(
-                song.output_job_dir is not None
-                and load_output_sound_set(song.output_job_dir, self.settings.output_root) is not None
-            ),
+            output_available=output_available,
             item=song,
         )
         has_local_media = video_source.path is not None and video_source.path.is_file()
@@ -4840,6 +5049,9 @@ class MainWindow(QMainWindow):
     def _open_model_drive_share(self, record: RvcModelRecord) -> None:
         self.google_drive.open_model_share(record)
 
+    def _open_model_work_drive_share(self, record: RvcModelRecord) -> None:
+        self.google_drive.open_model_work_share(record)
+
     def _delete_export_drive_share(self, path: Path) -> None:
         if self._confirm_drive_share_delete(path.name):
             self.google_drive.delete_export_share(path)
@@ -4868,6 +5080,10 @@ class MainWindow(QMainWindow):
         if self._confirm_drive_share_delete(record.title):
             self.google_drive.delete_model_share(record)
 
+    def _delete_model_work_drive_share(self, record: RvcModelRecord) -> None:
+        if self._confirm_drive_share_delete(record.title):
+            self.google_drive.delete_model_work_share(record)
+
     def _confirm_drive_share_delete(self, title: str) -> bool:
         return ConfirmationDialog.confirm(
             self,
@@ -4883,23 +5099,55 @@ class MainWindow(QMainWindow):
         )
 
     def _on_drive_share_started(self, target_id: str) -> None:
-        self.model_workspace_page.set_share_started(target_id)
+        if target_id.startswith("model-work::"):
+            self.model_workspace_page.set_work_share_started(
+                target_id.removeprefix("model-work::")
+            )
+        else:
+            self.model_workspace_page.set_share_started(target_id)
         self.export_page.set_share_started(target_id)
 
     def _on_drive_share_progress(self, target_id: str, progress: int) -> None:
-        self.model_workspace_page.set_share_progress(target_id, progress)
+        if target_id.startswith("model-work::"):
+            self.model_workspace_page.set_work_share_progress(
+                target_id.removeprefix("model-work::"),
+                progress,
+            )
+        else:
+            self.model_workspace_page.set_share_progress(target_id, progress)
         self.export_page.set_share_progress(target_id, progress)
 
     def _on_drive_share_succeeded(self, target_id: str, _link: str) -> None:
-        self.model_workspace_page.set_share_completed(target_id)
+        if target_id.startswith("model-work::"):
+            self.model_workspace_page.set_work_share_completed(
+                target_id.removeprefix("model-work::")
+            )
+        else:
+            self.model_workspace_page.set_share_completed(target_id)
         self.export_page.set_share_completed(target_id)
 
-    def _on_drive_share_failed(self, target_id: str, _error: str) -> None:
-        self.model_workspace_page.set_share_failed(target_id)
+    def _on_drive_share_failed(self, target_id: str, error: str) -> None:
+        is_model_share = any(
+            record.model_id == target_id for record in self.model_workspace.records()
+        )
+        if target_id.startswith("model-work::"):
+            self.model_workspace_page.set_work_share_failed(
+                target_id.removeprefix("model-work::")
+            )
+        else:
+            self.model_workspace_page.set_share_failed(target_id)
         self.export_page.set_share_failed(target_id)
+        if not target_id.startswith("model-work::") and not is_model_share:
+            self.export_page.set_audio_status(error, error)
+            self.export_page.set_video_status(error, error)
 
     def _on_drive_share_deleted(self, target_id: str) -> None:
-        self.model_workspace_page.set_share_deleted(target_id)
+        if target_id.startswith("model-work::"):
+            self.model_workspace_page.set_work_share_deleted(
+                target_id.removeprefix("model-work::")
+            )
+        else:
+            self.model_workspace_page.set_share_deleted(target_id)
         self.export_page.set_share_deleted(target_id)
 
     @staticmethod
@@ -4937,6 +5185,31 @@ class MainWindow(QMainWindow):
         self._work_song_ready = session.ready
 
     @staticmethod
+    def _work_convert_session(self) -> WorkConvertSession:
+        session = getattr(self, "work_convert_session", None)
+        if isinstance(session, WorkConvertSession):
+            return session
+        selected_input = None
+        pool = getattr(self, "conversion_input_pool", None)
+        if pool is not None:
+            selected_version = getattr(pool, "selected_version", None)
+            if callable(selected_version):
+                version = selected_version()
+                selected_input = version.job_dir if version is not None else None
+        selected_converted = None
+        browser = getattr(self, "conversion_result_browser", None)
+        if browser is not None:
+            selected_path = getattr(browser, "selected_path", None)
+            if callable(selected_path):
+                selected_converted = selected_path()
+        session = WorkConvertSession(
+            selected_input_job_dir=selected_input,
+            selected_converted_path=selected_converted,
+        )
+        setattr(self, "work_convert_session", session)
+        return session
+
+    @staticmethod
     def _work_output_session(self) -> WorkOutputSession:
         session = getattr(self, "work_output_session", None)
         if isinstance(session, WorkOutputSession):
@@ -4958,7 +5231,7 @@ class MainWindow(QMainWindow):
         self._refresh_rvc_choices()
 
     def _use_model_in_convert(self, record: RvcModelRecord) -> None:
-        choice = rvc_model_choice_from_record(record)
+        choice = rvc_model_choice_from_record(record, execution_root=RVC_RUNTIME_DIR)
         if choice is None:
             self.model_workspace_page.show_status("This model has no usable inference file.")
             return

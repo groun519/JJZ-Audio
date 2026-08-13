@@ -141,6 +141,58 @@ class RvcTrainingExtractTests(unittest.TestCase):
 
             self.assertFalse((layout.experiment_dir / "2a_f0").exists())
 
+    def test_gpu_extraction_recovers_only_missing_outputs_on_cpu(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _extraction_setup(Path(temporary), input_count=2)
+            devices: list[str] = []
+
+            def runner(args, cwd=None, env=None, output_callback=None):
+                script_name = Path(args[1]).name
+                device = args[4] if script_name == "extract_f0_rmvpe.py" else args[2]
+                devices.append(device)
+                if device.startswith("cuda"):
+                    _write_extraction_outputs(args, limit=1)
+                else:
+                    _write_extraction_outputs(args)
+                return CommandResult(args, 0, "", "")
+
+            result = extract_rvc_training_features(
+                model_id,
+                layout,
+                runtime,
+                command_runner=runner,
+                runtime_inspector=_ready_runtime,
+            )
+
+            self.assertEqual(len(result.feature_files), 2)
+            self.assertEqual(devices, ["cuda:0", "cuda:0", "cpu", "cpu"])
+
+    def test_incomplete_extraction_reports_missing_stage_and_preserves_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _extraction_setup(Path(temporary), input_count=2)
+
+            def runner(args, cwd=None, env=None, output_callback=None):
+                _write_extraction_outputs(args, limit=1)
+                return CommandResult(args, 0, "", "")
+
+            with self.assertRaises(RvcTrainingExtractError) as raised:
+                extract_rvc_training_features(
+                    model_id,
+                    layout,
+                    runtime,
+                    command_runner=runner,
+                    runtime_inspector=_ready_runtime,
+                )
+
+            detail = str(raised.exception)
+            self.assertIn("F0=1/2", detail)
+            self.assertIn("continuous F0=1/2", detail)
+            self.assertIn("HuBERT=1/2", detail)
+            self.assertIn("Diagnostic log:", detail)
+            self.assertTrue(
+                (layout.model_dir / "training" / "diagnostics" / "extract-failed.log").is_file()
+            )
+
     def test_cuda_unavailable_is_rejected_before_state_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             model_id, layout, runtime = _extraction_setup(Path(temporary))
@@ -218,7 +270,7 @@ def _write_extraction_outputs(
     limit: int | None = None,
 ) -> None:
     script_name = Path(args[1]).name
-    staging = Path(args[5] if script_name == "extract_f0_rmvpe.py" else args[6])
+    staging = Path(args[-2])
     sources = sorted((staging / "1_16k_wavs").glob("*.wav"))[:limit]
     log_path = staging / "extract_f0_feature.log"
     if script_name == "extract_f0_rmvpe.py":

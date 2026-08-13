@@ -61,12 +61,22 @@ class RvcInferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(selection.effective_device, "cuda:0")
         self.assertFalse(selection.fallback_reason)
 
-    def test_falls_back_to_cpu_when_cuda_is_unavailable(self) -> None:
+    def test_explicit_cuda_fails_when_gpu_is_unavailable(self) -> None:
+        capabilities = _capabilities(cuda_available=False, cuda_ready=False)
+
+        with self.assertRaisesRegex(RvcInferenceRuntimeError, "GPU acceleration"):
+            select_rvc_inference_device(
+                Path("C:/rvc"),
+                "cuda:0",
+                runtime_probe=lambda _root: capabilities,
+            )
+
+    def test_auto_falls_back_to_cpu_when_gpu_is_unavailable(self) -> None:
         capabilities = _capabilities(cuda_available=False, cuda_ready=False)
 
         selection = select_rvc_inference_device(
             Path("C:/rvc"),
-            "cuda:0",
+            "auto",
             runtime_probe=lambda _root: capabilities,
         )
 
@@ -101,6 +111,21 @@ class RvcInferenceRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(selection.effective_device, "privateuseone:0")
+
+    def test_explicit_directml_fails_when_runtime_is_unavailable(self) -> None:
+        capabilities = replace(
+            _capabilities(cuda_available=False, cuda_ready=False),
+            directml_available=True,
+            directml_ready=False,
+            directml_detail="DirectML validation failed.",
+        )
+
+        with self.assertRaisesRegex(RvcInferenceRuntimeError, "validation failed"):
+            select_rvc_inference_device(
+                Path("C:/rvc"),
+                "directml",
+                runtime_probe=lambda _root: capabilities,
+            )
 
     def test_legacy_cuda_preference_uses_directml_after_amd_migration(self) -> None:
         capabilities = _capabilities(cuda_available=False, cuda_ready=False)

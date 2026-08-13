@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from jang_app.services.output_catalog import OutputSoundSet
+from jang_app.services.output_catalog import OutputSoundSet, load_output_sound_set
 from jang_app.services.song_library import SongItem
 
 
@@ -29,6 +29,10 @@ class WorkOutputSession:
     ) -> None:
         self._sound_set = sound_set
         self._sound_sets = tuple(sound_sets)
+        self._sound_sets_by_job_dir: dict[Path, OutputSoundSet] = {}
+        self._cache_sound_sets(self._sound_sets)
+        if sound_set is not None:
+            self.remember_sound_set(sound_set)
 
     @property
     def sound_set(self) -> OutputSoundSet | None:
@@ -44,6 +48,8 @@ class WorkOutputSession:
 
     def assign(self, sound_set: OutputSoundSet | None) -> OutputSoundSet | None:
         self._sound_set = sound_set
+        if sound_set is not None:
+            self.remember_sound_set(sound_set)
         return self._sound_set
 
     def refresh_target(
@@ -65,6 +71,7 @@ class WorkOutputSession:
         select_fallback: bool = True,
     ) -> OutputSelection:
         self._sound_sets = tuple(sound_sets)
+        self._cache_sound_sets(self._sound_sets)
         selection = self.selection_for_refresh(
             self._sound_sets,
             preferred_job_dir=preferred_job_dir,
@@ -95,10 +102,52 @@ class WorkOutputSession:
 
     def sound_set_for_job(self, job_dir: Path) -> OutputSoundSet | None:
         resolved = job_dir.expanduser().resolve()
+        cached = self._sound_sets_by_job_dir.get(resolved)
+        if cached is not None:
+            return cached
         for sound_set in self._sound_sets:
             if _same_job_dir(sound_set.job_dir, resolved):
                 return sound_set
         return None
+
+    def remember_sound_set(self, sound_set: OutputSoundSet) -> OutputSoundSet:
+        resolved = sound_set.job_dir.expanduser().resolve()
+        self._sound_sets_by_job_dir[resolved] = sound_set
+        self._sound_sets = tuple(
+            sound_set if _same_job_dir(existing.job_dir, resolved) else existing
+            for existing in self._sound_sets
+        )
+        return sound_set
+
+    def load_sound_set(
+        self,
+        job_dir: Path,
+        output_root: Path,
+        *,
+        reload: bool = False,
+        loader: Callable[[Path, Path], OutputSoundSet | None] = load_output_sound_set,
+    ) -> OutputSoundSet | None:
+        resolved = job_dir.expanduser().resolve()
+        if not reload:
+            cached = self._sound_sets_by_job_dir.get(resolved)
+            if cached is not None:
+                return cached
+        sound_set = loader(job_dir, output_root)
+        if sound_set is None:
+            self._sound_sets_by_job_dir.pop(resolved, None)
+            return None
+        return self.remember_sound_set(sound_set)
+
+    def output_available(
+        self,
+        job_dir: Path | None,
+        output_root: Path,
+        *,
+        loader: Callable[[Path, Path], OutputSoundSet | None] = load_output_sound_set,
+    ) -> bool:
+        if job_dir is None:
+            return False
+        return self.load_sound_set(job_dir, output_root, loader=loader) is not None
 
     def selected_index_for_job(self, job_dir: Path) -> int:
         resolved = job_dir.expanduser().resolve()
@@ -127,6 +176,24 @@ class WorkOutputSession:
             if _same_job_dir(item.output_job_dir, resolved):
                 return item
         return None
+
+    def _cache_sound_sets(self, sound_sets: Sequence[OutputSoundSet]) -> None:
+        current_selection = (
+            self._sound_set.job_dir.expanduser().resolve()
+            if self._sound_set is not None
+            else None
+        )
+        catalog_keys = {
+            sound_set.job_dir.expanduser().resolve()
+            for sound_set in sound_sets
+        }
+        self._sound_sets_by_job_dir = {
+            job_dir: cached
+            for job_dir, cached in self._sound_sets_by_job_dir.items()
+            if job_dir in catalog_keys or job_dir == current_selection
+        }
+        for sound_set in sound_sets:
+            self.remember_sound_set(sound_set)
 
 
 def _same_job_dir(first: Path, second: Path) -> bool:

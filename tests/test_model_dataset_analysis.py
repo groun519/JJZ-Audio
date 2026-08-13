@@ -9,10 +9,12 @@ import soundfile as sf
 
 from jang_app.services.model_dataset import ModelDatasetStore
 from jang_app.services.model_dataset_analysis import (
-    PitchHistogramBin,
-    _correct_isolated_octave_errors,
     analyze_model_dataset,
     load_cached_model_dataset_analysis,
+)
+from jang_app.services.pitch_profile import (
+    PitchHistogramBin,
+    correct_isolated_octave_errors,
     midi_note_name,
     pitch_coverage_ranges,
     recommended_pitch_shift,
@@ -134,8 +136,8 @@ class ModelDatasetAnalysisTests(unittest.TestCase):
         )
 
     def test_corrects_only_isolated_octave_errors(self) -> None:
-        corrected = _correct_isolated_octave_errors((48.0, 48.1, 60.1, 48.2, 48.0))
-        sustained = _correct_isolated_octave_errors(
+        corrected = correct_isolated_octave_errors((48.0, 48.1, 60.1, 48.2, 48.0))
+        sustained = correct_isolated_octave_errors(
             (48.0, 48.1, 60.0, 60.1, 60.2, 60.0, 60.1)
         )
 

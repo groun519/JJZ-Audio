@@ -263,10 +263,20 @@ class _JjzeroConservativeDataLoader(_jjzero_original_data_loader):
     def __init__(self, *args, **kwargs):
         requested_workers = max(0, int(kwargs.get("num_workers", 0)))
         if requested_workers > 0:
-            kwargs["num_workers"] = 1
-            kwargs["prefetch_factor"] = 2
+            # Embedded Python workers can briefly create console windows on
+            # some CUDA runtime profiles. RVC datasets are already prepared
+            # locally, so loading them in the trainer process is predictable.
+            kwargs["num_workers"] = 0
+            kwargs.pop("prefetch_factor", None)
             kwargs["persistent_workers"] = False
         super().__init__(*args, **kwargs)
+
+    def __iter__(self):
+        print("JJZERO_TRAINING_DATA_LOADER_START", flush=True)
+        for index, batch in enumerate(super().__iter__()):
+            if index == 0:
+                print("JJZERO_TRAINING_FIRST_BATCH_READY", flush=True)
+            yield batch
 
 
 torch.utils.data.DataLoader = _JjzeroConservativeDataLoader
@@ -278,7 +288,9 @@ import torch.distributed
 import torch.nn.parallel
 
 
-if getattr(torch.version, "hip", None):
+if getattr(torch.version, "hip", None) or torch.cuda.device_count() <= 1:
+    print("JJZERO_SINGLE_DEVICE_TRAINING", flush=True)
+
     class _JjzeroSingleProcessDistributedDataParallel(torch.nn.Module):
         def __init__(self, module, *args, **kwargs):
             super().__init__()

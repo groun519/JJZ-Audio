@@ -125,6 +125,7 @@ class SongLibrary:
         self._legacy_titles: dict[str, str] = {}
         self._legacy_hidden_outputs: set[Path] = set()
         self._legacy_paths: tuple[Path, ...] = ()
+        self._output_sound_sets_by_job_dir: dict[Path, OutputSoundSet] = {}
         self._store.purge_legacy_removed_data()
         self._load_legacy_index()
         self._migrate_legacy_sources()
@@ -179,6 +180,7 @@ class SongLibrary:
             job_dir = sound_set.job_dir.expanduser().resolve()
             if job_dir in self._legacy_hidden_outputs or job_dir in detached_output_dirs:
                 continue
+            self._remember_output_sound_set(sound_set)
 
             existing = next(
                 (
@@ -336,7 +338,9 @@ class SongLibrary:
         return self._store.create_vocal_separation_run(item_id)
 
     def register_output(self, item_id: str, job_dir: Path, label: str) -> SongItem:
-        return _item_from_package(self._store.attach_output(item_id, job_dir, label))
+        package = self._store.attach_output(item_id, job_dir, label)
+        self._cache_output_sound_set(package.folder / VOCAL_STAGE, job_dir)
+        return _item_from_package(package)
 
     def activate_output(self, job_dir: Path) -> SongItem | None:
         package = self._store.find_by_output_job_dir(job_dir)
@@ -355,16 +359,21 @@ class SongLibrary:
         package = self._store.find_by_output_job_dir(job_dir)
         if package is None:
             return None
-        return _item_from_package(self._store.detach_output(package.song_id, job_dir))
+        detached = self._store.detach_output(package.song_id, job_dir)
+        self._output_sound_sets_by_job_dir.pop(job_dir.expanduser().resolve(), None)
+        return _item_from_package(detached)
 
     def vocal_versions(self, item_id: str) -> tuple[SongVocalVersion, ...]:
         package = self._store.require(item_id)
-        versions = [
-            version
-            for output in package.outputs
-            for version in [_vocal_version_from_output(package, output)]
-            if version is not None
-        ]
+        versions: list[SongVocalVersion] = []
+        for output in package.outputs:
+            job_dir = output.job_dir.expanduser().resolve()
+            sound_set = self._output_sound_sets_by_job_dir.get(job_dir)
+            if sound_set is None:
+                sound_set = self._cache_output_sound_set(package.folder / VOCAL_STAGE, job_dir)
+            if sound_set is None:
+                continue
+            versions.append(_vocal_version_from_output(output, sound_set))
         return tuple(versions)
 
     def output_sound_sets(self) -> list[OutputSoundSet]:
@@ -375,7 +384,12 @@ class SongLibrary:
                 job_dir = output.job_dir.expanduser().resolve()
                 if job_dir in seen_job_dirs:
                     continue
-                sound_set = load_output_sound_set(job_dir, package.folder / VOCAL_STAGE)
+                sound_set = self._output_sound_sets_by_job_dir.get(job_dir)
+                if sound_set is None:
+                    sound_set = self._cache_output_sound_set(
+                        package.folder / VOCAL_STAGE,
+                        job_dir,
+                    )
                 if sound_set is None:
                     continue
                 seen_job_dirs.add(job_dir)
@@ -394,6 +408,21 @@ class SongLibrary:
                 )
         sound_sets.sort(key=lambda item: item[0], reverse=True)
         return [sound_set for _added_at, sound_set in sound_sets]
+
+    def _cache_output_sound_set(
+        self,
+        output_root: Path,
+        job_dir: Path,
+    ) -> OutputSoundSet | None:
+        sound_set = load_output_sound_set(job_dir, output_root)
+        if sound_set is None:
+            self._output_sound_sets_by_job_dir.pop(job_dir.expanduser().resolve(), None)
+            return None
+        return self._remember_output_sound_set(sound_set)
+
+    def _remember_output_sound_set(self, sound_set: OutputSoundSet) -> OutputSoundSet:
+        self._output_sound_sets_by_job_dir[sound_set.job_dir.expanduser().resolve()] = sound_set
+        return sound_set
 
     def rename_item(self, item_id: str, title: str) -> bool:
         try:
@@ -487,12 +516,9 @@ def _created_timestamp(item: SongItem) -> float:
 
 
 def _vocal_version_from_output(
-    package: SongPackage,
     output: SongOutputReference,
-) -> SongVocalVersion | None:
-    sound_set = load_output_sound_set(output.job_dir, package.folder / VOCAL_STAGE)
-    if sound_set is None:
-        return None
+    sound_set: OutputSoundSet,
+) -> SongVocalVersion:
     active_converted = output.active_converted_path
     if active_converted not in sound_set.converted_vocal_paths:
         active_converted = sound_set.converted_vocal_paths[0] if sound_set.converted_vocal_paths else None

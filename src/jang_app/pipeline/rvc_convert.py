@@ -31,8 +31,9 @@ from jang_app.services.tool_workspace import ToolWorkspace
 # file API. Keep conversion paths below MAX_PATH with room for collision suffixes.
 _RVC_SAFE_OUTPUT_PATH_LENGTH = 240
 _RVC_AUTO_CHUNK_THRESHOLD_SECONDS = 8 * 60
-_RVC_AUTO_CHUNK_CORE_SECONDS = 4 * 60
+_RVC_AUTO_CHUNK_CORE_SECONDS = 6 * 60
 _RVC_AUTO_CHUNK_CONTEXT_SECONDS = 2
+_RVC_AUTO_CHUNK_BOUNDARY_SEARCH_SECONDS = 12
 _RVC_AUTO_CHUNK_SIZE_BYTES = 512 * 1024 * 1024
 
 
@@ -138,15 +139,39 @@ def convert_vocal_with_rvc(
         staged_output = job.root / "o.wav"
         _require_safe_rvc_runtime_paths(staged_input, staged_output)
         command_environment = build_rvc_environment(rvc_root)
-        if _requires_automatic_chunking(staged_input):
+        allow_chunk_recovery = _requires_automatic_chunking(staged_input)
+        effective_device = device.effective_device
+
+        def run_full_conversion(device_name: str) -> None:
+            _run_rvc_conversion_command(
+                runtime_python=runtime_python,
+                wrapper_script=wrapper_script,
+                rvc_root=rvc_root,
+                input_path=staged_input,
+                output_path=staged_output,
+                model_path=staged_model,
+                index_path=staged_index,
+                device=device_name,
+                settings=settings,
+                workspace=workspace,
+                environment=command_environment,
+            )
+
+        def run_chunk_recovery(device_name: str, failure_kind: str) -> None:
+            staged_output.unlink(missing_ok=True)
             chunks = write_overlapping_audio_chunks(
                 staged_input,
                 job.root / "chunks",
                 core_seconds=_RVC_AUTO_CHUNK_CORE_SECONDS,
                 context_seconds=_RVC_AUTO_CHUNK_CONTEXT_SECONDS,
+                boundary_search_seconds=_RVC_AUTO_CHUNK_BOUNDARY_SEARCH_SECONDS,
+                consistent_peak_target=0.95,
             )
             logger.info(
-                "RVC automatic chunking enabled: chunks=%s core_seconds=%s context_seconds=%s",
+                "RVC automatic chunk recovery enabled after %s: "
+                "device=%s chunks=%s core_seconds=%s context_seconds=%s",
+                failure_kind,
+                device_name,
                 len(chunks),
                 _RVC_AUTO_CHUNK_CORE_SECONDS,
                 _RVC_AUTO_CHUNK_CONTEXT_SECONDS,
@@ -162,7 +187,7 @@ def convert_vocal_with_rvc(
                     output_path=chunk_output,
                     model_path=staged_model,
                     index_path=staged_index,
-                    device=device.effective_device,
+                    device=device_name,
                     settings=settings,
                     workspace=workspace,
                     environment=command_environment,
@@ -172,20 +197,15 @@ def convert_vocal_with_rvc(
                 if progress_callback is not None:
                     progress_callback(round((chunk.index + 1) * 100 / len(chunks)))
             stitch_crossfaded_audio_chunks(chunks, converted_chunks, staged_output)
+
+        try:
+            run_full_conversion(effective_device)
+        except RvcConversionError as exc:
+            if allow_chunk_recovery and _is_chunk_recoverable_failure(str(exc)):
+                run_chunk_recovery(effective_device, "a memory failure")
+            else:
+                raise
         else:
-            _run_rvc_conversion_command(
-                runtime_python=runtime_python,
-                wrapper_script=wrapper_script,
-                rvc_root=rvc_root,
-                input_path=staged_input,
-                output_path=staged_output,
-                model_path=staged_model,
-                index_path=staged_index,
-                device=device.effective_device,
-                settings=settings,
-                workspace=workspace,
-                environment=command_environment,
-            )
             if progress_callback is not None:
                 progress_callback(100)
         if not staged_output.is_file():
@@ -194,7 +214,11 @@ def convert_vocal_with_rvc(
             )
         _publish_rvc_output(staged_output, output_path)
 
-    logger.info("RVC conversion complete: output=%s", output_path)
+    logger.info(
+        "RVC conversion complete: output=%s effective_device=%s",
+        output_path,
+        effective_device,
+    )
     return RvcConversionResult(
         source,
         output_path,
@@ -204,7 +228,7 @@ def convert_vocal_with_rvc(
         index_file=settings.index_file,
         pitch=settings.pitch,
         requested_device=settings.device,
-        effective_device=device.effective_device,
+        effective_device=effective_device,
         f0_method=settings.f0_method,
         inference=settings.inference,
     )
@@ -215,6 +239,23 @@ def _requires_automatic_chunking(source: Path) -> bool:
         source,
         duration_threshold_seconds=_RVC_AUTO_CHUNK_THRESHOLD_SECONDS,
         size_threshold_bytes=_RVC_AUTO_CHUNK_SIZE_BYTES,
+    )
+
+
+def _is_chunk_recoverable_failure(message: str) -> bool:
+    value = message.casefold()
+    return (
+        "openblas: malloc failed" in value
+        or "cannot allocate memory" in value
+        or "memoryerror" in value
+        or (
+            "faiss" in value
+            and (
+                "access violation" in value
+                or "3221225477" in value
+                or "0xc0000005" in value
+            )
+        )
     )
 
 
@@ -317,7 +358,10 @@ def _prepare_rvc_workspace(
 ) -> Path:
     RVC_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     _copy_tree(rvc_root / "configs", RVC_WORKSPACE_DIR / "configs")
-    _copy_file(rvc_root / "trainset_preprocess_pipeline_print.py", RVC_WORKSPACE_DIR / "trainset_preprocess_pipeline_print.py")
+    _copy_file(
+        rvc_root / "trainset_preprocess_pipeline_print.py",
+        RVC_WORKSPACE_DIR / "trainset_preprocess_pipeline_print.py",
+    )
     for name in ("hubert_base.pt", "rmvpe.pt"):
         source = rvc_root / name
         if not source.is_file():
@@ -494,7 +538,12 @@ def _relative_to_root(path: Path, root: Path) -> str:
 
 def _conversion_failure_message(returncode: int, device: str, process_output: str = "") -> str:
     windows_code = returncode & 0xFFFFFFFF
-    if windows_code == 0xC0000094:
+    if windows_code == 0xC00000FD:
+        message = (
+            "RVC runtime crashed with Windows status 0xC00000FD (stack overflow). "
+            f"Selected device: {device}."
+        )
+    elif windows_code == 0xC0000094:
         message = (
             "RVC runtime crashed with Windows status 0xC0000094 (integer divide by zero). "
             f"Selected device: {device}."

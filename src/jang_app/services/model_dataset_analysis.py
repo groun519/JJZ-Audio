@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from jang_app.services.audio_pitch_analysis import analyze_audio_signal
 from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.clip_edit_history import REVIEW_READY, TRAINING_MODE_CLIPS
 from jang_app.services.managed_files import file_sha256, write_json_atomic
@@ -18,13 +19,19 @@ from jang_app.services.model_dataset import (
     ModelDatasetItem,
     ModelDatasetStore,
 )
+from jang_app.services.pitch_profile import (
+    PitchCoverageRange,
+    PitchHistogramBin,
+    midi_note_name,
+    pitch_coverage_ranges,
+    pitch_histogram as build_pitch_histogram,
+    primary_pitch_center,
+    recommended_pitch_shift,
+)
 
 
 ANALYSIS_SCHEMA_VERSION = 4
 ANALYSIS_FILE_NAME = "dataset-analysis.json"
-_FRAME_MS = 50
-_SILENCE_FLOOR_DB = -55.0
-_MAX_PITCH_SAMPLES = 3000
 
 
 class ModelDatasetAnalysisError(RuntimeError):
@@ -59,20 +66,6 @@ class DatasetAssetAnalysis:
     noise_floor_db: float | None
     signal_contrast_db: float | None
     pitch_midi_samples: tuple[float, ...]
-
-
-@dataclass(frozen=True)
-class PitchHistogramBin:
-    midi_note: int
-    note_name: str
-    count: int
-
-
-@dataclass(frozen=True)
-class PitchCoverageRange:
-    low_midi: int
-    high_midi: int
-    sample_ratio: float
 
 
 @dataclass(frozen=True)
@@ -183,14 +176,6 @@ def load_cached_model_dataset_analysis(
         return None
 
 
-def midi_note_name(value: float | int | None) -> str:
-    if value is None or not math.isfinite(float(value)):
-        return "-"
-    midi = int(round(float(value)))
-    names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
-    return f"{names[midi % 12]}{midi // 12 - 1}"
-
-
 def _training_assets(items: tuple[ModelDatasetItem, ...]) -> tuple[_TrainingAsset, ...]:
     assets: list[_TrainingAsset] = []
     for item in items:
@@ -262,151 +247,17 @@ def _analyze_asset(asset: _TrainingAsset) -> DatasetAssetAnalysis:
 
 
 def _stream_audio_metrics(audio: sf.SoundFile) -> dict[str, object]:
-    sample_rate = audio.samplerate
-    frame_size = max(1, round(sample_rate * _FRAME_MS / 1000))
-    expected_frames = max(1, math.ceil(len(audio) / frame_size))
-    pitch_stride = max(2, math.ceil(expected_frames / _MAX_PITCH_SAMPLES))
-    carry = np.empty(0, dtype=np.float32)
-    frame_levels: list[float] = []
-    pitch_candidates: list[tuple[float, float]] = []
-    sample_count = 0
-    clipping_count = 0
-    square_sum = 0.0
-    peak = 0.0
-    frame_index = 0
-    previous_pitch_frame: np.ndarray | None = None
-
-    while True:
-        block = audio.read(frame_size * 256, always_2d=True, dtype="float32")
-        if block.size == 0:
-            break
-        mono = np.mean(block, axis=1, dtype=np.float32)
-        sample_count += len(mono)
-        clipping_count += int(np.count_nonzero(np.abs(mono) >= 0.999))
-        square_sum += float(np.sum(np.square(mono, dtype=np.float64)))
-        peak = max(peak, float(np.max(np.abs(mono), initial=0.0)))
-        if carry.size:
-            mono = np.concatenate((carry, mono))
-        complete = len(mono) // frame_size
-        if complete:
-            frames = mono[: complete * frame_size].reshape(complete, frame_size)
-            rms = np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=1))
-            levels = 20 * np.log10(np.maximum(rms, 1e-9))
-            frame_levels.extend(float(level) for level in levels)
-            for local_index, frame in enumerate(frames):
-                absolute_index = frame_index + local_index
-                pitch_frame = (
-                    np.concatenate((previous_pitch_frame, frame))
-                    if previous_pitch_frame is not None
-                    else frame
-                )
-                previous_pitch_frame = frame.copy()
-                if absolute_index % pitch_stride or levels[local_index] < _SILENCE_FLOOR_DB:
-                    continue
-                pitch = _estimate_pitch_midi(pitch_frame, sample_rate)
-                if pitch is not None:
-                    pitch_candidates.append((float(levels[local_index]), pitch))
-            frame_index += complete
-        carry = mono[complete * frame_size :].copy()
-
-    if carry.size:
-        padded = np.pad(carry, (0, frame_size - len(carry)))
-        rms = float(np.sqrt(np.mean(np.square(padded, dtype=np.float64))))
-        level = 20 * math.log10(max(rms, 1e-9))
-        frame_levels.append(level)
-        if frame_index % pitch_stride == 0 and level >= _SILENCE_FLOOR_DB:
-            pitch_frame = (
-                np.concatenate((previous_pitch_frame, padded))
-                if previous_pitch_frame is not None
-                else padded
-            )
-            pitch = _estimate_pitch_midi(pitch_frame, sample_rate)
-            if pitch is not None:
-                pitch_candidates.append((level, pitch))
-
-    if sample_count <= 0 or not frame_levels:
-        raise ModelDatasetAnalysisError("Training audio contains no readable samples.")
-    levels = np.asarray(frame_levels, dtype=np.float64)
-    upper_level = float(np.percentile(levels, 90))
-    active_threshold = max(_SILENCE_FLOOR_DB, min(-35.0, upper_level - 25.0))
-    active = levels >= active_threshold
-    active_levels = levels[active]
-    inactive_levels = levels[~active]
-    has_quiet_reference = inactive_levels.size >= max(3, math.ceil(len(levels) * 0.05))
-    noise_floor = max(-100.0, float(np.median(inactive_levels))) if has_quiet_reference else None
-    signal_level = float(np.median(active_levels)) if active_levels.size else None
-    signal_contrast = (
-        min(80.0, max(0.0, signal_level - noise_floor))
-        if signal_level is not None and noise_floor is not None
-        else None
-    )
-    pitch_samples = _correct_isolated_octave_errors(
-        tuple(
-            pitch
-            for level, pitch in pitch_candidates
-            if level >= active_threshold
-        )
-    )
-    rms = math.sqrt(square_sum / sample_count)
+    metrics = analyze_audio_signal(audio)
     return {
-        "duration_ms": round(sample_count * 1000 / sample_rate),
-        "active_ratio": float(np.count_nonzero(active) / len(levels)),
-        "rms_db": 20 * math.log10(max(rms, 1e-9)),
-        "peak_db": 20 * math.log10(max(peak, 1e-9)),
-        "clipping_ratio": clipping_count / sample_count,
-        "noise_floor_db": noise_floor,
-        "signal_contrast_db": signal_contrast,
-        "pitch_midi_samples": pitch_samples,
+        "duration_ms": metrics.duration_ms,
+        "active_ratio": metrics.active_ratio,
+        "rms_db": metrics.rms_db,
+        "peak_db": metrics.peak_db,
+        "clipping_ratio": metrics.clipping_ratio,
+        "noise_floor_db": metrics.noise_floor_db,
+        "signal_contrast_db": metrics.signal_contrast_db,
+        "pitch_midi_samples": metrics.pitch_midi_samples,
     }
-
-
-def _estimate_pitch_midi(frame: np.ndarray, sample_rate: int) -> float | None:
-    stride = max(1, round(sample_rate / 16000))
-    signal = np.asarray(frame[::stride], dtype=np.float64)
-    effective_rate = sample_rate / stride
-    signal -= np.mean(signal)
-    energy = float(np.dot(signal, signal))
-    if energy <= 1e-8:
-        return None
-    signal *= np.hanning(len(signal))
-    fft_size = 1 << max(1, (len(signal) * 2 - 1).bit_length())
-    spectrum = np.fft.rfft(signal, fft_size)
-    correlation = np.fft.irfft(spectrum * np.conjugate(spectrum), fft_size)[: len(signal)]
-    if correlation[0] <= 0:
-        return None
-    min_lag = max(1, math.floor(effective_rate / 1100))
-    max_lag = min(len(correlation) - 1, math.ceil(effective_rate / 65))
-    if max_lag <= min_lag:
-        return None
-    search = correlation[min_lag : max_lag + 1]
-    lag = min_lag + int(np.argmax(search))
-    confidence = float(correlation[lag] / correlation[0])
-    if confidence < 0.30:
-        return None
-    frequency = effective_rate / lag
-    if not 65 <= frequency <= 1100:
-        return None
-    return 69.0 + 12.0 * math.log2(frequency / 440.0)
-
-
-def _correct_isolated_octave_errors(values: tuple[float, ...]) -> tuple[float, ...]:
-    if len(values) < 5:
-        return values
-    corrected = list(values)
-    for index in range(2, len(values) - 2):
-        neighbors = np.asarray(
-            (*values[index - 2 : index], *values[index + 1 : index + 3]),
-            dtype=np.float64,
-        )
-        if float(np.ptp(neighbors)) > 4.0:
-            continue
-        reference = float(np.median(neighbors))
-        original = values[index]
-        candidates = (original - 12.0, original + 12.0)
-        replacement = min(candidates, key=lambda value: abs(value - reference))
-        if 9.0 <= abs(original - reference) <= 15.0 and abs(replacement - reference) <= 2.5:
-            corrected[index] = replacement
-    return tuple(corrected)
 
 
 def _aggregate_analysis(
@@ -424,9 +275,9 @@ def _aggregate_analysis(
     pitch_low = float(np.percentile(pitch, 5)) if pitch.size else None
     pitch_median = float(np.percentile(pitch, 50)) if pitch.size else None
     pitch_high = float(np.percentile(pitch, 95)) if pitch.size else None
-    pitch_histogram = _pitch_histogram(pitch)
+    pitch_histogram = build_pitch_histogram(pitch)
     coverage_ranges = pitch_coverage_ranges(pitch_histogram)
-    pitch_center = _primary_pitch_center(pitch, coverage_ranges)
+    pitch_center = primary_pitch_center(pitch, coverage_ranges)
     if pitch_center is None:
         pitch_center = pitch_median
     issues = [issue for asset in assets for issue in _asset_issues(asset)]
@@ -555,110 +406,6 @@ def _weighted_optional_average(
     if not np.sum(selected_weights):
         return float(np.mean(values))
     return float(np.average(values, weights=selected_weights))
-
-
-def _pitch_histogram(pitch: np.ndarray) -> tuple[PitchHistogramBin, ...]:
-    if not pitch.size:
-        return ()
-    low = max(0, math.floor(float(np.percentile(pitch, 1))))
-    high = min(127, math.ceil(float(np.percentile(pitch, 99))))
-    rounded = np.rint(pitch).astype(np.int16)
-    return tuple(
-        PitchHistogramBin(note, midi_note_name(note), int(np.count_nonzero(rounded == note)))
-        for note in range(low, high + 1)
-    )
-
-
-def pitch_coverage_ranges(
-    histogram: tuple[PitchHistogramBin, ...],
-) -> tuple[PitchCoverageRange, ...]:
-    if not histogram:
-        return ()
-    counts = np.asarray([item.count for item in histogram], dtype=np.float64)
-    total = float(np.sum(counts))
-    if total <= 0:
-        return ()
-    smoothed = np.convolve(
-        np.pad(counts, (1, 1)),
-        np.asarray((0.25, 0.5, 0.25)),
-        mode="valid",
-    )
-    threshold = max(1.0, float(np.max(smoothed)) * 0.15)
-    covered = smoothed >= threshold
-    _bridge_short_pitch_gaps(covered, max_gap=2)
-
-    ranges: list[PitchCoverageRange] = []
-    start: int | None = None
-    for index, is_covered in enumerate((*covered, False)):
-        if is_covered and start is None:
-            start = index
-            continue
-        if is_covered or start is None:
-            continue
-        end = index - 1
-        dense = np.flatnonzero(
-            counts[start : end + 1] >= max(1.0, threshold * 0.5)
-        )
-        if dense.size:
-            low_index = start + int(dense[0])
-            high_index = start + int(dense[-1])
-            sample_count = float(np.sum(counts[low_index : high_index + 1]))
-            sample_ratio = sample_count / total
-            if sample_ratio >= 0.03:
-                ranges.append(
-                    PitchCoverageRange(
-                        histogram[low_index].midi_note,
-                        histogram[high_index].midi_note,
-                        sample_ratio,
-                    )
-                )
-        start = None
-    return tuple(
-        sorted(
-            ranges,
-            key=lambda item: (
-                -item.sample_ratio,
-                item.low_midi,
-            ),
-        )[:3]
-    )
-
-
-def _bridge_short_pitch_gaps(covered: np.ndarray, *, max_gap: int) -> None:
-    index = 1
-    while index < len(covered) - 1:
-        if covered[index]:
-            index += 1
-            continue
-        start = index
-        while index < len(covered) and not covered[index]:
-            index += 1
-        if (
-            start > 0
-            and index < len(covered)
-            and covered[start - 1]
-            and covered[index]
-            and index - start <= max_gap
-        ):
-            covered[start:index] = True
-
-
-def recommended_pitch_shift(model_center_midi: float, source_center_midi: float) -> int:
-    return round(model_center_midi - source_center_midi)
-
-
-def _primary_pitch_center(
-    pitch: np.ndarray,
-    ranges: tuple[PitchCoverageRange, ...],
-) -> float | None:
-    if not pitch.size or not ranges:
-        return None
-    primary = ranges[0]
-    selected = pitch[
-        (pitch >= primary.low_midi - 0.5)
-        & (pitch <= primary.high_midi + 0.5)
-    ]
-    return float(np.median(selected)) if selected.size else None
 
 
 def _load_cache_entries(path: Path) -> dict[str, object]:

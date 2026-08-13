@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
-from jang_app.qt_app.widgets import DangerIconButton, TrackMixControl, TrackRow
+from jang_app.qt_app.widgets import DangerIconButton, TrackMixControl, TrackRow, WaveformView
 from jang_app.services.i18n import tr
 from jang_app.services.song_library import SongVocalVersion
 from jang_app.services.vocal_project import (
@@ -296,6 +297,27 @@ class VocalResultsPanelTests(unittest.TestCase):
         self.assertEqual(row.volume(), 1.75)
         self.assertEqual(changed.count(), 0)
         row.close()
+
+    def test_workspace_waveform_decode_is_submitted_without_blocking_ui(self) -> None:
+        waveform = WaveformView()
+        future = Mock()
+        cache_key = ("audio.wav", 1, 2, 360)
+
+        with (
+            patch(
+                "jang_app.qt_app.widgets.waveform_cache_key",
+                return_value=cache_key,
+            ),
+            patch("jang_app.qt_app.widgets._WAVEFORM_VIEW_EXECUTOR.submit") as submit,
+        ):
+            submit.return_value = future
+            waveform.set_path(Path("audio.wav"))
+
+        submit.assert_called_once()
+        future.add_done_callback.assert_called_once()
+        self.assertTrue(waveform._is_loading)
+        self.assertEqual(waveform._cache_key, cache_key)
+        waveform.close()
 
     def test_result_track_exposes_the_shared_mix_control(self) -> None:
         panel = VocalResultsPanel(mode="separation")

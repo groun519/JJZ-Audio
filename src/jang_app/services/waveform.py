@@ -95,10 +95,9 @@ def _sample_peaks(samples: np.ndarray, point_count: int) -> np.ndarray:
     if samples.size == 0:
         return np.zeros(0, dtype=np.float32)
     bucket_count = min(point_count, len(samples))
-    bucket_size = max(1, len(samples) // bucket_count)
-    usable_samples = bucket_count * bucket_size
-    buckets = np.abs(samples[:usable_samples]).reshape(bucket_count, bucket_size)
-    return np.max(buckets, axis=1).astype(np.float32, copy=False)
+    starts = np.arange(bucket_count, dtype=np.int64) * len(samples) // bucket_count
+    peaks = np.maximum.reduceat(np.abs(samples), starts)
+    return peaks.astype(np.float32, copy=False)
 
 
 def _stream_peaks(audio: sf.SoundFile, bucket_count: int, bucket_size: int) -> np.ndarray:

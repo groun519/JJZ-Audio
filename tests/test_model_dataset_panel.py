@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
 from jang_app.qt_app.widgets import DangerIconButton
 from jang_app.services.i18n import tr
-from jang_app.services.model_dataset import ModelDatasetStore
+from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem, ModelDatasetStore
 
 
 class ModelDatasetPanelTests(unittest.TestCase):
@@ -143,6 +143,63 @@ class ModelDatasetPanelTests(unittest.TestCase):
                 self.assertEqual(ready.review_state, "ready")
                 self.assertEqual(ready.held_segment_count, 1)
                 panel.close()
+
+    def test_preloaded_large_dataset_renders_in_deferred_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            panel = ModelDatasetPanel(ModelDatasetStore(root / "workspace"))
+            items = tuple(
+                ModelDatasetItem(
+                    item_id=f"item-{index}",
+                    source_name=f"voice-{index}.wav",
+                    source_path=root / f"voice-{index}.wav",
+                    original_path=root / f"original-{index}.wav",
+                    working_path=root / f"working-{index}.wav",
+                    added_at="2026-08-14T00:00:00+00:00",
+                    duration_ms=1000,
+                )
+                for index in range(73)
+            )
+
+            panel.prepare_model("model")
+            panel.apply_dataset(ModelDataset("model", items), deferred=True)
+
+            self.assertEqual(panel.source_list.count(), 0)
+            for _ in range(12):
+                self.app.processEvents()
+
+            self.assertEqual(panel.source_list.count(), 73)
+            self.assertFalse(panel.progress_bar.isVisible())
+            self.assertTrue(panel.source_list.isEnabled())
+            panel.close()
+
+    def test_deferred_render_opens_requested_training_item_when_rows_are_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            panel = ModelDatasetPanel(ModelDatasetStore(root / "workspace"))
+            items = tuple(
+                ModelDatasetItem(
+                    item_id=f"item-{index}",
+                    source_name=f"voice-{index}.wav",
+                    source_path=root / f"voice-{index}.wav",
+                    original_path=root / f"original-{index}.wav",
+                    working_path=root / f"working-{index}.wav",
+                    added_at="2026-08-14T00:00:00+00:00",
+                    duration_ms=1000,
+                    selected_order=index,
+                )
+                for index in range(30)
+            )
+
+            panel.prepare_model("model")
+            panel.apply_dataset(ModelDataset("model", items), deferred=True)
+            self.assertTrue(panel.open_training_item("item-29"))
+            for _ in range(8):
+                self.app.processEvents()
+
+            self.assertEqual(panel.training_list.currentRow(), 29)
+            self.assertFalse(panel.clip_editor.isHidden())
+            panel.close()
 
 
 def _wave_file(path: Path) -> Path:

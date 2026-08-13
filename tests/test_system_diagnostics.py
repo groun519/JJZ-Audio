@@ -302,7 +302,7 @@ class SystemDiagnosticsTests(unittest.TestCase):
             self.assertEqual(statuses["cuda"], DiagnosticStatus.WARNING)
             self.assertEqual(statuses["training_device"], DiagnosticStatus.WARNING)
             checks = {check.key: check for check in diagnostics.checks}
-            self.assertIn("CPU conversion", checks["cuda"].detail)
+            self.assertIn("Select CPU explicitly", checks["cuda"].detail)
 
     def test_cpu_runtime_crash_blocks_setup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

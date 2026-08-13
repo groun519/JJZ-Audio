@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 from jang_app.qt_app.main_window import MainWindow
 from jang_app.qt_app.vocal_version_pool import VocalVersionPool
 from jang_app.services.song_library import SongVocalVersion
+from jang_app.services.work_convert import WorkConvertSession
 
 
 class MainWindowConversionSourceTests(unittest.TestCase):
@@ -44,17 +45,22 @@ class MainWindowConversionSourceTests(unittest.TestCase):
         pool = VocalVersionPool("vocal")
         window = SimpleNamespace(
             conversion_input_pool=pool,
+            vocal_project_store=SimpleNamespace(load=lambda _job_dir: None),
             conversion_result_browser=SimpleNamespace(
+                select_converted=lambda _path: True,
                 set_versions=lambda *_args, **_kwargs: None,
                 selected_path=lambda: None,
                 version_for_path=lambda _path: None,
+                projects=lambda: (),
+                converted_paths=lambda: (),
             ),
-            _conversion_projects=lambda _versions: {},
+            _on_conversion_project_load_failed=lambda *_args: None,
             _apply_conversion_result_context=lambda _version, **_kwargs: None,
         )
 
         MainWindow._refresh_conversion_input_choices(window, versions, first.job_dir)
         pool.select_version(second.job_dir)
+        MainWindow._on_conversion_input_version_changed(window, second)
         MainWindow._refresh_conversion_input_choices(window, versions, first.job_dir)
 
         self.assertIs(pool.selected_version(), second)
@@ -98,6 +104,80 @@ class MainWindowConversionSourceTests(unittest.TestCase):
         MainWindow._activate_vocal_converted_version(window, selected_path)
 
         self.assertEqual(previewed, [(source, selected_path)])
+
+    def test_manual_conversion_input_selection_clears_selected_converted_preview(self) -> None:
+        first = _version("standard", (Path("output/standard/rvc.wav"),))
+        second = _version("maximum")
+        cleared: list[Path | None] = []
+        previewed: list[tuple[SongVocalVersion | None, Path | None]] = []
+        window = SimpleNamespace(
+            conversion_result_browser=SimpleNamespace(
+                select_converted=lambda path: cleared.append(path) or True,
+                projects=lambda: (),
+                selected_path=lambda: None,
+                converted_paths=lambda: (),
+            ),
+            _apply_conversion_result_context=lambda version, **kwargs: previewed.append(
+                (version, kwargs.get("selected_converted_path"))
+            ),
+        )
+        MainWindow._work_convert_session(window).refresh(
+            (first, second),
+            current_output_job_dir=first.job_dir,
+            preferred_converted_path=first.converted_vocal_paths[0],
+        )
+
+        MainWindow._on_conversion_input_version_changed(window, second)
+
+        self.assertEqual(cleared, [None])
+        self.assertIs(
+            MainWindow._work_convert_session(window).input_version(),
+            second,
+        )
+        self.assertEqual(
+            previewed,
+            [(second, None)],
+        )
+
+    def test_rename_vocal_take_uses_selected_take_owner_job_dir(self) -> None:
+        current_output = _version("standard")
+        owner = _version("maximum", (Path("output/maximum/rvc.wav"),))
+        selected_take = SimpleNamespace(
+            output_path=owner.converted_vocal_paths[0],
+            label="Old label",
+        )
+        renamed: list[tuple[Path, Path, str] | tuple[str]] = []
+        window = SimpleNamespace(
+            current_output_set=SimpleNamespace(job_dir=current_output.job_dir),
+            vocal_results_panel=SimpleNamespace(current_take=lambda: selected_take),
+            settings=SimpleNamespace(theme_mode="dark"),
+            vocal_project_store=SimpleNamespace(
+                rename_take=lambda job_dir, path, label: renamed.append(
+                    (job_dir, path, label)
+                )
+            ),
+            _refresh_vocal_project_panel=lambda: renamed.append(("refreshed",)),
+            rvc_action=SimpleNamespace(set_status=lambda _message: None),
+            work_convert_session=WorkConvertSession(),
+        )
+        window.work_convert_session.refresh(
+            (current_output, owner),
+            current_output_job_dir=current_output.job_dir,
+        )
+
+        with patch(
+            "jang_app.qt_app.main_window.TextInputDialog.get_text",
+            return_value=("New label", True),
+        ):
+            MainWindow._rename_vocal_take(window, owner.converted_vocal_paths[0])
+
+        self.assertEqual(
+            renamed,
+            [
+                (owner.job_dir, owner.converted_vocal_paths[0], "New label"),
+                ("refreshed",),
+            ],
+        )
 
     def test_successful_conversion_selects_the_new_take(self) -> None:
         converted_job = Path("output/maximum")

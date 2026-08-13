@@ -91,6 +91,8 @@ class MainWindowRvcModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             old_root = root / "old"
+            execution_root = root / "execution"
+            execution_root.mkdir()
             model_root = root / "managed"
             model_root.mkdir()
             model = model_root / "voice.pth"
@@ -142,10 +144,13 @@ class MainWindowRvcModelTests(unittest.TestCase):
                 MainWindow._save_rvc_settings_from_controls(window, *args)
             )
 
-            with patch("jang_app.qt_app.main_window.save_app_settings"):
+            with (
+                patch("jang_app.qt_app.main_window.save_app_settings"),
+                patch("jang_app.qt_app.main_window.RVC_RUNTIME_DIR", execution_root),
+            ):
                 MainWindow._refresh_rvc_choices(window)
 
-            self.assertEqual(window.settings.rvc.root, model_root.resolve())
+            self.assertEqual(window.settings.rvc.root, execution_root.resolve())
             self.assertEqual(window.settings.rvc.voice_model, str(model.resolve()))
             self.assertEqual(window.settings.rvc.index_file, str(index.resolve()))
             self.assertEqual(window.settings.rvc.pitch, 7)

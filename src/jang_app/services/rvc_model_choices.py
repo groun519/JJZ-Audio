@@ -27,12 +27,14 @@ def collect_rvc_model_choices(
     *,
     current_root: Path | None = None,
     current_model: str = "",
+    execution_root: Path | None = None,
 ) -> tuple[RvcModelChoice, ...]:
     choices: list[RvcModelChoice] = []
     seen_paths: set[str] = set()
+    resolved_execution_root = execution_root.expanduser().resolve() if execution_root is not None else None
 
     for record in records:
-        choice = rvc_model_choice_from_record(record)
+        choice = rvc_model_choice_from_record(record, execution_root=resolved_execution_root)
         if choice is None:
             continue
         _append_choice(choices, seen_paths, choice)
@@ -74,13 +76,19 @@ def collect_rvc_model_choices(
 
 def rvc_model_choice_from_record(
     record: RvcModelRecord,
+    *,
+    execution_root: Path | None = None,
 ) -> RvcModelChoice | None:
     if not record.can_convert or record.inference_model is None:
         return None
     return RvcModelChoice(
         choice_id=f"library:{record.model_id}",
         label=record.title,
-        root=record.runtime_root.expanduser().resolve(),
+        root=(
+            execution_root.expanduser().resolve()
+            if execution_root is not None
+            else record.runtime_root.expanduser().resolve()
+        ),
         model_path=record.inference_model.expanduser().resolve(),
         model_id=record.model_id,
         index_path=(

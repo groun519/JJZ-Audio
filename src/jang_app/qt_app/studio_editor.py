@@ -31,6 +31,7 @@ from jang_app.qt_app.workspace_splitter import create_workspace_splitter
 from jang_app.qt_app.theme import theme_tokens
 from jang_app.services.i18n import tr
 from jang_app.services.studio_assets import StudioSoundAsset
+from jang_app.services.studio_audio_levels import studio_source_gain
 from jang_app.services.studio_character_fx_presets import (
     EDITABLE_EFFECT_KINDS,
     character_effect,
@@ -592,7 +593,7 @@ class StudioTimelineView(QWidget):
         if track.role == TRACK_VIDEO:
             self._paint_video_clip(painter, rect)
         else:
-            self._paint_clip_waveform(painter, clip, rect)
+            self._paint_clip_waveform(painter, track, clip, rect)
             self._paint_clip_fades(painter, clip, rect)
         painter.setPen(QColor("#f4f1ea"))
         asset = self._assets.get(clip.asset.asset_id)
@@ -728,7 +729,13 @@ class StudioTimelineView(QWidget):
             )
         painter.restore()
 
-    def _paint_clip_waveform(self, painter: QPainter, clip: StudioClip, rect: QRectF) -> None:
+    def _paint_clip_waveform(
+        self,
+        painter: QPainter,
+        track: StudioTrack,
+        clip: StudioClip,
+        rect: QRectF,
+    ) -> None:
         asset = self._assets.get(clip.asset.asset_id)
         peaks = self._peaks.get(clip.asset.asset_id, [])
         if asset is None or not peaks or asset.duration_ms <= 0 or rect.width() < 20:
@@ -740,13 +747,27 @@ class StudioTimelineView(QWidget):
         if len(visible) > target_count:
             step = len(visible) / target_count
             visible = [visible[min(len(visible) - 1, int(index * step))] for index in range(target_count)]
-        painter.setPen(QPen(QColor(255, 255, 255, 65 if clip.muted else 150), 1))
+        painter.setPen(
+            QPen(QColor(255, 255, 255, 65 if track.muted or clip.muted else 150), 1)
+        )
         center = rect.center().y() + 8
-        max_height = max(2.0, rect.height() * 0.26)
+        nominal_height = max(2.0, rect.height() * 0.26)
+        bottom_margin = rect.bottom() - 5
+        if clip.effects:
+            effect_height = min(20.0, max(12.0, rect.height() * 0.28))
+            bottom_margin -= effect_height + 4
+        available_height = max(
+            1.0,
+            min(center - (rect.top() + 22), bottom_margin - center),
+        )
+        display_gain = studio_source_gain(
+            self._display_track_volume(track),
+            clip.gain_db,
+        )
         x_step = rect.width() / max(1, len(visible) - 1)
         for index, peak in enumerate(visible):
             x = rect.left() + index * x_step
-            height = max(1.0, peak * max_height)
+            height = min(available_height, max(0.5, peak * nominal_height * display_gain))
             painter.drawLine(int(x), int(center - height), int(x), int(center + height))
 
     def _paint_playhead(self, painter: QPainter) -> None:
@@ -935,15 +956,7 @@ class StudioTimelineView(QWidget):
 
         rail = volume_rect.adjusted(7, 0, -7, 0)
         center_y = rail.center().y()
-        display_volume = (
-            self._drag_volume_value
-            if (
-                self._drag_mode == "volume"
-                and self._drag_track_id == track.track_id
-                and self._drag_volume_value is not None
-            )
-            else track.volume_percent
-        )
+        display_volume = self._display_track_volume(track)
         ratio = max(0.0, min(1.0, display_volume / 200))
         knob_x = rail.left() + rail.width() * ratio
         unity_x = rail.left() + rail.width() * 0.5
@@ -959,6 +972,15 @@ class StudioTimelineView(QWidget):
         painter.setPen(QColor(self._theme["muted"]))
         painter.drawText(value_rect, Qt.AlignmentFlag.AlignCenter, f"{display_volume}%")
         painter.restore()
+
+    def _display_track_volume(self, track: StudioTrack) -> int:
+        if (
+            self._drag_mode == "volume"
+            and self._drag_track_id == track.track_id
+            and self._drag_volume_value is not None
+        ):
+            return self._drag_volume_value
+        return track.volume_percent
 
     def _track_volume_from_x(self, track: StudioTrack, x_position: float) -> int:
         index = self._session.tracks.index(track)

@@ -144,11 +144,14 @@ class SongListRowTests(unittest.TestCase):
         self.assertNotEqual(row.work_song_button._loading_phase, initial_phase)
 
         row._is_hovered = False
+        completed = QSignalSpy(row.work_song_button.loading_finished)
         row.set_work_song_loading(False)
-        QTest.qWait(220)
+        self.assertTrue(row.work_song_button.is_loading())
+        QTest.qWait(650)
         self.assertFalse(row.work_song_button.is_loading())
         self.assertTrue(row.work_song_button.isEnabled())
         self.assertFalse(row.work_song_button.isVisible())
+        self.assertEqual(completed.count(), 1)
         row.close()
 
     def test_row_expands_inline_transport_without_resizing_the_title_column(self) -> None:

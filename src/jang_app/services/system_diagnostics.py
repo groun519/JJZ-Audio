@@ -285,7 +285,7 @@ def _runtime_checks(
             if capabilities.directml_ready
             else _accelerator_detail(capabilities)
             if capabilities.cuda_ready
-            else "CPU fallback active"
+            else "CPU-only runtime active"
         )
         cuda = DiagnosticCheck(
             "cuda",
@@ -308,7 +308,9 @@ def _runtime_checks(
             capabilities.directml_device_name or "DirectML GPU conversion ready",
         )
     elif capabilities.cuda_available:
-        detail = capabilities.cuda_detail or "CUDA operation failed. CPU conversion will be used."
+        detail = capabilities.cuda_detail or (
+            "CUDA validation failed. GPU conversion is unavailable until the runtime is repaired."
+        )
         cuda = DiagnosticCheck(
             "cuda",
             "Voice Conversion Acceleration",
@@ -316,7 +318,9 @@ def _runtime_checks(
             detail,
         )
     elif capabilities.directml_available:
-        detail = capabilities.directml_detail or "DirectML operation failed. CPU conversion will be used."
+        detail = capabilities.directml_detail or (
+            "DirectML validation failed. GPU conversion is unavailable until the runtime is repaired."
+        )
         cuda = DiagnosticCheck(
             "cuda",
             "Voice Conversion Acceleration",
@@ -328,7 +332,7 @@ def _runtime_checks(
             "cuda",
             "Voice Conversion Acceleration",
             DiagnosticStatus.WARNING,
-            "GPU acceleration is unavailable. CPU conversion and training will be used.",
+            "GPU acceleration is unavailable. Select CPU explicitly to run without GPU acceleration.",
         )
     return runtime, cuda
 

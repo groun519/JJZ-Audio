@@ -201,7 +201,7 @@ class ButtonFeedbackTests(unittest.TestCase):
             button_rect = queue_button.geometry()
             action_rect = title_bar.action_widget.rect()
             with self.subTest(theme_mode=theme_mode):
-                self.assertEqual(queue_button.size().toTuple(), (48, 26))
+                self.assertEqual(queue_button.size().toTuple(), (184, 26))
                 self.assertTrue(action_rect.contains(button_rect))
 
             title_bar.close()

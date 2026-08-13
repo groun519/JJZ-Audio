@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,11 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from jang_app.qt_app.workers import TaskWorker
 from jang_app.services.app_paths import AppPaths
-from jang_app.services.google_drive import GoogleDriveCancelled, GoogleDriveUnavailableError
+from jang_app.services.google_drive import (
+    GoogleDriveCancelled,
+    GoogleDriveQuota,
+    GoogleDriveUnavailableError,
+)
 from jang_app.services.google_drive_download import download_public_drive_file
 from jang_app.services.google_drive_share import (
     GoogleDriveShareResult,
@@ -23,10 +28,23 @@ from jang_app.services.google_oauth import GoogleOAuthConfigurationError
 from jang_app.services.model_share_package import (
     ImportedSharedModel,
     ModelShareCancelled,
+    ModelSharePackageError,
     create_model_share_package,
+    estimate_model_share_size_bytes,
     find_current_model_share_package,
     import_model_share_package,
 )
+from jang_app.services.model_work_share_package import (
+    ImportedSharedModelWork,
+    ModelWorkShareCancelled,
+    ModelWorkSharePackageError,
+    create_model_work_share_package,
+    estimate_model_work_share_size_bytes,
+    find_current_model_work_share_package,
+    import_model_work_share_package,
+    inspect_model_work_share_package,
+)
+from jang_app.services.i18n import tr
 from jang_app.services.rvc_model_workspace import RvcModelRecord, RvcModelWorkspace
 
 
@@ -40,10 +58,12 @@ class _DriveShareTarget:
     title: str
     category: str
     model: RvcModelRecord | None = None
+    is_model_work: bool = False
 
 
 class GoogleDriveController(QObject):
     account_changed = Signal(object)
+    quota_changed = Signal(object)
     account_busy_changed = Signal(bool)
     account_error = Signal(str)
     account_unavailable = Signal(str)
@@ -80,6 +100,7 @@ class GoogleDriveController(QObject):
         self._runtime_error = ""
         self._account_cancellation: Event | None = None
         self._account_running = False
+        self._quota: GoogleDriveQuota | None = None
         self._pending_shares: dict[str, _DriveShareTarget] = {}
         self._pending_deletes: dict[str, _DriveShareTarget] = {}
         self._active_shares: dict[str, Event] = {}
@@ -102,15 +123,18 @@ class GoogleDriveController(QObject):
         unavailable = self._unavailable_reason()
         if unavailable:
             self.feature_availability_changed.emit(False)
+            self.quota_changed.emit(None)
             self.account_unavailable.emit(unavailable)
             return
         service = self._get_service()
         if service is None:
             self.feature_availability_changed.emit(False)
+            self.quota_changed.emit(None)
             self.account_unavailable.emit(self._unavailable_reason())
             return
         self.feature_availability_changed.emit(True)
         self.account_changed.emit(service.account)
+        self.quota_changed.emit(self._quota if service.account is not None else None)
 
     def connect_account(self) -> None:
         self._connect_account()
@@ -153,6 +177,14 @@ class GoogleDriveController(QObject):
             return
         self._request_share(self._model_target(record))
 
+    def open_model_work_share(self, record: RvcModelRecord) -> None:
+        if self._reject_unavailable_action(notify_model=True):
+            return
+        if not record.is_managed:
+            self._model_status("Only managed models can share training work.")
+            return
+        self._request_share(self._model_work_target(record))
+
     def delete_export_share(self, path: Path) -> None:
         if not self._reject_unavailable_action():
             self._request_delete(self._export_target(path))
@@ -160,6 +192,10 @@ class GoogleDriveController(QObject):
     def delete_model_share(self, record: RvcModelRecord) -> None:
         if not self._reject_unavailable_action(notify_model=True):
             self._request_delete(self._model_target(record))
+
+    def delete_model_work_share(self, record: RvcModelRecord) -> None:
+        if not self._reject_unavailable_action(notify_model=True):
+            self._request_delete(self._model_work_target(record))
 
     def is_export_shared(self, path: Path) -> bool:
         return self._target_is_shared(self._export_target(path))
@@ -179,20 +215,33 @@ class GoogleDriveController(QObject):
             return False
         return self._target_is_shared(self._model_target(record))
 
+    def is_model_work_shared(self, record: RvcModelRecord) -> bool:
+        if not record.is_managed:
+            return False
+        return self._target_is_shared(self._model_work_target(record))
+
     def import_model_link(self, link: str) -> None:
         self._model_status("Downloading shared model...")
 
-        def import_model(progress: Callable[[int], None]) -> ImportedSharedModel:
+        def import_model(progress: Callable[[int], None]) -> tuple[RvcModelRecord, ...]:
             package_path = download_public_drive_file(
                 link,
                 self._paths.cache_dir / "drive_downloads",
                 progress=lambda value: progress(value * 55 // 100),
             )
-            return import_model_share_package(
+            if _is_model_work_share(package_path):
+                imported_work = import_model_work_share_package(
+                    package_path,
+                    self._model_workspace,
+                    progress=lambda value: progress(55 + value * 45 // 100),
+                )
+                return (imported_work.record,)
+            imported_model = import_model_share_package(
                 package_path,
                 self._model_workspace,
                 progress=lambda value: progress(55 + value * 45 // 100),
             )
+            return imported_model.records
 
         self._run_worker(
             TaskWorker(import_model),
@@ -228,6 +277,17 @@ class GoogleDriveController(QObject):
             model=record,
         )
 
+    @staticmethod
+    def _model_work_target(record: RvcModelRecord) -> _DriveShareTarget:
+        return _DriveShareTarget(
+            target_id=_model_work_target_id(record.model_id),
+            source=record.source_folder,
+            title=record.title,
+            category="model_work",
+            model=record,
+            is_model_work=True,
+        )
+
     def _target_is_shared(self, target: _DriveShareTarget) -> bool:
         service = self._get_service()
         if service is None:
@@ -252,6 +312,10 @@ class GoogleDriveController(QObject):
         if existing is not None:
             QApplication.clipboard().setText(existing.share_link)
             self.share_succeeded.emit(target.target_id, existing.share_link)
+            return
+        preflight_error = self._preflight_share_error(service, target)
+        if preflight_error:
+            self._report_share_failure(target, preflight_error)
             return
         self.share_started.emit(target.target_id)
         if service.account is None:
@@ -294,6 +358,13 @@ class GoogleDriveController(QObject):
     def _resolved_share_source(self, target: _DriveShareTarget) -> Path | None:
         if target.model is None:
             return target.source
+        if target.is_model_work:
+            package = _find_current_model_work_share_package(
+                self._model_workspace,
+                target.model,
+                self._paths.cache_dir / "model_work_shares" / target.model.model_id,
+            )
+            return package.path if package is not None else None
         package = find_current_model_share_package(
             target.model,
             self._paths.cache_dir / "model_shares" / target.model.model_id,
@@ -362,11 +433,19 @@ class GoogleDriveController(QObject):
         if not isinstance(result, tuple) or len(result) != 2:
             self._fail_pending_operations("Google account authorization returned no account.")
             return
-        account, _quota = result
+        account, quota = result
+        self._quota = quota if isinstance(quota, GoogleDriveQuota) else None
         self.account_changed.emit(account)
+        self.quota_changed.emit(self._quota)
+        service = self._get_service()
         pending = tuple(self._pending_shares.values())
         self._pending_shares.clear()
         for target in pending:
+            if service is not None:
+                preflight_error = self._preflight_share_error(service, target)
+                if preflight_error:
+                    self._report_share_failure(target, preflight_error)
+                    continue
             self._start_share(target)
         pending_deletes = tuple(self._pending_deletes.values())
         self._pending_deletes.clear()
@@ -387,8 +466,10 @@ class GoogleDriveController(QObject):
 
     def _on_disconnected(self) -> None:
         self._account_running = False
+        self._quota = None
         self.account_busy_changed.emit(False)
         self.account_changed.emit(None)
+        self.quota_changed.emit(None)
 
     def _on_account_action_failed(self, error: str) -> None:
         self._account_running = False
@@ -409,12 +490,21 @@ class GoogleDriveController(QObject):
             source = target.source
             upload_start = 0
             if target.model is not None:
-                package = create_model_share_package(
-                    target.model,
-                    self._paths.cache_dir / "model_shares" / target.model.model_id,
-                    progress=lambda value: progress(value * 30 // 100),
-                    cancelled=cancellation.is_set,
-                )
+                if target.is_model_work:
+                    package = create_model_work_share_package(
+                        self._model_workspace,
+                        target.model,
+                        self._paths.cache_dir / "model_work_shares" / target.model.model_id,
+                        progress=lambda value: progress(value * 30 // 100),
+                        cancelled=cancellation.is_set,
+                    )
+                else:
+                    package = create_model_share_package(
+                        target.model,
+                        self._paths.cache_dir / "model_shares" / target.model.model_id,
+                        progress=lambda value: progress(value * 30 // 100),
+                        cancelled=cancellation.is_set,
+                    )
                 source = package.path
                 upload_start = 30
             return service.share_file(
@@ -489,8 +579,11 @@ class GoogleDriveController(QObject):
     def _on_share_failed(self, target: _DriveShareTarget, error: str) -> None:
         if self._active_shares.pop(target.target_id, None) is None:
             return
-        detail = _last_error_line(error)
+        detail = _friendly_share_error(target, error)
         self._disable_for_error(error)
+        self.account_error.emit(detail)
+        if target.model is not None:
+            self._model_status(detail)
         self.share_failed.emit(target.target_id, detail)
 
     def _on_delete_succeeded(self, target: _DriveShareTarget) -> None:
@@ -523,6 +616,12 @@ class GoogleDriveController(QObject):
     def _on_model_import_succeeded(self, result: object) -> None:
         if isinstance(result, ImportedSharedModel):
             self._models_imported(result.records)
+        elif isinstance(result, ImportedSharedModelWork):
+            self._models_imported((result.record,))
+        elif isinstance(result, tuple) and all(
+            isinstance(item, RvcModelRecord) for item in result
+        ):
+            self._models_imported(result)
 
     def _cancel_account(self) -> None:
         if self._account_cancellation is not None:
@@ -547,6 +646,62 @@ class GoogleDriveController(QObject):
         for target_id in target_ids:
             self.share_failed.emit(target_id, reason)
 
+    def _preflight_share_error(
+        self,
+        service: GoogleDriveShareService,
+        target: _DriveShareTarget,
+    ) -> str:
+        try:
+            quota = self._quota
+            if quota is None and service.account is not None:
+                if not hasattr(service, "quota"):
+                    return ""
+                quota = service.quota()
+                self._quota = quota
+                self.quota_changed.emit(self._quota)
+            available_bytes = getattr(quota, "available_bytes", None) if quota is not None else None
+            if quota is None or available_bytes is None:
+                return ""
+            required_bytes = self._estimated_share_size_bytes(target)
+        except (
+            OSError,
+            ModelSharePackageError,
+            ModelWorkSharePackageError,
+        ) as exc:
+            return _last_error_line(str(exc))
+        if required_bytes <= 0 or available_bytes is None or available_bytes >= required_bytes:
+            return ""
+        return _share_storage_message(target, required_bytes, available_bytes)
+
+    def _estimated_share_size_bytes(self, target: _DriveShareTarget) -> int:
+        if target.model is None:
+            return target.source.expanduser().resolve().stat().st_size
+        if target.is_model_work:
+            package = _find_current_model_work_share_package(
+                self._model_workspace,
+                target.model,
+                self._paths.cache_dir / "model_work_shares" / target.model.model_id,
+            )
+            if package is not None and package.path.is_file():
+                return package.path.stat().st_size
+            return estimate_model_work_share_size_bytes(
+                self._model_workspace,
+                target.model,
+            )
+        package = find_current_model_share_package(
+            target.model,
+            self._paths.cache_dir / "model_shares" / target.model.model_id,
+        )
+        if package is not None and package.path.is_file():
+            return package.path.stat().st_size
+        return estimate_model_share_size_bytes(target.model)
+
+    def _report_share_failure(self, target: _DriveShareTarget, message: str) -> None:
+        self.account_error.emit(message)
+        self.share_failed.emit(target.target_id, message)
+        if target.model is not None:
+            self._model_status(message)
+
 
 def _last_error_line(error: str) -> str:
     lines = [line.strip() for line in error.splitlines() if line.strip()]
@@ -557,6 +712,7 @@ def _is_cancelled_error(error: str) -> bool:
     return (
         GoogleDriveCancelled.__name__ in error
         or ModelShareCancelled.__name__ in error
+        or ModelWorkShareCancelled.__name__ in error
         or "operation was cancelled" in error.casefold()
         or "connection was cancelled" in error.casefold()
     )
@@ -568,3 +724,74 @@ def _is_unavailable_error(error: str) -> bool:
         or GoogleOAuthConfigurationError.__name__ in error
         or "OAuth client is not configured" in error
     )
+
+
+def _model_work_target_id(model_id: str) -> str:
+    return f"model-work::{model_id}"
+
+
+def _is_model_work_share(package_path: Path) -> bool:
+    try:
+        inspect_model_work_share_package(package_path)
+    except ModelWorkSharePackageError:
+        return False
+    return True
+
+
+def _find_current_model_work_share_package(
+    workspace: RvcModelWorkspace,
+    record: RvcModelRecord,
+    output_dir: Path,
+):
+    return find_current_model_work_share_package(workspace, record, output_dir)
+
+
+def _friendly_share_error(target: _DriveShareTarget, error: str) -> str:
+    detail = _last_error_line(error)
+    storage_message = _share_storage_message_from_error(target, detail)
+    return storage_message or detail
+
+
+def _share_storage_message_from_error(target: _DriveShareTarget, detail: str) -> str:
+    normalized = detail
+    if "GoogleDriveStorageError" in detail:
+        normalized = detail.split("GoogleDriveStorageError:", 1)[-1].strip()
+    if "Google Drive does not have enough free space" not in normalized:
+        return ""
+    match = re.search(r"\(([^)]+) required,\s*([^)]+) available\)", normalized)
+    if match is None:
+        return tr("Not enough Google Drive space.")
+    required = match.group(1).strip()
+    available = match.group(2).strip()
+    return _share_storage_message(target, required, available)
+
+
+def _share_storage_message(
+    target: _DriveShareTarget,
+    required: int | str,
+    available: int | str,
+) -> str:
+    required_text = required if isinstance(required, str) else _format_drive_bytes(required)
+    available_text = available if isinstance(available, str) else _format_drive_bytes(available)
+    if target.is_model_work:
+        return tr(
+            "Not enough Google Drive space for model work. This package needs about {required}, but only {available} is available. Free space or use inference share instead.",
+            required=required_text,
+            available=available_text,
+        )
+    return tr(
+        "Not enough Google Drive space. This upload needs about {required}, but only {available} is available.",
+        required=required_text,
+        available=available_text,
+    )
+
+
+def _format_drive_bytes(size_bytes: int) -> str:
+    size = float(max(0, size_bytes))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return "0 B"

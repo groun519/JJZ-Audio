@@ -3,7 +3,9 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+from jang_app.qt_app.localization import set_translated_tooltip
 from jang_app.qt_app.share_progress_action import ShareProgressAction
+from jang_app.qt_app.widgets import DangerIconButton
 from jang_app.services.i18n import tr
 from jang_app.services.rvc_model_workspace import RvcModelRecord
 
@@ -12,6 +14,7 @@ class ModelListRow(QWidget):
     activated = Signal(str)
     share_requested = Signal(str)
     delete_share_requested = Signal(str)
+    remove_requested = Signal(str)
 
     def __init__(
         self,
@@ -43,7 +46,7 @@ class ModelListRow(QWidget):
             reveal_on_hover=True,
             parent=self,
         )
-        self.share_action.setObjectName("ModelRowActionSlot")
+        self.share_action.setObjectName("ModelRowShareAction")
         self.share_action.requested.connect(
             lambda: self.share_requested.emit(self._model_id)
         )
@@ -51,7 +54,22 @@ class ModelListRow(QWidget):
             lambda: self.delete_share_requested.emit(self._model_id)
         )
         self.share_button = self.share_action.button
-        self.action_slot = self.share_action
+
+        self.remove_button = DangerIconButton(size=36, paint_inset=2)
+        set_translated_tooltip(self.remove_button, "Delete model and work")
+        self.remove_button.clicked.connect(
+            lambda: self.remove_requested.emit(self._model_id)
+        )
+        self.remove_button.hide()
+
+        self.action_slot = QWidget()
+        self.action_slot.setObjectName("ModelRowActionSlot")
+        self.action_slot.setFixedSize(163, 42)
+        action_layout = QHBoxLayout(self.action_slot)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(7)
+        action_layout.addWidget(self.share_action)
+        action_layout.addWidget(self.remove_button)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -70,6 +88,7 @@ class ModelListRow(QWidget):
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self.share_action.set_theme_mode(theme_mode)
+        self.remove_button.set_theme_mode(theme_mode)
 
     def update_record(self, record: RvcModelRecord) -> None:
         self._record = record
@@ -83,6 +102,7 @@ class ModelListRow(QWidget):
     def apply_language(self) -> None:
         self.update_record(self._record)
         self.share_action.apply_language()
+        set_translated_tooltip(self.remove_button, "Delete model and work")
 
     def set_sharing_enabled(self, is_enabled: bool) -> None:
         self._sharing_enabled = is_enabled
@@ -110,11 +130,13 @@ class ModelListRow(QWidget):
     def enterEvent(self, event) -> None:  # noqa: N802
         self.share_action.set_idle_visible(True)
         self.share_action.set_actions_expanded(True)
+        self.remove_button.show()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self.share_action.set_idle_visible(False)
         self.share_action.set_actions_expanded(False)
+        self.remove_button.hide()
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802

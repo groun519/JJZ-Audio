@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from jang_app.config import APP_ICON_PATH
+from jang_app.qt_app.confirmation_dialog import ConfirmationDialog
 from jang_app.qt_app.model_add_dialog import (
     ModelAddAction,
     ModelAddDialog,
@@ -35,12 +36,14 @@ from jang_app.qt_app.model_badge import set_model_badge
 from jang_app.qt_app.model_dataset_analysis_panel import ModelDatasetAnalysisPanel
 from jang_app.qt_app.model_dataset_panel import ModelDatasetPanel
 from jang_app.qt_app.model_detail_panel import ModelDetailPanel, ModelProfileValues
+from jang_app.qt_app.model_precision_benchmark_panel import ModelPrecisionBenchmarkPanel
 from jang_app.qt_app.model_row import ModelListRow
 from jang_app.qt_app.model_training_panel import (
     ModelTrainingPanel,
     ModelTrainingWorker,
     format_training_elapsed,
 )
+from jang_app.qt_app.share_progress_action import ShareProgressAction
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
 from jang_app.qt_app.text_input_dialog import TextInputDialog
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton, attach_list_item_widget
@@ -57,6 +60,7 @@ from jang_app.services.job_diagnostics import classify_error
 from jang_app.services.processing_queue import ProcessingQueue
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_model_workspace import RvcModelRecord, RvcModelWorkspace
+from jang_app.services.rvc_training_activity import describe_rvc_training_activity
 from jang_app.services.rvc_training_finalize import (
     RvcTrainingFinalizeResult,
     finalize_rvc_training_artifacts,
@@ -106,6 +110,8 @@ class ModelWorkspacePage(QWidget):
     models_changed = Signal()
     share_requested = Signal(object)
     delete_share_requested = Signal(object)
+    work_share_requested = Signal(object)
+    delete_work_share_requested = Signal(object)
     drive_import_requested = Signal(str)
 
     def __init__(
@@ -131,10 +137,18 @@ class ModelWorkspacePage(QWidget):
         self._share_progress_by_id: dict[str, int] = {}
         self._shared_model_ids: set[str] = set()
         self._share_status_provider: Callable[[RvcModelRecord], bool] | None = None
+        self._shared_model_work_ids: set[str] = set()
+        self._work_share_status_provider: Callable[[RvcModelRecord], bool] | None = None
         self._sharing_enabled = True
         self._selected_model_id: str | None = None
         self._active_worker: TaskWorker | None = None
         self._active_action_label = ""
+        self._dataset_load_worker: TaskWorker | None = None
+        self._dataset_load_model_id = ""
+        self._pending_dataset_model_id = ""
+        self._loaded_dataset: ModelDataset | None = None
+        self._section_model_ids: dict[int, str] = {}
+        self._pending_dataset_open: tuple[str, str, int, int] | None = None
         self._processing_queue = processing_queue
         self._training_worker: ModelTrainingWorker | None = None
         self._training_cancellation: CommandCancellation | None = None
@@ -142,9 +156,13 @@ class ModelWorkspacePage(QWidget):
         self._training_task_id = ""
         self._training_progress = 0
         self._training_stage = ""
+        self._training_activity_detail = ""
         self._training_started_at = 0.0
         self._training_last_activity_at = 0.0
         self._training_queue_runtime_bucket = -1
+        self._benchmark_task_id = ""
+        self._benchmark_model_id = ""
+        self._benchmark_model_title = ""
         self._theme_mode = "white"
 
         self._training_runtime_timer = QTimer(self)
@@ -325,17 +343,29 @@ class ModelWorkspacePage(QWidget):
         self.workspace_open_button.setObjectName("ModelIconButton")
         self.workspace_open_button.setToolTip("Open model location")
         self.workspace_open_button.clicked.connect(self._emit_open_selected)
-        self.workspace_use_button = FeedbackButton("Use in Convert")
-        self.workspace_use_button.setObjectName("PrimaryButton")
-        self.workspace_use_button.clicked.connect(self._emit_use_selected)
+
+        self.workspace_work_share_action = ShareProgressAction(
+            button_size=30,
+            share_tooltip="Share model work with Google Drive",
+            copy_tooltip="Copy model work Google Drive link",
+            delete_tooltip="Delete model work from Google Drive",
+            copied_text="Copied",
+            parent=header,
+        )
+        self.workspace_work_share_action.setObjectName("WorkspaceModelWorkShareAction")
+        self.workspace_work_share_action.requested.connect(self._emit_work_share_model)
+        self.workspace_work_share_action.delete_requested.connect(
+            self._emit_delete_work_share_model
+        )
+        self.workspace_work_share_action.set_actions_expanded(True)
 
         header_layout.addWidget(self.workspace_back_button)
         header_layout.addLayout(identity)
         header_layout.addWidget(self.workspace_status_badge)
         header_layout.addWidget(self.workspace_mode_badge)
         header_layout.addStretch(1)
+        header_layout.addWidget(self.workspace_work_share_action)
         header_layout.addWidget(self.workspace_open_button)
-        header_layout.addWidget(self.workspace_use_button)
 
         section_control = QFrame()
         section_control.setObjectName("SegmentedControl")
@@ -353,6 +383,9 @@ class ModelWorkspacePage(QWidget):
         self.analysis_section_button = FeedbackButton("Analysis")
         self.analysis_section_button.setObjectName("SegmentButton")
         self.analysis_section_button.setCheckable(True)
+        self.evaluation_section_button = FeedbackButton("Evaluation")
+        self.evaluation_section_button.setObjectName("SegmentButton")
+        self.evaluation_section_button.setCheckable(True)
         self.training_section_button = FeedbackButton("Training")
         self.training_section_button.setObjectName("SegmentButton")
         self.training_section_button.setCheckable(True)
@@ -361,11 +394,13 @@ class ModelWorkspacePage(QWidget):
         self.section_button_group.addButton(self.overview_section_button, 0)
         self.section_button_group.addButton(self.dataset_section_button, 1)
         self.section_button_group.addButton(self.analysis_section_button, 2)
-        self.section_button_group.addButton(self.training_section_button, 3)
+        self.section_button_group.addButton(self.evaluation_section_button, 3)
+        self.section_button_group.addButton(self.training_section_button, 4)
         self.section_button_group.idClicked.connect(self._navigate_model_section)
         section_layout.addWidget(self.overview_section_button, 1)
         section_layout.addWidget(self.dataset_section_button, 1)
         section_layout.addWidget(self.analysis_section_button, 1)
+        section_layout.addWidget(self.evaluation_section_button, 1)
         section_layout.addWidget(self.training_section_button, 1)
 
         section_row = QHBoxLayout()
@@ -417,6 +452,27 @@ class ModelWorkspacePage(QWidget):
         analysis_layout.addWidget(analysis_title)
         analysis_layout.addWidget(self.analysis_panel, 1)
 
+        evaluation = QFrame()
+        evaluation.setObjectName("Panel")
+        evaluation_layout = QVBoxLayout(evaluation)
+        evaluation_layout.setContentsMargins(20, 20, 20, 20)
+        evaluation_layout.setSpacing(14)
+        evaluation_title = QLabel("Model Evaluation")
+        evaluation_title.setObjectName("SectionTitle")
+        self.evaluation_panel = ModelPrecisionBenchmarkPanel(
+            self._workspace.root,
+            self._execution_runtime_root,
+        )
+        self.evaluation_panel.benchmark_started.connect(self._on_benchmark_started)
+        self.evaluation_panel.benchmark_progress_reported.connect(
+            self._on_benchmark_progress_reported
+        )
+        self.evaluation_panel.benchmark_completed.connect(self._on_benchmark_completed)
+        self.evaluation_panel.benchmark_failed_reported.connect(self._on_benchmark_failed)
+        self.evaluation_panel.benchmark_finished_reported.connect(self._on_benchmark_finished)
+        evaluation_layout.addWidget(evaluation_title)
+        evaluation_layout.addWidget(self.evaluation_panel, 1)
+
         training = QFrame()
         training.setObjectName("Panel")
         training_layout = QVBoxLayout(training)
@@ -434,7 +490,10 @@ class ModelWorkspacePage(QWidget):
             self.system_setup_requested.emit
         )
         self.training_panel.preflight_requested.connect(
-            lambda: self._refresh_training_panel(self._selected_record())
+            lambda: self._refresh_training_panel(
+                self._selected_record(),
+                self._selected_dataset(),
+            )
         )
         self.training_panel.excluded_clip_requested.connect(
             self._open_excluded_training_clip
@@ -455,6 +514,7 @@ class ModelWorkspacePage(QWidget):
         self.workspace_content_stack.addWidget(overview)
         self.workspace_content_stack.addWidget(dataset)
         self.workspace_content_stack.addWidget(analysis)
+        self.workspace_content_stack.addWidget(evaluation)
         self.workspace_content_stack.addWidget(self.training_scroll)
 
         layout.addWidget(header)
@@ -481,6 +541,7 @@ class ModelWorkspacePage(QWidget):
                 row.activated.connect(self._open_model)
                 row.share_requested.connect(self._emit_share_model)
                 row.delete_share_requested.connect(self._emit_delete_share_model)
+                row.remove_requested.connect(self._remove_model)
                 row.set_theme_mode(self._theme_mode)
                 row.set_sharing_enabled(self._sharing_enabled)
                 row.set_shared(self._record_is_shared(record))
@@ -503,6 +564,7 @@ class ModelWorkspacePage(QWidget):
             self.detail_panel.set_record(None)
             self.dataset_panel.set_model(None)
             self.analysis_panel.set_model(None)
+            self.evaluation_panel.set_model(None)
             self.training_panel.set_model(None, None, 0, 0)
             self._update_workspace_header(None)
             self.view_stack.setCurrentIndex(0)
@@ -512,16 +574,19 @@ class ModelWorkspacePage(QWidget):
         self.refresh_button.set_theme_mode(theme_mode)
         self.workspace_back_button.set_theme_mode(theme_mode)
         self.workspace_open_button.set_theme_mode(theme_mode)
+        self.workspace_work_share_action.set_theme_mode(theme_mode)
         for row in self._rows_by_id.values():
             row.set_theme_mode(theme_mode)
         self.detail_panel.set_theme_mode(theme_mode)
         self.dataset_panel.set_theme_mode(theme_mode)
         self.analysis_panel.set_theme_mode(theme_mode)
+        self.evaluation_panel.set_theme_mode(theme_mode)
 
     def set_sharing_enabled(self, is_enabled: bool) -> None:
         self._sharing_enabled = is_enabled
         for row in self._rows_by_id.values():
             row.set_sharing_enabled(is_enabled)
+        self._sync_workspace_work_share_action(self._selected_record())
 
     def set_share_status_provider(
         self,
@@ -533,6 +598,13 @@ class ModelWorkspacePage(QWidget):
             row = self._rows_by_id.get(model_id)
             if row is not None:
                 row.set_shared(is_shared)
+
+    def set_work_share_status_provider(
+        self,
+        provider: Callable[[RvcModelRecord], bool],
+    ) -> None:
+        self._work_share_status_provider = provider
+        self._sync_workspace_work_share_action(self._selected_record(), refresh=True)
 
     def set_share_started(self, model_id: str) -> None:
         if model_id not in self._records_by_id:
@@ -571,12 +643,43 @@ class ModelWorkspacePage(QWidget):
         if row is not None:
             row.set_share_deleted()
 
+    def set_work_share_started(self, model_id: str) -> None:
+        record = self._records_by_id.get(model_id)
+        if record is None or self._selected_model_id != model_id:
+            return
+        self.workspace_work_share_action.set_running(True)
+        self.workspace_work_share_action.set_feature_enabled(
+            self._sharing_enabled and record.is_managed
+        )
+
+    def set_work_share_progress(self, model_id: str, progress: int) -> None:
+        if self._selected_model_id != model_id:
+            return
+        self.workspace_work_share_action.set_progress(progress)
+
+    def set_work_share_completed(self, model_id: str) -> None:
+        if self._selected_model_id == model_id:
+            self.workspace_work_share_action.set_completed()
+        self._shared_model_work_ids.add(model_id)
+
+    def set_work_share_failed(self, model_id: str) -> None:
+        if self._selected_model_id != model_id:
+            return
+        self.workspace_work_share_action.set_failed()
+
+    def set_work_share_deleted(self, model_id: str) -> None:
+        self._shared_model_work_ids.discard(model_id)
+        if self._selected_model_id == model_id:
+            self.workspace_work_share_action.set_deleted()
+
     def apply_language(self) -> None:
         apply_widget_language(self)
         self.detail_panel.apply_language()
         self.dataset_panel.apply_language()
         self.analysis_panel.apply_language()
+        self.evaluation_panel.apply_language()
         self.training_panel.apply_language()
+        self.workspace_work_share_action.apply_language()
         self._navigate_model_section(self.workspace_content_stack.currentIndex())
         self._update_workspace_header(self._selected_record())
         for row in self._rows_by_id.values():
@@ -611,6 +714,76 @@ class ModelWorkspacePage(QWidget):
         self._open_model(record.model_id)
         self._navigate_model_section(1)
         self.show_status("Model created.")
+
+    def _remove_model(self, model_id: str) -> None:
+        record = self._records_by_id.get(model_id)
+        if record is None:
+            return
+        if self._model_has_active_task(model_id):
+            self.show_status("Stop the current model task before deleting it.")
+            return
+
+        message = (
+            tr(
+                "Delete '{name}' and all model files, training material, edited clips, "
+                "analysis results, and checkpoints managed by JJZero Audio? This cannot be undone.",
+                name=record.title,
+            )
+            if record.is_managed
+            else tr(
+                "Remove '{name}' and all JJZero Audio training work for it? "
+                "Linked external model files will not be deleted. This cannot be undone.",
+                name=record.title,
+            )
+        )
+        if not ConfirmationDialog.confirm(
+            self,
+            tr("Delete Model"),
+            message,
+            APP_ICON_PATH,
+            theme_mode=self._theme_mode,
+            accept_label=tr("Delete"),
+            cancel_label=tr("Cancel"),
+        ):
+            return
+
+        self.stop_preview()
+        try:
+            self._workspace.remove_model(model_id)
+        except Exception as exc:
+            self.show_status(f"Delete failed: {_last_error_line(exc)}")
+            return
+
+        if self._selected_model_id == model_id:
+            self._selected_model_id = None
+            self._loaded_dataset = None
+            self._pending_dataset_model_id = ""
+            self._pending_dataset_open = None
+            self._section_model_ids.clear()
+        self._share_progress_by_id.pop(model_id, None)
+        self._shared_model_ids.discard(model_id)
+        self._shared_model_work_ids.discard(model_id)
+        self.view_stack.setCurrentIndex(0)
+        self.refresh_models()
+        self.show_status("Model deleted.")
+
+    def _model_has_active_task(self, model_id: str) -> bool:
+        if self._active_worker is not None:
+            return True
+        if self._dataset_load_worker is not None and self._dataset_load_model_id == model_id:
+            return True
+        if self._training_worker is not None and self._training_model_id == model_id:
+            return True
+        if self._benchmark_model_id == model_id:
+            return True
+        if model_id in self._share_progress_by_id:
+            return True
+        if self._selected_model_id != model_id:
+            return False
+        return any(
+            getattr(panel, "_worker", None) is not None
+            for panel in (self.dataset_panel, self.analysis_panel, self.evaluation_panel)
+        )
 
     def _show_add_model_dialog(self) -> None:
         request = ModelAddDialog.get_request(
@@ -741,21 +914,30 @@ class ModelWorkspacePage(QWidget):
         self.workspace_back_button.setDisabled(is_busy)
         selected = self._selected_record()
         self.workspace_open_button.setDisabled(is_busy or selected is None or not selected.primary_location.exists())
-        self.workspace_use_button.setDisabled(is_busy or selected is None or not selected.can_convert)
+        self.workspace_work_share_action.setDisabled(is_busy)
         self.import_progress.setVisible(is_busy)
         self.detail_panel.set_busy(is_busy)
 
     def _on_model_selection_changed(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         model_id = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
+        previous_model_id = self._selected_model_id
         self._selected_model_id = model_id if isinstance(model_id, str) else None
+        if self._selected_model_id != previous_model_id:
+            self._loaded_dataset = None
+            self._pending_dataset_model_id = ""
+            self._pending_dataset_open = None
+            self._section_model_ids.clear()
         for row_id, row in self._rows_by_id.items():
             row.set_selected(row_id == self._selected_model_id)
         selected = self._selected_record()
         self.detail_panel.set_record(selected)
-        self.dataset_panel.set_model(selected.model_id if selected is not None else None)
-        self.analysis_panel.set_model(selected.model_id if selected is not None else None)
-        self._refresh_training_panel(selected)
+        if selected is None:
+            self.dataset_panel.set_model(None)
+            self.analysis_panel.set_model(None)
+            self.evaluation_panel.set_model(None)
+            self.training_panel.set_model(None, None, 0, 0)
         self._update_workspace_header(selected)
+        self._sync_workspace_work_share_action(selected)
 
     def _open_model_from_item(self, item: QListWidgetItem) -> None:
         model_id = item.data(Qt.ItemDataRole.UserRole)
@@ -766,32 +948,149 @@ class ModelWorkspacePage(QWidget):
         record = self._records_by_id.get(model_id)
         if record is None:
             return
+        self._navigate_model_section(0)
         if self._selected_model_id != model_id:
             self._select_model_item(model_id)
-        self._navigate_model_section(0)
         self.view_stack.setCurrentIndex(1)
+        QTimer.singleShot(0, lambda: self._request_dataset_load_if_current(model_id))
 
     def _show_model_library(self) -> None:
         self.stop_preview()
         self.view_stack.setCurrentIndex(0)
 
     def _navigate_model_section(self, index: int) -> None:
-        selected_index = max(0, min(3, index))
+        selected_index = max(0, min(4, index))
         self.workspace_content_stack.setCurrentIndex(selected_index)
         self.overview_section_button.setChecked(selected_index == 0)
         self.dataset_section_button.setChecked(selected_index == 1)
         self.analysis_section_button.setChecked(selected_index == 2)
-        self.training_section_button.setChecked(selected_index == 3)
-        section_name = ("Overview", "Dataset", "Analysis", "Training")[selected_index]
+        self.evaluation_section_button.setChecked(selected_index == 3)
+        self.training_section_button.setChecked(selected_index == 4)
+        section_name = ("Overview", "Dataset", "Analysis", "Evaluation", "Training")[selected_index]
         set_translated_text(self.workspace_section_label, section_name)
         if selected_index != 1:
             self.stop_preview()
-        if selected_index == 2:
-            self.analysis_panel.ensure_analysis()
+        self._ensure_model_section_loaded(selected_index)
 
-    def _on_dataset_changed(self, _dataset: object) -> None:
+    def _ensure_model_section_loaded(self, section_index: int) -> None:
+        record = self._selected_record()
+        if record is None or section_index == 0:
+            return
+        model_id = record.model_id
+        if section_index == 1:
+            if self._section_model_ids.get(section_index) == model_id:
+                return
+            self.dataset_panel.prepare_model(model_id)
+            self._section_model_ids[section_index] = model_id
+            dataset = self._selected_dataset()
+            if dataset is not None:
+                self.dataset_panel.apply_dataset(dataset, deferred=True)
+                self._try_open_pending_dataset_item()
+            else:
+                self._request_dataset_load(model_id)
+            return
+        if section_index == 2:
+            if self._section_model_ids.get(section_index) != model_id:
+                self.analysis_panel.set_model(model_id)
+                self._section_model_ids[section_index] = model_id
+            self.analysis_panel.ensure_analysis()
+            return
+        if section_index == 3:
+            if self._section_model_ids.get(section_index) != model_id:
+                self.evaluation_panel.set_model(record)
+                self._section_model_ids[section_index] = model_id
+            return
+        if self._section_model_ids.get(section_index) == model_id:
+            return
+        dataset = self._selected_dataset()
+        if dataset is None:
+            self.training_panel.set_model(record, None, 0, 0)
+            self._request_dataset_load(model_id)
+            return
+        self._refresh_training_panel(record, dataset)
+        self._section_model_ids[section_index] = model_id
+
+    def _request_dataset_load_if_current(self, model_id: str) -> None:
+        if self._selected_model_id == model_id and self.view_stack.currentIndex() == 1:
+            self._request_dataset_load(model_id)
+
+    def _request_dataset_load(self, model_id: str) -> None:
+        if self._loaded_dataset is not None and self._loaded_dataset.model_id == model_id:
+            return
+        self._pending_dataset_model_id = model_id
+        if self._dataset_load_worker is not None:
+            return
+        self._start_pending_dataset_load()
+
+    def _start_pending_dataset_load(self) -> None:
+        model_id = self._pending_dataset_model_id
+        if not model_id:
+            return
+        self._dataset_load_model_id = model_id
+        worker = TaskWorker(lambda _progress: self._dataset_store.load(model_id))
+        worker.setParent(self)
+        worker.succeeded.connect(
+            lambda result, selected_model_id=model_id: self._on_dataset_load_succeeded(
+                selected_model_id,
+                result,
+            )
+        )
+        worker.failed.connect(
+            lambda traceback_text, selected_model_id=model_id: self._on_dataset_load_failed(
+                selected_model_id,
+                traceback_text,
+            )
+        )
+        worker.finished.connect(
+            lambda selected_worker=worker, selected_model_id=model_id: self._on_dataset_load_finished(
+                selected_worker,
+                selected_model_id,
+            )
+        )
+        self._dataset_load_worker = worker
+        worker.start()
+
+    def _on_dataset_load_succeeded(self, model_id: str, result: object) -> None:
+        if self._pending_dataset_model_id == model_id:
+            self._pending_dataset_model_id = ""
+        if not isinstance(result, ModelDataset) or self._selected_model_id != model_id:
+            return
+        self._loaded_dataset = result
+        section_index = self.workspace_content_stack.currentIndex()
+        if section_index == 1 and self._section_model_ids.get(1) == model_id:
+            self.dataset_panel.apply_dataset(result, deferred=True)
+            self._try_open_pending_dataset_item()
+        elif section_index == 4:
+            record = self._selected_record()
+            self._refresh_training_panel(record, result)
+            self._section_model_ids[4] = model_id
+
+    def _on_dataset_load_failed(self, model_id: str, traceback_text: str) -> None:
+        if self._pending_dataset_model_id == model_id:
+            self._pending_dataset_model_id = ""
+        if self._selected_model_id != model_id:
+            return
+        self._section_model_ids.pop(1, None)
+        if self.workspace_content_stack.currentIndex() == 1:
+            self.dataset_panel.set_load_failure(model_id, traceback_text)
+        elif self.workspace_content_stack.currentIndex() == 4:
+            self.training_panel.set_failure(_last_error_line(traceback_text))
+
+    def _on_dataset_load_finished(self, worker: TaskWorker, model_id: str) -> None:
+        if self._dataset_load_worker is worker:
+            self._dataset_load_worker = None
+            self._dataset_load_model_id = ""
+        worker.deleteLater()
+        if self._pending_dataset_model_id and self._pending_dataset_model_id != model_id:
+            self._start_pending_dataset_load()
+
+    def _on_dataset_changed(self, dataset: object) -> None:
+        if isinstance(dataset, ModelDataset) and dataset.model_id == self._selected_model_id:
+            self._loaded_dataset = dataset
         self.analysis_panel.mark_stale()
-        self._refresh_training_panel(self._selected_record())
+        self._section_model_ids.pop(4, None)
+        if self.workspace_content_stack.currentIndex() == 4:
+            self._ensure_model_section_loaded(4)
 
     def _open_dataset_item(
         self,
@@ -800,8 +1099,16 @@ class ModelWorkspacePage(QWidget):
         start_ms: int = 0,
         end_ms: int = 0,
     ) -> None:
+        self._pending_dataset_open = (item_id, clip_id, start_ms, end_ms)
         self._navigate_model_section(1)
-        self.dataset_panel.open_training_item(item_id, clip_id, start_ms, end_ms)
+        self._try_open_pending_dataset_item()
+
+    def _try_open_pending_dataset_item(self) -> None:
+        pending = self._pending_dataset_open
+        if pending is None or self._selected_dataset() is None:
+            return
+        if self.dataset_panel.open_training_item(*pending):
+            self._pending_dataset_open = None
 
     def _open_excluded_training_clip(self, failure: object) -> None:
         if not isinstance(failure, RvcTrainingPreprocessFailure):
@@ -823,12 +1130,22 @@ class ModelWorkspacePage(QWidget):
         self.dataset_panel.stop_preview()
 
     def shutdown_training(self) -> None:
-        if self._training_worker is None:
-            return
-        self._stop_training()
-        self._training_worker.wait()
+        if self._training_worker is not None:
+            self._stop_training()
+            self._training_worker.wait()
+        if self._dataset_load_worker is not None:
+            self._dataset_load_worker.wait()
 
-    def _refresh_training_panel(self, record: RvcModelRecord | None) -> None:
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.stop_preview()
+        self.shutdown_training()
+        super().closeEvent(event)
+
+    def _refresh_training_panel(
+        self,
+        record: RvcModelRecord | None,
+        dataset: ModelDataset | None = None,
+    ) -> None:
         if record is None or not record.is_managed:
             self.training_panel.set_model(record, None, 0, 0)
             self.training_panel.clear_preprocess_summary()
@@ -842,7 +1159,7 @@ class ModelWorkspacePage(QWidget):
             else:
                 state = state_store.recover_interrupted()
                 state = state_store.refresh_checkpoint_pair()
-            dataset = ModelDatasetStore(self._workspace.root).load(record.model_id)
+            dataset = dataset or self._dataset_store.load(record.model_id)
         except Exception as exc:
             self.training_panel.set_model(record, None, 0, 0)
             self.training_panel.clear_preprocess_summary()
@@ -872,6 +1189,7 @@ class ModelWorkspacePage(QWidget):
         if is_running:
             self.training_panel.set_progress(self._training_progress)
             self.training_panel.set_stage(self._training_stage)
+            self.training_panel.set_activity_detail(self._training_activity_detail)
             self._refresh_training_runtime()
 
     def _start_training(self, settings: object) -> None:
@@ -881,7 +1199,8 @@ class ModelWorkspacePage(QWidget):
         if not isinstance(settings, RvcTrainingRunSettings):
             return
         try:
-            dataset = ModelDatasetStore(self._workspace.root).load(record.model_id)
+            dataset = self._selected_dataset() or self._dataset_store.load(record.model_id)
+            self._loaded_dataset = dataset
             self._validate_training_dataset(dataset)
             preflight = self._training_preflight(record, dataset)
             if not preflight.can_start:
@@ -900,6 +1219,7 @@ class ModelWorkspacePage(QWidget):
         self._training_model_id = record.model_id
         self._training_progress = 0
         self._training_stage = "Preparing Training"
+        self._training_activity_detail = ""
         now = monotonic()
         self._training_started_at = now
         self._training_last_activity_at = now
@@ -957,7 +1277,7 @@ class ModelWorkspacePage(QWidget):
         progress: Callable[[int], None],
         stage: Callable[[str], None],
         epoch: Callable[[int, int], None],
-        activity: Callable[[], None],
+        activity: Callable[[str], None],
         preprocess: Callable[[object], None],
     ) -> _ModelTrainingJobResult:
         pipeline = run_rvc_training_pipeline(
@@ -971,7 +1291,9 @@ class ModelWorkspacePage(QWidget):
             epoch_callback=epoch,
             stage_callback=lambda current: stage(_training_stage_label(current)),
             preprocess_callback=preprocess,
-            output_callback=lambda _line: activity(),
+            output_callback=lambda line: activity(
+                describe_rvc_training_activity(line) or ""
+            ),
         )
         if pipeline.stopped:
             return _ModelTrainingJobResult(pipeline, None)
@@ -1022,8 +1344,12 @@ class ModelWorkspacePage(QWidget):
         if self._selected_model_id == self._training_model_id:
             self.training_panel.set_epoch_progress(current_epoch, target_epoch)
 
-    def _on_training_activity(self) -> None:
+    def _on_training_activity(self, detail: str = "") -> None:
         self._mark_training_activity()
+        if detail:
+            self._training_activity_detail = detail
+        if detail and self._selected_model_id == self._training_model_id:
+            self.training_panel.set_activity_detail(detail)
 
     def _on_training_preprocess(self, result: object) -> None:
         if not isinstance(result, RvcTrainingPreprocessResult):
@@ -1135,6 +1461,7 @@ class ModelWorkspacePage(QWidget):
         self._training_task_id = ""
         self._training_progress = 0
         self._training_stage = ""
+        self._training_activity_detail = ""
         self._training_started_at = 0.0
         self._training_last_activity_at = 0.0
         self._training_queue_runtime_bucket = -1
@@ -1142,9 +1469,51 @@ class ModelWorkspacePage(QWidget):
         if worker is not None:
             worker.deleteLater()
         if self._selected_model_id == trained_model_id:
-            self._refresh_training_panel(self._selected_record())
+            self._refresh_training_panel(
+                self._selected_record(),
+                self._selected_dataset(),
+            )
         else:
             self.dataset_panel.set_training_locked(False)
+
+    def _on_benchmark_started(self, model_id: str, model_title: str) -> None:
+        self._benchmark_model_id = model_id
+        self._benchmark_model_title = model_title
+        self._benchmark_task_id = (
+            self._processing_queue.start(tr("Model Evaluation"), model_title)
+            if self._processing_queue is not None
+            else ""
+        )
+        if self._benchmark_task_id:
+            self.evaluation_panel.assign_diagnostic_task_id(self._benchmark_task_id)
+
+    def _on_benchmark_progress_reported(self, progress: int, detail: str) -> None:
+        if self._processing_queue is None or not self._benchmark_task_id:
+            return
+        self._processing_queue.update_progress(self._benchmark_task_id, progress)
+        queue_detail = detail
+        if self._benchmark_model_title:
+            queue_detail = f"{self._benchmark_model_title}  |  {detail}"
+        self._processing_queue.update_detail(self._benchmark_task_id, queue_detail)
+
+    def _on_benchmark_completed(self, model_id: str, _model_title: str) -> None:
+        if model_id != self._benchmark_model_id:
+            return
+        if self._processing_queue is not None and self._benchmark_task_id:
+            self._processing_queue.complete(self._benchmark_task_id)
+
+    def _on_benchmark_failed(self, model_id: str, _model_title: str, traceback_text: str) -> None:
+        if model_id != self._benchmark_model_id:
+            return
+        if self._processing_queue is not None and self._benchmark_task_id:
+            self._processing_queue.fail(self._benchmark_task_id, traceback_text)
+
+    def _on_benchmark_finished(self, model_id: str, _model_title: str) -> None:
+        if model_id != self._benchmark_model_id:
+            return
+        self._benchmark_task_id = ""
+        self._benchmark_model_id = ""
+        self._benchmark_model_title = ""
 
     def _training_layout(self, record: RvcModelRecord) -> RvcModelPackageLayout:
         return RvcModelPackageLayout(self._workspace.library_dir / record.model_id, record.name)
@@ -1207,12 +1576,7 @@ class ModelWorkspacePage(QWidget):
             record.is_managed if record is not None else False,
         )
         self.workspace_open_button.setEnabled(record is not None and record.primary_location.exists())
-        self.workspace_use_button.setEnabled(record is not None and record.can_convert)
-
-    def _emit_use_selected(self) -> None:
-        record = self._selected_record()
-        if record is not None and record.can_convert:
-            self.use_in_convert_requested.emit(record)
+        self._sync_workspace_work_share_action(record)
 
     def _emit_open_selected(self) -> None:
         record = self._selected_record()
@@ -1232,6 +1596,20 @@ class ModelWorkspacePage(QWidget):
             and record is not None
         ):
             self.delete_share_requested.emit(record)
+
+    def _emit_work_share_model(self) -> None:
+        record = self._selected_record()
+        if self._sharing_enabled and record is not None and record.is_managed:
+            self.work_share_requested.emit(record)
+
+    def _emit_delete_work_share_model(self) -> None:
+        record = self._selected_record()
+        if (
+            self._sharing_enabled
+            and record is not None
+            and record.model_id in self._shared_model_work_ids
+        ):
+            self.delete_work_share_requested.emit(record)
 
     def _record_is_shared(
         self,
@@ -1253,6 +1631,44 @@ class ModelWorkspacePage(QWidget):
             self._shared_model_ids.discard(record.model_id)
         return is_shared
 
+    def _record_work_is_shared(
+        self,
+        record: RvcModelRecord,
+        *,
+        refresh: bool = False,
+    ) -> bool:
+        if not refresh and record.model_id in self._shared_model_work_ids:
+            return True
+        is_shared = False
+        if self._work_share_status_provider is not None:
+            try:
+                is_shared = self._work_share_status_provider(record)
+            except OSError:
+                is_shared = False
+        if is_shared:
+            self._shared_model_work_ids.add(record.model_id)
+        else:
+            self._shared_model_work_ids.discard(record.model_id)
+        return is_shared
+
+    def _sync_workspace_work_share_action(
+        self,
+        record: RvcModelRecord | None,
+        *,
+        refresh: bool = False,
+    ) -> None:
+        enabled = bool(
+            self._sharing_enabled and record is not None and record.is_managed
+        )
+        self.workspace_work_share_action.set_feature_enabled(enabled)
+        if not enabled or record is None:
+            self.workspace_work_share_action.set_running(False)
+            self.workspace_work_share_action.set_shared(False)
+            return
+        self.workspace_work_share_action.set_shared(
+            self._record_work_is_shared(record, refresh=refresh)
+        )
+
     def apply_drive_import(self, records: tuple[RvcModelRecord, ...]) -> None:
         if records:
             self._selected_model_id = records[0].model_id
@@ -1266,6 +1682,12 @@ class ModelWorkspacePage(QWidget):
         if self._selected_model_id is None:
             return None
         return self._records_by_id.get(self._selected_model_id)
+
+    def _selected_dataset(self) -> ModelDataset | None:
+        dataset = self._loaded_dataset
+        if dataset is None or dataset.model_id != self._selected_model_id:
+            return None
+        return dataset
 
     def _save_model_profile(self, values: ModelProfileValues) -> None:
         try:
@@ -1344,7 +1766,11 @@ class ModelWorkspacePage(QWidget):
                 self.detail_panel.set_record(record)
             else:
                 self.detail_panel.apply_saved_record(record)
-            self._refresh_training_panel(record)
+            self._section_model_ids.pop(3, None)
+            self._section_model_ids.pop(4, None)
+            current_section = self.workspace_content_stack.currentIndex()
+            if current_section in {3, 4}:
+                self._ensure_model_section_loaded(current_section)
             self._update_workspace_header(record)
         self._update_summary(list(self._records_by_id.values()))
         self.models_changed.emit()

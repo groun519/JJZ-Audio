@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from jang_app.qt_app.google_drive_controller import GoogleDriveController
 from jang_app.services.drive_share_catalog import DriveShareRecord
+from jang_app.services.google_drive import GoogleDriveQuota
 from jang_app.services.google_drive_share import GoogleDriveShareResult, drive_share_target_id
 from jang_app.services.model_share_package import create_model_share_package
 from jang_app.services.rvc_model_workspace import RvcModelWorkspace
@@ -161,6 +162,44 @@ class GoogleDriveControllerTests(unittest.TestCase):
             self.assertEqual(len(workers), 1)
             self.assertEqual(started.count(), 1)
             controller.shutdown()
+            parent.close()
+
+    def test_share_preflight_blocks_when_google_drive_space_is_too_small(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "mix.wav"
+            source.write_bytes(b"audio" * 256)
+            workers: list[object] = []
+            parent = QWidget()
+            controller = GoogleDriveController(
+                parent,
+                paths=SimpleNamespace(cache_dir=root / "cache"),
+                oauth_asset=root / "oauth.json",
+                model_workspace=RvcModelWorkspace(root / "models"),
+                run_worker=lambda worker, *_args, **_kwargs: workers.append(worker),
+                model_status=lambda _message: None,
+                models_imported=lambda _records: None,
+                logger=logging.getLogger("test.google-drive"),
+            )
+            controller._service = SimpleNamespace(
+                account=SimpleNamespace(email="user@example.com"),
+                existing_share=lambda _source, _category: None,
+            )
+            controller._quota = GoogleDriveQuota(
+                limit_bytes=source.stat().st_size - 1,
+                usage_bytes=0,
+                drive_usage_bytes=0,
+            )
+            failed = QSignalSpy(controller.share_failed)
+            started = QSignalSpy(controller.share_started)
+
+            controller.open_export_share(source)
+
+            self.assertEqual(workers, [])
+            self.assertEqual(started.count(), 0)
+            self.assertEqual(failed.count(), 1)
+            self.assertEqual(failed.at(0)[0], drive_share_target_id(source))
+            self.assertIn("용량", failed.at(0)[1])
             parent.close()
 
     def test_disconnected_share_resumes_after_account_connection(self) -> None:

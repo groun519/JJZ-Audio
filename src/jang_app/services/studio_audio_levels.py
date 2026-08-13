@@ -19,3 +19,10 @@ def clamp_studio_clip_gain_db(value: float) -> float:
 
 def clamp_studio_source_volume(value: float) -> float:
     return max(0.0, min(STUDIO_SOURCE_VOLUME_MAX, float(value)))
+
+
+def studio_source_gain(volume_percent: int | float, clip_gain_db: float = 0.0) -> float:
+    """Return the effective linear gain shared by waveform and export paths."""
+    track_gain = max(0.0, min(STUDIO_TRACK_VOLUME_MAX_PERCENT, float(volume_percent))) / 100.0
+    clip_gain = math.pow(10.0, clamp_studio_clip_gain_db(clip_gain_db) / 20.0)
+    return clamp_studio_source_volume(track_gain * clip_gain)

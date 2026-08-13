@@ -18,6 +18,7 @@ DRIVE_UPLOAD_ROOT = "https://www.googleapis.com/upload/drive/v3"
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 DRIVE_ROOT_FOLDER = "JJZero Audio"
 DRIVE_MODEL_FOLDER = "Models"
+DRIVE_MODEL_WORK_FOLDER = "Model Work"
 DRIVE_EXPORT_FOLDER = "Exports"
 UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
@@ -480,6 +481,8 @@ def _category_folder(category: str) -> str:
     value = category.strip().casefold()
     if value == "models":
         return DRIVE_MODEL_FOLDER
+    if value == "model_work":
+        return DRIVE_MODEL_WORK_FOLDER
     if value == "exports":
         return DRIVE_EXPORT_FOLDER
     raise GoogleDriveError(f"Unsupported Google Drive category: {category}")

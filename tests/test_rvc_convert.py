@@ -39,6 +39,10 @@ class RvcConvertTests(unittest.TestCase):
         self.assertEqual(environment["PYTHONIOENCODING"], "utf-8:replace")
         self.assertEqual(environment["PYTHONFAULTHANDLER"], "1")
         self.assertEqual(environment["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"], "1")
+        self.assertEqual(environment["OPENBLAS_NUM_THREADS"], "1")
+        self.assertEqual(environment["OMP_NUM_THREADS"], "1")
+        self.assertEqual(environment["MKL_NUM_THREADS"], "1")
+        self.assertEqual(environment["NUMEXPR_NUM_THREADS"], "1")
 
     def test_environment_overrides_legacy_windows_console_encoding(self) -> None:
         with patch.dict(
@@ -105,14 +109,19 @@ class RvcConvertTests(unittest.TestCase):
                     require_directml_rmvpe=True,
                 )
 
-    def test_conversion_uses_effective_cpu_device_after_cuda_fallback(self) -> None:
+    def test_auto_conversion_uses_effective_cpu_device_without_gpu(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             rvc_root = root / "rvc"
             source = root / "vocal.wav"
             model = rvc_root / "weights" / "voice.pth"
             workspace = root / "workspace"
-            for path in (source, model, rvc_root / "runtime" / "python.exe", rvc_root / "infer_cli.py"):
+            for path in (
+                source,
+                model,
+                rvc_root / "runtime" / "python.exe",
+                rvc_root / "infer_cli.py",
+            ):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"test")
             workspace.mkdir()
@@ -123,12 +132,12 @@ class RvcConvertTests(unittest.TestCase):
                 cuda_available=False,
                 cuda_ready=False,
             )
-            selection = RvcDeviceSelection("cuda:0", "cpu", capabilities, "CUDA unavailable")
+            selection = RvcDeviceSelection("auto", "cpu", capabilities, "GPU unavailable")
             settings = RvcSettings(
                 root=rvc_root,
                 voice_model="weights/voice.pth",
                 pitch=-12,
-                device="cuda:0",
+                device="auto",
                 inference=RvcInferenceSettings(
                     index_rate=0.62,
                     filter_radius=5,
@@ -159,6 +168,74 @@ class RvcConvertTests(unittest.TestCase):
             self.assertEqual(result.effective_device, "cpu")
             self.assertEqual(result.inference, settings.inference)
 
+    def test_directml_native_crash_fails_without_cpu_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rvc_root = root / "rvc"
+            source = root / "vocal.wav"
+            model = rvc_root / "weights" / "voice.pth"
+            workspace = root / "workspace"
+            for path in (
+                source,
+                model,
+                rvc_root / "runtime" / "python.exe",
+                rvc_root / "infer_cli.py",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"test")
+            workspace.mkdir()
+            capabilities = RvcInferenceCapabilities(
+                imports_ready=True,
+                cpu_ready=True,
+                faiss_ready=True,
+                cuda_available=False,
+                cuda_ready=False,
+                directml_available=True,
+                directml_ready=True,
+                directml_device_name="AMD Radeon(TM) RX Vega 11 Graphics",
+            )
+            selection = RvcDeviceSelection("gpu", "privateuseone:0", capabilities)
+            settings = RvcSettings(
+                root=rvc_root,
+                voice_model="weights/voice.pth",
+                device="gpu",
+            )
+            def fail_directml(args, **_kwargs):
+                return CommandResult(
+                    args,
+                    3221225725,
+                    "loading model",
+                    "torch DirectML native runtime stopped",
+                )
+
+            with (
+                patch.object(rvc_convert, "select_rvc_inference_device", return_value=selection),
+                patch.object(rvc_convert, "_prepare_rvc_workspace", return_value=workspace),
+                patch.object(
+                    rvc_convert,
+                    "run_command",
+                    side_effect=fail_directml,
+                ) as command,
+            ):
+                with self.assertRaisesRegex(RvcConversionError, "0xC00000FD"):
+                    rvc_convert.convert_vocal_with_rvc(
+                        source,
+                        root / "output",
+                        settings,
+                    )
+
+            self.assertEqual(command.call_count, 1)
+            self.assertEqual(command.call_args.args[0][8], "privateuseone:0")
+
+    def test_directml_stack_overflow_failure_is_identified(self) -> None:
+        message = rvc_convert._conversion_failure_message(
+            3221225725,
+            "privateuseone:0",
+        )
+
+        self.assertIn("0xC00000FD", message)
+        self.assertIn("stack overflow", message)
+
     def test_long_conversion_automatically_runs_overlapping_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -187,7 +264,18 @@ class RvcConvertTests(unittest.TestCase):
             settings = RvcSettings(root=rvc_root, voice_model="weights/voice.pth", device="cpu")
             progress: list[int] = []
 
+            invocation = 0
+
             def complete_chunk(args, **_kwargs):
+                nonlocal invocation
+                invocation += 1
+                if invocation == 1:
+                    return CommandResult(
+                        args,
+                        3221225477,
+                        "",
+                        "faiss.search\nWindows fatal exception: access violation",
+                    )
                 audio, sample_rate = sf.read(args[4], dtype="float32")
                 sf.write(args[5], audio, sample_rate, subtype="PCM_16")
                 return CommandResult(args, 0, "", "")
@@ -198,6 +286,7 @@ class RvcConvertTests(unittest.TestCase):
                 patch.object(rvc_convert, "_RVC_AUTO_CHUNK_THRESHOLD_SECONDS", 1.0),
                 patch.object(rvc_convert, "_RVC_AUTO_CHUNK_CORE_SECONDS", 1.0),
                 patch.object(rvc_convert, "_RVC_AUTO_CHUNK_CONTEXT_SECONDS", 0.1),
+                patch.object(rvc_convert, "_RVC_AUTO_CHUNK_BOUNDARY_SEARCH_SECONDS", 0.0),
                 patch.object(rvc_convert, "run_command", side_effect=complete_chunk) as command,
             ):
                 result = rvc_convert.convert_vocal_with_rvc(
@@ -208,7 +297,7 @@ class RvcConvertTests(unittest.TestCase):
                 )
 
             rendered, sample_rate = sf.read(result.output_path, dtype="float32")
-            self.assertEqual(command.call_count, 3)
+            self.assertEqual(command.call_count, 4)
             self.assertEqual(sample_rate, 1_000)
             self.assertEqual(len(rendered), 3_000)
             self.assertEqual(progress, [33, 67, 100])

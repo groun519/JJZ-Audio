@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from jang_app.config import LOG_FILE
+from jang_app.qt_app.app_overlay import AppOverlayFrame
 from jang_app.qt_app.localization import apply_widget_language
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton, attach_list_item_widget
 from jang_app.services.i18n import tr
@@ -31,8 +32,9 @@ from jang_app.services.processing_queue import (
 )
 
 
-class LogDrawer(QFrame):
+class LogDrawer(AppOverlayFrame):
     close_requested = Signal()
+    queue_requested = Signal()
     open_location_requested = Signal(object)
 
     def __init__(self, queue: ProcessingQueue, parent: QWidget | None = None) -> None:
@@ -57,6 +59,10 @@ class LogDrawer(QFrame):
 
         title = QLabel("Activity & Logs")
         title.setObjectName("LogDrawerTitle")
+        self.queue_button = SvgIconButton("arrow_left", size=30)
+        self.queue_button.setObjectName("LogDrawerIconButton")
+        self.queue_button.setToolTip("Back to processing queue")
+        self.queue_button.clicked.connect(self.queue_requested.emit)
         self.open_button = SvgIconButton("folder", size=30)
         self.open_button.setObjectName("LogDrawerIconButton")
         self.open_button.setToolTip("Open log location")
@@ -73,6 +79,7 @@ class LogDrawer(QFrame):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
+        header.addWidget(self.queue_button)
         header.addWidget(title)
         header.addStretch(1)
         header.addWidget(self.open_button)
@@ -168,6 +175,7 @@ class LogDrawer(QFrame):
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
         for button in (
+            self.queue_button,
             self.open_button,
             self.refresh_button,
             self.close_button,

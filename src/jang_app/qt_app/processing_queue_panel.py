@@ -4,9 +4,11 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QScrollArea, QVBoxLayout, QWidget
 
+from jang_app.qt_app.app_overlay import AppOverlayFrame
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
 from jang_app.qt_app.overflow_title_label import OverflowTextLabel
 from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton, render_app_icon
+from jang_app.services.i18n import tr
 from jang_app.services.processing_queue import (
     ProcessingQueue,
     ProcessingTask,
@@ -18,6 +20,9 @@ from jang_app.services.processing_queue import (
 
 _DRAWER_WIDTH = 400
 _MAX_VISIBLE_TASKS = 6
+_QUEUE_BUTTON_COLLAPSED_WIDTH = 48
+_QUEUE_BUTTON_ACTIVE_WIDTH = 184
+_QUEUE_BUTTON_HEIGHT = 26
 
 
 class ProcessingQueueButton(SvgIconButton):
@@ -25,7 +30,7 @@ class ProcessingQueueButton(SvgIconButton):
 
     def __init__(self, queue: ProcessingQueue, parent: QWidget | None = None) -> None:
         super().__init__("logs", size=30)
-        self.lock_outer_size(48, 26)
+        self.lock_outer_size(_QUEUE_BUTTON_COLLAPSED_WIDTH, _QUEUE_BUTTON_HEIGHT)
         if parent is not None:
             self.setParent(parent)
         self.setObjectName("ProcessingQueueButton")
@@ -34,6 +39,8 @@ class ProcessingQueueButton(SvgIconButton):
         self._active_count = 0
         self._task_count = 0
         self._aggregate_progress = 0
+        self._active_title_source = ""
+        self._expanded = False
         self._queue.subscribe(self._on_tasks_changed)
         self.apply_language()
 
@@ -46,9 +53,23 @@ class ProcessingQueueButton(SvgIconButton):
     def aggregate_progress(self) -> int:
         return self._aggregate_progress
 
+    def active_title(self) -> str:
+        return tr(self._active_title_source) if self._active_title_source else ""
+
     def apply_language(self) -> None:
-        action = "Hide processing queue ({count})" if self.isChecked() else "Show processing queue ({count})"
-        set_translated_tooltip(self, action, count=self._task_count)
+        if self._task_count:
+            action = (
+                "Hide processing queue ({count})"
+                if self.isChecked()
+                else "Show processing queue ({count})"
+            )
+            set_translated_tooltip(self, action, count=self._task_count)
+        else:
+            action = "Hide processing queue" if self.isChecked() else "Show processing queue"
+            set_translated_tooltip(self, action)
+        self.setAccessibleName(tr("Processing Queue"))
+        self.setAccessibleDescription(self.active_title())
+        self.update()
 
     def nextCheckState(self) -> None:  # noqa: N802
         super().nextCheckState()
@@ -82,8 +103,43 @@ class ProcessingQueueButton(SvgIconButton):
             round(rect.bottom() - 7),
         )
 
+        count_divider_x = rect.right() - 24 if self._active_count else divider_x
+        if self._active_count:
+            painter.drawLine(
+                round(count_divider_x),
+                round(rect.top() + 7),
+                round(count_divider_x),
+                round(rect.bottom() - 7),
+            )
+            title_rect = QRectF(
+                divider_x + 7,
+                rect.top(),
+                max(0.0, count_divider_x - divider_x - 12),
+                rect.height(),
+            )
+            title_font = painter.font()
+            title_font.setPixelSize(9)
+            title_font.setBold(False)
+            painter.setFont(title_font)
+            painter.setPen(palette["icon"])
+            title = painter.fontMetrics().elidedText(
+                self.active_title(),
+                Qt.TextElideMode.ElideRight,
+                round(title_rect.width()),
+            )
+            painter.drawText(
+                title_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                title,
+            )
+
         badge_text = "9+" if self._task_count > 9 else str(self._task_count)
-        count_rect = QRectF(divider_x + 2, rect.top(), rect.right() - divider_x - 3, rect.height())
+        count_rect = QRectF(
+            count_divider_x + 2,
+            rect.top(),
+            rect.right() - count_divider_x - 3,
+            rect.height(),
+        )
         font = painter.font()
         font.setPixelSize(9)
         font.setBold(True)
@@ -119,12 +175,20 @@ class ProcessingQueueButton(SvgIconButton):
             if active_tasks
             else 0
         )
-        self.setVisible(bool(tasks))
+        self._active_title_source = active_tasks[0].title if active_tasks else ""
+        self._set_expanded(bool(active_tasks))
         self.apply_language()
         self.update()
 
+    def _set_expanded(self, expanded: bool) -> None:
+        if self._expanded == expanded:
+            return
+        self._expanded = expanded
+        width = _QUEUE_BUTTON_ACTIVE_WIDTH if expanded else _QUEUE_BUTTON_COLLAPSED_WIDTH
+        self.lock_outer_size(width, _QUEUE_BUTTON_HEIGHT)
 
-class ProcessingQueuePanel(QFrame):
+
+class ProcessingQueuePanel(AppOverlayFrame):
     geometry_changed = Signal()
     log_requested = Signal()
     close_requested = Signal()

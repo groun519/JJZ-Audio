@@ -53,6 +53,22 @@ class WaveformTests(unittest.TestCase):
 
         self.assertEqual(peaks, [0.0, 0.0, 0.0, 0.0])
 
+    def test_ffmpeg_fallback_keeps_the_remainder_at_the_end_of_the_timeline(self) -> None:
+        source = Path("voice.m4a")
+        samples = np.zeros(10, dtype=np.float32)
+        samples[-1] = 1.0
+
+        with (
+            mock.patch("jang_app.services.waveform.sf.SoundFile", side_effect=RuntimeError("unsupported")),
+            mock.patch(
+                "jang_app.services.waveform._decode_with_ffmpeg",
+                return_value=samples,
+            ),
+        ):
+            peaks = build_waveform_peaks(source, 3)
+
+        self.assertEqual(peaks, [0.0, 0.0, 1.0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -164,6 +164,41 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertEqual([model.name for model in discover_rvc_models(model_dir)], ["voice-a"])
             self.assertEqual(original_bytes, {path: path.read_bytes() for path in source_files})
 
+    def test_remove_managed_model_deletes_package_and_training_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = _build_rvc_root(base / "runtime")
+            workspace = RvcModelWorkspace(base / "workspace")
+            record = workspace.create_model("Voice One", runtime)
+            package_dir = workspace.library_dir / record.model_id
+            work_dir = workspace.root / record.model_id
+            (work_dir / "datasets").mkdir(parents=True)
+            (work_dir / "datasets" / "dataset.json").write_text("{}", encoding="utf-8")
+
+            removed = workspace.remove_model(record.model_id)
+
+            self.assertEqual(removed, record)
+            self.assertEqual(workspace.records(), [])
+            self.assertFalse(package_dir.exists())
+            self.assertFalse(work_dir.exists())
+
+    def test_remove_linked_model_keeps_external_files_and_deletes_local_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = _build_rvc_root(base / "source")
+            workspace = RvcModelWorkspace(base / "workspace")
+            record = workspace.link_folder(source / "logs" / "voice-a")[0]
+            work_dir = workspace.root / record.model_id
+            work_dir.mkdir(parents=True)
+            (work_dir / "dataset.json").write_text("{}", encoding="utf-8")
+
+            workspace.remove_model(record.model_id)
+
+            self.assertEqual(workspace.records(), [])
+            self.assertFalse(work_dir.exists())
+            self.assertTrue((source / "weights" / "voice-a.pth").is_file())
+            self.assertTrue((source / "logs" / "voice-a" / "G_100.pth").is_file())
+
     def test_profile_survives_source_rescan(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

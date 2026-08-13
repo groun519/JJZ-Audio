@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import sqlite3
 import uuid
 from collections.abc import Callable, Sequence
@@ -30,6 +31,7 @@ CATALOG_FILE_NAME = "catalog.json"
 MANAGED_LIBRARY_DIR_NAME = "library"
 _EPOCH_WEIGHT_PATTERN = re.compile(r"^(?P<name>.+)_e(?P<epoch>\d+)_s(?P<step>\d+)$", re.IGNORECASE)
 _CHECKPOINT_PATTERN = re.compile(r"^[GD]_(?P<step>\d+)\.pth$", re.IGNORECASE)
+_MODEL_ID_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
 _LOGGER = logging.getLogger("jang_app")
 
 
@@ -451,6 +453,122 @@ class RvcModelWorkspace:
         self._replace_record(updated)
         return updated
 
+    def register_imported_managed_record(
+        self,
+        *,
+        model_id: str,
+        name: str,
+        runtime_root: Path,
+        created_at: str,
+        display_name: str = "",
+        tags: tuple[str, ...] = (),
+        notes: str = "",
+        default_pitch: int = 0,
+        default_device: str = RVC_DEVICE_AUTO,
+        mode: str = "managed",
+        inference_model: Path | None = None,
+        index_file: Path | None = None,
+        generator_checkpoint: Path | None = None,
+        discriminator_checkpoint: Path | None = None,
+    ) -> RvcModelRecord:
+        if not _MODEL_ID_PATTERN.fullmatch(model_id):
+            raise RvcModelWorkspaceError(f"Invalid model id: {model_id}")
+        if mode not in {"managed", "created"}:
+            raise RvcModelWorkspaceError(f"Unsupported managed model mode: {mode}")
+        records = {record.model_id: record for record in self.records()}
+        if model_id in records:
+            raise RvcModelWorkspaceError(f"Model is already registered: {model_id}")
+        model_name = " ".join(name.split())[:80]
+        if not model_name:
+            raise RvcModelWorkspaceError("Model name is required.")
+        model_dir = self.library_dir / model_id
+        if not model_dir.is_dir():
+            raise RvcModelWorkspaceError(f"Managed model package is missing: {model_dir}")
+        package = RvcModelPackageLayout(model_dir, model_name)
+        package.create()
+        artifacts = {
+            "inference_model": inference_model,
+            "index_file": index_file,
+            "generator_checkpoint": generator_checkpoint,
+            "discriminator_checkpoint": discriminator_checkpoint,
+        }
+        normalized_artifacts: dict[str, Path | None] = {}
+        for artifact_name, artifact_path in artifacts.items():
+            if artifact_path is None:
+                normalized_artifacts[artifact_name] = None
+                continue
+            resolved = artifact_path.expanduser().resolve()
+            _validate_replacement_artifact(artifact_name, resolved)
+            if not package.contains(resolved):
+                raise RvcModelWorkspaceError(
+                    f"Managed model artifact is outside its package: {resolved}"
+                )
+            normalized_artifacts[artifact_name] = resolved
+        generator = normalized_artifacts["generator_checkpoint"]
+        discriminator = normalized_artifacts["discriminator_checkpoint"]
+        if (generator is None) != (discriminator is None):
+            raise RvcModelWorkspaceError(
+                "Generator and discriminator checkpoints must be stored as a pair."
+            )
+        if generator is not None and discriminator is not None:
+            if _checkpoint_step(generator) != _checkpoint_step(discriminator):
+                raise RvcModelWorkspaceError(
+                    "Training checkpoint steps do not match."
+                )
+        record = RvcModelRecord(
+            model_id=model_id,
+            name=model_name,
+            mode=mode,
+            runtime_root=runtime_root.expanduser().resolve(),
+            source_folder=package.experiment_dir,
+            inference_model=normalized_artifacts["inference_model"],
+            index_file=normalized_artifacts["index_file"],
+            generator_checkpoint=generator,
+            discriminator_checkpoint=discriminator,
+            created_at=created_at.strip() or datetime.now(UTC).isoformat(),
+            display_name=display_name.strip()[:80],
+            tags=_normalize_tags(tags),
+            notes=notes.strip()[:2000],
+            default_pitch=int(default_pitch),
+            default_device=normalize_rvc_device(default_device),
+        )
+        records[record.model_id] = record
+        self._save_records(records.values())
+        return record
+
+    def remove_model(self, model_id: str) -> RvcModelRecord:
+        """Remove one catalog entry and every JJZero Audio-owned file for it."""
+        record = self._require_record(model_id)
+        records = {item.model_id: item for item in self.records()}
+        records.pop(model_id, None)
+
+        owned_directories = [(self.root / model_id, self.root)]
+        if record.is_managed:
+            owned_directories.insert(
+                0,
+                (self.library_dir / model_id, self.library_dir),
+            )
+        for directory, parent in owned_directories:
+            _require_direct_child(directory, parent)
+
+        self._save_records(records.values())
+        try:
+            for directory, _parent in owned_directories:
+                if directory.is_symlink():
+                    directory.unlink()
+                elif directory.is_dir():
+                    shutil.rmtree(directory)
+                elif directory.exists():
+                    directory.unlink()
+        except OSError as exc:
+            # Restore catalog visibility if Windows denied deletion. This avoids
+            # leaving a partially removed package hidden from the user.
+            self._save_records((*records.values(), record))
+            raise RvcModelWorkspaceError(
+                f"Model files could not be deleted: {directory}"
+            ) from exc
+        return record
+
     def _require_record(self, model_id: str) -> RvcModelRecord:
         record = next((item for item in self.records() if item.model_id == model_id), None)
         if record is None:
@@ -866,6 +984,13 @@ def _existing_unique_paths(*paths: Path | None) -> tuple[Path, ...]:
         seen.add(resolved)
         existing.append(path)
     return tuple(existing)
+
+
+def _require_direct_child(path: Path, parent: Path) -> None:
+    resolved = path.expanduser().resolve()
+    resolved_parent = parent.expanduser().resolve()
+    if resolved.parent != resolved_parent or resolved == resolved_parent:
+        raise RvcModelWorkspaceError(f"Unsafe model deletion path: {resolved}")
 
 
 def _managed_rvc_root(source_folder: Path) -> Path | None:

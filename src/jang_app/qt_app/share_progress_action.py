@@ -18,6 +18,10 @@ class ShareProgressAction(QWidget):
         *,
         button_size: int = 30,
         reveal_on_hover: bool = False,
+        share_tooltip: str = "Share with Google Drive",
+        copy_tooltip: str = "Copy Google Drive link",
+        delete_tooltip: str = "Delete from Google Drive",
+        copied_text: str = "Copied",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -32,6 +36,10 @@ class ShareProgressAction(QWidget):
         self._shared = False
         self._actions_expanded = False
         self._copied_visible = False
+        self._share_tooltip = share_tooltip
+        self._copy_tooltip = copy_tooltip
+        self._delete_tooltip = delete_tooltip
+        self._copied_text = copied_text
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("RowShareProgress")
@@ -48,15 +56,15 @@ class ShareProgressAction(QWidget):
         self.copied_label.setObjectName("ShareCopiedLabel")
         self.copied_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.copied_label.setFixedSize(66, 28)
-        set_translated_text(self.copied_label, "Copied")
+        set_translated_text(self.copied_label, self._copied_text)
 
         self.button = SvgIconButton("link", size=button_extent, paint_inset=2)
         self.button.setObjectName("RowShareButton")
-        set_translated_tooltip(self.button, "Share with Google Drive")
+        set_translated_tooltip(self.button, self._share_tooltip)
         self.button.clicked.connect(self.requested.emit)
 
         self.delete_button = DangerIconButton(size=button_extent, paint_inset=2)
-        set_translated_tooltip(self.delete_button, "Delete from Google Drive")
+        set_translated_tooltip(self.delete_button, self._delete_tooltip)
         self.delete_button.clicked.connect(self.delete_requested.emit)
 
         layout = QHBoxLayout(self)
@@ -84,9 +92,9 @@ class ShareProgressAction(QWidget):
         self.delete_button.set_theme_mode(theme_mode)
 
     def apply_language(self) -> None:
-        set_translated_text(self.copied_label, "Copied")
+        set_translated_text(self.copied_label, self._copied_text)
         self._sync_share_tooltip()
-        set_translated_tooltip(self.delete_button, "Delete from Google Drive")
+        set_translated_tooltip(self.delete_button, self._delete_tooltip)
 
     def set_feature_enabled(self, is_enabled: bool) -> None:
         self._feature_enabled = is_enabled
@@ -162,5 +170,5 @@ class ShareProgressAction(QWidget):
     def _sync_share_tooltip(self) -> None:
         set_translated_tooltip(
             self.button,
-            "Copy Google Drive link" if self._shared else "Share with Google Drive",
+            self._copy_tooltip if self._shared else self._share_tooltip,
         )

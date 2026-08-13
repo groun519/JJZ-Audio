@@ -29,8 +29,9 @@ from jang_app.qt_app.workflow_progress import WorkflowProgress, WorkflowStage
 from jang_app.services.audio_metadata import format_duration
 from jang_app.services.i18n import tr
 from jang_app.services.job_diagnostics import diagnostic_task
-from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.rvc_hardware import RvcComputeBackend
+from jang_app.services.rvc_model_workspace import RvcModelRecord
+from jang_app.services.rvc_training_activity import training_stage_detail
 from jang_app.services.rvc_training_presets import (
     TRAINING_PRESETS,
     RvcTrainingPresetId,
@@ -55,7 +56,7 @@ TrainingTask = Callable[
         Callable[[int], None],
         Callable[[str], None],
         Callable[[int, int], None],
-        Callable[[], None],
+        Callable[[str], None],
         Callable[[object], None],
     ],
     object,
@@ -66,7 +67,7 @@ class ModelTrainingWorker(QThread):
     progress_changed = Signal(int)
     stage_changed = Signal(str)
     epoch_changed = Signal(int, int)
-    activity_changed = Signal()
+    activity_changed = Signal(str)
     preprocess_changed = Signal(object)
     succeeded = Signal(object)
     failed = Signal(str)
@@ -94,12 +95,12 @@ class ModelTrainingWorker(QThread):
             except Exception:
                 self.failed.emit(traceback.format_exc())
 
-    def _emit_activity(self) -> None:
+    def _emit_activity(self, detail: str = "") -> None:
         now = monotonic()
         if now - self._last_activity_emit < 0.5:
             return
         self._last_activity_emit = now
-        self.activity_changed.emit()
+        self.activity_changed.emit(detail)
 
 
 class ModelTrainingPanel(QWidget):
@@ -130,6 +131,8 @@ class ModelTrainingPanel(QWidget):
         self._recovery_advice: RvcTrainingRecoveryAdvice | None = None
         self._recovery_task_id = ""
         self._active_stage_key = ""
+        self._active_stage = "Preparing Training"
+        self._current_progress = 0
         self._current_epoch = 0
         self._target_epoch = 20
         self._last_epoch_at = 0.0
@@ -190,34 +193,72 @@ class ModelTrainingPanel(QWidget):
         self.workflow_progress.setObjectName("TrainingWorkflow")
         summary_layout.addWidget(self.workflow_progress)
 
-        progress_row = QHBoxLayout()
-        progress_row.setContentsMargins(0, 0, 0, 0)
-        progress_row.setSpacing(10)
+        overall_progress_header = QHBoxLayout()
+        overall_progress_header.setContentsMargins(0, 0, 0, 0)
+        overall_progress_header.setSpacing(10)
+        self.overall_progress_label = QLabel("Overall Progress")
+        self.overall_progress_label.setObjectName("TrainingProgressHeading")
+        self.progress_percent_label = QLabel("0%")
+        self.progress_percent_label.setObjectName("TrainingProgressText")
+        overall_progress_header.addWidget(self.overall_progress_label)
+        overall_progress_header.addStretch(1)
+        overall_progress_header.addWidget(self.progress_percent_label)
+        summary_layout.addLayout(overall_progress_header)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("TrainingProgress")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_percent_label = QLabel("0%")
-        self.progress_percent_label.setObjectName("TrainingProgressText")
-        progress_row.addWidget(self.progress_bar, 1)
-        progress_row.addWidget(self.progress_percent_label)
-        summary_layout.addLayout(progress_row)
+        self.progress_bar.setTextVisible(False)
+        summary_layout.addWidget(self.progress_bar)
+
+        stage_progress_header = QHBoxLayout()
+        stage_progress_header.setContentsMargins(0, 0, 0, 0)
+        stage_progress_header.setSpacing(10)
+        self.stage_progress_label = QLabel("Current Step")
+        self.stage_progress_label.setObjectName("TrainingProgressHeading")
+        self.stage_progress_value_label = QLabel("1 / 7  |  0%")
+        self.stage_progress_value_label.setObjectName("TrainingProgressText")
+        stage_progress_header.addWidget(self.stage_progress_label)
+        stage_progress_header.addStretch(1)
+        stage_progress_header.addWidget(self.stage_progress_value_label)
+        summary_layout.addLayout(stage_progress_header)
+
+        self.stage_progress_bar = QProgressBar()
+        self.stage_progress_bar.setObjectName("TrainingStageProgress")
+        self.stage_progress_bar.setRange(0, 100)
+        self.stage_progress_bar.setValue(0)
+        self.stage_progress_bar.setTextVisible(False)
+        summary_layout.addWidget(self.stage_progress_bar)
 
         self.activity_label = QLabel("Working")
         self.activity_label.setObjectName("TrainingActivityText")
+        self.activity_detail_label = QLabel("Checking training materials and runtime")
+        self.activity_detail_label.setObjectName("TrainingActivityDetail")
+        self.activity_detail_label.setWordWrap(True)
         self.runtime_label = QLabel("Elapsed 00:00")
         self.runtime_label.setObjectName("TrainingRuntimeText")
         self.remaining_label = QLabel("Estimating remaining time")
         self.remaining_label.setObjectName("TrainingRuntimeText")
 
-        self.runtime_row = QWidget()
+        self.runtime_row = QFrame()
+        self.runtime_row.setObjectName("TrainingActivityCard")
         runtime_layout = QHBoxLayout(self.runtime_row)
-        runtime_layout.setContentsMargins(0, 0, 0, 0)
-        runtime_layout.setSpacing(10)
-        runtime_layout.addWidget(self.activity_label)
+        runtime_layout.setContentsMargins(12, 10, 12, 10)
+        runtime_layout.setSpacing(14)
+        activity_text_layout = QVBoxLayout()
+        activity_text_layout.setContentsMargins(0, 0, 0, 0)
+        activity_text_layout.setSpacing(3)
+        activity_text_layout.addWidget(self.activity_label)
+        activity_text_layout.addWidget(self.activity_detail_label)
+        runtime_layout.addLayout(activity_text_layout, 1)
         runtime_layout.addStretch(1)
-        runtime_layout.addWidget(self.remaining_label)
-        runtime_layout.addWidget(self.runtime_label)
+        runtime_text_layout = QVBoxLayout()
+        runtime_text_layout.setContentsMargins(0, 0, 0, 0)
+        runtime_text_layout.setSpacing(3)
+        runtime_text_layout.addWidget(self.remaining_label, 0, Qt.AlignmentFlag.AlignRight)
+        runtime_text_layout.addWidget(self.runtime_label, 0, Qt.AlignmentFlag.AlignRight)
+        runtime_layout.addLayout(runtime_text_layout)
         self.runtime_row.hide()
         summary_layout.addWidget(self.runtime_row)
 
@@ -637,7 +678,10 @@ class ModelTrainingPanel(QWidget):
             set_translated_text(self.status_label, "Training")
             self.stage_label.setToolTip("")
             self._active_stage_key = "data"
+            self._active_stage = "Preparing Training"
+            self.set_activity_detail(training_stage_detail(self._active_stage))
             self.workflow_progress.set_status("data")
+            self._sync_stage_progress()
             self._refresh_status_style()
         self._sync_recovery_visibility()
         self.stop_button.setVisible(is_running)
@@ -705,8 +749,10 @@ class ModelTrainingPanel(QWidget):
 
     def set_progress(self, value: int) -> None:
         progress = max(0, min(100, int(value)))
+        self._current_progress = progress
         self.progress_bar.setValue(progress)
         self.progress_percent_label.setText(f"{progress}%")
+        self._sync_stage_progress()
 
     def set_preprocess_summary(
         self,
@@ -756,6 +802,8 @@ class ModelTrainingPanel(QWidget):
 
     def set_stage(self, text: str) -> None:
         set_translated_text(self.stage_label, text)
+        self._active_stage = text
+        self.set_activity_detail(training_stage_detail(text))
         stage_key = _workflow_key_for_stage(text)
         if stage_key:
             self._active_stage_key = stage_key
@@ -763,12 +811,33 @@ class ModelTrainingPanel(QWidget):
                 stage_key,
                 completed_keys=_completed_workflow_stages(stage_key),
             )
+        self._sync_stage_progress()
+
+    def set_activity_detail(self, text: str) -> None:
+        if text.strip():
+            self.activity_detail_label.setText(text.strip())
 
     def set_runtime_status(self, elapsed_seconds: int, idle_seconds: int) -> None:
         elapsed = max(0, int(elapsed_seconds))
         idle = max(0, int(idle_seconds))
         dots = "." * (elapsed % 3 + 1)
-        self.activity_label.setText(f"{tr('Working')}{dots}")
+        if idle < 15:
+            activity_state = "active"
+            activity_label = tr("Running normally")
+        elif idle < 120:
+            activity_state = "quiet"
+            activity_label = tr("Processing; waiting for the next update")
+        elif idle < 600:
+            activity_state = "quiet"
+            activity_label = tr("Still running; this step may be quiet")
+        else:
+            activity_state = "stale"
+            activity_label = tr("Still running, but no response for a long time")
+        self.activity_label.setText(f"{activity_label}{dots}")
+        if self.activity_label.property("state") != activity_state:
+            self.activity_label.setProperty("state", activity_state)
+            self.activity_label.style().unpolish(self.activity_label)
+            self.activity_label.style().polish(self.activity_label)
         elapsed_text = tr("Elapsed {elapsed}", elapsed=format_training_elapsed(elapsed))
         if idle < 2:
             activity_text = tr("Active now")
@@ -792,6 +861,20 @@ class ModelTrainingPanel(QWidget):
             set_translated_text(self.remaining_label, "Finishing")
         else:
             set_translated_text(self.remaining_label, "Estimating remaining time")
+
+    def _sync_stage_progress(self) -> None:
+        current, total, start, end = _stage_progress_range(self._active_stage)
+        if end <= start:
+            stage_progress = 100 if self._current_progress >= end else 0
+        else:
+            stage_progress = round(
+                100 * (self._current_progress - start) / (end - start)
+            )
+        stage_progress = max(0, min(100, stage_progress))
+        self.stage_progress_bar.setValue(stage_progress)
+        self.stage_progress_value_label.setText(
+            f"{current} / {total}  |  {stage_progress}%"
+        )
 
     def set_failure(
         self,
@@ -1378,6 +1461,22 @@ def _workflow_key_for_stage(stage: str) -> str:
         "Building Index": "index",
         "Registering Model": "index",
     }.get(stage, "")
+
+
+def _stage_progress_range(stage: str) -> tuple[int, int, int, int]:
+    stages = {
+        "Preparing Training": (1, 7, 0, 5),
+        "Preparing Audio": (2, 7, 5, 15),
+        "Extracting Features": (3, 7, 15, 25),
+        "Building File List": (4, 7, 25, 28),
+        "Preparing Spectrograms": (5, 7, 28, 32),
+        "Training": (6, 7, 32, 95),
+        "Training Model": (6, 7, 32, 95),
+        "Building Index": (7, 7, 95, 100),
+        "Registering Model": (7, 7, 100, 100),
+        "Stopping Training": (7, 7, 100, 100),
+    }
+    return stages.get(stage, (1, 7, 0, 100))
 
 
 def _completed_workflow_stages(active_key: str) -> tuple[str, ...]:

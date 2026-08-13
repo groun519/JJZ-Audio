@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from pathlib import Path
 
@@ -25,6 +24,7 @@ from jang_app.services.studio_session import (
     StudioTrackState,
 )
 from jang_app.services.studio_assets import resolve_studio_asset
+from jang_app.services.studio_audio_levels import studio_source_gain
 
 
 SongAudioExport = ExportedFile
@@ -125,14 +125,12 @@ def _timeline_mix_sources(
     for track in audio_tracks:
         if track.muted or (has_solo and not track.solo):
             continue
-        track_volume = max(0, min(200, track.volume_percent)) / 100.0
         for clip in track.clips:
             if clip.muted:
                 continue
             path = resolve_studio_asset(package, clip.asset)
             if path is None:
                 continue
-            clip_gain = math.pow(10.0, clip.gain_db / 20.0)
             reference_path = None
             if (
                 clip.asset.role == TRACK_CONVERTED_VOCAL
@@ -149,7 +147,7 @@ def _timeline_mix_sources(
                 AudioMixSource(
                     label=f"{track.name} / {clip.clip_id}",
                     path=path,
-                    volume=track_volume * clip_gain,
+                    volume=studio_source_gain(track.volume_percent, clip.gain_db),
                     timeline_start_ms=clip.timeline_start_ms,
                     source_start_ms=clip.source_start_ms,
                     source_end_ms=clip.source_end_ms,

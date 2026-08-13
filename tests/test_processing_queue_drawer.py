@@ -51,22 +51,24 @@ class ProcessingQueueDrawerTests(unittest.TestCase):
         self.assertFalse(log_drawer.visible)
         self.assertEqual(positions, [True])
 
-    def test_queue_drawer_does_not_open_without_tasks(self) -> None:
+    def test_queue_drawer_opens_without_tasks(self) -> None:
         panel = _VisibilityTarget(has_tasks=False)
         button = _VisibilityTarget()
+        positions: list[bool] = []
         window = SimpleNamespace(
             processing_queue_panel=panel,
             processing_queue_button=button,
             log_drawer=_VisibilityTarget(),
             _processing_queue_drawer_open=False,
-            _position_processing_queue=lambda: self.fail("empty drawer was positioned"),
+            _position_processing_queue=lambda: positions.append(True),
         )
 
         MainWindow._open_processing_queue_drawer(window)
 
-        self.assertFalse(window._processing_queue_drawer_open)
-        self.assertFalse(panel.visible)
-        self.assertFalse(button.checked)
+        self.assertTrue(window._processing_queue_drawer_open)
+        self.assertTrue(panel.visible)
+        self.assertTrue(button.checked)
+        self.assertEqual(positions, [True])
 
     def test_closing_queue_drawer_hides_panel(self) -> None:
         panel = _VisibilityTarget(visible=True)
