@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.3.4 - 2026-08-14
+
+### Added
+
+- Added Quick Create to run Fast Separation and balanced RVC conversion from the Library, then open the completed result in Studio.
+- Added non-destructive clip pitch controls in Studio with matching real-time playback, saved sessions, and exported audio.
+- Added live training-performance details so CPU, CUDA, and AMD execution activity can be inspected while long jobs are running.
+
+### Changed
+
+- Kept Quick Create model and pitch choices compact while reusing existing separation results when they are already available.
+- Improved RVC device probing and profile activation for DirectML, ROCm, CUDA, and CPU environments without replacing a known working profile prematurely.
+- Moved long-running RVC and training subprocesses onto hidden, captured execution paths so background work does not flash command windows.
+
+### Fixed
+
+- Prevented stale update metadata from rejecting compatible application-only releases that reuse the existing AI runtime.
+- Improved AMD and DirectML failure reporting so unavailable acceleration is distinguished from a conversion or training failure.
+- Stabilized long-waveform rendering, Studio pitch playback, exported naming, and transient child-window ownership.
+
+### Quality
+
+- Added regression coverage for Quick Create, Studio pitch, hidden subprocess execution, AMD/DirectML probing, training performance, waveform rendering, and update compatibility.
+
 ## 0.3.3 - 2026-08-13
 
 ### Added
