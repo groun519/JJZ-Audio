@@ -200,6 +200,7 @@ from jang_app.services.workspace_playback import (
     scope_track_ids,
 )
 from jang_app.services.work_scope import WorkTaskScope
+from jang_app.services.work_output import WorkOutputSession
 from jang_app.services.work_song import (
     WorkSongSession,
     WorkSongStore,
@@ -230,6 +231,7 @@ class MainWindow(QMainWindow):
         self.library = SongLibrary()
         self.work_song_store = work_song_store or WorkSongStore()
         self.work_song_session = WorkSongSession(self.work_song_store)
+        self.work_output_session = WorkOutputSession()
         self._work_song_ready = self.work_song_session.ready
         self._work_song_load_worker: TaskWorker | None = None
         self._work_song_loading_id = ""
@@ -254,7 +256,7 @@ class MainWindow(QMainWindow):
         self._song_items_by_id: dict[str, SongItem] = {}
         self.current_song: SongItem | None = self.work_song_session.source_item
         self.current_work_item: SongItem | None = self.work_song_session.item
-        self.current_output_set: OutputSoundSet | None = None
+        self.current_output_set: OutputSoundSet | None = self.work_output_session.sound_set
         self.playback_session = PlaybackSession()
         self.current_playback_queue: PlaybackQueue | None = self.playback_session.queue
         self._playback_position_ms = self.playback_session.position_ms
@@ -2692,14 +2694,9 @@ class MainWindow(QMainWindow):
         self.rvc_action.set_action_enabled(capabilities.can_convert)
 
     def _current_output_matches_work_song(self) -> bool:
-        item = self.current_work_item
-        sound_set = self.current_output_set
-        if item is None or item.output_job_dir is None or sound_set is None:
-            return False
-        try:
-            return item.output_job_dir.expanduser().resolve() == sound_set.job_dir.expanduser().resolve()
-        except OSError:
-            return False
+        return MainWindow._work_output_session(self).matches_work_item(
+            self.current_work_item
+        )
 
     def _refresh_video_source(self) -> None:
         item = self.current_work_item
@@ -3049,11 +3046,10 @@ class MainWindow(QMainWindow):
         self.separation_action.status_label.setToolTip(f"{LOG_FILE}\n{_last_error_line(error)}")
 
     def _refresh_output_sets_after_task(self, scope: WorkTaskScope, completed_job_dir: Path) -> None:
-        current_output_dir = self.current_output_set.job_dir if self.current_output_set is not None else None
-        target = scope.output_refresh_target(
+        target = MainWindow._work_output_session(self).refresh_target(
+            scope.song_id,
             completed_job_dir,
             self.current_work_item,
-            current_output_dir,
         )
         self._refresh_output_sets(
             preferred_job_dir=target.preferred_job_dir,
@@ -3066,6 +3062,7 @@ class MainWindow(QMainWindow):
         *,
         select_fallback: bool = True,
     ) -> None:
+        session = MainWindow._work_output_session(self)
         legacy_sound_sets = scan_output_sound_sets(self.settings.output_root)
         self.library.add_output_sets(legacy_sound_sets)
         sound_sets = self.library.output_sound_sets()
@@ -3077,27 +3074,27 @@ class MainWindow(QMainWindow):
         for sound_set in sound_sets:
             self.output_set_combo.addItem(sound_set.label, str(sound_set.job_dir))
 
+        selection = session.refresh_catalog(
+            sound_sets,
+            preferred_job_dir=preferred_job_dir,
+            select_fallback=select_fallback,
+        )
+        MainWindow._sync_work_output_session_state(self, session)
+
         if not sound_sets:
             self.output_set_combo.blockSignals(False)
             self._apply_output_set(None)
             return
 
-        if preferred_job_dir is None and not select_fallback:
+        if selection.selected_index < 0 or selection.sound_set is None:
             self.output_set_combo.setCurrentIndex(-1)
             self.output_set_combo.blockSignals(False)
             self._apply_output_set(None)
             return
 
-        preferred_index = 0
-        if preferred_job_dir is not None:
-            resolved = preferred_job_dir.expanduser().resolve()
-            for index, sound_set in enumerate(sound_sets):
-                if sound_set.job_dir.expanduser().resolve() == resolved:
-                    preferred_index = index
-                    break
-        self.output_set_combo.setCurrentIndex(preferred_index)
+        self.output_set_combo.setCurrentIndex(selection.selected_index)
         self.output_set_combo.blockSignals(False)
-        self._apply_output_set(sound_sets[preferred_index])
+        self._apply_output_set(selection.sound_set)
 
     def _use_output_song(self, song: SongItem) -> None:
         if song.output_job_dir is None:
@@ -3110,14 +3107,12 @@ class MainWindow(QMainWindow):
         self._navigate_to_page(PAGE_STUDIO)
 
     def _select_output_set(self, job_dir: Path) -> None:
-        resolved = job_dir.expanduser().resolve()
-        for index in range(self.output_set_combo.count()):
-            data = self.output_set_combo.itemData(index)
-            if data and Path(data).expanduser().resolve() == resolved:
-                was_blocked = self.output_set_combo.blockSignals(True)
-                self.output_set_combo.setCurrentIndex(index)
-                self.output_set_combo.blockSignals(was_blocked)
-                return
+        index = MainWindow._work_output_session(self).selected_index_for_job(job_dir)
+        if index < 0:
+            return
+        was_blocked = self.output_set_combo.blockSignals(True)
+        self.output_set_combo.setCurrentIndex(index)
+        self.output_set_combo.blockSignals(was_blocked)
 
     def _on_output_set_changed(self, *_args) -> None:
         data = self.output_set_combo.currentData()
@@ -3127,11 +3122,15 @@ class MainWindow(QMainWindow):
         self._activate_output_job(Path(data))
 
     def _activate_output_job(self, job_dir: Path) -> None:
+        session = MainWindow._work_output_session(self)
         song = self.library.activate_output(job_dir)
         if song is not None:
             self._song_items_by_id[song.id] = song
             self._assign_work_item(song)
-        self._apply_output_set(load_output_sound_set(job_dir, self.settings.output_root))
+        sound_set = session.sound_set_for_job(job_dir)
+        if sound_set is None:
+            sound_set = load_output_sound_set(job_dir, self.settings.output_root)
+        self._apply_output_set(sound_set)
 
     def _activate_vocal_converted_version(self, path: Path | None) -> None:
         if path is None:
@@ -3154,13 +3153,16 @@ class MainWindow(QMainWindow):
         self._apply_conversion_result_context(owner, selected_converted_path=path)
 
     def _activate_separation_result(self, job_dir: Path) -> None:
+        session = MainWindow._work_output_session(self)
         song = self.library.activate_output(job_dir)
         if song is None:
             return
         self._song_items_by_id[song.id] = song
         if self.current_work_item is not None and self.current_work_item.id == song.id:
             self._assign_work_item(song, persist=False)
-        sound_set = load_output_sound_set(job_dir, self.settings.output_root)
+        sound_set = session.sound_set_for_job(job_dir)
+        if sound_set is None:
+            sound_set = load_output_sound_set(job_dir, self.settings.output_root)
         if sound_set is not None:
             self._apply_output_set(sound_set)
 
@@ -3255,8 +3257,15 @@ class MainWindow(QMainWindow):
 
     def _apply_output_set(self, sound_set: OutputSoundSet | None) -> None:
         self.studio_session_autosave.flush()
-        self.current_output_set = sound_set
-        self._sync_current_work_output_item(sound_set)
+        session = MainWindow._work_output_session(self)
+        session.assign(sound_set)
+        MainWindow._sync_work_output_session_state(self, session)
+        linked_item = session.linked_output_item(
+            self._song_items_by_id,
+            current_source_item=self.current_song,
+        )
+        if linked_item is not None and linked_item != self.current_work_item:
+            self._assign_work_item(linked_item)
         if sound_set is None:
             self.vocal_track.set_single_path(None)
             self.instrumental_track.set_single_path(None)
@@ -3431,23 +3440,6 @@ class MainWindow(QMainWindow):
             if project is not None:
                 projects[version.job_dir] = project
         return projects
-
-    def _sync_current_work_output_item(self, sound_set: OutputSoundSet | None) -> None:
-        if self.current_song is not None:
-            return
-        if sound_set is None:
-            return
-        item = self._output_item_for_sound_set(sound_set)
-        if item is not None and item != self.current_work_item:
-            self._assign_work_item(item)
-
-    def _output_item_for_sound_set(self, sound_set: OutputSoundSet) -> SongItem | None:
-        output_job_dir = sound_set.job_dir.expanduser().resolve()
-        for item in self._song_items_by_id.values():
-            if item.output_job_dir is not None:
-                if item.output_job_dir.expanduser().resolve() == output_job_dir:
-                    return item
-        return None
 
     def _choose_rvc_root(self, *_args) -> None:
         selected = QFileDialog.getExistingDirectory(self, tr("Select RVC Root"), self.rvc_root_edit.text())
@@ -3699,7 +3691,7 @@ class MainWindow(QMainWindow):
                     )
                 except Exception as exc:
                     self._logger.warning("Could not register vocal take metadata: %s", exc)
-        current_job_dir = self.current_output_set.job_dir if self.current_output_set is not None else None
+        current_job_dir = MainWindow._work_output_session(self).job_dir
         preferred_job_dir = current_job_dir or (
             job_dir if scope.is_current(self.current_work_item) else None
         )
@@ -4943,6 +4935,17 @@ class MainWindow(QMainWindow):
         self.current_work_item = session.item
         self.current_song = session.source_item
         self._work_song_ready = session.ready
+
+    @staticmethod
+    def _work_output_session(self) -> WorkOutputSession:
+        session = getattr(self, "work_output_session", None)
+        if isinstance(session, WorkOutputSession):
+            return session
+        return WorkOutputSession(getattr(self, "current_output_set", None))
+
+    @staticmethod
+    def _sync_work_output_session_state(self, session: WorkOutputSession) -> None:
+        self.current_output_set = session.sound_set
 
     def _start_drive_model_import(self, link: str) -> None:
         self.google_drive.import_model_link(link)
