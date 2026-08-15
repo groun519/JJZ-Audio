@@ -20,9 +20,9 @@
 </p>
 
 > [!NOTE]
-> 이 문서는 정식 배포된 **JJZero Audio 0.3.5** 기준으로 작성되어 있습니다. 설치 파일은 [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest)에서 받을 수 있습니다.
+> 이 문서는 정식 배포된 **JJZero Audio 0.3.6** 기준으로 작성되어 있습니다. 설치 파일은 [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest)에서 받을 수 있습니다.
 
-학습 모니터·진단 로그와 Studio Delay·Doubler 변경 사항은 [0.3.5 패치노트](docs/releases/0.3.5.md)에서 확인할 수 있습니다.
+자동 업데이트 복구, 일반 RVC ZIP 가져오기와 AMD DirectML 수정 사항은 [0.3.6 패치노트](docs/releases/0.3.6.md)에서 확인할 수 있습니다.
 
 <p align="center">
   <img src="docs/assets/releases/0.3.0/separation-pools.png" width="920" alt="JJZero Audio 0.3.0 보컬·반주 결과 선택 화면">

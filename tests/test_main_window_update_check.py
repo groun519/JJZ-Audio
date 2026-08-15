@@ -61,6 +61,7 @@ class MainWindowUpdateCheckTests(unittest.TestCase):
                 _set_update_download_failed=Mock(),
                 _logger=Mock(),
             )
+            application = SimpleNamespace(_jjzero_mutex_handle=123)
 
             with (
                 patch.object(
@@ -68,12 +69,16 @@ class MainWindowUpdateCheckTests(unittest.TestCase):
                     "APP_PATHS",
                     SimpleNamespace(cache_dir=cache),
                 ),
+                patch.object(main_window.QApplication, "instance", return_value=application),
+                patch.object(main_window, "close_app_mutex", return_value=True) as close_mutex,
                 patch.object(main_window, "start_detached_command", return_value=True),
                 patch.object(main_window.QApplication, "quit"),
             ):
                 MainWindow._launch_downloaded_installer_or_restart(window)
 
             self.assertTrue((update / UPDATE_CLEANUP_MARKER).is_file())
+            close_mutex.assert_called_once_with(123)
+            self.assertIsNone(application._jjzero_mutex_handle)
 
     def test_failed_installer_launch_does_not_mark_update_for_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -90,6 +95,7 @@ class MainWindowUpdateCheckTests(unittest.TestCase):
                 _set_update_download_failed=Mock(),
                 _logger=Mock(),
             )
+            application = SimpleNamespace(_jjzero_mutex_handle=456)
 
             with (
                 patch.object(
@@ -97,12 +103,16 @@ class MainWindowUpdateCheckTests(unittest.TestCase):
                     "APP_PATHS",
                     SimpleNamespace(cache_dir=cache),
                 ),
+                patch.object(main_window.QApplication, "instance", return_value=application),
+                patch.object(main_window, "close_app_mutex", return_value=True),
+                patch.object(main_window, "create_app_mutex", return_value=789),
                 patch.object(main_window, "start_detached_command", return_value=False),
                 patch.object(main_window.QApplication, "quit"),
             ):
                 MainWindow._launch_downloaded_installer_or_restart(window)
 
             self.assertFalse((update / UPDATE_CLEANUP_MARKER).exists())
+            self.assertEqual(application._jjzero_mutex_handle, 789)
 
     def test_builds_update_outcome_and_preserves_cache_validators(self) -> None:
         artifact = ReleaseArtifact(

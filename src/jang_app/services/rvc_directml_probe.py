@@ -17,6 +17,20 @@ _DIRECTML_RMVPE_EXPECTED_OUTPUTS = (
     Path("2b-f0nsf") / "probe.wav.npy",
 )
 
+_DIRECTML_RMVPE_BOOTSTRAP = """
+import os
+import runpy
+import sys
+from pathlib import Path
+
+script = Path(sys.argv[1]).resolve()
+probe_root = Path(sys.argv[5]).resolve()
+sys.path.insert(0, str(script.parent))
+os.chdir(probe_root)
+sys.argv = sys.argv[1:]
+runpy.run_path(str(script), run_name="__main__")
+""".strip()
+
 
 def create_directml_rmvpe_probe() -> tuple[tempfile.TemporaryDirectory[str], Path]:
     temporary = tempfile.TemporaryDirectory(prefix="jjz-directml-rmvpe-")
@@ -49,9 +63,12 @@ def directml_rmvpe_probe_command(
     *,
     device: str = DIRECTML_RMVPE_PROBE_DEVICE,
 ) -> list[str]:
+    script = runtime_root / "extract_f0_rmvpe.py"
     return [
         str(python),
-        str(runtime_root / "extract_f0_rmvpe.py"),
+        "-c",
+        _DIRECTML_RMVPE_BOOTSTRAP,
+        str(script),
         "1",
         "0",
         device,

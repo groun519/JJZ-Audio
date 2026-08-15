@@ -138,6 +138,7 @@ from jang_app.services.command import start_detached_command
 from jang_app.services.distribution_channel import application_updates_enabled
 from jang_app.services.file_browser import open_in_file_browser
 from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language, tr
+from jang_app.services.windows_app_mutex import close_app_mutex, create_app_mutex
 from jang_app.services.job_diagnostics import get_job_diagnostics
 from jang_app.services.hardware_diagnostics_state import (
     recorded_hardware_selection,
@@ -1793,7 +1794,14 @@ class MainWindow(QMainWindow):
             "/CLOSEAPPLICATIONS",
             "/RUN",
         )
+        application = QApplication.instance()
+        mutex_handle = getattr(application, "_jjzero_mutex_handle", None)
+        mutex_released = close_app_mutex(mutex_handle)
+        if mutex_released:
+            application._jjzero_mutex_handle = None
         if not start_detached_command((str(installer), *arguments), cwd=installer.parent):
+            if mutex_released:
+                application._jjzero_mutex_handle = create_app_mutex()
             if self._update_dialog is not None:
                 self._set_update_download_failed(
                     self._update_dialog,

@@ -14,7 +14,6 @@ AppId={{E5ED303D-5BB2-4B1E-8AA8-434C16C4D3AE}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=JJZero
-AppMutex={#AppMutexName}
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 UninstallDisplayName={#AppName}
@@ -66,6 +65,36 @@ var
   RuntimePreservationPrepared: Boolean;
   PreservedRuntimeData: Boolean;
   PreservedRuntimePath: String;
+
+function HasCommandLineSwitch(const SwitchName: String): Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  for Index := 1 to ParamCount do
+  begin
+    if CompareText(ParamStr(Index), SwitchName) = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  if CheckForMutexes('{#AppMutexName}') and (not HasCommandLineSwitch('/RUN')) then
+  begin
+    if not WizardSilent then
+      MsgBox(
+        '{#AppName} is running. Close the application before installing.',
+        mbError,
+        MB_OK
+      );
+    Result := False;
+  end;
+end;
 
 function RuntimeDataRoot: String;
 begin
@@ -314,12 +343,22 @@ end;
 
 function InitializeUninstall: Boolean;
 begin
+  Result := not CheckForMutexes('{#AppMutexName}');
+  if not Result then
+  begin
+    if not UninstallSilent then
+      MsgBox(
+        '{#AppName} is running. Close the application before uninstalling.',
+        mbError,
+        MB_OK
+      );
+    Exit;
+  end;
   ManagedRuntimeCanBeDeleted := True;
   ManagedCacheCanBeDeleted := True;
   RuntimePreservationPrepared := False;
   PreservedRuntimeData := False;
   PreservedRuntimePath := '';
-  Result := True;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

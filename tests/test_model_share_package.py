@@ -54,6 +54,55 @@ class ModelSharePackageTests(unittest.TestCase):
             self.assertFalse(imported.records[0].has_index)
             self.assertFalse(package.includes_index)
 
+    def test_manifestless_rvc_zip_imports_inference_model_and_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "external-rvc-model.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("weights/voice.pth", b"model-data")
+                archive.writestr("logs/voice/added_voice.index", b"index-data")
+                archive.writestr("README.txt", b"ignored")
+            workspace = RvcModelWorkspace(root / "workspace")
+
+            imported = import_model_share_package(package, workspace)
+
+            self.assertEqual(len(imported.records), 1)
+            self.assertTrue(imported.records[0].can_convert)
+            self.assertTrue(imported.records[0].has_index)
+            self.assertEqual(imported.records[0].inference_model.name, "voice.pth")
+
+    def test_manifestless_zip_without_inference_model_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "checkpoints-only.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("G_100.pth", b"generator")
+                archive.writestr("D_100.pth", b"discriminator")
+
+            with self.assertRaisesRegex(ModelSharePackageError, "no RVC inference PTH"):
+                import_model_share_package(package, RvcModelWorkspace(root / "workspace"))
+
+    def test_manifestless_zip_rejects_unsafe_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "unsafe-external.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("../voice.pth", b"model-data")
+
+            with self.assertRaisesRegex(ModelSharePackageError, "unsafe path"):
+                import_model_share_package(package, RvcModelWorkspace(root / "workspace"))
+
+    def test_invalid_jjzero_manifest_does_not_fall_back_to_plain_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "invalid-jjzero.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr(MODEL_SHARE_MANIFEST, "{}")
+                archive.writestr("voice.pth", b"model-data")
+
+            with self.assertRaisesRegex(ModelSharePackageError, "not supported"):
+                import_model_share_package(package, RvcModelWorkspace(root / "workspace"))
+
     def test_unchanged_model_reuses_existing_package(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

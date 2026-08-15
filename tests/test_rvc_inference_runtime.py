@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -21,6 +23,56 @@ class RvcInferenceRuntimeTests(unittest.TestCase):
     def test_directml_probe_requires_complete_rmvpe_runtime(self) -> None:
         self.assertIn("DmlExecutionProvider", runtime_module._DIRECTML_PROBE)
         self.assertIn("runtime/rmvpe.onnx", runtime_module._DIRECTML_PROBE)
+
+    def test_directml_rmvpe_command_keeps_import_root_and_probe_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "rvc"
+            probe = root / "probe"
+            (runtime / "lib").mkdir(parents=True)
+            probe.mkdir()
+            (runtime / "lib" / "audio.py").write_text(
+                'MARKER = "audio-ready"\n',
+                encoding="utf-8",
+            )
+            (runtime / "extract_f0_rmvpe.py").write_text(
+                "\n".join(
+                    (
+                        "import sys",
+                        "from pathlib import Path",
+                        "from lib.audio import MARKER",
+                        "target = Path(sys.argv[4]) / 'probe-result.txt'",
+                        "target.write_text(f'{MARKER}|{Path.cwd()}', encoding='utf-8')",
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            bundled_python = (
+                Path(__file__).resolve().parents[1]
+                / "third_party"
+                / "rvc"
+                / "runtime"
+                / "python.exe"
+            )
+            command = runtime_module.directml_rmvpe_probe_command(
+                bundled_python if bundled_python.is_file() else Path(sys.executable),
+                runtime,
+                probe,
+            )
+            completed = subprocess.run(
+                command,
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                (probe / "probe-result.txt").read_text(encoding="utf-8"),
+                f"audio-ready|{probe.resolve()}",
+            )
 
     def test_skips_accelerator_probe_when_cpu_runtime_is_broken(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -192,11 +244,14 @@ class RvcInferenceRuntimeTests(unittest.TestCase):
             python.write_bytes(b"python")
             script.write_bytes(b"script")
             model.write_bytes(b"directml-rmvpe")
+            (root / "lib").mkdir()
+            for name in ("audio.py", "rmvpe.py", "jjzero_device.py"):
+                (root / "lib" / name).write_bytes(b"module")
 
             def complete_probe(args, **kwargs):
                 workspace = Path(kwargs["cwd"])
                 self.assertEqual((workspace / "rmvpe.onnx").read_bytes(), b"directml-rmvpe")
-                probe_root = Path(args[5])
+                probe_root = Path(args[7])
                 for relative in (
                     Path("2a_f0") / "probe.wav.npy",
                     Path("2b-f0nsf") / "probe.wav.npy",

@@ -22,6 +22,7 @@ V028_RUNTIME_REQUIRED_PATHS = (
     "rvc/extract_f0_rmvpe.py",
     "rvc/extract_feature_print.py",
     "rvc/train_nsf_sim_cache_sid_load_pretrain.py",
+    "rvc/lib/audio.py",
     "rvc/lib/jjzero_device.py",
     "rvc/lib/i18n/en_US.json",
     "rvc/lib/train/utils.py",

@@ -304,9 +304,23 @@ def _last_line(output: str) -> str:
 
 
 def _run_directml_rmvpe_probe(python: Path, rvc_root: Path, device: str) -> str:
-    script = rvc_root / "extract_f0_rmvpe.py"
-    if not script.is_file():
-        return f"DirectML RMVPE probe could not find the RVC extraction script: {script}"
+    required_files = (
+        Path("extract_f0_rmvpe.py"),
+        Path("lib") / "audio.py",
+        Path("lib") / "rmvpe.py",
+        Path("lib") / "jjzero_device.py",
+    )
+    missing_files = [
+        relative.as_posix()
+        for relative in required_files
+        if not (rvc_root / relative).is_file()
+    ]
+    if missing_files:
+        return (
+            "The installed RVC runtime is incomplete. Missing files: "
+            + ", ".join(missing_files)
+            + ". Repair the AI runtime before converting."
+        )
     temporary, probe_root = create_directml_rmvpe_probe()
     try:
         try:

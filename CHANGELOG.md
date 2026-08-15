@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.3.6 - 2026-08-15
+
+### Added
+
+- Added safe import support for ordinary RVC ZIP packages containing inference `.pth` and optional `.index` files.
+- Added a dedicated diagnostic classification for invalid or incomplete shared model packages.
+
+### Changed
+
+- Added the RVC root to child-process `PYTHONPATH` and ran the DirectML RMVPE probe from its prepared working directory.
+- Required the DirectML runtime files used by RMVPE before accepting an AMD inference profile.
+
+### Fixed
+
+- Fixed in-app updates that closed JJZero Audio before the installer could replace the previous version.
+- Allowed the verified internal `/RUN` update path to proceed while preserving running-app protection for manual installation and uninstall.
+- Released and restored the Windows application mutex safely around installer startup failures.
+- Accepted plain RVC model archives without weakening manifest validation, checksum checks, or archive path safety.
+- Fixed AMD DirectML RMVPE imports when the probe workspace differs from the bundled RVC directory.
+
+### Quality
+
+- Added installer verification while the application mutex is active and regression coverage for update recovery, plain RVC ZIP import, and DirectML RMVPE bootstrapping.
+
 ## 0.3.5 - 2026-08-15
 
 ### Added

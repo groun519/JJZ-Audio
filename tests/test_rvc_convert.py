@@ -35,6 +35,7 @@ class RvcConvertTests(unittest.TestCase):
         self.assertEqual(path_parts[0], str(FFMPEG_BIN_DIR))
         self.assertEqual(path_parts[1], str(rvc_root))
         self.assertEqual(path_parts[2], str(rvc_root / "runtime"))
+        self.assertEqual(environment["PYTHONPATH"].split(os.pathsep)[0], str(rvc_root))
         self.assertEqual(environment["PYTHONUTF8"], "1")
         self.assertEqual(environment["PYTHONIOENCODING"], "utf-8:replace")
         self.assertEqual(environment["PYTHONFAULTHANDLER"], "1")
@@ -43,6 +44,15 @@ class RvcConvertTests(unittest.TestCase):
         self.assertEqual(environment["OMP_NUM_THREADS"], "1")
         self.assertEqual(environment["MKL_NUM_THREADS"], "1")
         self.assertEqual(environment["NUMEXPR_NUM_THREADS"], "1")
+
+    def test_environment_preserves_existing_python_path_after_rvc_root(self) -> None:
+        with patch.dict(os.environ, {"PYTHONPATH": r"C:\existing"}, clear=False):
+            environment = build_rvc_environment(Path("C:/rvc"))
+
+        self.assertEqual(
+            environment["PYTHONPATH"].split(os.pathsep),
+            [str(Path("C:/rvc")), r"C:\existing"],
+        )
 
     def test_environment_overrides_legacy_windows_console_encoding(self) -> None:
         with patch.dict(

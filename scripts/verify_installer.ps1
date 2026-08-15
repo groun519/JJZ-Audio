@@ -235,7 +235,26 @@ foreach ($path in @(
 }
 $immutableSourceFiles = $preservedFiles.Clone()
 $immutableSourceFiles.Remove($storageFile)
-Invoke-Setup $installer "update-$targetVersion.log"
+$updateMutex = [System.Threading.Mutex]::new($false, $AppMutexName)
+try {
+    $logPath = Join-Path $testRoot "update-$targetVersion.log"
+    $arguments = @(
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/CLOSEAPPLICATIONS",
+        "/RUN",
+        "/DIR=`"$installDir`"",
+        "/LOG=`"$logPath`""
+    )
+    $updateProcess = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+    if ($updateProcess.ExitCode -ne 0) {
+        throw "Internal update installer failed with exit code $($updateProcess.ExitCode). Log: $logPath"
+    }
+}
+finally {
+    $updateMutex.Dispose()
+}
 Assert-InstalledVersion $targetVersion
 Assert-PreservedFiles $preservedFiles "application update"
 if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtime-model") {

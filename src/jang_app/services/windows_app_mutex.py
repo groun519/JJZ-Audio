@@ -19,3 +19,12 @@ def create_app_mutex() -> int | None:
     kernel32.CreateMutexW.restype = ctypes.c_void_p
     handle = kernel32.CreateMutexW(None, False, APP_MUTEX_NAME)
     return int(handle) if handle else None
+
+
+def close_app_mutex(handle: int | None) -> bool:
+    if os.name != "nt" or not handle:
+        return False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    return bool(kernel32.CloseHandle(handle))

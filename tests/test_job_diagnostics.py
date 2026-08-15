@@ -136,6 +136,14 @@ class JobDiagnosticsTests(unittest.TestCase):
             "GOOGLE_OAUTH_CONFIGURATION_FAILED",
         )
         self.assertEqual(
+            classify_error("The shared model manifest is invalid.").code,
+            "MODEL_SHARE_PACKAGE_INVALID",
+        )
+        self.assertEqual(
+            classify_error("The shared ZIP has no RVC inference PTH.").code,
+            "MODEL_SHARE_PACKAGE_INVALID",
+        )
+        self.assertEqual(
             classify_error("UnicodeEncodeError: 'cp949' codec can't encode character").code,
             "RVC_CONSOLE_ENCODING_ERROR",
         )

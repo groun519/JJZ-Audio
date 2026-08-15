@@ -113,6 +113,19 @@ def classify_error(error: str) -> ErrorClassification:
             "The Google OAuth client configuration is unavailable or invalid.",
         ),
         (
+            (
+                "shared model manifest",
+                "shared model format is not supported",
+                "shared model artifact",
+                "shared model contains an unsafe path",
+                "shared model checksum",
+                "shared zip has no rvc inference pth",
+                "shared model is not a valid zip package",
+            ),
+            "MODEL_SHARE_PACKAGE_INVALID",
+            "The downloaded model package is missing or contains invalid RVC model data.",
+        ),
+        (
             ("unicodeencodeerror", "codec can't encode character", "codec cannot encode character"),
             "RVC_CONSOLE_ENCODING_ERROR",
             "The RVC process could not write Unicode text using the Windows console encoding.",

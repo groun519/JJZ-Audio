@@ -255,8 +255,12 @@ def import_model_share_package(
     workspace.root.parent.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(package_path, "r") as archive:
-            manifest = _read_manifest(archive)
-            entries = _validate_archive(archive, manifest)
+            if MODEL_SHARE_MANIFEST in archive.namelist():
+                manifest = _read_manifest(archive)
+                entries = _validate_archive(archive, manifest)
+            else:
+                manifest = {}
+                entries = _legacy_archive_entries(archive)
             with tempfile.TemporaryDirectory(
                 prefix="jjzero-model-import-",
                 dir=workspace.root.parent,
@@ -266,7 +270,8 @@ def import_model_share_package(
                 extracted = 0
                 for entry in entries:
                     archive_path = str(entry["path"])
-                    target = extraction_root / PurePosixPath(archive_path)
+                    target_path = str(entry.get("target_path", archive_path))
+                    target = extraction_root / PurePosixPath(target_path)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     digest = hashlib.sha256()
                     with archive.open(archive_path, "r") as source, target.open("wb") as output:
@@ -275,7 +280,8 @@ def import_model_share_package(
                             digest.update(chunk)
                             extracted += len(chunk)
                             _report(progress, extracted, total, limit=48)
-                    if digest.hexdigest() != entry["sha256"]:
+                    expected_digest = str(entry.get("sha256", ""))
+                    if expected_digest and digest.hexdigest() != expected_digest:
                         raise ModelSharePackageError(f"Checksum mismatch: {archive_path}")
                 model_folder = extraction_root / MODEL_SHARE_DIRECTORY
                 records = workspace.import_folder(
@@ -296,6 +302,46 @@ def import_model_share_package(
     if progress is not None:
         progress(100)
     return ImportedSharedModel(package_path, imported)
+
+
+def _legacy_archive_entries(archive: zipfile.ZipFile) -> list[dict[str, object]]:
+    """Build a safe import plan for plain RVC ZIPs created outside JJZero Audio."""
+    entries: list[dict[str, object]] = []
+    target_names: set[str] = set()
+    has_inference_model = False
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        archive_path = info.filename
+        if not _safe_legacy_archive_path(archive_path):
+            raise ModelSharePackageError("The shared model contains an unsafe path.")
+        name = PurePosixPath(archive_path).name
+        suffix = Path(name).suffix.casefold()
+        if suffix not in {".pth", ".index"}:
+            continue
+        target_key = name.casefold()
+        if target_key in target_names:
+            raise ModelSharePackageError(
+                f"The shared model contains duplicate artifact names: {name}"
+            )
+        target_names.add(target_key)
+        has_inference_model = has_inference_model or (
+            suffix == ".pth" and not _is_training_checkpoint_name(name)
+        )
+        entries.append(
+            {
+                "artifact": "legacy_model_file",
+                "path": archive_path,
+                "target_path": f"{MODEL_SHARE_DIRECTORY}/{name}",
+                "size": max(0, info.file_size),
+                "sha256": "",
+            }
+        )
+    if not has_inference_model:
+        raise ModelSharePackageError(
+            "The shared ZIP has no RVC inference PTH. Select a package containing a model .pth file."
+        )
+    return entries
 
 
 def _read_manifest(archive: zipfile.ZipFile) -> dict[str, object]:
@@ -398,6 +444,27 @@ def _safe_archive_path(value: str) -> bool:
         and not path.is_absolute()
         and ".." not in path.parts
         and path.parts[0] == MODEL_SHARE_DIRECTORY
+    )
+
+
+def _safe_legacy_archive_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    return (
+        bool(value)
+        and "\\" not in value
+        and not path.is_absolute()
+        and ".." not in path.parts
+        and bool(path.name)
+    )
+
+
+def _is_training_checkpoint_name(name: str) -> bool:
+    stem = Path(name).stem
+    return (
+        len(stem) > 2
+        and stem[0].casefold() in {"g", "d"}
+        and stem[1] == "_"
+        and stem[2:].isdigit()
     )
 
 
