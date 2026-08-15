@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
 
@@ -38,10 +39,11 @@ class VocalProjectStore:
     def _load(self, job_dir: Path) -> tuple[VocalProject | None, bool]:
         root = job_dir.expanduser().resolve()
         manifest_path = root / VOCAL_PROJECT_MANIFEST
-        if not manifest_path.is_file():
+        revision = _manifest_revision(manifest_path)
+        if revision is None:
             return None, False
         try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            data = _read_manifest(manifest_path, revision)
         except (OSError, json.JSONDecodeError) as exc:
             raise VocalProjectValidationError(
                 f"Could not read vocal project: {manifest_path}"
@@ -52,6 +54,31 @@ class VocalProjectStore:
         self._validate_paths(root, project)
         validate_vocal_project(project)
         return project, source_schema != VOCAL_PROJECT_SCHEMA_VERSION
+
+    def available_takes(self, job_dir: Path) -> tuple[VocalTake, ...]:
+        """Return every usable RVC take, including outputs from older app versions."""
+        root = job_dir.expanduser().resolve()
+        discovered = {
+            take.output_path: take
+            for take in _imported_takes(root, active_converted_path=None)
+        }
+        try:
+            project = self.load(root)
+        except (OSError, VocalProjectValidationError):
+            project = None
+        if project is not None:
+            discovered.update(
+                (take.output_path.expanduser().resolve(), take)
+                for take in project.takes
+                if take.output_path.is_file()
+            )
+        return tuple(
+            sorted(
+                discovered.values(),
+                key=lambda take: _file_mtime(take.output_path),
+                reverse=True,
+            )
+        )
 
     def open_or_create(
         self,
@@ -320,7 +347,7 @@ def _imported_takes(root: Path, active_converted_path: Path | None) -> tuple[Voc
         active = active_converted_path.expanduser().resolve()
         if active.is_file() and active.parent == root:
             paths.add(active)
-    ordered = sorted(paths, key=lambda path: path.stat().st_mtime, reverse=True)
+    ordered = sorted(paths, key=_file_mtime, reverse=True)
     return tuple(_imported_take(root, path) for path in ordered)
 
 
@@ -354,6 +381,29 @@ def _take_id(root: Path, path: Path) -> str:
 
 def _file_timestamp(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+
+
+def _file_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _manifest_revision(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+
+
+@lru_cache(maxsize=128)
+def _read_manifest(
+    path: Path,
+    _revision: tuple[int, int, int],
+) -> object:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _default_take_label(conversion: VocalConversionSettings) -> str:

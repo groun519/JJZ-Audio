@@ -35,10 +35,12 @@ from jang_app.services.studio_audio_levels import studio_source_gain
 from jang_app.services.studio_character_fx_presets import (
     EDITABLE_EFFECT_KINDS,
     character_effect,
-    character_effect_chain,
     studio_effect_name,
 )
+from jang_app.services.studio_fx_chain_presets import studio_effect_chain
 from jang_app.services.studio_session import (
+    STUDIO_EFFECT_DELAY,
+    STUDIO_EFFECT_DOUBLER,
     STUDIO_EFFECT_LEVEL_MATCH,
     STUDIO_EFFECT_REVERB,
     TRACK_AUDIO,
@@ -76,13 +78,12 @@ from jang_app.services.waveform import (
     build_level_matched_waveform_peaks,
     build_waveform_amplitude_peaks,
     waveform_cache_key,
+    waveform_peak_cache,
 )
 
 
 _WAVEFORM_POINTS = 900
 _WAVEFORM_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="studio-waveform")
-_WAVEFORM_CACHE: dict[tuple[str, int, int, int], list[float]] = {}
-_LEVEL_MATCHED_WAVEFORM_CACHE: dict[tuple[object, ...], list[float]] = {}
 _ROLE_COLORS = {
     "original_vocal": QColor("#d6a85f"),
     "instrumental": QColor("#58a88f"),
@@ -1241,7 +1242,7 @@ class StudioTimelineView(QWidget):
                 key = waveform_cache_key(asset.path, _WAVEFORM_POINTS)
             except OSError:
                 continue
-            cached = _WAVEFORM_CACHE.get(key)
+            cached = waveform_peak_cache.amplitude(key)
             if cached is not None:
                 self._peaks[asset.asset_id] = cached
                 continue
@@ -1270,7 +1271,7 @@ class StudioTimelineView(QWidget):
                     self._level_matched_peaks.pop(clip.clip_id, None)
                     continue
                 key, source, reference, settings = request
-                cached = _LEVEL_MATCHED_WAVEFORM_CACHE.get(key)
+                cached = waveform_peak_cache.level_matched(key)
                 if cached is not None:
                     self._level_matched_peaks[clip.clip_id] = (key, cached)
                     continue
@@ -1307,7 +1308,7 @@ class StudioTimelineView(QWidget):
         key, asset_id = key_and_asset
         self._pending_peak_keys.discard(key)
         if peaks:
-            _WAVEFORM_CACHE[key] = peaks
+            waveform_peak_cache.store_amplitude(key, peaks)
             self._peaks[asset_id] = peaks
             self.update()
 
@@ -1325,7 +1326,7 @@ class StudioTimelineView(QWidget):
         key, clip_id = key_and_clip
         self._pending_level_matched_peak_keys.discard(key)
         if peaks:
-            _LEVEL_MATCHED_WAVEFORM_CACHE[key] = peaks
+            waveform_peak_cache.store_level_matched(key, peaks)
             clip = self._clip(clip_id)
             request = self._level_matched_waveform_request(clip) if clip is not None else None
             if request is not None and request[0] == key:
@@ -1338,7 +1339,7 @@ class StudioTimelineView(QWidget):
             cached = self._level_matched_peaks.get(clip.clip_id)
             if cached is not None and cached[0] == request[0]:
                 return cached[1]
-            shared = _LEVEL_MATCHED_WAVEFORM_CACHE.get(request[0])
+            shared = waveform_peak_cache.level_matched(request[0])
             if shared is not None:
                 return shared
         return self._peaks.get(clip.asset.asset_id, [])
@@ -1523,6 +1524,9 @@ class StudioEditor(QWidget):
     def session(self) -> StudioSession:
         return self._session
 
+    def sound_assets(self) -> tuple[StudioSoundAsset, ...]:
+        return self._assets
+
     def has_media_track(self) -> bool:
         return any(track.role == TRACK_VIDEO for track in self._session.tracks)
 
@@ -1611,10 +1615,14 @@ class StudioEditor(QWidget):
         if self._clip(clip_id) is None:
             return
         if effect_kind.startswith("preset:"):
-            effects = character_effect_chain(effect_kind.removeprefix("preset:"))
+            effects = studio_effect_chain(effect_kind.removeprefix("preset:"))
         elif effect_kind in EDITABLE_EFFECT_KINDS:
             effects = (character_effect(effect_kind),)
-        elif effect_kind == STUDIO_EFFECT_REVERB:
+        elif effect_kind in (
+            STUDIO_EFFECT_REVERB,
+            STUDIO_EFFECT_DELAY,
+            STUDIO_EFFECT_DOUBLER,
+        ):
             effects = (
                 StudioEffect(
                     effect_id=f"fx-{uuid.uuid4().hex}",

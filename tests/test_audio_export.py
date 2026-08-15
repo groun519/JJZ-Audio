@@ -12,6 +12,7 @@ from jang_app.services.audio_export import AudioMixSource, export_audio_file, ex
 from jang_app.services.audio_mix_processing import process_mix_source
 from jang_app.services.studio_character_fx_presets import character_effect_chain
 from jang_app.services.studio_session import (
+    StudioDelaySettings,
     StudioEffect,
     StudioLevelMatchSettings,
     StudioReverbSettings,
@@ -57,6 +58,27 @@ class AudioExportTests(unittest.TestCase):
             )
 
             export_mix((AudioMixSource("Reverb", source, effects=(effect,)),), output)
+            rendered, sample_rate = sf.read(output, dtype="float32")
+
+            self.assertEqual(sample_rate, 8_000)
+            self.assertGreater(len(rendered), len(impulse))
+            self.assertGreater(float(np.max(np.abs(rendered[len(impulse) :]))), 0.0)
+
+    def test_exported_delay_keeps_the_repeating_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "impulse.wav"
+            output = root / "delay.wav"
+            impulse = np.zeros(800, dtype=np.float32)
+            impulse[0] = 0.5
+            sf.write(source, impulse, 8_000, subtype="FLOAT")
+            effect = StudioEffect(
+                "fx-delay",
+                "delay",
+                delay=StudioDelaySettings(100, 30, 50, 0),
+            )
+
+            export_mix((AudioMixSource("Delay", source, effects=(effect,)),), output)
             rendered, sample_rate = sf.read(output, dtype="float32")
 
             self.assertEqual(sample_rate, 8_000)

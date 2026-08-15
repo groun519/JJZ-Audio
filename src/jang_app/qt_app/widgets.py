@@ -34,7 +34,11 @@ from PySide6.QtWidgets import (
 
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
 from jang_app.services.i18n import tr
-from jang_app.services.waveform import build_waveform_peaks, waveform_cache_key
+from jang_app.services.waveform import (
+    build_waveform_peaks,
+    waveform_cache_key,
+    waveform_peak_cache,
+)
 
 
 COMPACT_ICON_BUTTON_SIZE = 26
@@ -42,7 +46,6 @@ _WAVEFORM_VIEW_EXECUTOR = ThreadPoolExecutor(
     max_workers=3,
     thread_name_prefix="workspace-waveform",
 )
-_WAVEFORM_VIEW_CACHE: dict[tuple[str, int, int, int], list[float]] = {}
 atexit.register(
     lambda: _WAVEFORM_VIEW_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 )
@@ -858,7 +861,7 @@ class WaveformView(QWidget):
             return
 
         self._cache_key = cache_key
-        cached = _WAVEFORM_VIEW_CACHE.get(cache_key)
+        cached = waveform_peak_cache.normalized(cache_key)
         if cached is not None:
             self._peaks = cached
             self.update()
@@ -896,7 +899,7 @@ class WaveformView(QWidget):
         if cache_key != self._cache_key:
             return
         if peaks:
-            _WAVEFORM_VIEW_CACHE[cache_key] = peaks
+            waveform_peak_cache.store_normalized(cache_key, peaks)
         self._peaks = peaks
         self._error = error
         self._is_loading = False

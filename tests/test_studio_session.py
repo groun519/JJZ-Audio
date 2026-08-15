@@ -5,11 +5,13 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
 
 import jang_app.services.studio_session as studio_session
+import jang_app.services.studio_assets as studio_assets
 from jang_app.services.song_package import SongPackageStore
 from jang_app.services.studio_assets import resolve_studio_asset, studio_sound_pool
 from jang_app.services.studio_session import (
@@ -118,6 +120,82 @@ class StudioSessionTests(unittest.TestCase):
             self.assertEqual(media.offset_x_percent, 100)
             self.assertEqual(media.offset_y_percent, -100)
             self.assertTrue(media.source_audio_enabled)
+
+    def test_delay_effect_round_trips_and_clamps_invalid_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            session = load_studio_session(package)
+            track = session.tracks[0]
+            clip = track.clips[0]
+            effect = studio_session.StudioEffect(
+                "fx-delay",
+                "delay",
+                delay=studio_session.StudioDelaySettings(440, 36, 28, 85),
+            )
+            edited = replace(
+                session,
+                tracks=(
+                    replace(track, clips=(replace(clip, effects=(effect,)),)),
+                    *session.tracks[1:],
+                ),
+            )
+            save_studio_session(package, edited)
+
+            restored = load_studio_session(package)
+
+            self.assertEqual(restored.tracks[0].clips[0].effects, (effect,))
+            data = json.loads(studio_session_path(package).read_text(encoding="utf-8"))
+            settings = data["tracks"][0]["clips"][0]["effects"][0]["settings"]
+            settings.update(
+                delay_ms=9_999,
+                feedback_percent=200,
+                dry_wet_percent=-5,
+                stereo_width_percent=300,
+            )
+            studio_session_path(package).write_text(json.dumps(data), encoding="utf-8")
+            clamped = load_studio_session(package).tracks[0].clips[0].effects[0].delay
+            self.assertEqual(
+                clamped,
+                studio_session.StudioDelaySettings(2_000, 85, 0, 100),
+            )
+
+    def test_doubler_effect_round_trips_and_clamps_invalid_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            session = load_studio_session(package)
+            track = session.tracks[0]
+            clip = track.clips[0]
+            effect = studio_session.StudioEffect(
+                "fx-doubler",
+                "doubler",
+                doubler=studio_session.StudioDoublerSettings(24, 9, 90, 28),
+            )
+            edited = replace(
+                session,
+                tracks=(
+                    replace(track, clips=(replace(clip, effects=(effect,)),)),
+                    *session.tracks[1:],
+                ),
+            )
+            save_studio_session(package, edited)
+
+            restored = load_studio_session(package)
+
+            self.assertEqual(restored.tracks[0].clips[0].effects, (effect,))
+            data = json.loads(studio_session_path(package).read_text(encoding="utf-8"))
+            settings = data["tracks"][0]["clips"][0]["effects"][0]["settings"]
+            settings.update(
+                voice_spacing_ms=500,
+                pitch_spread_cents=200,
+                stereo_width_percent=-5,
+                dry_wet_percent=300,
+            )
+            studio_session_path(package).write_text(json.dumps(data), encoding="utf-8")
+            clamped = load_studio_session(package).tracks[0].clips[0].effects[0].doubler
+            self.assertEqual(
+                clamped,
+                studio_session.StudioDoublerSettings(40, 20, 0, 100),
+            )
 
     def test_character_effect_settings_round_trip_and_clamp(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -237,7 +315,11 @@ class StudioSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             package = _package_with_audio_output(Path(temporary))
 
-            assets = studio_sound_pool(package)
+            with patch(
+                "jang_app.services.song_assets.build_song_asset_details",
+                side_effect=AssertionError("sound pool must not rebuild the asset catalog"),
+            ):
+                assets = studio_sound_pool(package)
 
             self.assertEqual(len(assets), 4)
             self.assertEqual(
@@ -246,6 +328,35 @@ class StudioSessionTests(unittest.TestCase):
             )
             self.assertTrue(all(asset.can_remove for asset in assets))
             self.assertTrue(all(resolve_studio_asset(package, asset.reference) == asset.path for asset in assets))
+
+    def test_session_load_scans_each_output_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+
+            with patch.object(
+                studio_assets,
+                "_assets_for_output",
+                wraps=studio_assets._assets_for_output,
+            ) as scan_output:
+                session = load_studio_session(package)
+
+            self.assertTrue(session.tracks)
+            self.assertEqual(scan_output.call_count, 1)
+
+    def test_session_save_reuses_a_provided_asset_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            assets = studio_sound_pool(package)
+            session = load_studio_session(package, assets=assets)
+
+            with patch.object(
+                studio_assets,
+                "studio_sound_pool",
+                side_effect=AssertionError("save must not rebuild provided assets"),
+            ):
+                path = save_studio_session(package, session, assets=assets)
+
+            self.assertTrue(path.is_file())
 
     def test_sound_pool_includes_compact_rvc_output_names(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -277,6 +388,33 @@ class StudioSessionTests(unittest.TestCase):
             self.assertEqual(compact_asset.take.label, "voice-a / Pitch -12")
             reference = compact_asset.reference
             self.assertEqual(resolve_studio_asset(package, reference), compact.resolve())
+
+    def test_sound_pool_includes_registered_take_with_a_custom_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            custom = package.active_output.job_dir / "favorite-take.wav"
+            sf.write(custom, np.full(16_000, 0.4, dtype=np.float32), 8_000)
+            VocalProjectStore().register_take(
+                package.active_output.job_dir,
+                custom,
+                conversion=VocalConversionSettings(
+                    voice_model="models/voice-a.pth",
+                    index_file="",
+                    pitch=3,
+                    requested_device="cpu",
+                    effective_device="cpu",
+                    f0_method="rmvpe",
+                ),
+            )
+
+            converted = [
+                asset
+                for asset in studio_sound_pool(package)
+                if asset.reference.role == "converted_vocal"
+            ]
+
+            custom_asset = next(asset for asset in converted if asset.path == custom.resolve())
+            self.assertEqual(custom_asset.take.label, "voice-a / Pitch +3")
 
     def test_asset_can_be_added_and_moved_between_tracks_without_copying_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -406,6 +544,8 @@ class StudioSessionTests(unittest.TestCase):
             assets = studio_sound_pool(package)
             video_asset = next(asset for asset in assets if asset.media_kind == "video")
 
+            self.assertTrue(video_asset.can_remove)
+            self.assertTrue(video_asset.is_active_media)
             self.assertEqual(session.tracks[0].role, TRACK_VIDEO)
             self.assertEqual(session.tracks[0].clips[0].asset, video_asset.reference)
             self.assertEqual(resolve_studio_asset(package, video_asset.reference), imported.path)
@@ -422,6 +562,27 @@ class StudioSessionTests(unittest.TestCase):
             self.assertTrue(restored.tracks[0].collapsed)
             self.assertEqual(restored.tracks[0].role, TRACK_VIDEO)
             self.assertEqual(len(restored.tracks[0].clips), 2)
+
+    def test_session_load_reads_video_source_state_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_audio_output(root)
+            source_video = root / "reference.mp4"
+            source_video.write_bytes(b"video")
+            VideoSourceStore().import_file(package, source_video)
+            original_load = VideoSourceStore.load
+            load_count = 0
+
+            def counted_load(store: VideoSourceStore, selected_package) -> object:
+                nonlocal load_count
+                load_count += 1
+                return original_load(store, selected_package)
+
+            with patch.object(VideoSourceStore, "load", counted_load):
+                session = load_studio_session(package)
+
+            self.assertEqual(session.tracks[0].role, TRACK_VIDEO)
+            self.assertEqual(load_count, 1)
 
     def test_local_image_uses_a_five_second_default_media_clip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

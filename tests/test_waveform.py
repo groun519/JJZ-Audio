@@ -10,6 +10,7 @@ import numpy as np
 
 from jang_app.services.studio_session import StudioLevelMatchSettings
 from jang_app.services.waveform import (
+    WaveformPeakCache,
     build_level_matched_waveform_peaks,
     build_waveform_amplitude_peaks,
     build_waveform_peaks,
@@ -17,6 +18,25 @@ from jang_app.services.waveform import (
 
 
 class WaveformTests(unittest.TestCase):
+    def test_shared_peak_cache_separates_signal_types_and_evicts_old_entries(self) -> None:
+        cache = WaveformPeakCache(max_entries=2)
+        first = ("first.wav", 1, 1, 100)
+        second = ("second.wav", 1, 1, 100)
+        third = ("third.wav", 1, 1, 100)
+
+        cache.store_normalized(first, [1.0])
+        cache.store_amplitude(first, [0.25])
+        self.assertEqual(cache.normalized(first), [1.0])
+        self.assertEqual(cache.amplitude(first), [0.25])
+
+        cache.store_normalized(second, [0.5])
+        cache.store_normalized(third, [0.75])
+
+        self.assertIsNone(cache.amplitude(first))
+        self.assertIsNone(cache.normalized(first))
+        self.assertEqual(cache.normalized(second), [0.5])
+        self.assertEqual(cache.normalized(third), [0.75])
+
     def test_level_matched_peaks_follow_reference_scale(self) -> None:
         source = np.concatenate((np.full(4, 0.05), np.full(4, 0.4))).astype(np.float32)
         reference = np.concatenate((np.full(4, 0.4), np.full(4, 0.05))).astype(np.float32)

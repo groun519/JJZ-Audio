@@ -23,10 +23,13 @@ class StudioFxPoolTests(unittest.TestCase):
         self.assertIsNotNone(self.studio_fx_pool)
         pool = self.studio_fx_pool.StudioFxPool()
 
-        self.assertEqual(len(pool.cards), 9)
+        self.assertEqual(len(pool.cards), 12)
+        self.assertIn("preset:karaoke", pool.cards)
         self.assertIn("preset:animatronic", pool.cards)
         self.assertIn("radio_filter", pool.cards)
         self.assertIn("level_match", pool.cards)
+        self.assertIn("delay", pool.cards)
+        self.assertIn("doubler", pool.cards)
         card = pool.cards["reverb"]
         self.assertEqual(card.effect_kind, "reverb")
         self.assertTrue(card.mime_data().hasFormat(self.studio_fx_pool.STUDIO_EFFECT_MIME))
@@ -44,7 +47,7 @@ class StudioFxPoolTests(unittest.TestCase):
             bytes(card.mime_data().data(self.studio_fx_pool.STUDIO_EFFECT_MIME)).decode("utf-8"),
             "preset:broken_robot",
         )
-        self.assertEqual(pool.count_label.text(), "9")
+        self.assertEqual(pool.count_label.text(), "12")
         pool.close()
 
     def test_fx_pool_is_expanded_and_has_its_own_scroll_area(self) -> None:

@@ -121,7 +121,16 @@ class StudioReverbEditorTests(unittest.TestCase):
 
         self.assertEqual(
             names,
-            ["Natural", "Warm", "Plate", "Hall", "Dream", "Bloom", "Custom"],
+            [
+                "Karaoke",
+                "Natural",
+                "Warm",
+                "Plate",
+                "Hall",
+                "Dream",
+                "Bloom",
+                "Custom",
+            ],
         )
         self.assertIsNotNone(bloom)
         self.assertEqual(

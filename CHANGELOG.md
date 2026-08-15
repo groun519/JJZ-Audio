@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.3.5 - 2026-08-15
+
+### Added
+
+- Added a live RVC training monitor for GPU, VRAM, CPU, system-memory, worker, and throughput activity.
+- Added a searchable live training log and one-click diagnostic archives for failed jobs.
+- Added editable Studio Delay and Doubler effects with presets, real-time playback, saved sessions, and matching exports.
+- Added a Karaoke vocal-effect chain that combines editable ambience and echo settings.
+
+### Changed
+
+- Reused cached song, model, output, Studio, and waveform metadata while still detecting files changed outside the app.
+- Reused one Studio asset snapshot across loading, editing, autosave, playback, and export to avoid repeated output scans.
+- Preserved registered RVC takes with custom filenames and recovered compatible legacy takes when metadata is missing or damaged.
+
+### Fixed
+
+- Retried RVC training with safe single-process data loading when parallel workers fail or time out before the first batch.
+- Added structured worker and first-batch diagnostics so stalled training is distinguished from import, memory, and runtime failures.
+- Staged the DirectML RMVPE probe model in its actual working directory before validating AMD conversion support.
+- Preserved Delay and Doubler tails in real-time preview and final audio or video exports.
+- Retried transient Windows file locks during atomic metadata saves.
+
+### Quality
+
+- Added regression coverage for training telemetry and diagnostics, Delay and Doubler processing, effect persistence, Studio asset reuse, output recovery, shared waveform caching, and Windows-safe metadata writes.
+
 ## 0.3.4 - 2026-08-14
 
 ### Added

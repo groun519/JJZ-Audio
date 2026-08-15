@@ -23,7 +23,7 @@ from jang_app.services.studio_session import (
     StudioSession,
     StudioTrackState,
 )
-from jang_app.services.studio_assets import resolve_studio_asset
+from jang_app.services.studio_assets import StudioSoundAsset, resolve_studio_asset
 from jang_app.services.studio_audio_levels import studio_source_gain
 
 
@@ -53,9 +53,13 @@ def export_song_mix(
     )
 
 
-def build_song_mix_sources(package: SongPackage, session: StudioSession) -> tuple[AudioMixSource, ...]:
+def build_song_mix_sources(
+    package: SongPackage,
+    session: StudioSession,
+    assets: tuple[StudioSoundAsset, ...] | None = None,
+) -> tuple[AudioMixSource, ...]:
     if session.tracks:
-        sources = _timeline_mix_sources(package, session)
+        sources = _timeline_mix_sources(package, session, assets)
         if not sources:
             raise AudioExportError("Add at least one audible clip to the Studio timeline.")
         return sources
@@ -118,9 +122,15 @@ def _volume_multiplier(state: StudioTrackState) -> float:
 def _timeline_mix_sources(
     package: SongPackage,
     session: StudioSession,
+    assets: tuple[StudioSoundAsset, ...] | None,
 ) -> tuple[AudioMixSource, ...]:
     audio_tracks = tuple(track for track in session.tracks if track.role != TRACK_VIDEO)
     has_solo = any(track.solo and not track.muted for track in audio_tracks)
+    asset_paths = (
+        None
+        if assets is None
+        else {asset.reference: asset.path for asset in assets}
+    )
     sources: list[AudioMixSource] = []
     for track in audio_tracks:
         if track.muted or (has_solo and not track.solo):
@@ -128,7 +138,7 @@ def _timeline_mix_sources(
         for clip in track.clips:
             if clip.muted:
                 continue
-            path = resolve_studio_asset(package, clip.asset)
+            path = _mix_asset_path(package, clip.asset, asset_paths)
             if path is None:
                 continue
             reference_path = None
@@ -139,9 +149,10 @@ def _timeline_mix_sources(
                     for effect in clip.effects
                 )
             ):
-                reference_path = resolve_studio_asset(
+                reference_path = _mix_asset_path(
                     package,
                     StudioAssetRef(clip.asset.output_id, TRACK_ORIGINAL_VOCAL),
+                    asset_paths,
                 )
             sources.append(
                 AudioMixSource(
@@ -160,3 +171,13 @@ def _timeline_mix_sources(
                 )
             )
     return tuple(sources)
+
+
+def _mix_asset_path(
+    package: SongPackage,
+    reference: StudioAssetRef,
+    asset_paths: dict[StudioAssetRef, Path] | None,
+) -> Path | None:
+    if asset_paths is not None:
+        return asset_paths.get(reference)
+    return resolve_studio_asset(package, reference)

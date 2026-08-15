@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.rvc_model_workspace import (
     RvcModelWorkspace,
@@ -13,6 +14,39 @@ from jang_app.services.rvc_model_workspace import (
 
 
 class RvcModelWorkspaceTests(unittest.TestCase):
+    def test_records_reuses_catalog_until_the_file_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = _build_rvc_root(base / "runtime")
+            RvcModelWorkspace(base / "workspace").create_model("Voice One", runtime)
+            workspace = RvcModelWorkspace(base / "workspace")
+
+            with patch.object(
+                workspace,
+                "_record_from_data",
+                wraps=workspace._record_from_data,
+            ) as decode:
+                first = workspace.records()
+                second = workspace.records()
+
+            self.assertEqual(first, second)
+            self.assertEqual(decode.call_count, 1)
+
+    def test_records_reloads_an_externally_changed_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = _build_rvc_root(base / "runtime")
+            creator = RvcModelWorkspace(base / "workspace")
+            creator.create_model("Voice One", runtime)
+            workspace = RvcModelWorkspace(base / "workspace")
+            self.assertEqual(workspace.records()[0].title, "Voice One")
+
+            catalog = json.loads(workspace.catalog_path.read_text(encoding="utf-8"))
+            catalog["models"][0]["display_name"] = "Externally Renamed Voice"
+            workspace.catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+
+            self.assertEqual(workspace.records()[0].title, "Externally Renamed Voice")
+
     def test_create_model_builds_empty_managed_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

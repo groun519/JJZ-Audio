@@ -5,15 +5,19 @@ import math
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from jang_app.services.managed_files import write_json_atomic
 from jang_app.services.song_package import STUDIO_STAGE, SongPackage
 from jang_app.services.studio_audio_levels import clamp_studio_clip_gain_db
 from jang_app.services.studio_pitch import clamp_studio_clip_pitch
 
+if TYPE_CHECKING:
+    from jang_app.services.studio_assets import StudioSoundAsset
 
-STUDIO_SESSION_VERSION = 9
-STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4, 5, 6, 7, 8}
+
+STUDIO_SESSION_VERSION = 11
+STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10}
 STUDIO_SESSION_LEGACY_VERSION = 1
 STUDIO_SESSION_NAME = "session.json"
 TRACK_ORIGINAL_VOCAL = "original_vocal"
@@ -22,6 +26,8 @@ TRACK_CONVERTED_VOCAL = "converted_vocal"
 TRACK_AUDIO = "audio"
 TRACK_VIDEO = "video"
 STUDIO_EFFECT_REVERB = "reverb"
+STUDIO_EFFECT_DELAY = "delay"
+STUDIO_EFFECT_DOUBLER = "doubler"
 STUDIO_EFFECT_RADIO_FILTER = "radio_filter"
 STUDIO_EFFECT_RING_MODULATOR = "ring_modulator"
 STUDIO_EFFECT_BITCRUSHER = "bitcrusher"
@@ -29,6 +35,8 @@ STUDIO_EFFECT_DISTORTION = "distortion"
 STUDIO_EFFECT_LEVEL_MATCH = "level_match"
 SUPPORTED_STUDIO_EFFECTS = {
     STUDIO_EFFECT_REVERB,
+    STUDIO_EFFECT_DELAY,
+    STUDIO_EFFECT_DOUBLER,
     STUDIO_EFFECT_RADIO_FILTER,
     STUDIO_EFFECT_RING_MODULATOR,
     STUDIO_EFFECT_BITCRUSHER,
@@ -90,6 +98,22 @@ class StudioReverbSettings:
 
 
 @dataclass(frozen=True)
+class StudioDelaySettings:
+    delay_ms: int = 320
+    feedback_percent: int = 32
+    dry_wet_percent: int = 24
+    stereo_width_percent: int = 35
+
+
+@dataclass(frozen=True)
+class StudioDoublerSettings:
+    voice_spacing_ms: int = 18
+    pitch_spread_cents: int = 6
+    stereo_width_percent: int = 55
+    dry_wet_percent: int = 22
+
+
+@dataclass(frozen=True)
 class StudioRadioFilterSettings:
     low_cut_hz: int = 280
     high_cut_hz: int = 4_800
@@ -129,6 +153,8 @@ class StudioEffect:
     kind: str
     enabled: bool = True
     reverb: StudioReverbSettings = field(default_factory=StudioReverbSettings)
+    delay: StudioDelaySettings = field(default_factory=StudioDelaySettings)
+    doubler: StudioDoublerSettings = field(default_factory=StudioDoublerSettings)
     radio_filter: StudioRadioFilterSettings = field(default_factory=StudioRadioFilterSettings)
     ring_modulator: StudioRingModulatorSettings = field(
         default_factory=StudioRingModulatorSettings
@@ -210,36 +236,51 @@ class StudioSession:
         raise KeyError(f"Unknown studio track: {track_key}")
 
 
-def load_studio_session(package: SongPackage) -> StudioSession:
+def load_studio_session(
+    package: SongPackage,
+    *,
+    assets: tuple[StudioSoundAsset, ...] | None = None,
+) -> StudioSession:
+    assets = _studio_assets(package, assets)
     path = studio_session_path(package)
     if not path.is_file():
-        return _session_with_default_tracks(package, StudioSession())
+        return _session_with_default_tracks(package, StudioSession(), assets)
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return _session_with_default_tracks(package, StudioSession())
+        return _session_with_default_tracks(package, StudioSession(), assets)
     if not isinstance(data, dict) or data.get("song_id") not in (None, "", package.song_id):
-        return _session_with_default_tracks(package, StudioSession())
+        return _session_with_default_tracks(package, StudioSession(), assets)
 
     version = data.get("version")
     if version == STUDIO_SESSION_LEGACY_VERSION:
         legacy = _legacy_session_from_data(data)
-        return _session_with_default_tracks(package, legacy)
+        return _session_with_default_tracks(package, legacy, assets)
     if version not in (*STUDIO_SESSION_PREVIOUS_VERSIONS, STUDIO_SESSION_VERSION):
-        return _session_with_default_tracks(package, StudioSession())
+        return _session_with_default_tracks(package, StudioSession(), assets)
 
     tracks = _tracks_from_data(data.get("tracks"))
     if not tracks:
-        return _session_with_default_tracks(package, StudioSession(updated_at=str(data.get("updated_at", ""))))
+        return _session_with_default_tracks(
+            package,
+            StudioSession(updated_at=str(data.get("updated_at", ""))),
+            assets,
+        )
     return _session_with_required_tracks(
         package,
         _session_from_tracks(tracks, updated_at=str(data.get("updated_at", ""))),
+        assets,
     )
 
 
-def save_studio_session(package: SongPackage, session: StudioSession) -> Path:
+def save_studio_session(
+    package: SongPackage,
+    session: StudioSession,
+    *,
+    assets: tuple[StudioSoundAsset, ...] | None = None,
+) -> Path:
     path = studio_session_path(package)
-    normalized = _normalized_session(package, session)
+    normalized = _normalized_session(package, session, _studio_assets(package, assets))
     write_json_atomic(
         path,
         {
@@ -266,11 +307,19 @@ def _legacy_session_from_data(data: dict[str, object]) -> StudioSession:
     )
 
 
-def _session_with_default_tracks(package: SongPackage, session: StudioSession) -> StudioSession:
-    return _session_with_required_tracks(package, session)
+def _session_with_default_tracks(
+    package: SongPackage,
+    session: StudioSession,
+    assets: tuple[StudioSoundAsset, ...],
+) -> StudioSession:
+    return _session_with_required_tracks(package, session, assets)
 
 
-def _session_with_required_tracks(package: SongPackage, session: StudioSession) -> StudioSession:
+def _session_with_required_tracks(
+    package: SongPackage,
+    session: StudioSession,
+    assets: tuple[StudioSoundAsset, ...],
+) -> StudioSession:
     from jang_app.services.studio_assets import build_default_studio_tracks
 
     default_tracks = build_default_studio_tracks(
@@ -280,40 +329,64 @@ def _session_with_required_tracks(package: SongPackage, session: StudioSession) 
             TRACK_INSTRUMENTAL: session.state_for(TRACK_INSTRUMENTAL),
             TRACK_CONVERTED_VOCAL: session.state_for(TRACK_CONVERTED_VOCAL),
         },
+        assets,
     )
     if not default_tracks:
-        return _with_video_track(package, session)
+        return _with_video_track(package, session, assets)
 
     existing_roles = {track.role for track in session.tracks}
     missing_tracks = tuple(
         track for track in default_tracks if track.role not in existing_roles
     )
     if not missing_tracks:
-        return _with_video_track(package, session)
+        return _with_video_track(package, session, assets)
     return _with_video_track(
         package,
         _session_from_tracks(
             (*session.tracks, *missing_tracks),
             updated_at=session.updated_at,
         ),
+        assets,
     )
 
 
-def _normalized_session(package: SongPackage, session: StudioSession) -> StudioSession:
+def _normalized_session(
+    package: SongPackage,
+    session: StudioSession,
+    assets: tuple[StudioSoundAsset, ...],
+) -> StudioSession:
     tracks = tuple(_normalize_track(track) for track in session.tracks)
     tracks = tuple(track for track in tracks if track.track_id)
-    session = _session_with_required_tracks(package, replace(session, tracks=tracks))
+    session = _session_with_required_tracks(
+        package,
+        replace(session, tracks=tracks),
+        assets,
+    )
     return _session_from_tracks(
         session.tracks,
         updated_at=datetime.now(UTC).isoformat(),
     )
 
 
-def _with_video_track(package: SongPackage, session: StudioSession) -> StudioSession:
-    from jang_app.services.studio_assets import studio_sound_pool, sync_studio_video_track
+def _with_video_track(
+    package: SongPackage,
+    session: StudioSession,
+    assets: tuple[StudioSoundAsset, ...],
+) -> StudioSession:
+    from jang_app.services.studio_assets import sync_studio_video_track
 
-    assets = studio_sound_pool(package)
-    return sync_studio_video_track(package, session, assets)
+    return sync_studio_video_track(session, assets)
+
+
+def _studio_assets(
+    package: SongPackage,
+    assets: tuple[StudioSoundAsset, ...] | None,
+) -> tuple[StudioSoundAsset, ...]:
+    if assets is not None:
+        return assets
+    from jang_app.services.studio_assets import studio_sound_pool
+
+    return studio_sound_pool(package)
 
 
 def _session_from_tracks(tracks: tuple[StudioTrack, ...], *, updated_at: str) -> StudioSession:
@@ -559,6 +632,8 @@ def _effect_from_data(value: object) -> StudioEffect | None:
     )
     settings_loader = {
         STUDIO_EFFECT_REVERB: ("reverb", _reverb_settings_from_data),
+        STUDIO_EFFECT_DELAY: ("delay", _delay_settings_from_data),
+        STUDIO_EFFECT_DOUBLER: ("doubler", _doubler_settings_from_data),
         STUDIO_EFFECT_RADIO_FILTER: ("radio_filter", _radio_filter_settings_from_data),
         STUDIO_EFFECT_RING_MODULATOR: ("ring_modulator", _ring_modulator_settings_from_data),
         STUDIO_EFFECT_BITCRUSHER: ("bitcrusher", _bitcrusher_settings_from_data),
@@ -587,6 +662,8 @@ def _normalized_effect(effect: StudioEffect) -> StudioEffect:
         kind=effect.kind,
         enabled=bool(effect.enabled),
         reverb=_normalized_reverb_settings(effect.reverb),
+        delay=_normalized_delay_settings(effect.delay),
+        doubler=_normalized_doubler_settings(effect.doubler),
         radio_filter=_normalized_radio_filter_settings(effect.radio_filter),
         ring_modulator=_normalized_ring_modulator_settings(effect.ring_modulator),
         bitcrusher=_normalized_bitcrusher_settings(effect.bitcrusher),
@@ -598,6 +675,12 @@ def _normalized_effect(effect: StudioEffect) -> StudioEffect:
 def _effect_to_data(effect: StudioEffect) -> dict[str, object]:
     settings = {
         STUDIO_EFFECT_REVERB: _reverb_settings_to_data(effect.reverb),
+        STUDIO_EFFECT_DELAY: _settings_to_data(
+            _normalized_delay_settings(effect.delay)
+        ),
+        STUDIO_EFFECT_DOUBLER: _settings_to_data(
+            _normalized_doubler_settings(effect.doubler)
+        ),
         STUDIO_EFFECT_RADIO_FILTER: _settings_to_data(
             _normalized_radio_filter_settings(effect.radio_filter)
         ),
@@ -630,6 +713,46 @@ def _radio_filter_settings_from_data(value: object) -> StudioRadioFilterSettings
             low_cut_hz=_integer(data.get("low_cut_hz"), defaults.low_cut_hz),
             high_cut_hz=_integer(data.get("high_cut_hz"), defaults.high_cut_hz),
             mix_percent=_integer(data.get("mix_percent"), defaults.mix_percent),
+        )
+    )
+
+
+def _delay_settings_from_data(value: object) -> StudioDelaySettings:
+    data = value if isinstance(value, dict) else {}
+    defaults = StudioDelaySettings()
+    return _normalized_delay_settings(
+        StudioDelaySettings(
+            delay_ms=_integer(data.get("delay_ms"), defaults.delay_ms),
+            feedback_percent=_integer(
+                data.get("feedback_percent"), defaults.feedback_percent
+            ),
+            dry_wet_percent=_integer(
+                data.get("dry_wet_percent"), defaults.dry_wet_percent
+            ),
+            stereo_width_percent=_integer(
+                data.get("stereo_width_percent"), defaults.stereo_width_percent
+            ),
+        )
+    )
+
+
+def _doubler_settings_from_data(value: object) -> StudioDoublerSettings:
+    data = value if isinstance(value, dict) else {}
+    defaults = StudioDoublerSettings()
+    return _normalized_doubler_settings(
+        StudioDoublerSettings(
+            voice_spacing_ms=_integer(
+                data.get("voice_spacing_ms"), defaults.voice_spacing_ms
+            ),
+            pitch_spread_cents=_integer(
+                data.get("pitch_spread_cents"), defaults.pitch_spread_cents
+            ),
+            stereo_width_percent=_integer(
+                data.get("stereo_width_percent"), defaults.stereo_width_percent
+            ),
+            dry_wet_percent=_integer(
+                data.get("dry_wet_percent"), defaults.dry_wet_percent
+            ),
         )
     )
 
@@ -696,6 +819,24 @@ def _normalized_radio_filter_settings(
         low_cut_hz=low_cut,
         high_cut_hz=high_cut,
         mix_percent=int(_clamp(settings.mix_percent, 0, 100)),
+    )
+
+
+def _normalized_delay_settings(settings: StudioDelaySettings) -> StudioDelaySettings:
+    return StudioDelaySettings(
+        delay_ms=int(_clamp(settings.delay_ms, 40, 2_000)),
+        feedback_percent=int(_clamp(settings.feedback_percent, 0, 85)),
+        dry_wet_percent=int(_clamp(settings.dry_wet_percent, 0, 100)),
+        stereo_width_percent=int(_clamp(settings.stereo_width_percent, 0, 100)),
+    )
+
+
+def _normalized_doubler_settings(settings: StudioDoublerSettings) -> StudioDoublerSettings:
+    return StudioDoublerSettings(
+        voice_spacing_ms=int(_clamp(settings.voice_spacing_ms, 6, 40)),
+        pitch_spread_cents=int(_clamp(settings.pitch_spread_cents, 0, 20)),
+        stereo_width_percent=int(_clamp(settings.stereo_width_percent, 0, 100)),
+        dry_wet_percent=int(_clamp(settings.dry_wet_percent, 0, 100)),
     )
 
 

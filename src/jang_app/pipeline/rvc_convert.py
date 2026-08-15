@@ -16,6 +16,7 @@ from jang_app.services.overlapping_audio_chunks import (
     stitch_crossfaded_audio_chunks,
     write_overlapping_audio_chunks,
 )
+from jang_app.services.rvc_directml_probe import find_directml_rmvpe_model
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 from jang_app.services.rvc_inference_runtime import (
@@ -375,11 +376,7 @@ def _prepare_rvc_workspace(
 
 
 def _find_directml_rmvpe_model(rvc_root: Path) -> Path:
-    candidates = (
-        rvc_root / "runtime" / "rmvpe.onnx",
-        rvc_root / "rmvpe.onnx",
-    )
-    model = next((path for path in candidates if path.is_file()), None)
+    model = find_directml_rmvpe_model(rvc_root)
     if model is None:
         raise RvcConversionError(
             "The installed DirectML runtime is missing rmvpe.onnx. "

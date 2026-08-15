@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from jang_app.services.job_diagnostics import (
@@ -56,6 +57,31 @@ class JobDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("secret", " ".join(command))
         self.assertEqual(redact_text("token=abc"), "token=<redacted>")
 
+    def test_builds_single_diagnostic_archive_without_recursing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics = JobDiagnostics(Path(temporary), session_id="session-test")
+            folder = diagnostics.start_job("task-archive", "Train Model")
+            self.assertIsNotNone(folder)
+            assert folder is not None
+            diagnostics.append_command_output("task-archive", "worker output")
+            training = folder / "training"
+            training.mkdir()
+            (training / "events.jsonl").write_text(
+                '{"event":"first_batch_ready"}\n',
+                encoding="utf-8",
+            )
+
+            archive = diagnostics.build_archive("task-archive")
+
+            self.assertIsNotNone(archive)
+            assert archive is not None
+            with zipfile.ZipFile(archive) as package:
+                names = set(package.namelist())
+            self.assertIn("report.txt", names)
+            self.assertIn("summary.json", names)
+            self.assertIn("training/events.jsonl", names)
+            self.assertFalse(any(name.endswith(".zip") for name in names))
+
     def test_classifies_common_runtime_failures(self) -> None:
         self.assertEqual(classify_error("CUDA out of memory").code, "CUDA_OUT_OF_MEMORY")
         self.assertEqual(
@@ -98,6 +124,10 @@ class JobDiagnosticsTests(unittest.TestCase):
             "DIRECTML_RUNTIME_FAILED",
         )
         self.assertEqual(
+            classify_error("DirectML RMVPE probe did not create the expected outputs").code,
+            "DIRECTML_RUNTIME_FAILED",
+        )
+        self.assertEqual(
             classify_error("Google Drive file access was not granted.").code,
             "GOOGLE_OAUTH_AUTHORIZATION_FAILED",
         )
@@ -111,6 +141,12 @@ class JobDiagnosticsTests(unittest.TestCase):
         )
         self.assertEqual(classify_error("HIP runtime failure in ROCm").code, "ROCM_RUNTIME_FAILED")
         self.assertEqual(classify_error("unknown").code, "UNEXPECTED_ERROR")
+        self.assertEqual(
+            classify_error(
+                "JJZERO_DIAGNOSTIC_CODE=RVC_FIRST_BATCH_TIMEOUT\ntraining failed"
+            ).code,
+            "RVC_FIRST_BATCH_TIMEOUT",
+        )
 
 
 if __name__ == "__main__":

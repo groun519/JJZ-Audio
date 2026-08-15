@@ -37,6 +37,8 @@ def prepare_rvc_script_launcher(
     data_loader_settings: RvcTrainingDataLoaderSettings | None = None,
     rocm_single_process_training: bool = False,
     legacy_i18n: bool = False,
+    diagnostic_directory: Path | None = None,
+    diagnostic_attempt_id: str = "",
 ) -> Path:
     root = rvc_root.expanduser().resolve()
     source = script.expanduser().resolve()
@@ -56,6 +58,17 @@ def prepare_rvc_script_launcher(
         f"RVC_ROOT = Path({str(root)!r})",
         f"RVC_SCRIPT = Path({str(source)!r})",
         "RVC_PYTHONW = RVC_ROOT / 'runtime' / 'pythonw.exe'",
+        (
+            "JJZERO_DIAGNOSTIC_DIRECTORY = "
+            + (
+                f"Path({str(diagnostic_directory.expanduser().resolve())!r})"
+                if diagnostic_directory is not None
+                else "None"
+            )
+        ),
+        f"JJZERO_DIAGNOSTIC_ATTEMPT_ID = {str(diagnostic_attempt_id)!r}",
+        _DIAGNOSTIC_BOOTSTRAP.rstrip(),
+        "",
         "if RVC_PYTHONW.is_file():",
         "    multiprocessing.set_executable(str(RVC_PYTHONW))",
         "sys.path.insert(0, str(RVC_ROOT))",
@@ -76,6 +89,7 @@ def prepare_rvc_script_launcher(
                 f"JJZERO_DATA_LOADER_PIN_MEMORY = {data_loader_settings.pin_memory!r}",
                 "JJZERO_DATA_LOADER_PERSISTENT = "
                 f"{data_loader_settings.persistent_workers!r}",
+                f"JJZERO_DATA_LOADER_TIMEOUT = {data_loader_settings.timeout_seconds}",
                 _OPTIMIZED_DATA_LOADER_BOOTSTRAP.rstrip(),
                 "",
             )
@@ -157,6 +171,119 @@ def _jjzero_atomic_torch_save(value, destination, *args, **kwargs):
 
 
 torch.save = _jjzero_atomic_torch_save
+'''
+
+
+_DIAGNOSTIC_BOOTSTRAP = '''import atexit
+import faulthandler
+import json
+import os
+import threading
+import traceback
+from datetime import datetime, timezone
+
+
+_jjzero_diag_stream = None
+
+
+def _jjzero_diag_event(event, **data):
+    if JJZERO_DIAGNOSTIC_DIRECTORY is None:
+        return
+    try:
+        process_dir = JJZERO_DIAGNOSTIC_DIRECTORY / "processes"
+        process_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "attempt_id": JJZERO_DIAGNOSTIC_ATTEMPT_ID,
+            "event": str(event),
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "process_name": multiprocessing.current_process().name,
+            "module_name": __name__,
+            **data,
+        }
+        with (process_dir / f"{os.getpid()}.jsonl").open(
+            "a",
+            encoding="utf-8",
+        ) as output:
+            output.write(json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True))
+            output.write("\\n")
+    except BaseException:
+        return
+
+
+def _jjzero_diag_exception(event, exception_type, exception, exception_traceback):
+    _jjzero_diag_event(
+        event,
+        exception_type=getattr(exception_type, "__name__", str(exception_type)),
+        detail=str(exception),
+        traceback="".join(
+            traceback.format_exception(exception_type, exception, exception_traceback)
+        ),
+    )
+
+
+if JJZERO_DIAGNOSTIC_DIRECTORY is not None:
+    try:
+        _jjzero_process_dir = JJZERO_DIAGNOSTIC_DIRECTORY / "processes"
+        _jjzero_process_dir.mkdir(parents=True, exist_ok=True)
+        _jjzero_diag_stream = (_jjzero_process_dir / f"{os.getpid()}.log").open(
+            "a",
+            encoding="utf-8",
+            errors="replace",
+            buffering=1,
+        )
+        if sys.stdout is None:
+            sys.stdout = _jjzero_diag_stream
+        if sys.stderr is None:
+            sys.stderr = _jjzero_diag_stream
+        faulthandler.enable(file=_jjzero_diag_stream, all_threads=True)
+    except BaseException as _jjzero_stream_error:
+        _jjzero_diag_stream = None
+
+    _jjzero_original_excepthook = sys.excepthook
+
+    def _jjzero_excepthook(exception_type, exception, exception_traceback):
+        _jjzero_diag_exception(
+            "uncaught_exception",
+            exception_type,
+            exception,
+            exception_traceback,
+        )
+        _jjzero_original_excepthook(exception_type, exception, exception_traceback)
+
+    sys.excepthook = _jjzero_excepthook
+    if hasattr(threading, "excepthook"):
+        _jjzero_original_threading_excepthook = threading.excepthook
+
+        def _jjzero_threading_excepthook(args):
+            _jjzero_diag_exception(
+                "thread_exception",
+                args.exc_type,
+                args.exc_value,
+                args.exc_traceback,
+            )
+            _jjzero_original_threading_excepthook(args)
+
+        threading.excepthook = _jjzero_threading_excepthook
+
+    def _jjzero_process_exit():
+        _jjzero_diag_event("process_exit")
+        if _jjzero_diag_stream is not None:
+            try:
+                _jjzero_diag_stream.flush()
+            except BaseException:
+                pass
+
+    atexit.register(_jjzero_process_exit)
+
+_jjzero_diag_event(
+    "process_boot",
+    executable=sys.executable,
+    argv=list(sys.argv),
+    stdout_available=sys.stdout is not None,
+    stderr_available=sys.stderr is not None,
+)
 '''
 
 
@@ -270,6 +397,34 @@ _OPTIMIZED_DATA_LOADER_BOOTSTRAP = '''import torch.utils.data
 
 
 _jjzero_original_data_loader = torch.utils.data.DataLoader
+_jjzero_diag_event("torch_data_imported", torch_version=torch.__version__)
+
+
+class _JjzeroWorkerInit:
+    def __init__(self, original):
+        self._original = original
+
+    def __call__(self, worker_id):
+        _jjzero_diag_event("data_worker_initialized", worker_id=int(worker_id))
+        if self._original is not None:
+            self._original(worker_id)
+
+
+def _jjzero_worker_statuses(iterator):
+    statuses = []
+    for worker in getattr(iterator, "_workers", ()):
+        try:
+            alive = bool(worker.is_alive())
+        except BaseException:
+            alive = False
+        statuses.append(
+            {
+                "pid": getattr(worker, "pid", None),
+                "alive": alive,
+                "exit_code": getattr(worker, "exitcode", None),
+            }
+        )
+    return statuses
 
 
 class _JjzeroOptimizedDataLoader(_jjzero_original_data_loader):
@@ -280,11 +435,23 @@ class _JjzeroOptimizedDataLoader(_jjzero_original_data_loader):
         if workers > 0:
             kwargs["prefetch_factor"] = max(1, int(JJZERO_DATA_LOADER_PREFETCH))
             kwargs["persistent_workers"] = bool(JJZERO_DATA_LOADER_PERSISTENT)
+            kwargs["timeout"] = max(1, int(JJZERO_DATA_LOADER_TIMEOUT))
+            kwargs["worker_init_fn"] = _JjzeroWorkerInit(
+                kwargs.get("worker_init_fn")
+            )
         else:
             kwargs.pop("prefetch_factor", None)
             kwargs["persistent_workers"] = False
+            kwargs["timeout"] = 0
         super().__init__(*args, **kwargs)
         self._jjzero_configuration_reported = False
+        _jjzero_diag_event(
+            "data_loader_created",
+            workers=self.num_workers,
+            pin_memory=bool(self.pin_memory),
+            persistent_workers=bool(self.persistent_workers),
+            timeout=int(self.timeout),
+        )
 
     def __iter__(self):
         if not self._jjzero_configuration_reported:
@@ -292,15 +459,53 @@ class _JjzeroOptimizedDataLoader(_jjzero_original_data_loader):
                 "JJZERO_DATA_LOADER_CONFIG "
                 f"workers={self.num_workers} "
                 f"pin_memory={int(bool(self.pin_memory))} "
-                f"persistent={int(bool(self.persistent_workers))}",
+                f"persistent={int(bool(self.persistent_workers))} "
+                f"timeout={self.timeout}",
                 flush=True,
             )
             self._jjzero_configuration_reported = True
         print("JJZERO_TRAINING_DATA_LOADER_START", flush=True)
-        for index, batch in enumerate(super().__iter__()):
-            if index == 0:
-                print("JJZERO_TRAINING_FIRST_BATCH_READY", flush=True)
-            yield batch
+        _jjzero_diag_event("data_loader_iterator_requested")
+        iterator = None
+        try:
+            iterator = super().__iter__()
+            worker_pids = [
+                int(worker.pid)
+                for worker in getattr(iterator, "_workers", ())
+                if getattr(worker, "pid", None) is not None
+            ]
+            _jjzero_diag_event(
+                "data_loader_iterator_created",
+                worker_pids=worker_pids,
+                workers=_jjzero_worker_statuses(iterator),
+            )
+            print(
+                "JJZERO_DATA_LOADER_WORKERS_STARTED "
+                f"count={len(worker_pids)} pids={','.join(map(str, worker_pids))}",
+                flush=True,
+            )
+            for index, batch in enumerate(iterator):
+                if index == 0:
+                    _jjzero_diag_event(
+                        "first_batch_ready",
+                        worker_pids=worker_pids,
+                    )
+                    print("JJZERO_TRAINING_FIRST_BATCH_READY", flush=True)
+                yield batch
+        except BaseException as exc:
+            _jjzero_diag_event(
+                "data_loader_exception",
+                exception_type=type(exc).__name__,
+                detail=str(exc),
+                traceback=traceback.format_exc(),
+                workers=_jjzero_worker_statuses(iterator),
+            )
+            print(
+                "JJZERO_DATA_LOADER_ERROR "
+                f"type={type(exc).__name__} detail={exc}",
+                flush=True,
+            )
+            raise
 
 
 torch.utils.data.DataLoader = _JjzeroOptimizedDataLoader
@@ -313,7 +518,9 @@ import torch.multiprocessing
 import torch.nn.parallel
 
 
-if getattr(torch.version, "hip", None) or torch.cuda.device_count() <= 1:
+if __name__ == "__main__" and (
+    getattr(torch.version, "hip", None) or torch.cuda.device_count() <= 1
+):
     print("JJZERO_SINGLE_DEVICE_TRAINING", flush=True)
 
     class _JjzeroSingleProcessDistributedDataParallel(torch.nn.Module):

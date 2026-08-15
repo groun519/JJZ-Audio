@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 
-_CONVERTED_VOCAL_PATTERNS = ("vocals_rvc*.wav", "rvc_*.wav")
+_CONVERTED_VOCAL_PREFIXES = ("vocals_rvc", "rvc_")
 
 
 @dataclass(frozen=True)
@@ -21,12 +22,14 @@ def scan_output_sound_sets(output_root: Path) -> list[OutputSoundSet]:
     if not root.exists():
         return []
 
-    sound_sets = [
-        sound_set
-        for sound_set in (_load_output_sound_set(job_dir, root) for job_dir in _candidate_job_dirs(root))
-        if sound_set is not None
-    ]
-    return sorted(sound_sets, key=lambda sound_set: _latest_mtime(sound_set.job_dir), reverse=True)
+    discovered: list[tuple[float, OutputSoundSet]] = []
+    for job_dir in _candidate_job_dirs(root):
+        wav_files = _job_wav_files(job_dir)
+        sound_set = _load_output_sound_set(job_dir, root, wav_files)
+        if sound_set is not None:
+            discovered.append((_latest_mtime(job_dir, wav_files), sound_set))
+    ordered = sorted(discovered, key=lambda item: item[0], reverse=True)
+    return [sound_set for _mtime, sound_set in ordered]
 
 
 def load_output_sound_set(job_dir: Path, output_root: Path) -> OutputSoundSet | None:
@@ -35,36 +38,37 @@ def load_output_sound_set(job_dir: Path, output_root: Path) -> OutputSoundSet | 
 
 def converted_vocal_paths(job_dir: Path) -> tuple[Path, ...]:
     root = job_dir.expanduser().resolve()
-    paths = {
-        path.resolve()
-        for pattern in _CONVERTED_VOCAL_PATTERNS
-        for path in root.glob(pattern)
-        if path.is_file()
-    }
-    return tuple(sorted(paths, key=lambda path: path.stat().st_mtime, reverse=True))
+    return _converted_vocal_paths(_job_wav_files(root))
 
 
-def _candidate_job_dirs(root: Path) -> list[Path]:
-    return [
-        path
-        for path in root.rglob("*")
-        if path.is_dir() and path.name != "exports" and (path / "vocals.wav").is_file() and (path / "no_vocals.wav").is_file()
-    ]
+def _candidate_job_dirs(root: Path) -> Iterator[Path]:
+    for vocals_path in root.rglob("vocals.wav"):
+        job_dir = vocals_path.parent
+        if (
+            vocals_path.is_file()
+            and job_dir.name != "exports"
+            and (job_dir / "no_vocals.wav").is_file()
+        ):
+            yield job_dir
 
 
-def _load_output_sound_set(job_dir: Path, output_root: Path) -> OutputSoundSet | None:
+def _load_output_sound_set(
+    job_dir: Path,
+    output_root: Path,
+    wav_files: tuple[Path, ...] | None = None,
+) -> OutputSoundSet | None:
     vocals_path = job_dir / "vocals.wav"
     instrumental_path = job_dir / "no_vocals.wav"
     if not vocals_path.is_file() or not instrumental_path.is_file():
         return None
 
-    converted_paths = converted_vocal_paths(job_dir)
+    files = wav_files if wav_files is not None else _job_wav_files(job_dir)
     return OutputSoundSet(
         label=_relative_label(job_dir, output_root),
         job_dir=job_dir,
         vocals_path=vocals_path,
         instrumental_path=instrumental_path,
-        converted_vocal_paths=converted_paths,
+        converted_vocal_paths=_converted_vocal_paths(files),
     )
 
 
@@ -75,8 +79,26 @@ def _relative_label(job_dir: Path, output_root: Path) -> str:
         return str(job_dir)
 
 
-def _latest_mtime(job_dir: Path) -> float:
-    files = [path for path in job_dir.glob("*.wav") if path.is_file()]
-    if not files:
-        return job_dir.stat().st_mtime
-    return max(path.stat().st_mtime for path in files)
+def _job_wav_files(job_dir: Path) -> tuple[Path, ...]:
+    return tuple(path for path in job_dir.glob("*.wav") if path.is_file())
+
+
+def _converted_vocal_paths(wav_files: tuple[Path, ...]) -> tuple[Path, ...]:
+    converted = (
+        path.resolve()
+        for path in wav_files
+        if path.name.startswith(_CONVERTED_VOCAL_PREFIXES)
+    )
+    return tuple(sorted(converted, key=_path_mtime, reverse=True))
+
+
+def _latest_mtime(job_dir: Path, wav_files: tuple[Path, ...]) -> float:
+    timestamps = tuple(_path_mtime(path) for path in wav_files)
+    return max(timestamps, default=_path_mtime(job_dir))
+
+
+def _path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0

@@ -7,6 +7,7 @@ import unittest
 import wave
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.vocal_project import (
     UNASSIGNED_SPEAKER_ID,
@@ -21,6 +22,60 @@ from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 
 
 class VocalProjectStoreTests(unittest.TestCase):
+    def test_available_takes_merges_registered_metadata_and_legacy_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = _job_dir(Path(temporary) / "run")
+            registered = _write_wave(job_dir / "custom-conversion.wav")
+            store = VocalProjectStore()
+            store.register_take(
+                job_dir,
+                registered,
+                conversion=VocalConversionSettings(
+                    voice_model="models/voice-a.pth",
+                    index_file="",
+                    pitch=-7,
+                    requested_device="cpu",
+                    effective_device="cpu",
+                    f0_method="rmvpe",
+                ),
+            )
+            legacy = _write_wave(job_dir / "rvc_p0_legacy.wav")
+
+            takes = store.available_takes(job_dir)
+
+            self.assertEqual(
+                {take.output_path for take in takes},
+                {registered, legacy},
+            )
+            registered_take = next(take for take in takes if take.output_path == registered)
+            self.assertEqual(registered_take.label, "voice-a / Pitch -7")
+            self.assertIsNotNone(registered_take.conversion)
+
+    def test_available_takes_recovers_legacy_outputs_from_a_corrupt_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = _job_dir(Path(temporary) / "run")
+            legacy = _write_wave(job_dir / "rvc_p0_legacy.wav")
+            (job_dir / VOCAL_PROJECT_MANIFEST).write_text("{broken", encoding="utf-8")
+
+            takes = VocalProjectStore().available_takes(job_dir)
+
+            self.assertEqual(tuple(take.output_path for take in takes), (legacy,))
+
+    def test_repeated_loads_reuse_unchanged_manifest_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = _job_dir(Path(temporary) / "run")
+            VocalProjectStore().open_or_create(job_dir)
+
+            with patch(
+                "jang_app.services.vocal_project_store.json.loads",
+                wraps=json.loads,
+            ) as parse_json:
+                first = VocalProjectStore().load(job_dir)
+                second = VocalProjectStore().load(job_dir)
+
+            self.assertEqual(second, first)
+            self.assertEqual(parse_json.call_count, 1)
+
     def test_compact_windows_safe_output_is_imported_as_a_take(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             job_dir = _job_dir(Path(temporary) / "run")

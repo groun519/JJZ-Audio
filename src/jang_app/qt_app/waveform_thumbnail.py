@@ -8,11 +8,14 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QSizePolicy
 
-from jang_app.services.waveform import build_waveform_peaks, waveform_cache_key
+from jang_app.services.waveform import (
+    build_waveform_peaks,
+    waveform_cache_key,
+    waveform_peak_cache,
+)
 
 
 _WAVEFORM_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thumbnail-waveform")
-_WAVEFORM_CACHE: dict[tuple[str, int, int, int], list[float]] = {}
 atexit.register(lambda: _WAVEFORM_EXECUTOR.shutdown(wait=False, cancel_futures=True))
 
 
@@ -60,7 +63,7 @@ class WaveformThumbnail(QFrame):
         except Exception:
             self.update()
             return
-        cached = _WAVEFORM_CACHE.get(cache_key)
+        cached = waveform_peak_cache.normalized(cache_key)
         if cached is not None:
             self._peaks = cached
             self._is_available = bool(cached)
@@ -122,9 +125,9 @@ class WaveformThumbnail(QFrame):
         if cache_key != self._cache_key:
             return
         if peaks:
-            _WAVEFORM_CACHE[cache_key] = peaks
+            waveform_peak_cache.store_normalized(cache_key, peaks)
         else:
-            _WAVEFORM_CACHE.pop(cache_key, None)
+            waveform_peak_cache.discard_normalized(cache_key)
         self._peaks = peaks
         self._is_available = bool(peaks)
         self._is_loading = False

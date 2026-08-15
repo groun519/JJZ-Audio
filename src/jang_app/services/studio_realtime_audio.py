@@ -4,6 +4,8 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from jang_app.services.audio_delay import delay_tail_ms
+from jang_app.services.audio_doubler import doubler_tail_ms
 from jang_app.services.audio_export import AudioMixSource
 from jang_app.services.audio_mix_processing import process_mix_source
 from jang_app.services.audio_player import PreparedPlaybackAudio, read_playback_audio
@@ -11,6 +13,8 @@ from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.studio_pitch import prepare_pitch_shifted_audio
 from jang_app.services.studio_session import (
     STUDIO_EFFECT_LEVEL_MATCH,
+    STUDIO_EFFECT_DELAY,
+    STUDIO_EFFECT_DOUBLER,
     STUDIO_EFFECT_REVERB,
     StudioEffect,
 )
@@ -133,11 +137,14 @@ def _realtime_effects(effects: tuple[StudioEffect, ...]) -> tuple[StudioEffect, 
 
 
 def _effect_tail_ms(source: AudioMixSource) -> int:
-    return max(
-        (
-            effect.reverb.pre_delay_ms + effect.reverb.decay_ms + 250
-            for effect in source.effects
-            if effect.enabled and effect.kind == STUDIO_EFFECT_REVERB
-        ),
-        default=0,
-    )
+    total = 0
+    for effect in source.effects:
+        if not effect.enabled:
+            continue
+        if effect.kind == STUDIO_EFFECT_REVERB:
+            total += max(0, effect.reverb.pre_delay_ms) + effect.reverb.decay_ms + 250
+        elif effect.kind == STUDIO_EFFECT_DELAY:
+            total += delay_tail_ms(effect.delay)
+        elif effect.kind == STUDIO_EFFECT_DOUBLER:
+            total += doubler_tail_ms(effect.doubler)
+    return total

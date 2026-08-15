@@ -11,12 +11,15 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from jang_app.services.model_dataset import ModelDatasetClip
 from jang_app.services.silence_detection import SpeechRegion
-from jang_app.services.waveform import build_waveform_peaks, waveform_cache_key
+from jang_app.services.waveform import (
+    build_waveform_peaks,
+    waveform_cache_key,
+    waveform_peak_cache,
+)
 
 
 _WAVEFORM_POINT_COUNT = 2400
 _WAVEFORM_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-waveform")
-_WAVEFORM_CACHE: dict[tuple[str, int, int, int], list[float]] = {}
 atexit.register(lambda: _WAVEFORM_EXECUTOR.shutdown(wait=False, cancel_futures=True))
 
 
@@ -108,7 +111,7 @@ class ClipWaveformView(QWidget):
         if cache_key == self._waveform_key:
             return
         self._waveform_key = cache_key
-        cached = _WAVEFORM_CACHE.get(cache_key)
+        cached = waveform_peak_cache.normalized(cache_key)
         if cached is not None:
             self._peaks = cached
             return
@@ -125,9 +128,9 @@ class ClipWaveformView(QWidget):
 
     def _apply_peaks(self, cache_key: tuple[str, int, int, int], peaks: list[float]) -> None:
         if peaks:
-            _WAVEFORM_CACHE[cache_key] = peaks
+            waveform_peak_cache.store_normalized(cache_key, peaks)
         else:
-            _WAVEFORM_CACHE.pop(cache_key, None)
+            waveform_peak_cache.discard_normalized(cache_key)
         if cache_key == self._waveform_key:
             self._peaks = peaks
             self.update()

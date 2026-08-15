@@ -4273,12 +4273,17 @@ class MainWindow(QMainWindow):
             self._apply_studio_session(StudioSession())
             return
         try:
-            session = self.library.studio_session(item.id)
+            workspace = self.library.studio_workspace(item.id)
         except KeyError:
-            session = StudioSession()
-        self._apply_studio_session(session)
+            self._apply_studio_session(StudioSession(), ())
+            return
+        self._apply_studio_session(workspace.session, workspace.assets)
 
-    def _apply_studio_session(self, session: StudioSession) -> None:
+    def _apply_studio_session(
+        self,
+        session: StudioSession,
+        assets: tuple[StudioSoundAsset, ...] | None = None,
+    ) -> None:
         self._is_loading_studio_session = True
         try:
             self.vocal_track.set_mix_state(
@@ -4294,11 +4299,12 @@ class MainWindow(QMainWindow):
                 volume_percent=session.converted_vocal.volume_percent,
             )
             self._sync_result_playback_settings()
-            item = self.current_song or self.current_work_item
-            try:
-                assets = self.library.studio_assets(item.id) if item is not None else ()
-            except KeyError:
-                assets = ()
+            if assets is None:
+                item = self.current_song or self.current_work_item
+                try:
+                    assets = self.library.studio_assets(item.id) if item is not None else ()
+                except KeyError:
+                    assets = ()
             self.studio_editor.set_context(session, assets)
             self._studio_playback_queue_dirty = False
             self._studio_playback_sources = ()
@@ -4334,12 +4340,12 @@ class MainWindow(QMainWindow):
             return
         session = self._studio_session_from_tracks()
         if session.tracks and session != self.studio_editor.session():
-            try:
-                assets = self.library.studio_assets(item.id)
-            except KeyError:
-                assets = ()
-            self.studio_editor.set_context(session, assets)
-        self.studio_session_autosave.queue(item.id, session)
+            self.studio_editor.set_context(session, self.studio_editor.sound_assets())
+        self.studio_session_autosave.queue(
+            item.id,
+            session,
+            self.studio_editor.sound_assets(),
+        )
 
     def _studio_session_from_tracks(self) -> StudioSession:
         session = self.studio_editor.session()
@@ -4391,7 +4397,11 @@ class MainWindow(QMainWindow):
             self._is_loading_studio_session = False
         item = self.current_song or self.current_work_item
         if item is not None:
-            self.studio_session_autosave.queue(item.id, session)
+            self.studio_session_autosave.queue(
+                item.id,
+                session,
+                self.studio_editor.sound_assets(),
+            )
         queue = self.current_playback_queue
         if (
             item is None
@@ -4402,7 +4412,11 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            sources = self.library.studio_mix_sources(item.id, session)
+            sources = self.library.studio_mix_sources(
+                item.id,
+                session,
+                self.studio_editor.sound_assets(),
+            )
         except (AudioExportError, KeyError, OSError, ValueError) as exc:
             self.studio_editor.set_status(_last_error_line(str(exc)))
             return
@@ -4985,7 +4999,11 @@ class MainWindow(QMainWindow):
             self.studio_editor.set_status(tr("Add a sound to the timeline."))
             return None
         try:
-            sources = self.library.studio_mix_sources(item.id, session)
+            sources = self.library.studio_mix_sources(
+                item.id,
+                session,
+                self.studio_editor.sound_assets(),
+            )
         except (AudioExportError, KeyError, OSError, ValueError) as exc:
             self.studio_editor.set_status(_last_error_line(str(exc)))
             return None

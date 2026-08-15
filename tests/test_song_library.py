@@ -9,6 +9,7 @@ from unittest.mock import patch
 from jang_app.services.output_catalog import OutputSoundSet
 from jang_app.services.song_library import SongItem, SongLibrary, sort_song_items
 from jang_app.services.song_package import SongPackageStore
+from jang_app.services.studio_assets import studio_sound_pool
 
 
 class SongLibraryTests(unittest.TestCase):
@@ -187,6 +188,27 @@ class SongLibraryTests(unittest.TestCase):
 
             self.assertEqual(len(versions), 1)
             self.assertEqual(versions[0].job_dir, job_dir.resolve())
+
+    def test_studio_workspace_reuses_the_asset_snapshot_for_its_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"source")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            song = library.add_paths([source])[0]
+            sound_set = _sound_set(project, source.stem)
+            library.register_output(song.id, sound_set.job_dir, "Version")
+
+            with patch(
+                "jang_app.services.song_library.studio_sound_pool",
+                wraps=studio_sound_pool,
+            ) as build_pool:
+                workspace = library.studio_workspace(song.id)
+
+            self.assertEqual(build_pool.call_count, 1)
+            self.assertEqual(len(workspace.assets), 2)
+            self.assertTrue(workspace.session.tracks)
 
     def test_selecting_output_version_updates_song_active_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

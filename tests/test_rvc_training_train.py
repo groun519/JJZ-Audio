@@ -188,6 +188,7 @@ class RvcTrainingRunTests(unittest.TestCase):
                 self.assertIn("JJZERO_DATA_LOADER_WORKERS = 4", launcher)
                 self.assertIn("JJZERO_DATA_LOADER_PIN_MEMORY = True", launcher)
                 self.assertIn("JJZERO_DATA_LOADER_PERSISTENT = True", launcher)
+                self.assertIn("JJZERO_DATA_LOADER_TIMEOUT = 120", launcher)
                 _write_training_success(layout, output_callback, target_epoch=20)
                 return CommandResult(args, 2333333, "", "Training is done.")
 
@@ -244,6 +245,42 @@ class RvcTrainingRunTests(unittest.TestCase):
             self.assertTrue(result.completed)
             self.assertEqual(worker_settings, [4, 0])
             self.assertIn("JJZERO_DATA_LOADER_FALLBACK workers=0", activity)
+
+    def test_parallel_data_loader_timeout_retries_with_safe_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            (runtime / "runtime" / "pythonw.exe").write_bytes(b"pythonw")
+            worker_settings: list[int] = []
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                launcher = Path(args[1]).read_text(encoding="utf-8")
+                workers = 4 if "JJZERO_DATA_LOADER_WORKERS = 4" in launcher else 0
+                worker_settings.append(workers)
+                if workers:
+                    return CommandResult(
+                        args,
+                        1,
+                        "",
+                        "RuntimeError: DataLoader timed out after 120 seconds",
+                    )
+                _write_training_success(layout, output_callback, target_epoch=20)
+                return CommandResult(args, 0, "Training is done.", "")
+
+            with patch(
+                "jang_app.services.rvc_training_performance.os.cpu_count",
+                return_value=16,
+            ):
+                result = train_rvc_model(
+                    model_id,
+                    layout,
+                    runtime,
+                    RvcTrainingRunSettings(target_epoch=20),
+                    command_runner=runner,
+                    runtime_inspector=_ready_runtime,
+                )
+
+            self.assertTrue(result.completed)
+            self.assertEqual(worker_settings, [4, 0])
 
     def test_existing_checkpoint_pair_is_resumed_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

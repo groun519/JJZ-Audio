@@ -13,12 +13,15 @@ class RvcTrainingDataLoaderSettings:
     prefetch_factor: int = 2
     pin_memory: bool = False
     persistent_workers: bool = False
+    timeout_seconds: int = 120
 
     def validate(self) -> None:
         if self.workers < 0 or self.workers > 8:
             raise ValueError("RVC data loader workers must be between 0 and 8.")
         if self.prefetch_factor <= 0:
             raise ValueError("RVC data loader prefetch factor must be positive.")
+        if self.timeout_seconds <= 0:
+            raise ValueError("RVC data loader timeout must be positive.")
         if self.workers == 0 and self.persistent_workers:
             raise ValueError("Persistent RVC workers require at least one worker.")
 

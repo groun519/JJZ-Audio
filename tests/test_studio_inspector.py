@@ -188,6 +188,50 @@ class StudioInspectorTests(unittest.TestCase):
         self.assertTrue(level_editor.reference_status.property("available"))
         inspector.close()
 
+    def test_delay_effect_uses_the_dedicated_inspector_editor(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        effect = StudioEffect("fx-delay", "delay")
+        clip = StudioClip("clip-1", reference, 0, 0, 2_000, effects=(effect,))
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(clip,),
+        )
+        inspector = StudioInspector()
+        changed = QSignalSpy(inspector.effect_changed)
+
+        inspector.set_selection(track, clip, None)
+        editor = inspector.effect_editors[effect.effect_id]
+        editor.controls["feedback_percent"].setValue(48)
+        editor._emit_changed()
+
+        self.assertEqual(changed.at(0)[0], clip.clip_id)
+        self.assertEqual(changed.at(0)[1].delay.feedback_percent, 48)
+        inspector.close()
+
+    def test_doubler_effect_uses_the_dedicated_inspector_editor(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        effect = StudioEffect("fx-doubler", "doubler")
+        clip = StudioClip("clip-1", reference, 0, 0, 2_000, effects=(effect,))
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(clip,),
+        )
+        inspector = StudioInspector()
+        changed = QSignalSpy(inspector.effect_changed)
+
+        inspector.set_selection(track, clip, None)
+        editor = inspector.effect_editors[effect.effect_id]
+        editor.controls["pitch_spread_cents"].setValue(12)
+        editor._emit_changed()
+
+        self.assertEqual(changed.at(0)[0], clip.clip_id)
+        self.assertEqual(changed.at(0)[1].doubler.pitch_spread_cents, 12)
+        inspector.close()
+
     def test_media_clip_controls_follow_image_and_video_capabilities(self) -> None:
         image_reference = StudioAssetRef("image", TRACK_VIDEO, "cover.png")
         image_asset = StudioSoundAsset(

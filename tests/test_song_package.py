@@ -4,11 +4,53 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.song_package import SongPackageStore
 
 
 class SongPackageStoreTests(unittest.TestCase):
+    def test_unchanged_manifests_are_loaded_once_and_reused_by_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            root = project / "workspace" / "library" / "songs"
+            created, _was_created = SongPackageStore(root, project).import_audio(source, title="Song")
+            store = SongPackageStore(root, project)
+
+            with patch.object(
+                store,
+                "_load_manifest",
+                wraps=store._load_manifest,
+            ) as load_manifest:
+                first = store.packages()
+                renamed = store.rename(created.song_id, "Renamed Song")
+                required = store.require(created.song_id)
+
+            self.assertEqual(load_manifest.call_count, 1)
+            self.assertEqual(first[0].title, "Song")
+            self.assertEqual(required, renamed)
+
+    def test_external_manifest_change_invalidates_cached_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            package, _was_created = store.import_audio(source, title="Song")
+            self.assertEqual(store.require(package.song_id).title, "Song")
+
+            manifest_path = package.folder / "song.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["title"] = "Externally Renamed Song"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            self.assertEqual(
+                store.require(package.song_id).title,
+                "Externally Renamed Song",
+            )
+
     def test_import_creates_self_contained_song_stages_without_changing_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)

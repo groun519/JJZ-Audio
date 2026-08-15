@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from uuid import uuid4
 
 from jang_app.services.command import background_command_args, hidden_subprocess_kwargs
 from jang_app.services.rvc_script_launcher import (
@@ -193,7 +194,12 @@ class RvcScriptLauncherTests(unittest.TestCase):
             completed = _run_python((str(launcher),), cwd=workspace)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "4 2 True True")
+            self.assertEqual(completed.stdout.strip(), "4 2 True True 120")
+
+            self.assertIn(
+                'if __name__ == "__main__"',
+                _ROCM_SINGLE_PROCESS_TRAINING_BOOTSTRAP,
+            )
 
     def test_launcher_replaces_unnecessary_ddp_for_single_device_training(self) -> None:
         probe = (
@@ -207,6 +213,61 @@ class RvcScriptLauncherTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("JJZERO_SINGLE_DEVICE_TRAINING", completed.stdout)
         self.assertTrue(completed.stdout.rstrip().endswith("ready"))
+
+    def test_bundled_pythonw_workers_return_a_real_first_batch(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        runtime = repository / "third_party" / "rvc"
+        python = runtime / "runtime" / "python.exe"
+        pythonw = runtime / "runtime" / "pythonw.exe"
+        if not python.is_file() or not pythonw.is_file():
+            self.skipTest("Bundled RVC Python runtime is unavailable.")
+
+        probe = runtime / f".jjzero-loader-probe-{uuid4().hex}.py"
+        try:
+            probe.write_text(_SPAWNED_DATA_LOADER_PROBE, encoding="utf-8")
+            with tempfile.TemporaryDirectory() as temporary:
+                workspace = Path(temporary)
+                diagnostics = workspace / "diagnostics"
+                launcher = prepare_rvc_script_launcher(
+                    workspace / "launcher.py",
+                    runtime,
+                    probe,
+                    data_loader_settings=RvcTrainingDataLoaderSettings(
+                        workers=2,
+                        prefetch_factor=2,
+                        pin_memory=False,
+                        persistent_workers=False,
+                        timeout_seconds=60,
+                    ),
+                    diagnostic_directory=diagnostics,
+                    diagnostic_attempt_id="integration-test",
+                )
+
+                completed = subprocess.run(
+                    (str(python), str(launcher)),
+                    cwd=workspace,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=90,
+                    **hidden_subprocess_kwargs(),
+                )
+
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(
+                    (workspace / "loader-result.txt").read_text(encoding="utf-8"),
+                    "0,1,2,3",
+                )
+                events = "\n".join(
+                    path.read_text(encoding="utf-8", errors="replace")
+                    for path in (diagnostics / "processes").glob("*.jsonl")
+                )
+                self.assertIn('"event": "data_worker_initialized"', events)
+                self.assertIn('"event": "first_batch_ready"', events)
+        finally:
+            probe.unlink(missing_ok=True)
 
 
 def _run_python(
@@ -294,7 +355,29 @@ loader = DataLoader(
     prefetch_factor=8,
     persistent_workers=True,
 )
-print(loader.num_workers, loader.prefetch_factor, loader.persistent_workers, loader.pin_memory)
+print(
+    loader.num_workers,
+    loader.prefetch_factor,
+    loader.persistent_workers,
+    loader.pin_memory,
+    loader.timeout,
+)
+"""
+
+_SPAWNED_DATA_LOADER_PROBE = """\
+from pathlib import Path
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+
+
+if __name__ == "__main__":
+    loader = DataLoader(
+        TensorDataset(torch.arange(4)),
+        batch_size=1,
+        num_workers=0,
+    )
+    values = [str(int(batch[0].item())) for batch in loader]
+    Path("loader-result.txt").write_text(",".join(values), encoding="utf-8")
 """
 
 _ROCM_SINGLE_PROCESS_PROBE = """\

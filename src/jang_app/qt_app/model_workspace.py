@@ -44,6 +44,8 @@ from jang_app.qt_app.model_training_panel import (
     ModelTrainingWorker,
     format_training_elapsed,
 )
+from jang_app.qt_app.training_log_console import TrainingLogConsole
+from jang_app.qt_app.training_monitor import TrainingTelemetryWorker
 from jang_app.qt_app.share_progress_action import ShareProgressAction
 from jang_app.qt_app.localization import (
     apply_widget_language,
@@ -100,7 +102,14 @@ from jang_app.services.rvc_training_preprocess import (
     RvcTrainingPreprocessResult,
     load_rvc_preprocess_result,
 )
-from jang_app.services.rvc_training_runtime import training_backend_for_profile
+from jang_app.services.rvc_training_performance import (
+    recommend_rvc_training_data_loader,
+)
+from jang_app.services.rvc_training_runtime import (
+    RvcTrainingRuntimeInspection,
+    training_backend_for_profile,
+)
+from jang_app.services.rvc_training_telemetry import RvcTrainingTelemetrySnapshot
 
 
 _LOGGER = logging.getLogger("jang_app")
@@ -143,6 +152,7 @@ class ModelWorkspacePage(QWidget):
         self._dataset_store = ModelDatasetStore(self._workspace.root)
         self._runtime_profile = runtime_profile
         self._hardware_selection = hardware_selection
+        self._training_backend = RvcComputeBackend.CPU
         self._records_by_id: dict[str, RvcModelRecord] = {}
         self._rows_by_id: dict[str, ModelListRow] = {}
         self._share_progress_by_id: dict[str, int] = {}
@@ -162,9 +172,14 @@ class ModelWorkspacePage(QWidget):
         self._pending_dataset_open: tuple[str, str, int, int] | None = None
         self._processing_queue = processing_queue
         self._training_worker: ModelTrainingWorker | None = None
+        self._training_telemetry_worker: TrainingTelemetryWorker | None = None
+        self._training_runtime_inspection: RvcTrainingRuntimeInspection | None = None
+        self._training_effective_workers: int | None = None
+        self._training_last_telemetry: RvcTrainingTelemetrySnapshot | None = None
         self._training_cancellation: CommandCancellation | None = None
         self._training_model_id = ""
         self._training_task_id = ""
+        self._last_training_task_id = ""
         self._training_progress = 0
         self._training_stage = ""
         self._training_activity_detail = ""
@@ -194,6 +209,7 @@ class ModelWorkspacePage(QWidget):
             if profile == RVC_PROFILE_DIRECTML
             else training_backend_for_profile(profile)
         )
+        self._training_backend = training_backend_for_profile(profile)
         adapter = (
             self._hardware_selection.adapter
             if self._hardware_selection is not None
@@ -201,7 +217,7 @@ class ModelWorkspacePage(QWidget):
         )
         self.training_panel.set_compute_backends(
             inference_backend,
-            training_backend_for_profile(profile),
+            self._training_backend,
             adapter_name=adapter.name if adapter is not None else "",
             adapter_memory_bytes=adapter.adapter_ram if adapter is not None else 0,
         )
@@ -543,12 +559,25 @@ class ModelWorkspacePage(QWidget):
         )
         self.training_scroll.setWidget(training)
 
+        self.training_log_console = TrainingLogConsole()
+        self.training_log_console.open_folder_requested.connect(
+            self._open_current_training_log
+        )
+        self.training_workspace_splitter = create_workspace_splitter(
+            (self.training_scroll, self.training_log_console),
+            object_name="ModelTrainingWorkspaceSplitter",
+            orientation=Qt.Orientation.Vertical,
+            sizes=(720, 230),
+            stretch_factors=(4, 1),
+            collapsible=(False, True),
+        )
+
         self.workspace_content_stack = QStackedWidget()
         self.workspace_content_stack.addWidget(overview)
         self.workspace_content_stack.addWidget(dataset)
         self.workspace_content_stack.addWidget(analysis)
         self.workspace_content_stack.addWidget(evaluation)
-        self.workspace_content_stack.addWidget(self.training_scroll)
+        self.workspace_content_stack.addWidget(self.training_workspace_splitter)
 
         layout.addWidget(header)
         layout.addLayout(section_row)
@@ -714,6 +743,7 @@ class ModelWorkspacePage(QWidget):
         self.analysis_panel.apply_language()
         self.evaluation_panel.apply_language()
         self.training_panel.apply_language()
+        self.training_log_console.apply_language()
         self.workspace_work_share_action.apply_language()
         self._navigate_model_section(self.workspace_content_stack.currentIndex())
         self._update_workspace_header(self._selected_record())
@@ -1237,6 +1267,11 @@ class ModelWorkspacePage(QWidget):
         if self._training_worker is not None:
             self._stop_training()
             self._training_worker.wait()
+        telemetry_worker = self._training_telemetry_worker
+        if telemetry_worker is not None:
+            telemetry_worker.request_stop()
+            telemetry_worker.wait()
+            self._training_telemetry_worker = None
         if self._dataset_load_worker is not None:
             self._dataset_load_worker.wait()
 
@@ -1294,6 +1329,15 @@ class ModelWorkspacePage(QWidget):
             self.training_panel.set_progress(self._training_progress)
             self.training_panel.set_stage(self._training_stage)
             self.training_panel.set_activity_detail(self._training_activity_detail)
+            if self._training_runtime_inspection is not None:
+                self.training_panel.set_runtime_inspection(
+                    self._training_runtime_inspection
+                )
+            self.training_panel.set_effective_workers(
+                self._training_effective_workers
+            )
+            if self._training_last_telemetry is not None:
+                self.training_panel.set_telemetry(self._training_last_telemetry)
             self._refresh_training_runtime()
 
     def _start_training(self, settings: object) -> None:
@@ -1328,11 +1372,16 @@ class ModelWorkspacePage(QWidget):
         self._training_started_at = now
         self._training_last_activity_at = now
         self._training_queue_runtime_bucket = -1
+        self._training_runtime_inspection = None
+        self._training_effective_workers = None
+        self._training_last_telemetry = None
         self._training_task_id = (
             self._processing_queue.start("Train RVC Model", record.title)
             if self._processing_queue is not None
             else ""
         )
+        self._last_training_task_id = self._training_task_id
+        self.training_log_console.begin(record.title)
         self.training_panel.set_running(True)
         self.training_panel.clear_preprocess_summary()
         self.training_panel.set_progress(0)
@@ -1343,7 +1392,7 @@ class ModelWorkspacePage(QWidget):
         self.dataset_panel.set_training_locked(True)
 
         worker = ModelTrainingWorker(
-            lambda progress, stage, epoch, activity, preprocess: self._run_training_job(
+            lambda progress, stage, epoch, activity, preprocess, log, runtime: self._run_training_job(
                 record,
                 layout,
                 dataset,
@@ -1354,6 +1403,8 @@ class ModelWorkspacePage(QWidget):
                 epoch,
                 activity,
                 preprocess,
+                log,
+                runtime,
             )
         )
         worker.set_diagnostic_task_id(self._training_task_id)
@@ -1363,12 +1414,15 @@ class ModelWorkspacePage(QWidget):
         worker.epoch_changed.connect(self._on_training_epoch)
         worker.activity_changed.connect(self._on_training_activity)
         worker.preprocess_changed.connect(self._on_training_preprocess)
+        worker.log_batch_changed.connect(self._on_training_log_batch)
+        worker.runtime_inspected.connect(self._on_training_runtime_inspected)
         worker.succeeded.connect(self._on_training_succeeded)
         worker.failed.connect(self._on_training_failed)
         worker.finished.connect(self._on_training_finished)
         self._training_worker = worker
         self._training_runtime_timer.start()
         self._refresh_training_runtime()
+        self._start_training_telemetry()
         worker.start()
 
     def _run_training_job(
@@ -1383,7 +1437,15 @@ class ModelWorkspacePage(QWidget):
         epoch: Callable[[int, int], None],
         activity: Callable[[str], None],
         preprocess: Callable[[object], None],
+        log: Callable[[str], None],
+        runtime: Callable[[RvcTrainingRuntimeInspection], None],
     ) -> _ModelTrainingJobResult:
+        def handle_output(line: str) -> None:
+            log(line)
+            detail = describe_rvc_training_activity(line)
+            if detail:
+                activity(detail)
+
         pipeline = run_rvc_training_pipeline(
             record.model_id,
             layout,
@@ -1395,9 +1457,8 @@ class ModelWorkspacePage(QWidget):
             epoch_callback=epoch,
             stage_callback=lambda current: stage(_training_stage_label(current)),
             preprocess_callback=preprocess,
-            output_callback=lambda line: activity(
-                describe_rvc_training_activity(line) or ""
-            ),
+            output_callback=handle_output,
+            runtime_callback=runtime,
         )
         if pipeline.stopped:
             return _ModelTrainingJobResult(pipeline, None)
@@ -1430,6 +1491,7 @@ class ModelWorkspacePage(QWidget):
     def _on_training_stage(self, stage: str) -> None:
         self._mark_training_activity()
         self._training_stage = stage
+        self.training_log_console.append_system(stage)
         if self._selected_model_id == self._training_model_id:
             self.training_panel.set_stage(stage)
         self._update_training_queue_detail()
@@ -1454,6 +1516,59 @@ class ModelWorkspacePage(QWidget):
             self._training_activity_detail = detail
         if detail and self._selected_model_id == self._training_model_id:
             self.training_panel.set_activity_detail(detail)
+
+    def _on_training_log_batch(self, text: str) -> None:
+        self.training_log_console.append_batch(text)
+        if "JJZERO_DATA_LOADER_FALLBACK workers=0" in text:
+            self._training_effective_workers = 0
+            if self._selected_model_id == self._training_model_id:
+                self.training_panel.set_effective_workers(0)
+
+    def _on_training_runtime_inspected(self, inspection: object) -> None:
+        if not isinstance(inspection, RvcTrainingRuntimeInspection):
+            return
+        self._training_runtime_inspection = inspection
+        loader = recommend_rvc_training_data_loader(
+            inspection,
+            windowless_workers_available=(
+                self._execution_runtime_root / "runtime" / "pythonw.exe"
+            ).is_file(),
+        )
+        self._training_effective_workers = loader.workers
+        if self._selected_model_id == self._training_model_id:
+            self.training_panel.set_runtime_inspection(inspection)
+            self.training_panel.set_effective_workers(loader.workers)
+
+    def _start_training_telemetry(self) -> None:
+        self._stop_training_telemetry()
+        diagnostic_folder: Path | None = None
+        if self._processing_queue is not None and self._training_task_id:
+            diagnostics = self._processing_queue.diagnostics
+            if diagnostics is not None:
+                diagnostic_folder = diagnostics.job_path(self._training_task_id)
+        worker = TrainingTelemetryWorker(
+            self._training_backend,
+            diagnostic_folder=diagnostic_folder,
+        )
+        worker.setParent(self)
+        worker.snapshot_ready.connect(self._on_training_telemetry)
+        self._training_telemetry_worker = worker
+        worker.start()
+
+    def _stop_training_telemetry(self) -> None:
+        worker = self._training_telemetry_worker
+        self._training_telemetry_worker = None
+        if worker is None:
+            return
+        worker.request_stop()
+        worker.finished.connect(worker.deleteLater)
+
+    def _on_training_telemetry(self, snapshot: object) -> None:
+        if not isinstance(snapshot, RvcTrainingTelemetrySnapshot):
+            return
+        self._training_last_telemetry = snapshot
+        if self._selected_model_id == self._training_model_id:
+            self.training_panel.set_telemetry(snapshot)
 
     def _on_training_preprocess(self, result: object) -> None:
         if not isinstance(result, RvcTrainingPreprocessResult):
@@ -1505,6 +1620,7 @@ class ModelWorkspacePage(QWidget):
             if self._processing_queue is not None and self._training_task_id:
                 self._processing_queue.cancel(self._training_task_id)
             self.show_status("Training stopped.")
+            self.training_log_console.append_system(tr("Training stopped."))
             return
         if result.finalized is None:
             self._on_training_failed("Training artifacts were not registered.")
@@ -1513,12 +1629,22 @@ class ModelWorkspacePage(QWidget):
         if self._processing_queue is not None and self._training_task_id:
             self._processing_queue.complete(self._training_task_id)
         self.show_status("Training completed.")
+        self.training_log_console.append_system(tr("Training completed."))
 
     def _on_training_failed(self, traceback_text: str) -> None:
+        self._stop_training_telemetry()
+        self.training_log_console.append_batch(traceback_text)
         task_id = self._training_task_id
         diagnostic_code = classify_error(traceback_text).code
         if self._processing_queue is not None and self._training_task_id:
             self._processing_queue.fail(self._training_task_id, traceback_text)
+            diagnostics = self._processing_queue.diagnostics
+            if diagnostics is not None:
+                archive = diagnostics.build_archive(self._training_task_id)
+                if archive is not None:
+                    self.training_log_console.append_system(
+                        tr("Diagnostic package ready: {name}", name=archive.name)
+                    )
         record = self._records_by_id.get(self._training_model_id)
         if record is not None:
             try:
@@ -1556,10 +1682,16 @@ class ModelWorkspacePage(QWidget):
         if path.exists():
             self.open_location_requested.emit(path)
 
+    def _open_current_training_log(self) -> None:
+        task_id = self._training_task_id or self._last_training_task_id
+        if task_id:
+            self._open_training_diagnostics(task_id)
+
     def _on_training_finished(self) -> None:
         worker = self._training_worker
         trained_model_id = self._training_model_id
         self._training_worker = None
+        self._stop_training_telemetry()
         self._training_cancellation = None
         self._training_model_id = ""
         self._training_task_id = ""

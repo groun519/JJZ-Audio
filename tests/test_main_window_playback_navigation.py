@@ -124,6 +124,45 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_studio_mix_save_reuses_the_editor_asset_snapshot(self) -> None:
+        from jang_app.services.studio_session import StudioSession, StudioTrack
+
+        current = StudioSession(tracks=(StudioTrack("track-current", "Current"),))
+        updated = StudioSession(tracks=(StudioTrack("track-updated", "Updated"),))
+        assets = (object(),)
+        contexts: list[tuple[StudioSession, tuple[object, ...]]] = []
+        queued: list[tuple[str, StudioSession, tuple[object, ...]]] = []
+        editor = SimpleNamespace(
+            session=lambda: current,
+            sound_assets=lambda: assets,
+            set_context=lambda session, sound_assets: contexts.append(
+                (session, sound_assets)
+            ),
+        )
+        window = SimpleNamespace(
+            _is_loading_studio_session=False,
+            current_output_set=object(),
+            current_song=SimpleNamespace(id="song-1"),
+            current_work_item=None,
+            studio_editor=editor,
+            _studio_session_from_tracks=lambda: updated,
+            studio_session_autosave=SimpleNamespace(
+                queue=lambda song_id, session, sound_assets: queued.append(
+                    (song_id, session, sound_assets)
+                )
+            ),
+            library=SimpleNamespace(
+                studio_assets=lambda _song_id: self.fail(
+                    "mix-only edits must not rescan studio assets"
+                )
+            ),
+        )
+
+        MainWindow._queue_current_studio_session_save(window)
+
+        self.assertEqual(contexts, [(updated, assets)])
+        self.assertEqual(queued, [("song-1", updated, assets)])
+
     def test_space_shortcut_is_reserved_for_workspace_playback(self) -> None:
         button = QPushButton()
         line_edit = QLineEdit()
@@ -1105,7 +1144,8 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         )
         refreshes: list[WorkspacePlaybackScope] = []
         playback_prepares: list[tuple[str, StudioSession]] = []
-        queued: list[tuple[str, StudioSession]] = []
+        queued: list[tuple[str, StudioSession, tuple[object, ...]]] = []
+        assets = (object(),)
         source = AudioMixSource("Vocal", Path("vocal.wav"), source_end_ms=12_000)
         mix_track = SimpleNamespace(set_mix_state=lambda **_kwargs: None)
         window = SimpleNamespace(
@@ -1118,10 +1158,14 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
             current_song=SimpleNamespace(id="song-1"),
             current_work_item=None,
             studio_session_autosave=SimpleNamespace(
-                queue=lambda song_id, session: queued.append((song_id, session))
+                queue=lambda song_id, session, sound_assets: queued.append(
+                    (song_id, session, sound_assets)
+                )
             ),
             current_playback_queue=queue,
-            library=SimpleNamespace(studio_mix_sources=lambda _song_id, _session: (source,)),
+            library=SimpleNamespace(
+                studio_mix_sources=lambda _song_id, _session, _assets: (source,)
+            ),
             _studio_playback_sources=(source,),
             player=SimpleNamespace(
                 is_playing=lambda: True,
@@ -1130,7 +1174,10 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
                 set_volumes=lambda _volumes: None,
             ),
             _playback_position_ms=0,
-            studio_editor=SimpleNamespace(set_status=lambda _status: None),
+            studio_editor=SimpleNamespace(
+                set_status=lambda _status: None,
+                sound_assets=lambda: assets,
+            ),
             _refresh_output_playback_queue=lambda scope: refreshes.append(scope),
             _studio_playback_queue=lambda song_id, _session, _sources: PlaybackQueue(
                 context="output",
@@ -1155,7 +1202,10 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         self.assertEqual(refreshes, [])
         self.assertTrue(window._studio_playback_queue_dirty)
         self.assertEqual(playback_prepares, [("song-1", session), ("song-1", session)])
-        self.assertEqual(queued, [("song-1", session), ("song-1", session)])
+        self.assertEqual(
+            queued,
+            [("song-1", session, assets), ("song-1", session, assets)],
+        )
 
     def test_reverb_change_updates_the_live_chain_without_restarting_playback(self) -> None:
         from dataclasses import replace
@@ -1199,10 +1249,12 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
             _sync_result_playback_settings=lambda: None,
             current_song=SimpleNamespace(id="song-1"),
             current_work_item=None,
-            studio_session_autosave=SimpleNamespace(queue=lambda _song_id, _session: None),
+            studio_session_autosave=SimpleNamespace(
+                queue=lambda _song_id, _session, _assets: None
+            ),
             current_playback_queue=queue,
             library=SimpleNamespace(
-                studio_mix_sources=lambda _song_id, _session: (new_source,)
+                studio_mix_sources=lambda _song_id, _session, _assets: (new_source,)
             ),
             player=SimpleNamespace(
                 is_playing=lambda: True,
@@ -1211,7 +1263,10 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
                 set_volumes=lambda volumes: calls.append(("volumes", volumes)),
             ),
             _playback_position_ms=0,
-            studio_editor=SimpleNamespace(set_status=lambda _status: None),
+            studio_editor=SimpleNamespace(
+                set_status=lambda _status: None,
+                sound_assets=lambda: (),
+            ),
             _studio_playback_queue=lambda song_id, _session, sources: PlaybackQueue(
                 context="output",
                 source_id=f"studio:{song_id}",

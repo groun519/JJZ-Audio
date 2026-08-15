@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -12,13 +13,67 @@ from jang_app.services.studio_session import StudioLevelMatchSettings
 
 
 _FFMPEG_WAVEFORM_SAMPLE_RATE = 800
+_WAVEFORM_CACHE_LIMIT = 384
+
+WaveformCacheKey = tuple[str, int, int, int]
+
+
+class WaveformPeakCache:
+    """Owns bounded waveform results shared by every audio workspace."""
+
+    def __init__(self, max_entries: int = _WAVEFORM_CACHE_LIMIT) -> None:
+        self._max_entries = max(1, int(max_entries))
+        self._entries: OrderedDict[tuple[str, object], list[float]] = OrderedDict()
+
+    def normalized(self, key: WaveformCacheKey) -> list[float] | None:
+        return self._get("normalized", key)
+
+    def store_normalized(self, key: WaveformCacheKey, peaks: list[float]) -> None:
+        self._store("normalized", key, peaks)
+
+    def amplitude(self, key: WaveformCacheKey) -> list[float] | None:
+        return self._get("amplitude", key)
+
+    def store_amplitude(self, key: WaveformCacheKey, peaks: list[float]) -> None:
+        self._store("amplitude", key, peaks)
+
+    def level_matched(self, key: tuple[object, ...]) -> list[float] | None:
+        return self._get("level_matched", key)
+
+    def store_level_matched(self, key: tuple[object, ...], peaks: list[float]) -> None:
+        self._store("level_matched", key, peaks)
+
+    def discard_normalized(self, key: WaveformCacheKey) -> None:
+        self._entries.pop(("normalized", key), None)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def _get(self, kind: str, key: object) -> list[float] | None:
+        entry_key = kind, key
+        peaks = self._entries.pop(entry_key, None)
+        if peaks is not None:
+            self._entries[entry_key] = peaks
+        return peaks
+
+    def _store(self, kind: str, key: object, peaks: list[float]) -> None:
+        entry_key = kind, key
+        self._entries.pop(entry_key, None)
+        if not peaks:
+            return
+        self._entries[entry_key] = peaks
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+
+waveform_peak_cache = WaveformPeakCache()
 
 
 class WaveformDecodeError(RuntimeError):
     """Raised when neither SoundFile nor FFmpeg can decode an audio source."""
 
 
-def waveform_cache_key(path: Path, point_count: int) -> tuple[str, int, int, int]:
+def waveform_cache_key(path: Path, point_count: int) -> WaveformCacheKey:
     resolved = path.expanduser().resolve()
     stat = resolved.stat()
     return (str(resolved), stat.st_mtime_ns, stat.st_size, point_count)

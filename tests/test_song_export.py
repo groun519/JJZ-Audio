@@ -67,6 +67,42 @@ class SongExportTests(unittest.TestCase):
             self.assertEqual(sources[0].effects, (effect,))
             self.assertEqual(sources[0].pitch_semitones, 5)
 
+    def test_timeline_mix_reuses_provided_asset_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            assets = studio_sound_pool(package)
+            asset = next(
+                item
+                for item in assets
+                if item.reference.role == TRACK_ORIGINAL_VOCAL
+            )
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "track-vocal",
+                        "Original Vocal",
+                        role=TRACK_ORIGINAL_VOCAL,
+                        clips=(
+                            StudioClip(
+                                "clip-vocal",
+                                asset.reference,
+                                0,
+                                0,
+                                1_000,
+                            ),
+                        ),
+                    ),
+                )
+            )
+
+            with patch(
+                "jang_app.services.song_export.resolve_studio_asset",
+                side_effect=AssertionError("provided assets must resolve the timeline"),
+            ):
+                sources = build_song_mix_sources(package, session, assets)
+
+            self.assertTrue(sources)
+
     def test_level_match_resolves_original_vocal_from_the_same_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             package = _package_with_output(Path(temporary))

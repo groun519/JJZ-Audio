@@ -43,6 +43,8 @@ class StudioEditorTests(unittest.TestCase):
             changed = QSignalSpy(editor.session_changed)
             source_before = asset.path.read_bytes()
 
+            self.assertEqual(editor.sound_assets(), (asset,))
+
             editor._drop_asset(asset.asset_id, "track-original-vocal", 2_500)
 
             self.assertEqual(changed.count(), 1)
@@ -105,6 +107,34 @@ class StudioEditorTests(unittest.TestCase):
             self.assertEqual(editor.session().tracks[0].clips[0].effects, (effect,))
             editor.close()
 
+    def test_delay_drop_adds_an_editable_clip_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            editor = StudioEditor()
+            editor.set_context(_session(), (asset,))
+
+            editor._drop_effect("delay", "clip-1")
+
+            effect = editor.session().tracks[0].clips[0].effects[0]
+            self.assertEqual(effect.kind, "delay")
+            self.assertEqual(effect.delay.delay_ms, 320)
+            self.assertIn(effect.effect_id, editor.inspector.effect_tab_ids())
+            editor.close()
+
+    def test_doubler_drop_adds_an_editable_clip_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            editor = StudioEditor()
+            editor.set_context(_session(), (asset,))
+
+            editor._drop_effect("doubler", "clip-1")
+
+            effect = editor.session().tracks[0].clips[0].effects[0]
+            self.assertEqual(effect.kind, "doubler")
+            self.assertEqual(effect.doubler.voice_spacing_ms, 18)
+            self.assertIn(effect.effect_id, editor.inspector.effect_tab_ids())
+            editor.close()
+
     def test_character_chain_preset_is_added_and_undone_as_one_edit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             asset = _asset(Path(temporary))
@@ -118,6 +148,24 @@ class StudioEditorTests(unittest.TestCase):
                 tuple(effect.kind for effect in effects),
                 ("radio_filter", "ring_modulator", "bitcrusher", "distortion"),
             )
+            self.assertTrue(editor.undo())
+            self.assertEqual(editor.session().tracks[0].clips[0].effects, ())
+            editor.close()
+
+    def test_karaoke_preset_adds_delay_and_reverb_as_one_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            editor = StudioEditor()
+            editor.set_context(_session(), (asset,))
+
+            editor._drop_effect("preset:karaoke", "clip-1")
+
+            effects = editor.session().tracks[0].clips[0].effects
+            self.assertEqual(tuple(effect.kind for effect in effects), ("delay", "reverb"))
+            self.assertEqual(effects[0].delay.delay_ms, 190)
+            self.assertEqual(effects[0].delay.feedback_percent, 24)
+            self.assertEqual(effects[1].reverb.decay_ms, 1_250)
+            self.assertEqual(effects[1].reverb.dry_wet_percent, 22)
             self.assertTrue(editor.undo())
             self.assertEqual(editor.session().tracks[0].clips[0].effects, ())
             editor.close()
@@ -182,6 +230,7 @@ class StudioEditorTests(unittest.TestCase):
         timeline = StudioTimelineView()
         kinds = (
             "reverb",
+            "delay",
             "radio_filter",
             "ring_modulator",
             "bitcrusher",

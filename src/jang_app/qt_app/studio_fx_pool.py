@@ -18,17 +18,25 @@ from jang_app.services.i18n import tr
 
 STUDIO_EFFECT_MIME = "application/x-jjzero-studio-effect"
 
-_CARD_SPECS = {
+_PRESET_CARD_SPECS = {
+    "preset:karaoke": ("KR", "Karaoke", "Karaoke vocal ambience and echo"),
     "preset:animatronic": ("AN", "Animatronic", "Metallic machine voice chain"),
     "preset:walkie_talkie": ("WT", "Walkie-Talkie", "Narrow radio transmission chain"),
     "preset:broken_robot": ("BR", "Broken Robot", "Damaged unstable robot chain"),
+}
+
+_EFFECT_CARD_SPECS = {
     "reverb": ("RV", "Reverb", "Room and ambience"),
+    "delay": ("DL", "Delay", "Rhythmic echo and repeats"),
+    "doubler": ("DB", "Doubler", "Thicker and wider vocal layers"),
     "radio_filter": ("RF", "Radio Filter", "Narrow speaker tone"),
     "ring_modulator": ("RM", "Ring Modulator", "Metallic robot texture"),
     "bitcrusher": ("BT", "Bitcrusher", "Digital resolution damage"),
     "distortion": ("DS", "Distortion", "Saturation and grit"),
     "level_match": ("LM", "Level Match", "Follow the original vocal volume"),
 }
+
+_CARD_SPECS = {**_PRESET_CARD_SPECS, **_EFFECT_CARD_SPECS}
 
 
 class StudioFxCard(QFrame):
@@ -125,10 +133,10 @@ class StudioFxPool(QFrame):
         self.effect_label = QLabel()
         self.effect_label.setObjectName("StudioFxGroupLabel")
         content_layout.addWidget(self.preset_label)
-        for payload in tuple(_CARD_SPECS)[:3]:
+        for payload in _PRESET_CARD_SPECS:
             content_layout.addWidget(self.cards[payload])
         content_layout.addWidget(self.effect_label)
-        for payload in tuple(_CARD_SPECS)[3:]:
+        for payload in _EFFECT_CARD_SPECS:
             content_layout.addWidget(self.cards[payload])
 
         self.scroll = QScrollArea()

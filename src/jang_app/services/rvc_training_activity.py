@@ -27,6 +27,15 @@ _TRAINING_STEP = re.compile(
     r"Train\s+Epoch:\s*(?P<epoch>\d+)\s*\[\s*(?P<progress>\d+(?:\.\d+)?)%\s*\]",
     re.IGNORECASE,
 )
+_FIRST_BATCH_WAIT = re.compile(
+    r"JJZERO_TRAINING_FIRST_BATCH_WAIT\s+elapsed=(?P<elapsed>\d+)\s+"
+    r"workers_alive=(?P<alive>\d+)\s+workers_seen=(?P<seen>\d+)",
+    re.IGNORECASE,
+)
+_WORKERS_STARTED = re.compile(
+    r"JJZERO_DATA_LOADER_WORKERS_STARTED\s+count=(?P<count>\d+)",
+    re.IGNORECASE,
+)
 
 
 def describe_rvc_training_activity(line: str) -> str | None:
@@ -51,6 +60,22 @@ def describe_rvc_training_activity(line: str) -> str | None:
             "Training epoch {epoch}; current epoch {progress}%",
             epoch=int(match.group("epoch")),
             progress=round(float(match.group("progress"))),
+        )
+
+    match = _FIRST_BATCH_WAIT.search(text)
+    if match is not None:
+        return tr(
+            "Waiting for the first training batch · {elapsed} · workers {alive}/{seen}",
+            elapsed=_format_elapsed(int(match.group("elapsed"))),
+            alive=int(match.group("alive")),
+            seen=int(match.group("seen")),
+        )
+
+    match = _WORKERS_STARTED.search(text)
+    if match is not None:
+        return tr(
+            "Training data workers started · {count}",
+            count=int(match.group("count")),
         )
 
     match = _F0_PROGRESS.search(text)
@@ -114,6 +139,11 @@ def describe_rvc_training_activity(line: str) -> str | None:
     if "training is done" in lowered:
         return tr("Model optimization completed")
     return None
+
+
+def _format_elapsed(seconds: int) -> str:
+    minutes, remaining = divmod(max(0, int(seconds)), 60)
+    return f"{minutes:02d}:{remaining:02d}"
 
 
 def training_stage_detail(stage: str) -> str:

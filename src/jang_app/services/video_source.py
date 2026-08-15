@@ -105,12 +105,17 @@ class VideoSourceStore:
             )
         return VideoSource()
 
-    def managed_sources(self, package: SongPackage) -> tuple[VideoSource, ...]:
+    def managed_sources(
+        self,
+        package: SongPackage,
+        *,
+        active_source: VideoSource | None = None,
+    ) -> tuple[VideoSource, ...]:
         video_dir = package.folder / SOURCE_STAGE / "video"
         if not video_dir.is_dir():
             return ()
 
-        active = self.load(package)
+        active = active_source if active_source is not None else self.load(package)
         active_path = active.path.resolve() if active.path is not None else None
         sources: list[VideoSource] = []
         try:

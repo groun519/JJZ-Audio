@@ -5,7 +5,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from jang_app.services.audio_metadata import read_audio_metadata
-from jang_app.services.output_catalog import converted_vocal_paths
 from jang_app.services.song_package import SongOutputReference, SongPackage
 from jang_app.services.studio_session import (
     TRACK_CONVERTED_VOCAL,
@@ -20,7 +19,7 @@ from jang_app.services.studio_session import (
 )
 from jang_app.config import SUPPORTED_IMAGE_EXTENSIONS
 from jang_app.services.video_source import VideoSourceStore
-from jang_app.services.vocal_project import VocalProjectValidationError, VocalTake
+from jang_app.services.vocal_project import VocalTake
 from jang_app.services.vocal_project_store import VocalProjectStore
 
 
@@ -34,6 +33,7 @@ class StudioSoundAsset:
     media_kind: str = "audio"
     default_clip_duration_ms: int | None = None
     can_remove: bool = False
+    is_active_media: bool = False
 
     @property
     def asset_id(self) -> str:
@@ -55,20 +55,7 @@ def studio_sound_pool(package: SongPackage) -> tuple[StudioSoundAsset, ...]:
     for output in outputs:
         assets.extend(_assets_for_output(output))
     assets.extend(_video_assets(package, assets))
-    from jang_app.services.song_assets import build_song_asset_details
-
-    removable_paths = {
-        asset.path.expanduser().resolve()
-        for asset in build_song_asset_details(package).assets
-        if asset.can_remove
-    }
-    return tuple(
-        replace(
-            asset,
-            can_remove=asset.path.expanduser().resolve() in removable_paths,
-        )
-        for asset in assets
-    )
+    return tuple(assets)
 
 
 def resolve_studio_asset(package: SongPackage, reference: StudioAssetRef) -> Path | None:
@@ -93,24 +80,16 @@ def resolve_studio_asset(package: SongPackage, reference: StudioAssetRef) -> Pat
 
 
 def sync_studio_video_track(
-    package: SongPackage,
     session: StudioSession,
     assets: tuple[StudioSoundAsset, ...],
 ) -> StudioSession:
     """Keep one timeline media track aligned with the song's active local media."""
-    source = VideoSourceStore().resolve(package)
-    active_path = (
-        source.path.expanduser().resolve()
-        if source.path is not None
-        else None
-    )
     active_asset = next(
         (
             asset
             for asset in assets
             if asset.media_kind in {"video", "image"}
-            and active_path is not None
-            and asset.path == active_path
+            and asset.is_active_media
         ),
         None,
     )
@@ -144,15 +123,25 @@ def sync_studio_video_track(
 def build_default_studio_tracks(
     package: SongPackage,
     states: dict[str, StudioTrackState],
+    assets: tuple[StudioSoundAsset, ...] | None = None,
 ) -> tuple[StudioTrack, ...]:
     output = package.active_output
     if output is None:
         return ()
-    assets = _assets_for_output(output)
-    selected_converted = _selected_converted_asset(output, assets)
+    output_assets = (
+        _assets_for_output(output)
+        if assets is None
+        else [
+            asset
+            for asset in assets
+            if asset.reference.output_id == output.output_id
+            and asset.reference.role != TRACK_VIDEO
+        ]
+    )
+    selected_converted = _selected_converted_asset(output, output_assets)
     assets_by_role = {
         asset.reference.role: asset
-        for asset in assets
+        for asset in output_assets
         if asset.reference.role != TRACK_CONVERTED_VOCAL
     }
     if selected_converted is not None:
@@ -184,7 +173,6 @@ def build_default_studio_tracks(
 
 def _assets_for_output(output: SongOutputReference) -> list[StudioSoundAsset]:
     result: list[StudioSoundAsset] = []
-    takes_by_path = _vocal_takes_by_path(output.job_dir)
     candidates = (
         (TRACK_ORIGINAL_VOCAL, output.job_dir / "vocals.wav", "Original Vocal"),
         (TRACK_INSTRUMENTAL, output.job_dir / "no_vocals.wav", "Instrumental"),
@@ -193,13 +181,14 @@ def _assets_for_output(output: SongOutputReference) -> list[StudioSoundAsset]:
         asset = _sound_asset(output, role, path, f"{output.label} / {label}")
         if asset is not None:
             result.append(asset)
-    for path in converted_vocal_paths(output.job_dir):
+    for take in VocalProjectStore().available_takes(output.job_dir):
+        path = take.output_path
         asset = _sound_asset(
             output,
             TRACK_CONVERTED_VOCAL,
             path,
             f"{output.label} / {path.stem}",
-            take=takes_by_path.get(path.expanduser().resolve()),
+            take=take,
         )
         if asset is not None:
             result.append(asset)
@@ -212,9 +201,14 @@ def _video_assets(
 ) -> list[StudioSoundAsset]:
     store = VideoSourceStore()
     active = store.resolve(package)
+    active_path = (
+        active.path.expanduser().resolve()
+        if active.path is not None
+        else None
+    )
     sources = (
         [active] if active.path is not None and active.path.is_file() else []
-    ) + list(store.managed_sources(package))
+    ) + list(store.managed_sources(package, active_source=active))
     fallback_duration = max((asset.duration_ms for asset in audio_assets), default=0)
     assets: list[StudioSoundAsset] = []
     seen: set[Path] = set()
@@ -240,6 +234,8 @@ def _video_assets(
                 duration_ms,
                 media_kind=media_kind,
                 default_clip_duration_ms=5_000 if media_kind == "image" else None,
+                can_remove=True,
+                is_active_media=resolved == active_path,
             )
         )
     return assets
@@ -250,7 +246,7 @@ def _resolve_video_asset(package: SongPackage, reference: StudioAssetRef) -> Pat
     active = store.resolve(package)
     sources = (
         [active] if active.path is not None else []
-    ) + list(store.managed_sources(package))
+    ) + list(store.managed_sources(package, active_source=active))
     for source in sources:
         if source.path is None:
             continue
@@ -304,22 +300,9 @@ def _sound_asset(
         label,
         resolved,
         duration_ms,
-        take,
+        take=take,
+        can_remove=True,
     )
-
-
-def _vocal_takes_by_path(job_dir: Path) -> dict[Path, VocalTake]:
-    try:
-        project = VocalProjectStore().load(job_dir)
-    except (OSError, VocalProjectValidationError):
-        return {}
-    if project is None:
-        return {}
-    return {
-        take.output_path.expanduser().resolve(): take
-        for take in project.takes
-        if take.output_path.is_file()
-    }
 
 
 def _selected_converted_asset(

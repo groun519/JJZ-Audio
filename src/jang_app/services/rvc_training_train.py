@@ -26,10 +26,16 @@ from jang_app.services.rvc_script_launcher import (
     prepare_rvc_script_workspace,
 )
 from jang_app.services.rvc_training_performance import (
+    RvcTrainingDataLoaderSettings,
     conservative_rvc_training_data_loader,
     recommend_rvc_training_data_loader,
 )
 from jang_app.services.rvc_training_filelist import load_rvc_training_filelist
+from jang_app.services.rvc_training_diagnostics import (
+    RvcTrainingAttempt,
+    RvcTrainingAttemptMonitor,
+    RvcTrainingDiagnostics,
+)
 from jang_app.services.rvc_training_runtime import (
     RVC_TRAINING_SAMPLE_RATE,
     RVC_TRAINING_VERSION,
@@ -65,6 +71,8 @@ _DATA_LOADER_FAILURE_MARKERS = (
     "can't pickle",
     "cannot pickle",
     "paging file is too small",
+    "dataloader timed out",
+    "data loader timed out",
 )
 
 
@@ -118,12 +126,15 @@ def train_rvc_model(
     progress: Callable[[int], None] | None = None,
     epoch_callback: Callable[[int, int], None] | None = None,
     output_callback: Callable[[str], None] | None = None,
+    runtime_callback: Callable[[RvcTrainingRuntimeInspection], None] | None = None,
     command_runner: TrainingCommandRunner = run_cancellable_command,
     runtime_inspector: Callable[..., RvcTrainingRuntimeInspection] = inspect_rvc_training_runtime,
 ) -> RvcTrainingRunResult:
     settings.validate()
     runtime = runtime_root.expanduser().resolve()
     inspection = runtime_inspector(runtime, check_cuda=True)
+    if runtime_callback is not None:
+        runtime_callback(inspection)
     if not inspection.assets_ready:
         missing = ", ".join(path.as_posix() for path in inspection.missing_paths)
         raise RvcTrainingRunError(f"RVC training runtime is incomplete: {missing}")
@@ -146,6 +157,27 @@ def train_rvc_model(
         inspection,
         windowless_workers_available=(runtime / "runtime" / "pythonw.exe").is_file(),
     )
+    training_diagnostics = RvcTrainingDiagnostics.for_current_task(model_id)
+    if training_diagnostics is not None:
+        training_diagnostics.record_runtime(
+            {
+                "runtime_root": runtime,
+                "backend": inspection.backend.value,
+                "torch_version": inspection.torch_version,
+                "cuda_version": inspection.cuda_version,
+                "hip_version": inspection.hip_version,
+                "cuda_available": inspection.cuda_available,
+                "cuda_device_count": inspection.cuda_device_count,
+                "device_capability": inspection.device_capability,
+                "training_accelerated": inspection.training_accelerated,
+            }
+        )
+    active_attempt = _begin_training_attempt(
+        training_diagnostics,
+        settings,
+        data_loader_settings,
+        reason="initial",
+    )
     launcher = prepare_rvc_script_launcher(
         layout.root / ".jjzero" / "train_rvc.py",
         runtime,
@@ -155,6 +187,8 @@ def train_rvc_model(
         data_loader_settings=data_loader_settings,
         rocm_single_process_training=True,
         legacy_i18n=True,
+        diagnostic_directory=active_attempt.folder if active_attempt else None,
+        diagnostic_attempt_id=active_attempt.attempt_id if active_attempt else "",
     )
     state_store = RvcTrainingStateStore(model_id, layout)
     _keep_latest_checkpoint_pair(layout)
@@ -196,11 +230,16 @@ def train_rvc_model(
     output_lock = RLock()
     recent_output: deque[str] = deque()
     recent_output_set: set[str] = set()
+    active_monitor: RvcTrainingAttemptMonitor | None = None
+    attempt_log_offset = log_offset
+    last_returncode: int | None = None
 
     def handle_output(line: str) -> None:
         text = line.strip()
         if not text:
             return
+        if active_monitor is not None:
+            active_monitor.observe_output(text)
         with output_lock:
             if text in recent_output_set:
                 return
@@ -245,6 +284,13 @@ def train_rvc_model(
             accelerated=inspection.training_accelerated,
         )
         with LiveTextFile(log_path, log_offset, handle_output):
+            active_monitor = RvcTrainingAttemptMonitor(
+                training_diagnostics,
+                active_attempt,
+                activity_callback=handle_output,
+            )
+            active_monitor.start()
+            attempt_log_offset = log_path.stat().st_size if log_path.is_file() else 0
             result = command_runner(
                 command,
                 cwd=layout.root,
@@ -252,7 +298,18 @@ def train_rvc_model(
                 output_callback=handle_output,
                 cancellation=token,
             )
-            loader_diagnostics = f"{result.output}\n{_log_delta(log_path, log_offset)}"
+            last_returncode = result.returncode
+            active_monitor.stop()
+            active_monitor = None
+            if training_diagnostics is not None and active_attempt is not None:
+                training_diagnostics.capture_train_log(
+                    active_attempt,
+                    log_path,
+                    attempt_log_offset,
+                )
+            loader_diagnostics = (
+                f"{result.output}\n{_log_delta(log_path, attempt_log_offset)}"
+            )
             if (
                 data_loader_settings.workers > 0
                 and not result.cancelled
@@ -266,15 +323,49 @@ def train_rvc_model(
                     data_loader_settings.workers,
                 )
                 handle_output("JJZERO_DATA_LOADER_FALLBACK workers=0")
+                if training_diagnostics is not None and active_attempt is not None:
+                    diagnostic_code = training_diagnostics.diagnose_attempt(
+                        active_attempt,
+                        loader_diagnostics,
+                    )
+                    training_diagnostics.finish_attempt(
+                        active_attempt,
+                        status="failed",
+                        returncode=result.returncode,
+                        diagnostic_code=diagnostic_code,
+                        detail="Parallel data loading failed; retrying safely.",
+                    )
+                fallback_loader = conservative_rvc_training_data_loader()
+                active_attempt = _begin_training_attempt(
+                    training_diagnostics,
+                    settings,
+                    fallback_loader,
+                    reason="safe_fallback",
+                )
                 prepare_rvc_script_launcher(
                     launcher,
                     runtime,
                     runtime / "train_nsf_sim_cache_sid_load_pretrain.py",
                     atomic_torch_saves=True,
                     compact_rvc_checkpoints=True,
-                    data_loader_settings=conservative_rvc_training_data_loader(),
+                    data_loader_settings=fallback_loader,
                     rocm_single_process_training=True,
                     legacy_i18n=True,
+                    diagnostic_directory=(
+                        active_attempt.folder if active_attempt else None
+                    ),
+                    diagnostic_attempt_id=(
+                        active_attempt.attempt_id if active_attempt else ""
+                    ),
+                )
+                active_monitor = RvcTrainingAttemptMonitor(
+                    training_diagnostics,
+                    active_attempt,
+                    activity_callback=handle_output,
+                )
+                active_monitor.start()
+                attempt_log_offset = (
+                    log_path.stat().st_size if log_path.is_file() else 0
                 )
                 result = command_runner(
                     command,
@@ -283,8 +374,24 @@ def train_rvc_model(
                     output_callback=handle_output,
                     cancellation=token,
                 )
+                last_returncode = result.returncode
+                active_monitor.stop()
+                active_monitor = None
+                if training_diagnostics is not None and active_attempt is not None:
+                    training_diagnostics.capture_train_log(
+                        active_attempt,
+                        log_path,
+                        attempt_log_offset,
+                    )
         refreshed = state_store.refresh_checkpoint_pair()
         if result.cancelled or token.is_requested:
+            if training_diagnostics is not None and active_attempt is not None:
+                training_diagnostics.finish_attempt(
+                    active_attempt,
+                    status="cancelled",
+                    returncode=result.returncode,
+                    detail="Training was stopped by the user.",
+                )
             _restore_final_model(final_model, backup, layout)
             stopped = state_store.update_phase(RvcTrainingPhase.STOPPED)
             logger.info("RVC training stopped: model=%s", model_id)
@@ -302,6 +409,12 @@ def train_rvc_model(
             raise RvcTrainingRunError(f"RVC training did not produce a complete model: {detail}")
         state_store.record_epoch(settings.target_epoch)
         completed = state_store.update_phase(RvcTrainingPhase.COMPLETE)
+        if training_diagnostics is not None and active_attempt is not None:
+            training_diagnostics.finish_attempt(
+                active_attempt,
+                status="completed",
+                returncode=result.returncode,
+            )
         _discard_backup(backup, layout)
         _report(
             progress,
@@ -312,13 +425,64 @@ def train_rvc_model(
         logger.info("RVC training complete: model=%s output=%s", model_id, final_model)
         return RvcTrainingRunResult(completed, final_model, log_path, resumed, False)
     except Exception as exc:
+        if active_monitor is not None:
+            active_monitor.stop()
+            active_monitor = None
+        diagnostic_code = ""
+        if training_diagnostics is not None and active_attempt is not None:
+            training_diagnostics.capture_train_log(
+                active_attempt,
+                log_path,
+                attempt_log_offset,
+            )
+            diagnostic_code = training_diagnostics.diagnose_attempt(
+                active_attempt,
+                str(exc),
+            )
+            training_diagnostics.finish_attempt(
+                active_attempt,
+                status="failed",
+                returncode=last_returncode,
+                diagnostic_code=diagnostic_code,
+                detail=str(exc),
+            )
+        error_detail = str(exc)
+        if diagnostic_code and "JJZERO_DIAGNOSTIC_CODE=" not in error_detail:
+            error_detail = f"JJZERO_DIAGNOSTIC_CODE={diagnostic_code}\n{error_detail}"
         _restore_final_model(final_model, backup, layout)
         state_store.refresh_checkpoint_pair()
-        state_store.update_phase(RvcTrainingPhase.FAILED, last_error=str(exc))
-        logger.error("RVC training failed: model=%s error=%s", model_id, exc)
-        if isinstance(exc, RvcTrainingRunError):
+        state_store.update_phase(RvcTrainingPhase.FAILED, last_error=error_detail)
+        logger.error("RVC training failed: model=%s error=%s", model_id, error_detail)
+        if isinstance(exc, RvcTrainingRunError) and error_detail == str(exc):
             raise
-        raise RvcTrainingRunError(str(exc)) from exc
+        raise RvcTrainingRunError(error_detail) from exc
+
+
+def _begin_training_attempt(
+    diagnostics: RvcTrainingDiagnostics | None,
+    settings: RvcTrainingRunSettings,
+    loader: RvcTrainingDataLoaderSettings,
+    *,
+    reason: str,
+) -> RvcTrainingAttempt | None:
+    if diagnostics is None:
+        return None
+    return diagnostics.begin_attempt(
+        {
+            "reason": reason,
+            "target_epoch": settings.target_epoch,
+            "batch_size": settings.batch_size,
+            "save_every_epoch": settings.save_every_epoch,
+            "gpu_index": settings.gpu_index,
+            "cache_in_gpu": settings.cache_in_gpu,
+            "resume": settings.resume,
+            "data_loader_workers": loader.workers,
+            "data_loader_prefetch": loader.prefetch_factor,
+            "data_loader_pin_memory": loader.pin_memory,
+            "data_loader_persistent": loader.persistent_workers,
+            "data_loader_timeout_seconds": loader.timeout_seconds,
+        }
+    )
 
 
 def _training_command(

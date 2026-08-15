@@ -20,6 +20,7 @@ class RvcTrainingPerformanceTests(unittest.TestCase):
         self.assertEqual(settings.workers, 4)
         self.assertTrue(settings.pin_memory)
         self.assertTrue(settings.persistent_workers)
+        self.assertEqual(settings.timeout_seconds, 120)
 
     def test_cuda_scales_worker_count_for_small_cpu(self) -> None:
         settings = recommend_rvc_training_data_loader(

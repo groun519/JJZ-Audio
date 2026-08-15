@@ -71,14 +71,24 @@ class SongPackageStore:
         self._catalog = LibraryCatalog(
             catalog_file or inferred_catalog_file(self.root, "songs")
         )
+        self._manifest_cache: dict[
+            Path,
+            tuple[tuple[int, int, int], SongPackage],
+        ] = {}
+        self._manifest_by_song_id: dict[str, Path] = {}
 
     def packages(self, *, include_removed: bool = False) -> list[SongPackage]:
         if not self.root.is_dir():
+            self._clear_manifest_cache()
             return []
+        manifest_paths = tuple(self.root.glob(f"*/{SONG_MANIFEST_NAME}"))
+        active_paths = set(manifest_paths)
+        for stale_path in set(self._manifest_cache).difference(active_paths):
+            self._discard_cached_manifest(stale_path)
         packages: list[SongPackage] = []
-        for manifest_path in self.root.glob(f"*/{SONG_MANIFEST_NAME}"):
+        for manifest_path in manifest_paths:
             try:
-                package = self._load_manifest(manifest_path)
+                package = self._load_cached_manifest(manifest_path)
             except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
                 continue
             if include_removed or not package.removed:
@@ -405,6 +415,16 @@ class SongPackageStore:
         return purged
 
     def require(self, song_id: str, *, include_removed: bool = False) -> SongPackage:
+        manifest_path = self._manifest_by_song_id.get(song_id)
+        if manifest_path is not None:
+            try:
+                package = self._load_cached_manifest(manifest_path)
+            except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+                self._discard_cached_manifest(manifest_path)
+            else:
+                if include_removed or not package.removed:
+                    return package
+                raise KeyError(f"Song package does not exist: {song_id}")
         package = next(
             (item for item in self.packages(include_removed=include_removed) if item.song_id == song_id),
             None,
@@ -470,11 +490,60 @@ class SongPackageStore:
                 ],
             },
         }
-        write_json_atomic(package.folder / SONG_MANIFEST_NAME, data)
+        manifest_path = package.folder / SONG_MANIFEST_NAME
+        write_json_atomic(manifest_path, data)
+        revision = self._manifest_revision(manifest_path)
+        if revision is not None:
+            self._cache_manifest(manifest_path, revision, package)
         try:
             self._catalog.upsert_song(package)
         except (OSError, RuntimeError, sqlite3.Error) as exc:
             _LOGGER.warning("Song catalog update deferred: %s", exc)
+
+    def _load_cached_manifest(self, manifest_path: Path) -> SongPackage:
+        revision = self._manifest_revision(manifest_path)
+        if revision is None:
+            self._discard_cached_manifest(manifest_path)
+            raise FileNotFoundError(manifest_path)
+        cached = self._manifest_cache.get(manifest_path)
+        if cached is not None and cached[0] == revision:
+            return cached[1]
+        self._discard_cached_manifest(manifest_path)
+        package = self._load_manifest(manifest_path)
+        loaded_revision = self._manifest_revision(manifest_path)
+        if loaded_revision is None:
+            raise FileNotFoundError(manifest_path)
+        self._cache_manifest(manifest_path, loaded_revision, package)
+        return package
+
+    def _cache_manifest(
+        self,
+        manifest_path: Path,
+        revision: tuple[int, int, int],
+        package: SongPackage,
+    ) -> None:
+        previous = self._manifest_cache.get(manifest_path)
+        if previous is not None and previous[1].song_id != package.song_id:
+            self._manifest_by_song_id.pop(previous[1].song_id, None)
+        self._manifest_cache[manifest_path] = revision, package
+        self._manifest_by_song_id[package.song_id] = manifest_path
+
+    def _discard_cached_manifest(self, manifest_path: Path) -> None:
+        cached = self._manifest_cache.pop(manifest_path, None)
+        if cached is not None and self._manifest_by_song_id.get(cached[1].song_id) == manifest_path:
+            self._manifest_by_song_id.pop(cached[1].song_id, None)
+
+    def _clear_manifest_cache(self) -> None:
+        self._manifest_cache.clear()
+        self._manifest_by_song_id.clear()
+
+    @staticmethod
+    def _manifest_revision(manifest_path: Path) -> tuple[int, int, int] | None:
+        try:
+            stat = manifest_path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
 
     def _load_manifest(self, manifest_path: Path) -> SongPackage:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))

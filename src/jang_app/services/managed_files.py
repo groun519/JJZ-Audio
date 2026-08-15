@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -89,8 +90,11 @@ def file_sha256(path: Path) -> str:
 def write_json_atomic(path: Path, data: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f"{path.suffix}.tmp")
-    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _replace_with_retry(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
@@ -98,7 +102,7 @@ def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None
     temporary = path.with_suffix(f"{path.suffix}.tmp")
     try:
         temporary.write_text(text, encoding=encoding)
-        os.replace(temporary, path)
+        _replace_with_retry(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -107,3 +111,14 @@ def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None
 def _report(progress: Callable[[int], None] | None, value: int) -> None:
     if progress is not None:
         progress(value)
+
+
+def _replace_with_retry(source: Path, target: Path, attempts: int = 5) -> None:
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(0.02 * (2**attempt))

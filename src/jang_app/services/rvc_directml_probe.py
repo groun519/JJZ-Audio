@@ -5,6 +5,8 @@ import tempfile
 import wave
 from pathlib import Path
 
+from jang_app.services.managed_files import link_or_copy_file
+
 
 DIRECTML_RMVPE_PROBE_DEVICE = "privateuseone:0"
 _DIRECTML_RMVPE_PROBE_FREQUENCY_HZ = 440.0
@@ -23,6 +25,21 @@ def create_directml_rmvpe_probe() -> tuple[tempfile.TemporaryDirectory[str], Pat
     input_dir.mkdir(parents=True, exist_ok=True)
     _write_probe_wave(input_dir / "probe.wav")
     return temporary, root
+
+
+def find_directml_rmvpe_model(runtime_root: Path) -> Path | None:
+    candidates = (
+        runtime_root / "runtime" / "rmvpe.onnx",
+        runtime_root / "rmvpe.onnx",
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def stage_directml_rmvpe_probe_model(runtime_root: Path, probe_root: Path) -> Path:
+    source = find_directml_rmvpe_model(runtime_root)
+    if source is None:
+        raise FileNotFoundError("The installed DirectML runtime is missing rmvpe.onnx.")
+    return link_or_copy_file(source, probe_root / "rmvpe.onnx")
 
 
 def directml_rmvpe_probe_command(

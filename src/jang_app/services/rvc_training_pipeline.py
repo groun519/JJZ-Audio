@@ -37,6 +37,7 @@ from jang_app.services.rvc_training_preprocess import (
     load_rvc_preprocess_result,
     preprocess_rvc_training_dataset,
 )
+from jang_app.services.rvc_training_runtime import RvcTrainingRuntimeInspection
 from jang_app.services.rvc_training_state import (
     RvcTrainingPhase,
     RvcTrainingState,
@@ -97,6 +98,7 @@ def run_rvc_training_pipeline(
     stage_callback: Callable[[RvcTrainingStage], None] | None = None,
     preprocess_callback: Callable[[RvcTrainingPreprocessResult], None] | None = None,
     output_callback: Callable[[str], None] | None = None,
+    runtime_callback: Callable[[RvcTrainingRuntimeInspection], None] | None = None,
 ) -> RvcTrainingPipelineResult:
     token = cancellation or CommandCancellation()
     state_store = RvcTrainingStateStore(model_id, layout)
@@ -195,6 +197,7 @@ def run_rvc_training_pipeline(
             progress=_scaled_progress(progress, 32, 95),
             epoch_callback=epoch_callback,
             output_callback=output_callback,
+            runtime_callback=runtime_callback,
         )
         if training.stopped:
             return RvcTrainingPipelineResult(

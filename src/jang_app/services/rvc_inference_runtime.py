@@ -12,6 +12,7 @@ from jang_app.services.rvc_directml_probe import (
     create_directml_rmvpe_probe,
     directml_rmvpe_probe_command,
     missing_directml_rmvpe_outputs,
+    stage_directml_rmvpe_probe_model,
 )
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_cuda_compatibility import (
@@ -308,9 +309,13 @@ def _run_directml_rmvpe_probe(python: Path, rvc_root: Path, device: str) -> str:
         return f"DirectML RMVPE probe could not find the RVC extraction script: {script}"
     temporary, probe_root = create_directml_rmvpe_probe()
     try:
+        try:
+            stage_directml_rmvpe_probe_model(rvc_root, probe_root)
+        except FileNotFoundError as exc:
+            return str(exc)
         result = run_command(
             directml_rmvpe_probe_command(python, rvc_root, probe_root, device=device),
-            cwd=rvc_root,
+            cwd=probe_root,
             env=build_rvc_environment(rvc_root),
             timeout_seconds=180,
         )

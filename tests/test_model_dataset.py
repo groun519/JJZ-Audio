@@ -19,6 +19,45 @@ from jang_app.services.segment_review import SEGMENT_HELD, SEGMENT_REJECTED
 
 
 class ModelDatasetStoreTests(unittest.TestCase):
+    def test_load_reuses_manifest_until_the_file_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _audio_file(root / "voice.wav", b"audio")
+            creator = ModelDatasetStore(root / "workspace")
+            creator.add_sources("model", [source])
+            store = ModelDatasetStore(root / "workspace")
+
+            with patch.object(
+                store,
+                "_item_from_data",
+                wraps=store._item_from_data,
+            ) as decode:
+                first = store.load("model")
+                selected = store.select_items("model", [first.items[0].item_id])
+                reloaded = store.load("model")
+
+            self.assertEqual(decode.call_count, 1)
+            self.assertEqual(reloaded, selected)
+            self.assertTrue(reloaded.items[0].is_selected)
+
+    def test_load_reloads_an_externally_changed_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _audio_file(root / "voice.wav", b"audio")
+            store = ModelDatasetStore(root / "workspace")
+            store.add_sources("model", [source])
+            self.assertEqual(store.load("model").items[0].source_name, "voice.wav")
+
+            manifest = store.root / "model" / "dataset.json"
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            data["items"][0]["source_name"] = "Externally Renamed Voice.wav"
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+
+            self.assertEqual(
+                store.load("model").items[0].source_name,
+                "Externally Renamed Voice.wav",
+            )
+
     def test_add_sources_creates_original_and_independent_working_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

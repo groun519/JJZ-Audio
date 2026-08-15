@@ -112,6 +112,12 @@ class SongVocalVersion:
     separation_postprocess_status: str = "not_requested"
 
 
+@dataclass(frozen=True)
+class StudioWorkspaceSnapshot:
+    session: StudioSession
+    assets: tuple[StudioSoundAsset, ...]
+
+
 class SongLibrary:
     def __init__(
         self,
@@ -232,18 +238,40 @@ class SongLibrary:
     def studio_session(self, item_id: str) -> StudioSession:
         return load_package_studio_session(self._store.require(item_id))
 
-    def save_studio_session(self, item_id: str, session: StudioSession) -> Path:
-        return save_package_studio_session(self._store.require(item_id), session)
+    def save_studio_session(
+        self,
+        item_id: str,
+        session: StudioSession,
+        assets: tuple[StudioSoundAsset, ...] | None = None,
+    ) -> Path:
+        return save_package_studio_session(
+            self._store.require(item_id),
+            session,
+            assets=assets,
+        )
 
     def studio_assets(self, item_id: str) -> tuple[StudioSoundAsset, ...]:
         return studio_sound_pool(self._store.require(item_id))
+
+    def studio_workspace(self, item_id: str) -> StudioWorkspaceSnapshot:
+        package = self._store.require(item_id)
+        assets = studio_sound_pool(package)
+        return StudioWorkspaceSnapshot(
+            load_package_studio_session(package, assets=assets),
+            assets,
+        )
 
     def studio_mix_sources(
         self,
         item_id: str,
         session: StudioSession,
+        assets: tuple[StudioSoundAsset, ...] | None = None,
     ) -> tuple[AudioMixSource, ...]:
-        return build_song_mix_sources(self._store.require(item_id), session)
+        return build_song_mix_sources(
+            self._store.require(item_id),
+            session,
+            assets,
+        )
 
     def render_studio_preview(self, item_id: str, session: StudioSession) -> Path:
         return render_studio_preview(self._store.require(item_id), session)

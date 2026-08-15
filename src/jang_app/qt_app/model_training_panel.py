@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text
+from jang_app.qt_app.training_monitor import TrainingMonitorWidget
 from jang_app.qt_app.widgets import (
     FeedbackButton,
     InfoPopoverButton,
@@ -47,7 +48,9 @@ from jang_app.services.rvc_training_recovery import (
     RvcTrainingRecoveryAdvice,
     advise_rvc_training_recovery,
 )
+from jang_app.services.rvc_training_runtime import RvcTrainingRuntimeInspection
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingState
+from jang_app.services.rvc_training_telemetry import RvcTrainingTelemetrySnapshot
 from jang_app.services.rvc_training_train import RvcTrainingRunSettings
 
 
@@ -58,6 +61,8 @@ TrainingTask = Callable[
         Callable[[int, int], None],
         Callable[[str], None],
         Callable[[object], None],
+        Callable[[str], None],
+        Callable[[RvcTrainingRuntimeInspection], None],
     ],
     object,
 ]
@@ -69,6 +74,8 @@ class ModelTrainingWorker(QThread):
     epoch_changed = Signal(int, int)
     activity_changed = Signal(str)
     preprocess_changed = Signal(object)
+    log_batch_changed = Signal(str)
+    runtime_inspected = Signal(object)
     succeeded = Signal(object)
     failed = Signal(str)
 
@@ -76,6 +83,8 @@ class ModelTrainingWorker(QThread):
         super().__init__()
         self._task = task
         self._last_activity_emit = 0.0
+        self._last_log_emit = 0.0
+        self._pending_log_lines: list[str] = []
         self._diagnostic_task_id = ""
 
     def set_diagnostic_task_id(self, task_id: str) -> None:
@@ -90,9 +99,13 @@ class ModelTrainingWorker(QThread):
                     self.epoch_changed.emit,
                     self._emit_activity,
                     self.preprocess_changed.emit,
+                    self._emit_log,
+                    self.runtime_inspected.emit,
                 )
+                self._flush_log()
                 self.succeeded.emit(result)
             except Exception:
+                self._flush_log()
                 self.failed.emit(traceback.format_exc())
 
     def _emit_activity(self, detail: str = "") -> None:
@@ -101,6 +114,22 @@ class ModelTrainingWorker(QThread):
             return
         self._last_activity_emit = now
         self.activity_changed.emit(detail)
+
+    def _emit_log(self, line: str) -> None:
+        text = str(line).rstrip()
+        if not text:
+            return
+        self._pending_log_lines.append(text)
+        now = monotonic()
+        if len(self._pending_log_lines) >= 50 or now - self._last_log_emit >= 0.15:
+            self._flush_log(now)
+
+    def _flush_log(self, now: float | None = None) -> None:
+        if not self._pending_log_lines:
+            return
+        self.log_batch_changed.emit("\n".join(self._pending_log_lines))
+        self._pending_log_lines.clear()
+        self._last_log_emit = monotonic() if now is None else now
 
 
 class ModelTrainingPanel(QWidget):
@@ -136,6 +165,7 @@ class ModelTrainingPanel(QWidget):
         self._current_epoch = 0
         self._target_epoch = 20
         self._last_epoch_at = 0.0
+        self._latest_epoch_seconds = 0.0
         self._seconds_per_epoch = 0.0
         self._active_preset = RvcTrainingPresetId.QUICK
         self._applying_preset = False
@@ -525,10 +555,13 @@ class ModelTrainingPanel(QWidget):
         action_row.addWidget(self.start_button)
         settings_layout.addLayout(action_row)
 
+        self.training_monitor = TrainingMonitorWidget()
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
         layout.addWidget(summary)
+        layout.addWidget(self.training_monitor)
         layout.addWidget(self.preprocess_notice_card)
         layout.addWidget(self.recovery_card)
         layout.addWidget(readiness)
@@ -670,10 +703,18 @@ class ModelTrainingPanel(QWidget):
         self._sync_enabled_state()
 
     def set_running(self, is_running: bool) -> None:
+        was_running = self._is_running
         self._is_running = is_running
-        if is_running:
+        if is_running and not was_running:
             self._last_epoch_at = 0.0
+            self._latest_epoch_seconds = 0.0
             self._seconds_per_epoch = 0.0
+            self.training_monitor.reset()
+            self.training_monitor.configure(
+                self._training_backend,
+                adapter_name=self._adapter_name,
+                batch_size=self.batch_size_spin.value(),
+            )
             self.status_label.setProperty("phase", RvcTrainingPhase.TRAIN.value)
             set_translated_text(self.status_label, "Training")
             self.stage_label.setToolTip("")
@@ -708,6 +749,11 @@ class ModelTrainingPanel(QWidget):
             RvcComputeBackend.CUDA,
             RvcComputeBackend.ROCM,
         }
+        self.training_monitor.configure(
+            training_backend,
+            adapter_name=self._adapter_name,
+            batch_size=self.batch_size_spin.value(),
+        )
         set_translated_text(
             self.profile_label,
             "RVC v2 / 40k / RMVPE",
@@ -789,6 +835,7 @@ class ModelTrainingPanel(QWidget):
             if self._last_epoch_at > 0 and current > self._current_epoch:
                 sample = (now - self._last_epoch_at) / (current - self._current_epoch)
                 if sample > 0:
+                    self._latest_epoch_seconds = sample
                     self._seconds_per_epoch = (
                         sample
                         if self._seconds_per_epoch <= 0
@@ -799,6 +846,19 @@ class ModelTrainingPanel(QWidget):
         self._current_epoch = current
         self._target_epoch = target
         self.epoch_label.setText(f"{current} / {target}")
+        self.training_monitor.set_epoch_timing(
+            self._latest_epoch_seconds,
+            self._seconds_per_epoch,
+        )
+
+    def set_telemetry(self, snapshot: RvcTrainingTelemetrySnapshot) -> None:
+        self.training_monitor.set_snapshot(snapshot)
+
+    def set_runtime_inspection(self, inspection: RvcTrainingRuntimeInspection) -> None:
+        self.training_monitor.set_runtime_inspection(inspection)
+
+    def set_effective_workers(self, workers: int | None) -> None:
+        self.training_monitor.set_effective_workers(workers)
 
     def set_stage(self, text: str) -> None:
         set_translated_text(self.stage_label, text)
@@ -902,6 +962,7 @@ class ModelTrainingPanel(QWidget):
 
     def apply_language(self) -> None:
         apply_widget_language(self)
+        self.training_monitor.apply_language()
         self._sync_action_text()
         self._sync_preset_summary()
         self._sync_info_popovers()

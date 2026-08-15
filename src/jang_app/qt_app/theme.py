@@ -1032,10 +1032,164 @@ def _stylesheet(
         }}
 
         QFrame#TrainingStatusCard, QFrame#TrainingSettingsCard,
-        QFrame#TrainingReadinessCard {{
+        QFrame#TrainingReadinessCard, QFrame#TrainingMonitorCard {{
             background: {raised};
             border: 1px solid {border};
             border-radius: 14px;
+        }}
+
+        QLabel#TrainingMonitorRuntime, QLabel#TrainingMonitorLegend {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QFrame#TrainingMetricCard, QFrame#TrainingPerformanceStrip {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QLabel#TrainingMetricTitle, QLabel#TrainingMonitorGraphTitle {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QLabel#TrainingMetricValue, QLabel#TrainingPerformanceValue {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
+        QProgressBar#TrainingMetricProgress {{
+            min-height: 5px;
+            max-height: 5px;
+            background: {border};
+            border: 0;
+            border-radius: 2px;
+        }}
+
+        QProgressBar#TrainingMetricProgress::chunk {{
+            background: {accent};
+            border-radius: 2px;
+        }}
+
+        QProgressBar#TrainingMetricProgress[available="false"]::chunk {{
+            background: {faint};
+        }}
+
+        QWidget#TrainingTelemetryGraph {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QFrame#TrainingAssessmentCard {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QFrame#TrainingAssessmentCard[health="stable"] {{
+            border-color: {success_border};
+        }}
+
+        QFrame#TrainingAssessmentCard[health="memory_pressure"],
+        QFrame#TrainingAssessmentCard[health="accelerator_unavailable"] {{
+            background: {danger_background};
+            border-color: {danger_border};
+        }}
+
+        QFrame#TrainingAssessmentCard[health="gpu_underused"],
+        QFrame#TrainingAssessmentCard[health="data_supply"],
+        QFrame#TrainingAssessmentCard[health="monitor_unavailable"] {{
+            border-color: {warning_border};
+        }}
+
+        QLabel#TrainingAssessmentTitle {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingAssessmentDetail {{
+            color: {muted};
+            background: transparent;
+            border: 0;
+            font-size: 9px;
+            font-weight: 700;
+        }}
+
+        QFrame#TrainingLogConsole {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 14px;
+        }}
+
+        QLabel#TrainingLogTitle {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            font-size: 12px;
+            font-weight: 900;
+        }}
+
+        QLabel#TrainingLogNewLines {{
+            color: {accent};
+            background: {surface};
+            border: 1px solid {success_border};
+            border-radius: 8px;
+            padding: 3px 7px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QComboBox#TrainingLogFilter, QLineEdit#TrainingLogSearch {{
+            min-height: 30px;
+            max-height: 30px;
+        }}
+
+        QComboBox#TrainingLogFilter {{
+            min-width: 94px;
+            max-width: 118px;
+        }}
+
+        QLineEdit#TrainingLogSearch {{
+            min-width: 130px;
+            max-width: 220px;
+        }}
+
+        QPushButton#TrainingLogToggleButton,
+        QPushButton#TrainingLogActionButton {{
+            min-height: 30px;
+            max-height: 30px;
+            padding: 0 11px;
+        }}
+
+        QPushButton#TrainingLogToggleButton:checked {{
+            color: {text};
+            background: {selection};
+            border-color: {success_border};
+        }}
+
+        QPlainTextEdit#TrainingLogOutput {{
+            color: {text};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+            padding: 8px;
+            font-family: "Cascadia Mono", "Consolas";
+            font-size: 10px;
+            selection-background-color: {selection};
         }}
 
         QFrame#TrainingRecoveryCard {{

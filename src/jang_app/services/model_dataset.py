@@ -27,6 +27,7 @@ from jang_app.services.clip_edit_history import (
     state_from_values,
 )
 from jang_app.services.file_names import safe_filename_stem
+from jang_app.services.managed_files import write_json_atomic
 from jang_app.services.segment_review import (
     SEGMENT_HELD,
     SEGMENT_PENDING,
@@ -150,17 +151,29 @@ class ModelDataset:
 class ModelDatasetStore:
     def __init__(self, workspace_root: Path = MODEL_WORKSPACE_DIR) -> None:
         self.root = workspace_root.expanduser().resolve() / DATASET_DIRECTORY_NAME
+        self._dataset_cache: dict[
+            str,
+            tuple[tuple[int, int, int] | None, ModelDataset],
+        ] = {}
 
     def load(self, model_id: str) -> ModelDataset:
         model_dir = self._model_dir(model_id)
         manifest = model_dir / DATASET_MANIFEST_NAME
-        if not manifest.is_file():
-            return ModelDataset(model_id)
+        revision = self._manifest_revision(manifest)
+        cached = self._dataset_cache.get(model_id)
+        if cached is not None and cached[0] == revision:
+            return cached[1]
+        if revision is None:
+            return self._cache_dataset(ModelDataset(model_id), revision)
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ModelDatasetError(f"Dataset manifest cannot be read: {manifest}") from exc
-        if data.get("version") not in {1, 2, 3, 4, 5, DATASET_VERSION} or data.get("model_id") != model_id:
+        if (
+            not isinstance(data, dict)
+            or data.get("version") not in {1, 2, 3, 4, 5, DATASET_VERSION}
+            or data.get("model_id") != model_id
+        ):
             raise ModelDatasetError("Dataset manifest is not compatible with this model.")
         raw_items = data.get("items")
         if not isinstance(raw_items, list):
@@ -169,7 +182,10 @@ class ModelDatasetStore:
             items = tuple(self._item_from_data(item, model_dir) for item in raw_items if isinstance(item, dict))
         except (KeyError, TypeError, ValueError) as exc:
             raise ModelDatasetError("Dataset manifest contains an invalid item.") from exc
-        return ModelDataset(model_id, _normalize_selected_order(items))
+        return self._cache_dataset(
+            ModelDataset(model_id, _normalize_selected_order(items)),
+            revision,
+        )
 
     def add_sources(
         self,
@@ -236,12 +252,15 @@ class ModelDatasetStore:
         dataset = self.load(model_id)
         ordered_ids = _unique_values(item_ids)
         next_order = len(dataset.training_items)
+        items_by_id = {item.item_id: item for item in dataset.items}
         selected_order: dict[str, int] = {}
         for item_id in ordered_ids:
-            item = next((candidate for candidate in dataset.items if candidate.item_id == item_id), None)
+            item = items_by_id.get(item_id)
             if item is not None and not item.is_selected:
                 selected_order[item_id] = next_order
                 next_order += 1
+        if not selected_order:
+            return dataset
         updated = ModelDataset(
             model_id,
             tuple(
@@ -786,12 +805,30 @@ class ModelDatasetStore:
 
     def _save(self, dataset: ModelDataset) -> None:
         model_dir = self._model_dir(dataset.model_id)
+        manifest = model_dir / DATASET_MANIFEST_NAME
         data = {
             "version": DATASET_VERSION,
             "model_id": dataset.model_id,
             "items": [self._item_to_data(item, model_dir) for item in dataset.items],
         }
-        _write_json_atomic(model_dir / DATASET_MANIFEST_NAME, data)
+        write_json_atomic(manifest, data)
+        self._cache_dataset(dataset, self._manifest_revision(manifest))
+
+    @staticmethod
+    def _manifest_revision(manifest: Path) -> tuple[int, int, int] | None:
+        try:
+            stat = manifest.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+
+    def _cache_dataset(
+        self,
+        dataset: ModelDataset,
+        revision: tuple[int, int, int] | None,
+    ) -> ModelDataset:
+        self._dataset_cache[dataset.model_id] = revision, dataset
+        return dataset
 
     def _model_dir(self, model_id: str) -> Path:
         if not _MODEL_ID_PATTERN.fullmatch(model_id):
@@ -961,13 +998,6 @@ def _replace_dataset_item(dataset: ModelDataset, updated_item: ModelDatasetItem)
         dataset.model_id,
         tuple(updated_item if item.item_id == updated_item.item_id else item for item in dataset.items),
     )
-
-
-def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(f"{path.suffix}.tmp")
-    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(temporary, path)
 
 
 def _unique_values(values: Iterable[str]) -> tuple[str, ...]:

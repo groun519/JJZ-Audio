@@ -6,6 +6,7 @@ import platform
 import re
 import shutil
 import sys
+import zipfile
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -28,6 +29,16 @@ _URL = re.compile(r"https?://[^\s'\"<>]+", re.I)
 _SENSITIVE_ASSIGNMENT = re.compile(
     r"(?i)\b(token|password|passwd|cookie|secret|authorization|api[-_]?key)\s*([=:])\s*([^\s,;]+)"
 )
+_STRUCTURED_DIAGNOSTIC_CODE = re.compile(
+    r"JJZERO_DIAGNOSTIC_CODE=(?P<code>[A-Z0-9_]+)"
+)
+_STRUCTURED_DIAGNOSTICS = {
+    "RVC_WORKER_BOOT_FAILED": "An RVC data worker failed while starting.",
+    "RVC_WORKER_IMPORT_FAILED": "An RVC data worker could not import a required component.",
+    "RVC_WORKER_EXITED": "An RVC data worker exited before returning training data.",
+    "RVC_FIRST_BATCH_TIMEOUT": "RVC training timed out while waiting for the first data batch.",
+    "RVC_TRAINING_PROCESS_STALLED": "The RVC training process stopped reporting progress.",
+}
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,12 @@ def diagnostic_task(task_id: str) -> Iterator[None]:
 
 
 def classify_error(error: str) -> ErrorClassification:
+    structured = _STRUCTURED_DIAGNOSTIC_CODE.search(error)
+    if structured is not None:
+        code = structured.group("code")
+        summary = _STRUCTURED_DIAGNOSTICS.get(code)
+        if summary:
+            return ErrorClassification(code, summary)
     value = error.lower()
     if "openblas: malloc failed" in value or "cannot allocate memory" in value:
         return ErrorClassification(
@@ -105,7 +122,7 @@ def classify_error(error: str) -> ErrorClassification:
         (("no kernel image is available", "not compatible with the current pytorch", "cuda architecture sm_120", "requires torch 2.7.1+cu128"), "CUDA_ARCHITECTURE_UNSUPPORTED", "The bundled RVC runtime does not support this GPU architecture."),
         (("rvc extraction outputs are incomplete",), "RVC_EXTRACTION_INCOMPLETE", "RVC pitch or voice features could not be extracted from every training segment."),
         (("cuda is not available", "no cuda gpus are available", "invalid device ordinal"), "CUDA_UNAVAILABLE", "The selected CUDA device is unavailable."),
-        (("torch_directml", "privateuseone", "directml runtime", "directml device", "dmlexecutionprovider", "onnxruntime-directml", "rmvpe.onnx"), "DIRECTML_RUNTIME_FAILED", "The DirectML runtime or selected DirectML device failed."),
+        (("torch_directml", "privateuseone", "directml runtime", "directml device", "directml rmvpe", "dmlexecutionprovider", "onnxruntime-directml", "rmvpe.onnx"), "DIRECTML_RUNTIME_FAILED", "The DirectML runtime or selected DirectML device failed."),
         (("rocm", "hip error", "hip runtime"), "ROCM_RUNTIME_FAILED", "The AMD ROCm runtime or selected AMD GPU failed."),
         (("no space left on device", "not enough space on the disk", "disk full"), "STORAGE_INSUFFICIENT", "The storage device does not have enough free space."),
         (("ffmpeg is not available", "ffmpeg was not found", "no such file or directory: 'ffmpeg'"), "FFMPEG_UNAVAILABLE", "FFmpeg is unavailable."),
@@ -334,6 +351,35 @@ class JobDiagnostics:
         if command_tail:
             lines.extend(("", "Command output tail:", command_tail))
         return "\n".join(lines)
+
+    def build_archive(self, task_id: str) -> Path | None:
+        folder = self.job_path(task_id)
+        if not folder.is_dir():
+            return None
+        archive = folder / f"JJZero-Training-Diagnostics-{folder.name}.zip"
+        temporary = archive.with_suffix(".zip.tmp")
+        try:
+            with zipfile.ZipFile(
+                temporary,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=6,
+            ) as package:
+                package.writestr("report.txt", self.build_report(task_id))
+                for source in sorted(folder.rglob("*")):
+                    if not source.is_file() or source in {archive, temporary}:
+                        continue
+                    if source.suffix.casefold() in {".zip", ".tmp"}:
+                        continue
+                    package.write(source, source.relative_to(folder).as_posix())
+            os.replace(temporary, archive)
+            return archive
+        except (OSError, zipfile.BadZipFile):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
 
     def _prepare_root(self) -> None:
         try:

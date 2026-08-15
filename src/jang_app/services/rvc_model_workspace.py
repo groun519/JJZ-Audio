@@ -33,6 +33,7 @@ _EPOCH_WEIGHT_PATTERN = re.compile(r"^(?P<name>.+)_e(?P<epoch>\d+)_s(?P<step>\d+
 _CHECKPOINT_PATTERN = re.compile(r"^[GD]_(?P<step>\d+)\.pth$", re.IGNORECASE)
 _MODEL_ID_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
 _LOGGER = logging.getLogger("jang_app")
+_CATALOG_CACHE_UNSET = object()
 
 
 class RvcModelWorkspaceError(RuntimeError):
@@ -194,16 +195,25 @@ class RvcModelWorkspace:
         self._library_catalog = LibraryCatalog(
             catalog_file or inferred_catalog_file(self.root, "models")
         )
+        self._records_cache: tuple[RvcModelRecord, ...] = ()
+        self._records_revision: tuple[int, int, int] | None | object = _CATALOG_CACHE_UNSET
 
     def records(self) -> list[RvcModelRecord]:
-        if not self.catalog_path.is_file():
-            return []
+        revision = self._catalog_revision()
+        if revision == self._records_revision:
+            return list(self._records_cache)
+        if revision is None:
+            return self._cache_records((), revision)
         try:
             data = json.loads(self.catalog_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return []
-        if data.get("version") != CATALOG_VERSION or not isinstance(data.get("models"), list):
-            return []
+            return self._cache_records((), revision)
+        if (
+            not isinstance(data, dict)
+            or data.get("version") != CATALOG_VERSION
+            or not isinstance(data.get("models"), list)
+        ):
+            return self._cache_records((), revision)
 
         records: list[RvcModelRecord] = []
         did_migrate = False
@@ -218,7 +228,8 @@ class RvcModelWorkspace:
                 continue
         if did_migrate:
             self._write_catalog(records)
-        return sorted(records, key=lambda record: record.title.casefold())
+            return list(self._records_cache)
+        return self._cache_records(records, revision)
 
     def inspect_folder(self, folder: Path) -> list[DiscoveredRvcModel]:
         return discover_rvc_models(folder)
@@ -599,10 +610,27 @@ class RvcModelWorkspace:
             "models": [self._record_to_data(record) for record in sorted_records],
         }
         write_json_atomic(self.catalog_path, data)
+        self._cache_records(sorted_records, self._catalog_revision())
         try:
             self._library_catalog.replace_models(sorted_records)
         except (OSError, RuntimeError, sqlite3.Error) as exc:
             _LOGGER.warning("Model catalog update deferred: %s", exc)
+
+    def _catalog_revision(self) -> tuple[int, int, int] | None:
+        try:
+            stat = self.catalog_path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+
+    def _cache_records(
+        self,
+        records: Sequence[RvcModelRecord],
+        revision: tuple[int, int, int] | None,
+    ) -> list[RvcModelRecord]:
+        self._records_cache = tuple(sorted(records, key=lambda record: record.title.casefold()))
+        self._records_revision = revision
+        return list(self._records_cache)
 
     def _ensure_managed_package(self, record: RvcModelRecord) -> tuple[RvcModelRecord, bool]:
         model_dir = self.library_dir / record.model_id

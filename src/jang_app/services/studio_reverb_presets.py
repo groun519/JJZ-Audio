@@ -17,6 +17,27 @@ class StudioReverbPreset:
 
 STUDIO_REVERB_PRESETS = (
     StudioReverbPreset(
+        "karaoke",
+        "Karaoke",
+        StudioReverbSettings(
+            room_height_m=3.0,
+            room_length_m=5.5,
+            room_width_m=7.0,
+            pre_delay_ms=22,
+            decay_ms=1_250,
+            distance_m=2.0,
+            brightness_percent=58,
+            modulation_percent=5,
+            early_high_hz=8_500,
+            early_high_gain_db=-1.0,
+            reverb_high_hz=7_500,
+            reverb_high_gain_db=-2.0,
+            dry_wet_percent=22,
+            early_gain_db=-3.0,
+            reverb_gain_db=-1.0,
+        ),
+    ),
+    StudioReverbPreset(
         "natural_vocal",
         "Natural",
         StudioReverbSettings(),

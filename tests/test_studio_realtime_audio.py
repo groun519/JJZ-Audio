@@ -11,6 +11,7 @@ import soundfile as sf
 from jang_app.services.audio_export import AudioMixSource
 from jang_app.services.studio_realtime_audio import prepare_studio_playback_audio
 from jang_app.services.studio_session import (
+    StudioDelaySettings,
     StudioEffect,
     StudioLevelMatchSettings,
     StudioReverbSettings,
@@ -90,6 +91,27 @@ class StudioRealtimeAudioTests(unittest.TestCase):
 
             self.assertAlmostEqual(float(np.mean(prepared.tracks[0])), 0.4, places=2)
             self.assertEqual(prepared.effect_chains, ((),))
+
+    def test_delay_stays_live_and_extends_the_preview_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "voice.wav"
+            sf.write(path, np.ones((44_100, 2), dtype=np.float32) * 0.25, 44_100)
+            effect = StudioEffect(
+                "fx-delay",
+                "delay",
+                delay=StudioDelaySettings(250, 30, 25, 40),
+            )
+            source = AudioMixSource(
+                "Vocal",
+                path,
+                source_end_ms=1_000,
+                effects=(effect,),
+            )
+
+            prepared = prepare_studio_playback_audio((source,))
+
+            self.assertEqual(prepared.effect_chains, ((effect,),))
+            self.assertGreater(prepared.duration_ms, 2_000)
 
 
 if __name__ == "__main__":

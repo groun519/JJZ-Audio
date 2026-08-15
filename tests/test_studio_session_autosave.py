@@ -15,29 +15,44 @@ class StudioSessionAutosaveTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_debounces_same_song_and_flushes_before_song_changes(self) -> None:
-        saved: list[tuple[str, StudioSession]] = []
-        autosave = StudioSessionAutosave(lambda song_id, session: saved.append((song_id, session)))
+        saved: list[tuple[str, StudioSession, tuple[object, ...]]] = []
+        autosave = StudioSessionAutosave(
+            lambda song_id, session, assets: saved.append((song_id, session, assets))
+        )
         first = StudioSession(original_vocal=StudioTrackState(volume_percent=110))
         latest = StudioSession(original_vocal=StudioTrackState(volume_percent=140))
         second_song = StudioSession(instrumental=StudioTrackState(muted=True))
+        first_assets = (object(),)
+        latest_assets = (object(),)
+        second_assets = (object(),)
 
-        autosave.queue("song-1", first)
-        autosave.queue("song-1", latest)
+        autosave.queue("song-1", first, first_assets)
+        autosave.queue("song-1", latest, latest_assets)
         self.assertEqual(saved, [])
 
-        autosave.queue("song-2", second_song)
-        self.assertEqual(saved, [("song-1", latest)])
+        autosave.queue("song-2", second_song, second_assets)
+        self.assertEqual(saved, [("song-1", latest, latest_assets)])
 
         autosave.flush()
-        self.assertEqual(saved, [("song-1", latest), ("song-2", second_song)])
+        self.assertEqual(
+            saved,
+            [
+                ("song-1", latest, latest_assets),
+                ("song-2", second_song, second_assets),
+            ],
+        )
 
     def test_reports_save_failure_without_leaving_pending_state(self) -> None:
-        def fail(_song_id: str, _session: StudioSession) -> None:
+        def fail(
+            _song_id: str,
+            _session: StudioSession,
+            _assets: tuple[object, ...],
+        ) -> None:
             raise OSError("disk unavailable")
 
         autosave = StudioSessionAutosave(fail)
         failed = QSignalSpy(autosave.save_failed)
-        autosave.queue("song-1", StudioSession())
+        autosave.queue("song-1", StudioSession(), ())
 
         autosave.flush()
         autosave.flush()
@@ -46,9 +61,11 @@ class StudioSessionAutosaveTests(unittest.TestCase):
         self.assertEqual(failed.at(0)[0], "disk unavailable")
 
     def test_discard_prevents_a_removed_session_from_being_recreated(self) -> None:
-        saved: list[tuple[str, StudioSession]] = []
-        autosave = StudioSessionAutosave(lambda song_id, session: saved.append((song_id, session)))
-        autosave.queue("song-1", StudioSession())
+        saved: list[tuple[str, StudioSession, tuple[object, ...]]] = []
+        autosave = StudioSessionAutosave(
+            lambda song_id, session, assets: saved.append((song_id, session, assets))
+        )
+        autosave.queue("song-1", StudioSession(), ())
 
         autosave.discard("song-1")
         autosave.flush()

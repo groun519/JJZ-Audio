@@ -132,6 +132,11 @@ class LogDrawer(AppOverlayFrame):
         self.copy_diagnostics_button = FeedbackButton("Copy diagnostics")
         self.copy_diagnostics_button.setObjectName("LogDrawerActionButton")
         self.copy_diagnostics_button.clicked.connect(self._copy_selected_diagnostics)
+        self.diagnostic_package_button = FeedbackButton("Diagnostic file")
+        self.diagnostic_package_button.setObjectName("LogDrawerActionButton")
+        self.diagnostic_package_button.clicked.connect(
+            self._open_selected_diagnostic_package
+        )
         self.open_task_log_button = SvgIconButton("folder", size=32)
         self.open_task_log_button.setObjectName("LogDrawerTaskFolderButton")
         self.open_task_log_button.setToolTip("Open task log folder")
@@ -144,6 +149,7 @@ class LogDrawer(AppOverlayFrame):
         diagnostic_actions.setSpacing(8)
         diagnostic_actions.addWidget(self.diagnostic_status_label, 1)
         diagnostic_actions.addWidget(self.open_task_log_button)
+        diagnostic_actions.addWidget(self.diagnostic_package_button)
         diagnostic_actions.addWidget(self.copy_diagnostics_button)
 
         layout.addWidget(self.activity_list)
@@ -268,6 +274,7 @@ class LogDrawer(AppOverlayFrame):
             and self._queue.diagnostics is not None
         )
         self.copy_diagnostics_button.setEnabled(available)
+        self.diagnostic_package_button.setEnabled(available)
         self.open_task_log_button.setEnabled(available)
         self.diagnostic_status_label.clear()
 
@@ -284,6 +291,18 @@ class LogDrawer(AppOverlayFrame):
         task = self._tasks_by_id.get(self._selected_task_id() or "")
         if task is not None and task.diagnostic_path is not None:
             self.open_location_requested.emit(task.diagnostic_path)
+
+    def _open_selected_diagnostic_package(self) -> None:
+        task_id = self._selected_task_id()
+        diagnostics = self._queue.diagnostics
+        if not task_id or diagnostics is None:
+            return
+        archive = diagnostics.build_archive(task_id)
+        if archive is None:
+            self.diagnostic_status_label.setText(tr("Diagnostic file unavailable"))
+            return
+        self.diagnostic_status_label.setText(tr("Diagnostic file ready"))
+        self.open_location_requested.emit(archive)
 
     def _show_tab(self, index: int) -> None:
         self.page_stack.setCurrentIndex(index)

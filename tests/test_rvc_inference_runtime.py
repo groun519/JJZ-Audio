@@ -182,6 +182,39 @@ class RvcInferenceRuntimeTests(unittest.TestCase):
             self.assertIn("RMVPE probe", capabilities.directml_detail)
             runtime_module.clear_rvc_inference_probe_cache()
 
+    def test_directml_rmvpe_probe_stages_model_in_its_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            python = root / "runtime" / "python.exe"
+            script = root / "extract_f0_rmvpe.py"
+            model = root / "runtime" / "rmvpe.onnx"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            script.write_bytes(b"script")
+            model.write_bytes(b"directml-rmvpe")
+
+            def complete_probe(args, **kwargs):
+                workspace = Path(kwargs["cwd"])
+                self.assertEqual((workspace / "rmvpe.onnx").read_bytes(), b"directml-rmvpe")
+                probe_root = Path(args[5])
+                for relative in (
+                    Path("2a_f0") / "probe.wav.npy",
+                    Path("2b-f0nsf") / "probe.wav.npy",
+                ):
+                    target = probe_root / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"pitch")
+                return CommandResult(tuple(args), 0, "", "")
+
+            with patch.object(runtime_module, "run_command", side_effect=complete_probe):
+                detail = runtime_module._run_directml_rmvpe_probe(
+                    python,
+                    root,
+                    "privateuseone:0",
+                )
+
+            self.assertEqual(detail, "")
+
     def test_legacy_cuda_preference_uses_directml_after_amd_migration(self) -> None:
         capabilities = _capabilities(cuda_available=False, cuda_ready=False)
         capabilities = replace(
