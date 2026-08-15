@@ -20,9 +20,9 @@
 </p>
 
 > [!NOTE]
-> This document describes the released **JJZero Audio 0.3.6**. Download the installer from [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest).
+> This document describes the released **JJZero Audio 0.3.7**. Download the installer from [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest).
 
-See the [0.3.6 release notes](docs/releases/0.3.6.md) for the updater recovery, plain RVC ZIP import, and AMD DirectML fixes.
+See the [0.3.7 release notes](docs/releases/0.3.7.md) for the single-device RVC training hotfix.
 
 ## One Connected Workflow
 

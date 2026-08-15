@@ -523,6 +523,8 @@ if __name__ == "__main__" and (
 ):
     print("JJZERO_SINGLE_DEVICE_TRAINING", flush=True)
 
+    _jjzero_original_training_process = torch.multiprocessing.Process
+
     class _JjzeroSingleProcessDistributedDataParallel(torch.nn.Module):
         def __init__(self, module, *args, **kwargs):
             super().__init__()
@@ -561,8 +563,19 @@ if __name__ == "__main__" and (
             return False
 
 
+    def _jjzero_training_process(*args, **kwargs):
+        target = kwargs.get("target")
+        if target is None and len(args) > 1:
+            target = args[1]
+        if getattr(target, "__name__", "") == "run":
+            return _JjzeroInlineTrainingProcess(*args, **kwargs)
+        return _jjzero_original_training_process(*args, **kwargs)
+
+
     torch.distributed.init_process_group = _jjzero_skip_single_process_group
-    torch.multiprocessing.Process = _JjzeroInlineTrainingProcess
+    # Only the RVC rank process runs inline. DataLoader must keep the real
+    # multiprocessing Process or its first worker blocks the training thread.
+    torch.multiprocessing.Process = _jjzero_training_process
     torch.nn.parallel.DistributedDataParallel = (
         _JjzeroSingleProcessDistributedDataParallel
     )

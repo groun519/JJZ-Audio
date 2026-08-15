@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.3.7 - 2026-08-16
+
+### Fixed
+
+- Fixed single-device RVC training that could stall before the first batch when the training compatibility layer replaced DataLoader worker processes.
+- Limited inline execution to the RVC rank process while preserving real windowless multiprocessing for DataLoader workers.
+
+### Quality
+
+- Added a bundled-runtime integration test that starts parallel DataLoader workers and verifies that a real first batch and worker diagnostics are produced.
+
 ## 0.3.6 - 2026-08-15
 
 ### Added

@@ -239,6 +239,7 @@ class RvcScriptLauncherTests(unittest.TestCase):
                         persistent_workers=False,
                         timeout_seconds=60,
                     ),
+                    rocm_single_process_training=True,
                     diagnostic_directory=diagnostics,
                     diagnostic_attempt_id="integration-test",
                 )
@@ -370,21 +371,38 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 
-if __name__ == "__main__":
+def run(rank, world_size, output_path):
     loader = DataLoader(
         TensorDataset(torch.arange(4)),
         batch_size=1,
         num_workers=0,
     )
     values = [str(int(batch[0].item())) for batch in loader]
-    Path("loader-result.txt").write_text(",".join(values), encoding="utf-8")
+    Path(output_path).write_text(",".join(values), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    process = torch.multiprocessing.Process(
+        target=run,
+        args=(0, 1, "loader-result.txt"),
+    )
+    process.start()
+    process.join()
+    if process.exitcode != 0:
+        raise SystemExit(process.exitcode)
 """
 
 _ROCM_SINGLE_PROCESS_PROBE = """\
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 events = []
-process = torch.multiprocessing.Process(target=lambda: events.append("ran"))
+
+
+def run():
+    events.append("ran")
+
+
+process = torch.multiprocessing.Process(target=run)
 process.start()
 process.join()
 model = DDP(torch.nn.Linear(3, 2), device_ids=[0])
