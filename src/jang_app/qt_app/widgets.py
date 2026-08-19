@@ -1566,9 +1566,19 @@ def _track_button_palette(
     if object_name in {
         "SeparationPairButton",
         "StudioSplitButton",
+        "VocalReferenceModeButton",
         "WorkSongRevealButton",
     }:
         return _separation_pair_button_palette(
+            theme_mode,
+            is_checked,
+            is_enabled,
+            is_hovered,
+            is_pressed,
+        )
+
+    if object_name == "StudioSnapButton":
+        return _studio_snap_button_palette(
             theme_mode,
             is_checked,
             is_enabled,
@@ -1657,6 +1667,67 @@ def _separation_pair_button_palette(
             "active_pressed": QColor("#efd27b"),
             "active_border": QColor("#c38d13"),
             "active_icon": QColor("#8a6200"),
+            "disabled": QColor("#aaa397"),
+        }
+
+    if not is_enabled:
+        return {
+            "background": colors["idle"],
+            "border": colors["idle_border"],
+            "icon": colors["disabled"],
+        }
+    if is_checked:
+        background = (
+            colors["active_pressed"]
+            if is_pressed
+            else colors["active_hover"]
+            if is_hovered
+            else colors["active"]
+        )
+        return {
+            "background": background,
+            "border": colors["active_border"],
+            "icon": colors["active_icon"],
+        }
+    return {
+        "background": colors["idle_hover"] if is_hovered or is_pressed else colors["idle"],
+        "border": colors["idle_border"],
+        "icon": colors["idle_icon"],
+    }
+
+
+def _studio_snap_button_palette(
+    theme_mode: str,
+    is_checked: bool,
+    is_enabled: bool,
+    is_hovered: bool,
+    is_pressed: bool,
+) -> dict[str, QColor]:
+    transparent = QColor(0, 0, 0, 0)
+    if theme_mode == "dark":
+        colors = {
+            "idle": transparent,
+            "idle_border": QColor("#484843"),
+            "idle_icon": QColor("#aaa8a1"),
+            "idle_hover": QColor("#30302e"),
+            "active": QColor("#183a35"),
+            "active_hover": QColor("#204941"),
+            "active_pressed": QColor("#28564c"),
+            "active_border": QColor("#4f8f7d"),
+            "active_icon": QColor("#75d9bc"),
+            "disabled": QColor("#6c6b66"),
+        }
+    else:
+        colors = {
+            "idle": transparent,
+            "idle_border": QColor("#d8d0c2"),
+            "idle_icon": QColor("#6e6a61"),
+            "idle_hover": QColor("#e7e1d5"),
+            "active": QColor("#dcefe8"),
+            "active_hover": QColor("#cbe5dc"),
+            "active_pressed": QColor("#b8d9ce"),
+            "active_border": QColor("#70a995"),
+            "active_icon": QColor("#236b58"),
             "disabled": QColor("#aaa397"),
         }
 
@@ -2316,9 +2387,10 @@ _TRACK_ICON_SVGS = {
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
         'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.2" '
         'stroke-linecap="round" stroke-linejoin="round">'
-        '<path d="M6 3v8a6 6 0 0 0 12 0V3"/>'
-        '<path d="M6 7h4V3H6z"/>'
-        '<path d="M14 7h4V3h-4z"/>'
+        '<path d="m6 15-4-4 6.5-6.5a7.07 7.07 0 0 1 10 10L12 21l-4-4 '
+        '6.5-6.5a1.41 1.41 0 0 0-2-2z"/>'
+        '<path d="m5 8 4 4"/>'
+        '<path d="m12 15 4 4"/>'
         "</svg>"
     ),
     "cloud_check": (
@@ -2338,6 +2410,19 @@ _TRACK_ICON_SVGS = {
         '<path d="m8.6 8.5 11.4 7"/>'
         '<path d="m8.6 15.5 4-2.5"/>'
         '<path d="m15.2 9.4 4.8-3"/>'
+        "</svg>"
+    ),
+    "range": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.1" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M5 5v14"/>'
+        '<path d="M19 5v14"/>'
+        '<path d="M8 8h8"/>'
+        '<path d="m8 8 2-2"/>'
+        '<path d="m8 8 2 2"/>'
+        '<path d="m16 8-2-2"/>'
+        '<path d="m16 8-2 2"/>'
         "</svg>"
     ),
     "play": (

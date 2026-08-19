@@ -437,6 +437,16 @@ class SongLibrary:
         sound_sets.sort(key=lambda item: item[0], reverse=True)
         return [sound_set for _added_at, sound_set in sound_sets]
 
+    def refresh_output_sound_sets(self) -> list[OutputSoundSet]:
+        """Reload registered output folders before returning the catalog."""
+        for package in self._store.packages():
+            for output in package.outputs:
+                self._cache_output_sound_set(
+                    package.folder / VOCAL_STAGE,
+                    output.job_dir,
+                )
+        return self.output_sound_sets()
+
     def _cache_output_sound_set(
         self,
         output_root: Path,

@@ -41,6 +41,10 @@ from jang_app.version import __version__
 
 
 ProgressReporter = Callable[[int], None]
+ComponentPackageResolver = Callable[
+    [ReleaseComponent, ProgressReporter | None],
+    tuple[Path, ...],
+]
 
 
 class RuntimeProvisionStage(StrEnum):
@@ -84,13 +88,14 @@ def provision_ai_runtime(
         runtime_ready=False,
         desired_rvc_profile=preferred_profile,
     )
-    artifacts = plan.artifacts
+    artifacts = plan.runtime_artifacts
     cache = paths.cache_dir / "runtime" / release.version
     packages = _download_runtime_artifacts(artifacts, cache, progress, activity)
-    installations = install_update_runtime_components(
+    installations = provision_update_runtime_components(
         plan,
         packages,
         paths.runtime_root,
+        cache_dir=cache,
         progress=lambda value: _report(progress, 70 + int(value * 0.3)),
         activity=activity,
     )
@@ -172,6 +177,74 @@ def install_update_runtime_components(
     progress: ProgressReporter | None = None,
     activity: ActivityReporter | None = None,
 ) -> tuple[object, ...]:
+    def resolve_local(
+        component: ReleaseComponent,
+        component_progress: ProgressReporter | None,
+    ) -> tuple[Path, ...]:
+        packages = _component_packages(component, downloaded)
+        _report(component_progress, 100)
+        return packages
+
+    return _install_update_runtime_components(
+        plan,
+        runtime_root,
+        resolve_local,
+        progress=progress,
+        activity=activity,
+    )
+
+
+def provision_update_runtime_components(
+    plan: UpdatePlan,
+    downloaded: tuple[Path, ...],
+    runtime_root: Path,
+    *,
+    cache_dir: Path,
+    progress: ProgressReporter | None = None,
+    activity: ActivityReporter | None = None,
+) -> tuple[object, ...]:
+    available = list(downloaded)
+    fetched: list[Path] = []
+
+    def resolve_online(
+        component: ReleaseComponent,
+        component_progress: ProgressReporter | None,
+    ) -> tuple[Path, ...]:
+        try:
+            packages = _component_packages(component, tuple(available))
+        except UpdateError:
+            packages = _download_component_artifacts(
+                component.artifacts,
+                cache_dir,
+                component_progress,
+                activity,
+            )
+            available.extend(packages)
+            fetched.extend(packages)
+        else:
+            _report(component_progress, 100)
+        return packages
+
+    installed = _install_update_runtime_components(
+        plan,
+        runtime_root,
+        resolve_online,
+        progress=progress,
+        activity=activity,
+    )
+    if fetched:
+        discard_cached_artifacts(tuple(fetched), cache_dir)
+    return installed
+
+
+def _install_update_runtime_components(
+    plan: UpdatePlan,
+    runtime_root: Path,
+    resolve_packages: ComponentPackageResolver,
+    *,
+    progress: ProgressReporter | None = None,
+    activity: ActivityReporter | None = None,
+) -> tuple[object, ...]:
     operations = int(plan.runtime_required) + int(plan.rvc_profile_required)
     if operations == 0:
         _report(progress, 100)
@@ -186,12 +259,15 @@ def install_update_runtime_components(
         runtime = plan.release.ai_runtime
         if runtime is None:
             raise UpdateError("The audio engine component is unavailable.")
-        packages = _component_packages(runtime, downloaded)
+        packages = resolve_packages(
+            runtime,
+            lambda value: operation_progress(int(value * 0.2)),
+        )
         unpacked_size = _runtime_unpacked_size(packages)
         detail = "Installing audio tools and model components"
 
         def runtime_progress(value: int) -> None:
-            operation_progress(value)
+            operation_progress(20 + int(value * 0.8))
             _report_activity(
                 activity,
                 RuntimeProvisionStage.INSTALLING,
@@ -214,8 +290,8 @@ def install_update_runtime_components(
         installed.append(
             _install_profile_chain(
                 plan,
-                downloaded,
                 runtime_root,
+                resolve_packages,
                 progress=operation_progress,
                 activity=activity,
             )
@@ -226,8 +302,8 @@ def install_update_runtime_components(
 
 def _install_profile_chain(
     plan: UpdatePlan,
-    downloaded: tuple[Path, ...],
     runtime_root: Path,
+    resolve_packages: ComponentPackageResolver,
     *,
     progress: ProgressReporter | None,
     activity: ActivityReporter | None = None,
@@ -239,7 +315,15 @@ def _install_profile_chain(
     attempts = [plan.rvc_profile]
     if plan.rvc_fallback_profile and plan.rvc_fallback_profile not in attempts:
         attempts.append(plan.rvc_fallback_profile)
-    for profile in attempts:
+    attempt_count = max(1, len(attempts))
+    for attempt_index, profile in enumerate(attempts):
+        attempt_start = int(attempt_index * 100 / attempt_count)
+        attempt_end = int((attempt_index + 1) * 100 / attempt_count)
+        attempt_span = attempt_end - attempt_start
+
+        def attempt_progress(value: int) -> None:
+            _report(progress, attempt_start + int(attempt_span * value / 100))
+
         component = plan.release.rvc_runtime_profile(profile)
         if component is None:
             if not rvc_profile_requires_overlay(profile):
@@ -247,13 +331,15 @@ def _install_profile_chain(
             failures.append(f"RVC {profile} runtime component is unavailable.")
             continue
         try:
-            packages = _component_packages(component, downloaded)
+            packages = resolve_packages(
+                component,
+                lambda value: attempt_progress(int(value * 0.35)),
+            )
             unpacked_size = _runtime_unpacked_size(packages)
             detail = f"Configuring the {profile} accelerator"
 
             def profile_progress(value: int) -> None:
-                if progress is not None:
-                    progress(value)
+                attempt_progress(35 + int(value * 0.65))
                 _report_activity(
                     activity,
                     RuntimeProvisionStage.CONFIGURING,
@@ -374,6 +460,23 @@ def _download_runtime_artifacts(
     progress: ProgressReporter | None,
     activity: ActivityReporter | None = None,
 ) -> tuple[Path, ...]:
+    return _download_component_artifacts(
+        artifacts,
+        cache,
+        lambda value: _report(progress, 5 + int(value * 0.65)),
+        activity,
+    )
+
+
+def _download_component_artifacts(
+    artifacts: tuple[ReleaseArtifact, ...],
+    cache: Path,
+    progress: ProgressReporter | None,
+    activity: ActivityReporter | None = None,
+) -> tuple[Path, ...]:
+    if not artifacts:
+        _report(progress, 100)
+        return ()
     total_size = sum(artifact.size for artifact in artifacts)
     completed = 0
     packages: list[Path] = []
@@ -387,7 +490,7 @@ def _download_runtime_artifacts(
             offset: int = base,
         ) -> None:
             current = offset + int(item.size * value / 100)
-            _report(progress, 5 + int(current * 65 / total_size))
+            _report(progress, int(current * 100 / total_size))
             _report_activity(
                 activity,
                 RuntimeProvisionStage.DOWNLOADING,
@@ -403,6 +506,7 @@ def _download_runtime_artifacts(
         )
         packages.append(package)
         completed += artifact.size
+    _report(progress, 100)
     return tuple(packages)
 
 

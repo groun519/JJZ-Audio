@@ -18,17 +18,164 @@ from jang_app.services.studio_timeline import (
     StudioTimelineError,
     add_studio_clip,
     add_studio_track,
+    move_studio_clip,
     remove_studio_track,
+    resolve_studio_clip_position,
+    resolve_studio_clip_trim,
     set_studio_clip_mix,
     set_studio_clip_media,
     set_studio_clip_pitch,
+    set_studio_clip_timing,
     set_studio_track_collapsed,
     set_studio_track_mix,
     split_studio_clip,
+    trim_studio_clip,
 )
 
 
 class StudioTimelineTests(unittest.TestCase):
+    def test_add_clip_snaps_to_the_nearest_legal_track_boundary(self) -> None:
+        existing = StudioClip("first", _asset("first"), 1_000, 0, 1_000)
+
+        after = add_studio_clip(
+            _session(existing),
+            "track-audio",
+            _asset("new"),
+            500,
+            timeline_start_ms=1_800,
+        )
+        before = add_studio_clip(
+            _session(existing),
+            "track-audio",
+            _asset("new"),
+            500,
+            timeline_start_ms=700,
+        )
+
+        added_after = next(clip for clip in after.tracks[0].clips if clip.clip_id != "first")
+        added_before = next(clip for clip in before.tracks[0].clips if clip.clip_id != "first")
+        self.assertEqual(added_after.timeline_start_ms, 2_000)
+        self.assertEqual(added_before.timeline_start_ms, 500)
+
+    def test_clip_boundaries_can_touch_without_being_treated_as_overlap(self) -> None:
+        existing = StudioClip("first", _asset("first"), 0, 0, 1_000)
+
+        position = resolve_studio_clip_position(
+            _session(existing),
+            "track-audio",
+            timeline_start_ms=1_000,
+            duration_ms=500,
+        )
+
+        self.assertEqual(position, 1_000)
+
+    def test_position_resolver_skips_a_contiguous_block_of_clips(self) -> None:
+        first = StudioClip("first", _asset("first"), 0, 0, 1_000)
+        second = StudioClip("second", _asset("second"), 1_000, 0, 1_000)
+
+        position = resolve_studio_clip_position(
+            _session(first, second),
+            "track-audio",
+            timeline_start_ms=900,
+            duration_ms=500,
+        )
+
+        self.assertEqual(position, 2_000)
+
+    def test_move_clip_ignores_itself_and_snaps_against_target_neighbors(self) -> None:
+        first = StudioClip("first", _asset("first"), 0, 0, 1_000)
+        second = StudioClip("second", _asset("second"), 2_000, 0, 1_000)
+
+        updated = move_studio_clip(
+            _session(first, second),
+            "first",
+            track_id="track-audio",
+            timeline_start_ms=1_600,
+        )
+
+        moved = next(clip for clip in updated.tracks[0].clips if clip.clip_id == "first")
+        self.assertEqual(moved.timeline_start_ms, 1_000)
+
+    def test_trim_edges_stop_at_adjacent_clip_boundaries(self) -> None:
+        previous = StudioClip("previous", _asset("previous"), 0, 0, 1_000)
+        middle = StudioClip("middle", _asset("middle"), 1_500, 1_000, 2_000)
+        following = StudioClip("following", _asset("following"), 3_000, 0, 1_000)
+        session = _session(previous, middle, following)
+
+        left = resolve_studio_clip_trim(
+            session,
+            "middle",
+            source_start_ms=0,
+            source_end_ms=2_000,
+            preserve_timeline_end=True,
+        )
+        right = resolve_studio_clip_trim(
+            session,
+            "middle",
+            source_start_ms=1_000,
+            source_end_ms=3_000,
+        )
+
+        self.assertEqual((left.timeline_start_ms, left.source_start_ms), (1_000, 500))
+        self.assertEqual(left.timeline_end_ms, middle.timeline_end_ms)
+        self.assertEqual((right.source_end_ms, right.timeline_end_ms), (2_500, 3_000))
+
+    def test_trim_and_atomic_timing_edits_cannot_create_new_overlap(self) -> None:
+        first = StudioClip("first", _asset("first"), 0, 0, 1_000)
+        second = StudioClip("second", _asset("second"), 2_000, 0, 1_000)
+        session = _session(first, second)
+
+        trimmed = trim_studio_clip(
+            session,
+            "first",
+            source_start_ms=0,
+            source_end_ms=3_000,
+        )
+        edited = set_studio_clip_timing(
+            session,
+            "first",
+            timeline_start_ms=1_600,
+            source_start_ms=0,
+            source_end_ms=1_000,
+        )
+
+        self.assertEqual(trimmed.tracks[0].clips[0].timeline_end_ms, 2_000)
+        moved = next(clip for clip in edited.tracks[0].clips if clip.clip_id == "first")
+        self.assertEqual(moved.timeline_start_ms, 1_000)
+
+    def test_existing_legacy_overlap_is_not_rewritten_just_by_resolving_a_position(self) -> None:
+        first = StudioClip("first", _asset("first"), 0, 0, 2_000)
+        second = StudioClip("second", _asset("second"), 1_000, 0, 2_000)
+        session = _session(first, second)
+
+        resolve_studio_clip_position(
+            session,
+            "track-audio",
+            timeline_start_ms=500,
+            duration_ms=500,
+        )
+
+        self.assertEqual(session.tracks[0].clips, (first, second))
+        self.assertEqual(studio_timeline.studio_overlap_count(session), 1)
+
+    def test_overlap_count_treats_touching_clip_boundaries_as_legal(self) -> None:
+        first = StudioClip("first", _asset("first"), 0, 0, 1_000)
+        second = StudioClip("second", _asset("second"), 1_000, 0, 1_000)
+
+        self.assertEqual(studio_timeline.studio_overlap_count(_session(first, second)), 0)
+
+    def test_clips_on_different_tracks_may_share_the_same_time_range(self) -> None:
+        first = StudioClip("first", _asset("first"), 0, 0, 1_000)
+        second = StudioClip("second", _asset("second"), 0, 0, 1_000)
+        session = StudioSession(
+            tracks=(
+                StudioTrack("track-a", "Audio A", clips=(first,)),
+                StudioTrack("track-b", "Audio B", clips=(second,)),
+            )
+        )
+
+        self.assertEqual(studio_timeline.studio_overlap_count(session), 0)
+
     def test_media_settings_only_update_media_clips(self) -> None:
         clip = StudioClip(
             "media",
@@ -84,6 +231,62 @@ class StudioTimelineTests(unittest.TestCase):
             )
         with self.assertRaises(StudioTimelineError):
             studio_timeline.remove_studio_clip_effect(_session(clip), clip.clip_id, "missing")
+
+    def test_linked_effect_update_and_remove_follow_same_source_pieces(self) -> None:
+        shared_asset = _asset("shared")
+        other_asset = _asset("other")
+        effect = studio_session.StudioEffect("fx-linked", "reverb")
+        first = StudioClip("first", shared_asset, 0, 0, 1_000, effects=(effect,))
+        second = StudioClip("second", shared_asset, 1_000, 1_000, 2_000, effects=(effect,))
+        other = StudioClip("other", other_asset, 0, 0, 1_000, effects=(effect,))
+        session = _session(first, second, other)
+        changed = replace(effect, reverb=replace(effect.reverb, dry_wet_percent=61))
+
+        updated = studio_timeline.update_studio_clip_effect(session, "first", changed)
+        removed = studio_timeline.remove_studio_clip_effect(
+            updated,
+            "second",
+            effect.effect_id,
+        )
+
+        self.assertEqual(updated.tracks[0].clips[0].effects, (changed,))
+        self.assertEqual(updated.tracks[0].clips[1].effects, (changed,))
+        self.assertEqual(updated.tracks[0].clips[2].effects, (effect,))
+        self.assertEqual(removed.tracks[0].clips[0].effects, ())
+        self.assertEqual(removed.tracks[0].clips[1].effects, ())
+        self.assertEqual(removed.tracks[0].clips[2].effects, (effect,))
+
+    def test_studio_clip_siblings_are_limited_to_the_same_source_asset(self) -> None:
+        shared_asset = _asset("shared")
+        first = StudioClip("first", shared_asset, 0, 0, 1_000)
+        second = StudioClip("second", shared_asset, 1_000, 1_000, 2_000)
+        other = StudioClip("other", _asset("other"), 0, 0, 1_000)
+
+        siblings = studio_timeline.studio_clip_siblings(
+            _session(first, second, other),
+            "first",
+        )
+
+        self.assertEqual(tuple(clip.clip_id for clip in siblings), ("first", "second"))
+
+    def test_new_split_inherits_and_keeps_a_linked_effect(self) -> None:
+        shared_asset = _asset("shared")
+        effect = studio_session.StudioEffect("fx-linked", "delay")
+        first = StudioClip("first", shared_asset, 0, 0, 1_000, effects=(effect,))
+        second = StudioClip("second", shared_asset, 1_000, 1_000, 3_000, effects=(effect,))
+        split = split_studio_clip(
+            _session(first, second),
+            "second",
+            timeline_position_ms=2_000,
+        )
+        changed = replace(effect, delay=replace(effect.delay, dry_wet_percent=48))
+
+        updated = studio_timeline.update_studio_clip_effect(split, "first", changed)
+
+        self.assertEqual(len(updated.tracks[0].clips), 3)
+        self.assertTrue(
+            all(clip.effects == (changed,) for clip in updated.tracks[0].clips)
+        )
 
     def test_add_track_appends_an_empty_audio_track(self) -> None:
         session = _session(StudioClip("first", _asset("first"), 0, 0, 1_000))

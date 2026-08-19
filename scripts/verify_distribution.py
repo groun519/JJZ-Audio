@@ -105,6 +105,9 @@ def required_application_files(distribution: Path) -> tuple[Path, ...]:
         root / "_internal" / "jang_app" / "assets" / "jjzero_logo.svg",
         root / "_internal" / "jang_app" / "rvc_tools" / "rvc_artifact_worker.py",
         root / "_internal" / "jang_app" / "rvc_tools" / "jjzero_device.py",
+        root / "_internal" / "deno.exe",
+        root / "_internal" / "yt_dlp_ejs" / "yt" / "solver" / "core.min.js",
+        root / "_internal" / "yt_dlp_ejs" / "yt" / "solver" / "lib.min.js",
     )
 
 

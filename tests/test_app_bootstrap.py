@@ -8,6 +8,7 @@ from pathlib import Path
 from jang_app.services.app_bootstrap import prepare_app_environment
 from jang_app.services.app_paths import discover_app_paths
 from jang_app.services.update_cache import mark_update_cleanup_ready
+from jang_app.version import __version__
 
 
 class AppBootstrapTests(unittest.TestCase):
@@ -30,7 +31,7 @@ class AppBootstrapTests(unittest.TestCase):
             self.assertTrue(
                 mark_update_cleanup_ready(paths.cache_dir, completed, "0.3.0")
             )
-            partial = paths.cache_dir / "updates" / "0.3.1" / "setup.exe.part"
+            partial = paths.cache_dir / "updates" / __version__ / "setup.exe.part"
             partial.parent.mkdir(parents=True)
             partial.write_bytes(b"partial")
 

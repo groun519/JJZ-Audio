@@ -38,6 +38,9 @@ _STRUCTURED_DIAGNOSTICS = {
     "RVC_WORKER_EXITED": "An RVC data worker exited before returning training data.",
     "RVC_FIRST_BATCH_TIMEOUT": "RVC training timed out while waiting for the first data batch.",
     "RVC_TRAINING_PROCESS_STALLED": "The RVC training process stopped reporting progress.",
+    "RVC_NATIVE_RUNTIME_CRASH": (
+        "The RVC runtime stopped unexpectedly inside Windows or the GPU driver."
+    ),
 }
 
 
@@ -82,6 +85,19 @@ def classify_error(error: str) -> ErrorClassification:
             "RVC_FAISS_RUNTIME_CRASH",
             "The RVC index search runtime crashed while processing the audio.",
         )
+    if any(
+        marker in value
+        for marker in (
+            "windows fatal exception: access violation",
+            "0xc0000005",
+            "3221225477",
+            "rtluserthreadstart",
+        )
+    ):
+        return ErrorClassification(
+            "RVC_NATIVE_RUNTIME_CRASH",
+            "The RVC runtime stopped unexpectedly inside Windows or the GPU driver.",
+        )
     rules = (
         (
             (
@@ -124,6 +140,15 @@ def classify_error(error: str) -> ErrorClassification:
             ),
             "MODEL_SHARE_PACKAGE_INVALID",
             "The downloaded model package is missing or contains invalid RVC model data.",
+        ),
+        (
+            (
+                "param 'initial_lr' is not specified",
+                "jjzero_checkpoint_load_failed",
+                "could not restore the saved training checkpoint",
+            ),
+            "RVC_CHECKPOINT_RESUME_FAILED",
+            "The saved RVC checkpoint could not restore its training state.",
         ),
         (
             ("unicodeencodeerror", "codec can't encode character", "codec cannot encode character"),

@@ -24,6 +24,12 @@ _LOADER_TIMEOUT_MARKERS = (
     "dataloader timed out",
     "data loader timed out",
 )
+_NATIVE_CRASH_MARKERS = (
+    "windows fatal exception: access violation",
+    "0xc0000005",
+    "3221225477",
+    "rtluserthreadstart",
+)
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,11 @@ class RvcTrainingDiagnostics:
             return "RVC_FIRST_BATCH_TIMEOUT"
         process_text = _read_process_diagnostics(attempt.folder / "processes")
         process_lowered = process_text.casefold()
+        if any(
+            marker in lowered or marker in process_lowered
+            for marker in _NATIVE_CRASH_MARKERS
+        ):
+            return "RVC_NATIVE_RUNTIME_CRASH"
         if "data_loader_exception" in process_lowered:
             if "modulenotfounderror" in process_lowered or "importerror" in process_lowered:
                 return "RVC_WORKER_IMPORT_FAILED"
@@ -227,6 +238,7 @@ class RvcTrainingAttemptMonitor:
         self._last_output_at = self._started_at
         self._loader_started_at = 0.0
         self._first_batch_ready_at = 0.0
+        self._reported_dead_workers: set[int] = set()
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
@@ -292,6 +304,27 @@ class RvcTrainingAttemptMonitor:
                     f"elapsed={round(waiting_seconds)} "
                     f"workers_alive={alive} workers_seen={len(workers)}"
                 )
+            self._report_dead_workers(workers)
+
+    def _report_dead_workers(
+        self,
+        workers: tuple[RvcTrainingProcessStatus, ...],
+    ) -> None:
+        if self._activity_callback is None:
+            return
+        for worker in workers:
+            if worker.alive or worker.pid in self._reported_dead_workers:
+                continue
+            self._reported_dead_workers.add(worker.pid)
+            self._event(
+                "data_worker_exited",
+                pid=worker.pid,
+                exit_code=worker.exit_code,
+            )
+            self._activity_callback(
+                "JJZERO_DATA_LOADER_WORKER_EXITED "
+                f"pid={worker.pid} exit_code={worker.exit_code}"
+            )
 
     def _process_statuses(self) -> tuple[RvcTrainingProcessStatus, ...]:
         if self._attempt is None:

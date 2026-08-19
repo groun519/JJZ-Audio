@@ -57,15 +57,16 @@ def run_data_migrations(paths: AppPaths) -> DataMigrationResult:
         newly_applied.append(migration.migration_id)
 
     catalog = synchronize_library_catalog(paths)
-    write_json_atomic(
-        state_path,
-        {
-            "version": MIGRATION_STATE_VERSION,
-            "schema": DATA_SCHEMA_VERSION,
-            "applied": sorted(applied_ids),
-            "updated_at": datetime.now(UTC).isoformat(),
-        },
-    )
+    if newly_applied or not state_path.is_file() or previous_schema != DATA_SCHEMA_VERSION:
+        write_json_atomic(
+            state_path,
+            {
+                "version": MIGRATION_STATE_VERSION,
+                "schema": DATA_SCHEMA_VERSION,
+                "applied": sorted(applied_ids),
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        )
     return DataMigrationResult(
         previous_schema=previous_schema,
         current_schema=DATA_SCHEMA_VERSION,

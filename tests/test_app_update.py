@@ -305,7 +305,7 @@ class AppUpdateTests(unittest.TestCase):
 
         self.assertTrue(plan.runtime_required)
 
-    def test_supported_amd_downloads_rocm_and_directml_fallback_together(self) -> None:
+    def test_supported_amd_downloads_rocm_before_directml_fallback(self) -> None:
         release = _amd_release()
 
         plan = create_update_plan(
@@ -321,7 +321,11 @@ class AppUpdateTests(unittest.TestCase):
         self.assertFalse(plan.runtime_required)
         self.assertEqual(
             [artifact.name for artifact in plan.artifacts],
-            ["rocm.zip", "directml.zip"],
+            ["rocm.zip"],
+        )
+        self.assertEqual(
+            [artifact.name for artifact in plan.fallback_runtime_artifacts],
+            ["directml.zip"],
         )
 
     def test_split_runtime_downloads_shared_engine_and_one_cu118_profile(self) -> None:

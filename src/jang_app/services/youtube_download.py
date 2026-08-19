@@ -9,6 +9,7 @@ from jang_app.config import DOWNLOAD_OUTPUT_DIR, FFMPEG_BIN_DIR, SUPPORTED_AUDIO
 from jang_app.services.app_logging import get_logger
 from jang_app.services.environment import MissingExecutableError, require_executable
 from jang_app.services.file_names import safe_filename_stem, unique_path
+from jang_app.services.youtube_runtime import YouTubeRuntimeError, youtube_dl_runtime_options
 
 
 class YouTubeDownloadError(RuntimeError):
@@ -48,6 +49,11 @@ def download_youtube_audio(
         if progress_callback is not None:
             progress_callback(max(0, min(100, value)))
 
+    try:
+        runtime_options = youtube_dl_runtime_options()
+    except YouTubeRuntimeError as exc:
+        raise YouTubeDownloadError(str(exc)) from exc
+
     options = {
         "format": "bestaudio[ext=m4a]/bestaudio/best",
         "outtmpl": str(target_dir / "%(id)s.%(ext)s"),
@@ -66,6 +72,7 @@ def download_youtube_audio(
         ],
         "progress_hooks": [_build_progress_hook(report)],
         "postprocessor_hooks": [_build_postprocessor_hook(report)],
+        **runtime_options,
     }
     options = {key: value for key, value in options.items() if value is not None}
 

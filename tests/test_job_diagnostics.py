@@ -95,6 +95,12 @@ class JobDiagnosticsTests(unittest.TestCase):
             "RVC_FAISS_RUNTIME_CRASH",
         )
         self.assertEqual(
+            classify_error(
+                "00007FF8530AAD6C ntdll.dll!RtlUserThreadStart"
+            ).code,
+            "RVC_NATIVE_RUNTIME_CRASH",
+        )
+        self.assertEqual(
             classify_error("CUDA error: no kernel image is available for execution").code,
             "CUDA_ARCHITECTURE_UNSUPPORTED",
         )
@@ -142,6 +148,12 @@ class JobDiagnosticsTests(unittest.TestCase):
         self.assertEqual(
             classify_error("The shared ZIP has no RVC inference PTH.").code,
             "MODEL_SHARE_PACKAGE_INVALID",
+        )
+        self.assertEqual(
+            classify_error(
+                "KeyError: param 'initial_lr' is not specified when resuming an optimizer"
+            ).code,
+            "RVC_CHECKPOINT_RESUME_FAILED",
         )
         self.assertEqual(
             classify_error("UnicodeEncodeError: 'cp949' codec can't encode character").code,

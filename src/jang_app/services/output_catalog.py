@@ -87,9 +87,14 @@ def _converted_vocal_paths(wav_files: tuple[Path, ...]) -> tuple[Path, ...]:
     converted = (
         path.resolve()
         for path in wav_files
-        if path.name.startswith(_CONVERTED_VOCAL_PREFIXES)
+        if _is_converted_vocal_path(path)
     )
     return tuple(sorted(converted, key=_path_mtime, reverse=True))
+
+
+def _is_converted_vocal_path(path: Path) -> bool:
+    name = path.name.casefold()
+    return name.startswith(_CONVERTED_VOCAL_PREFIXES) or "_rvc_" in path.stem.casefold()
 
 
 def _latest_mtime(job_dir: Path, wav_files: tuple[Path, ...]) -> float:

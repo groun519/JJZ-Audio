@@ -23,7 +23,8 @@ class StudioFxPoolTests(unittest.TestCase):
         self.assertIsNotNone(self.studio_fx_pool)
         pool = self.studio_fx_pool.StudioFxPool()
 
-        self.assertEqual(len(pool.cards), 12)
+        self.assertEqual(len(pool.cards), 13)
+        self.assertIn("preset:lush", pool.cards)
         self.assertIn("preset:karaoke", pool.cards)
         self.assertIn("preset:animatronic", pool.cards)
         self.assertIn("radio_filter", pool.cards)
@@ -47,7 +48,7 @@ class StudioFxPoolTests(unittest.TestCase):
             bytes(card.mime_data().data(self.studio_fx_pool.STUDIO_EFFECT_MIME)).decode("utf-8"),
             "preset:broken_robot",
         )
-        self.assertEqual(pool.count_label.text(), "12")
+        self.assertEqual(pool.count_label.text(), "13")
         pool.close()
 
     def test_fx_pool_is_expanded_and_has_its_own_scroll_area(self) -> None:

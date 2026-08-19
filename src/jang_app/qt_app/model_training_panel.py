@@ -29,7 +29,7 @@ from jang_app.qt_app.widgets import (
 from jang_app.qt_app.workflow_progress import WorkflowProgress, WorkflowStage
 from jang_app.services.audio_metadata import format_duration
 from jang_app.services.i18n import tr
-from jang_app.services.job_diagnostics import diagnostic_task
+from jang_app.services.job_diagnostics import classify_error, diagnostic_task
 from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.rvc_training_activity import training_stage_detail
@@ -945,7 +945,12 @@ class ModelTrainingPanel(QWidget):
     ) -> None:
         set_translated_text(self.status_label, "Failed")
         self.status_label.setProperty("phase", RvcTrainingPhase.FAILED.value)
-        self.stage_label.setText(_last_error_line(error))
+        classification = classify_error(error)
+        self.stage_label.setText(
+            classification.summary
+            if classification.code != "UNEXPECTED_ERROR"
+            else _last_error_line(error)
+        )
         self.stage_label.setToolTip(error)
         self._set_recovery(
             error,

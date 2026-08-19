@@ -326,6 +326,80 @@ _COMPACT_RVC_CHECKPOINT_BOOTSTRAP = '''import torch
 from lib.train import utils as _jjzero_train_utils
 
 
+_jjzero_original_load_checkpoint = getattr(
+    _jjzero_train_utils,
+    "load_checkpoint",
+    None,
+)
+
+
+def _jjzero_load_checkpoint(
+    checkpoint_path,
+    model,
+    optimizer=None,
+    load_opt=1,
+):
+    # Compact JJZero checkpoints intentionally omit the optimizer state. RVC's
+    # broad resume exception otherwise hides that load error and starts again
+    # from the pretrained model at epoch one.
+    optimizer_restored = False
+    try:
+        result = _jjzero_original_load_checkpoint(
+            checkpoint_path,
+            model,
+            optimizer,
+            load_opt=load_opt,
+        )
+        optimizer_restored = optimizer is not None and bool(load_opt)
+    except BaseException:
+        if optimizer is None or not load_opt:
+            raise
+        try:
+            result = _jjzero_original_load_checkpoint(
+                checkpoint_path,
+                model,
+                optimizer,
+                load_opt=0,
+            )
+        except BaseException as exc:
+            print(
+                "JJZERO_CHECKPOINT_LOAD_FAILED "
+                f"file={Path(checkpoint_path).name} "
+                f"type={type(exc).__name__} detail={exc}",
+                flush=True,
+            )
+            raise
+    iteration = result[3] if len(result) > 3 else 0
+    optimizer_needs_schedule = optimizer is not None and (
+        not optimizer_restored
+        or any(
+            "initial_lr" not in parameter_group
+            for parameter_group in optimizer.param_groups
+        )
+    )
+    if optimizer_needs_schedule:
+        learning_rate = float(result[2])
+        training = getattr(globals().get("hps"), "train", None)
+        decay = float(getattr(training, "lr_decay", 1.0))
+        completed_epochs = max(0, int(iteration) - 1)
+        resumed_learning_rate = learning_rate * (decay ** completed_epochs)
+        for parameter_group in optimizer.param_groups:
+            parameter_group["initial_lr"] = learning_rate
+            parameter_group["lr"] = resumed_learning_rate
+        print(
+            "JJZERO_CHECKPOINT_OPTIMIZER_REBUILT "
+            f"file={Path(checkpoint_path).name} epoch={iteration} "
+            f"lr={resumed_learning_rate:.12g}",
+            flush=True,
+        )
+    print(
+        "JJZERO_CHECKPOINT_LOADED "
+        f"file={Path(checkpoint_path).name} epoch={iteration}",
+        flush=True,
+    )
+    return result
+
+
 def _jjzero_state_dict(model):
     source = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
     compact = {}
@@ -390,6 +464,8 @@ def _jjzero_save_checkpoint_d(
 
 _jjzero_train_utils.save_checkpoint = _jjzero_save_checkpoint
 _jjzero_train_utils.save_checkpoint_d = _jjzero_save_checkpoint_d
+if callable(_jjzero_original_load_checkpoint):
+    _jjzero_train_utils.load_checkpoint = _jjzero_load_checkpoint
 '''
 
 

@@ -76,6 +76,62 @@ class RvcTrainingStateStoreTests(unittest.TestCase):
             raw = json.loads(store.path.read_text(encoding="utf-8"))
             self.assertEqual(raw["checkpoint"]["generator"], "rvc/logs/voice/G_100.pth")
 
+    def test_refresh_recovers_epoch_from_train_log_when_resume_state_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            layout = RvcModelPackageLayout(Path(temporary) / "model", "voice")
+            layout.create()
+            for name in ("G_100.pth", "D_100.pth"):
+                (layout.experiment_dir / name).write_bytes(name.encode())
+            (layout.experiment_dir / "train.log").write_text(
+                "====> Epoch: 19\n"
+                "Saving compact model state at epoch 12 to ./logs/voice/G_100.pth\n",
+                encoding="utf-8",
+            )
+            store = RvcTrainingStateStore("created-voice", layout)
+
+            state = store.refresh_checkpoint_pair()
+
+            self.assertEqual(state.current_epoch, 12)
+            self.assertEqual(state.target_epoch, 20)
+            self.assertTrue(state.can_resume)
+
+    def test_refresh_recovers_epoch_from_exported_weight_name_when_log_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            layout = RvcModelPackageLayout(Path(temporary) / "model", "voice")
+            layout.create()
+            for name in ("G_100.pth", "D_100.pth"):
+                (layout.experiment_dir / name).write_bytes(name.encode())
+            (layout.weights_dir / "voice_e48_s100.pth").write_bytes(b"inference")
+            store = RvcTrainingStateStore("created-voice", layout)
+
+            state = store.refresh_checkpoint_pair()
+
+            self.assertEqual(state.current_epoch, 48)
+            self.assertEqual(state.target_epoch, 48)
+            self.assertTrue(state.can_resume)
+
+    def test_refresh_uses_checkpoint_epoch_instead_of_unsaved_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            layout = RvcModelPackageLayout(Path(temporary) / "model", "voice")
+            layout.create()
+            for name in ("G_80025.pth", "D_80025.pth"):
+                (layout.experiment_dir / name).write_bytes(name.encode())
+            (layout.weights_dir / "voice_e275_s80025.pth").write_bytes(b"inference")
+            store = RvcTrainingStateStore("created-voice", layout)
+            store.save(
+                replace(
+                    store.load(),
+                    current_epoch=295,
+                    target_epoch=300,
+                )
+            )
+
+            state = store.refresh_checkpoint_pair()
+
+            self.assertEqual(state.current_epoch, 275)
+            self.assertEqual(state.target_epoch, 300)
+            self.assertTrue(state.can_resume)
+
     def test_rejects_checkpoint_outside_managed_model(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

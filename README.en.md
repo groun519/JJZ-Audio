@@ -20,9 +20,9 @@
 </p>
 
 > [!NOTE]
-> This document describes the released **JJZero Audio 0.3.7**. Download the installer from [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest).
+> This document describes the released **JJZero Audio 0.3.8**. Download the installer from [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest).
 
-See the [0.3.7 release notes](docs/releases/0.3.7.md) for the single-device RVC training hotfix.
+See the [0.3.8 release notes](docs/releases/0.3.8.md) for Studio snapping, training recovery, and YouTube compatibility improvements.
 
 ## One Connected Workflow
 
@@ -40,7 +40,7 @@ JJZero Audio keeps songs, voice models, separation runs, converted takes, timeli
 | **Models** | Link or copy RVC models, edit and analyze training material, train or resume training, and manage checkpoints and indexes |
 | **Vocal Separation** | Fast, Precision, and Custom separation; retained runs; paired vocal and instrumental comparison with synchronized playback |
 | **RVC Conversion** | Select the source stem and RVC model, create and compare multiple takes, and audition them with the original vocal and instrumental |
-| **Studio** | Audio and video pools, nondestructive timeline editing, split, trim, move, mute, level control, and mixing |
+| **Studio** | Audio and video pools, magnetic nondestructive timeline editing, split, trim, move, effects, mute, level control, and mixing |
 | **Export and Sharing** | Render final audio or video, keep outputs attached to their source song, and share models or outputs through Google Drive |
 
 The app supports Korean and English, light and dark themes, background processing, structured diagnostics, and in-app updates.

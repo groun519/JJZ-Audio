@@ -72,6 +72,7 @@ class RvcSettingsTests(unittest.TestCase):
                 workspace_sizes=(220, 1_050, 310),
                 center_sizes=(410, 590),
                 left_sizes=(650, 350),
+                snapping_enabled=False,
             )
             with patch.object(settings_module, "SETTINGS_FILE", settings_file):
                 save_app_settings(AppSettings(studio_layout=expected))
@@ -91,6 +92,7 @@ class RvcSettingsTests(unittest.TestCase):
                 invalid.studio_layout.left_sizes,
                 StudioLayoutSettings().left_sizes,
             )
+            self.assertTrue(invalid.studio_layout.snapping_enabled)
 
     def test_removed_conversion_monitor_preference_is_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

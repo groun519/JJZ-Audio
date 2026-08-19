@@ -63,6 +63,17 @@ class RvcTrainingRecoveryTests(unittest.TestCase):
         self.assertEqual(resumable.action, RvcTrainingRecoveryAction.RESUME)
         self.assertEqual(fresh.action, RvcTrainingRecoveryAction.RETRY)
 
+    def test_old_unexpected_code_is_reclassified_from_saved_error(self) -> None:
+        advice = advise_rvc_training_recovery(
+            "KeyError: param 'initial_lr' is not specified when resuming an optimizer",
+            can_resume=True,
+            current_batch_size=6,
+            diagnostic_code="UNEXPECTED_ERROR",
+        )
+
+        self.assertEqual(advice.diagnostic_code, "RVC_CHECKPOINT_RESUME_FAILED")
+        self.assertEqual(advice.action, RvcTrainingRecoveryAction.RESUME)
+
 
 if __name__ == "__main__":
     unittest.main()

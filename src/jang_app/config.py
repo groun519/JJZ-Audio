@@ -28,6 +28,7 @@ THIRD_PARTY_DIR = APP_PATHS.runtime_root
 FFMPEG_BIN_DIR = THIRD_PARTY_DIR / "ffmpeg" / "bin"
 DEMUCS_RUNTIME_DIR = THIRD_PARTY_DIR / "demucs"
 ROFORMER_MODEL_DIR = APP_PATHS.cache_dir / "separation" / "roformer"
+VOCAL_SPLIT_MODEL_DIR = APP_PATHS.cache_dir / "separation" / "vocal_split"
 RVC_PYTHON_EXE = RVC_RUNTIME_DIR / "runtime" / "python.exe"
 ROFORMER_PACKAGE_DIR = RVC_PYTHON_EXE.parent / "jjzero-roformer-packages"
 WORKSPACE_DIR = APP_PATHS.workspace_root

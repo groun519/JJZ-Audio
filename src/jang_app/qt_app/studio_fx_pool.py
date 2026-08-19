@@ -19,6 +19,11 @@ from jang_app.services.i18n import tr
 STUDIO_EFFECT_MIME = "application/x-jjzero-studio-effect"
 
 _PRESET_CARD_SPECS = {
+    "preset:lush": (
+        "LS",
+        "Lush",
+        "Bloom ambience with matched vocal dynamics",
+    ),
     "preset:karaoke": ("KR", "Karaoke", "Karaoke vocal ambience and echo"),
     "preset:animatronic": ("AN", "Animatronic", "Metallic machine voice chain"),
     "preset:walkie_talkie": ("WT", "Walkie-Talkie", "Narrow radio transmission chain"),

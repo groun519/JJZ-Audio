@@ -48,6 +48,17 @@ class SongListRowTests(unittest.TestCase):
         self.assertEqual(requested.at(0)[0], "song-1")
         row.close()
 
+    def test_source_badge_uses_optically_centered_text(self) -> None:
+        row = SongListRow(
+            "song-1",
+            "Song",
+            SongDisplayMetadata("youtube", "YOUTUBE", "M4A", "01:00", "1.0 MB", None),
+        )
+
+        self.assertEqual(row.source_badge.contentsMargins().bottom(), 3)
+        self.assertEqual(row.source_badge.alignment(), Qt.AlignmentFlag.AlignCenter)
+        row.close()
+
     def test_work_song_action_reveals_before_content_and_persists_when_active(self) -> None:
         row = SongListRow(
             "song-1",

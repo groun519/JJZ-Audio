@@ -55,9 +55,14 @@ from jang_app.pipeline.quick_production import (
     run_quick_production,
 )
 from jang_app.pipeline.separate import SeparationResult, separate_audio
+from jang_app.pipeline.vocal_split import (
+    singer_split_capability,
+    split_selected_vocal,
+)
 from jang_app.qt_app.confirmation_dialog import ConfirmationDialog
 from jang_app.qt_app.collapsible_card_header import CollapsibleCardHeader
 from jang_app.qt_app.conversion_result_browser import ConversionResultBrowser
+from jang_app.qt_app.conversion_input_pool import ConversionInputPool
 from jang_app.qt_app.export_page import ExportPage
 from jang_app.qt_app.google_account_button import GoogleAccountButton
 from jang_app.qt_app.google_drive_controller import GoogleDriveController
@@ -94,7 +99,7 @@ from jang_app.qt_app.update_status_button import (
     update_button_position,
 )
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
-from jang_app.qt_app.vocal_version_pool import VocalVersionPool
+from jang_app.qt_app.vocal_split_workspace import VocalSplitWorkspace
 from jang_app.qt_app.video_preview_panel import VideoPreviewPanel
 from jang_app.qt_app.window_chrome import apply_window_corner_style
 from jang_app.qt_app.workspace_splitter import create_workspace_splitter
@@ -173,7 +178,7 @@ from jang_app.services.studio_realtime_audio import (
     studio_playback_duration_ms,
     studio_source_layout_signature,
 )
-from jang_app.services.runtime_bootstrap import install_update_runtime_components
+from jang_app.services.runtime_bootstrap import provision_update_runtime_components
 from jang_app.services.rvc_runtime_profile import detect_rvc_runtime_profile
 from jang_app.services.separation_recipe import FAST_RECIPE, SeparationRecipe
 from jang_app.services.separation_assets import separation_recipe_asset_status
@@ -205,6 +210,12 @@ from jang_app.services.update_cache import (
 from jang_app.services.video_source import VideoSource
 from jang_app.services.vocal_project import VocalConversionSettings, VocalProject
 from jang_app.services.vocal_project_store import VocalProjectStore
+from jang_app.services.vocal_input import (
+    VocalInputChoice,
+    original_vocal_choice,
+)
+from jang_app.services.vocal_split import VocalSplitRun, VocalSplitStem
+from jang_app.services.vocal_split_store import VocalSplitStore, VocalSplitStoreError
 from jang_app.services.workspace_playback import (
     WorkspacePlaybackScope,
     scope_label,
@@ -228,6 +239,8 @@ PAGE_SEPARATION = 2
 PAGE_CONVERSION = 3
 PAGE_STUDIO = 4
 PAGE_EXPORT = 5
+SEPARATION_MODE_AUDIO = "audio"
+SEPARATION_MODE_VOCAL = "vocal"
 WORK_SONG_REQUIRED_PAGES = frozenset((PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO))
 GOOGLE_DRIVE_FEATURE = "google_drive_sharing"
 
@@ -285,6 +298,7 @@ class MainWindow(QMainWindow):
             tuple[int, str, StudioSession, tuple[AudioMixSource, ...]] | None
         ) = None
         self.vocal_project_store = VocalProjectStore()
+        self.vocal_split_store = VocalSplitStore()
         self.model_workspace = RvcModelWorkspace()
         self.studio_session_autosave = StudioSessionAutosave(self.library.save_studio_session, parent=self)
         self.studio_session_autosave.save_failed.connect(self._on_studio_session_save_failed)
@@ -592,9 +606,33 @@ class MainWindow(QMainWindow):
             ("Export", PAGE_EXPORT),
         )
         self.primary_navigation.page_requested.connect(self._navigate_to_page)
+        self.primary_navigation.page_option_requested.connect(
+            self._on_primary_page_option_requested
+        )
         self.primary_navigation.settings_requested.connect(self._open_system_setup)
         self.primary_navigation.work_song_changed.connect(
             self._on_navigation_work_song_changed
+        )
+        self._separation_submode = SEPARATION_MODE_AUDIO
+        vocal_split_capability = singer_split_capability()
+        self.primary_navigation.set_page_options(
+            PAGE_SEPARATION,
+            (
+                (SEPARATION_MODE_AUDIO, "Audio Separation"),
+                (
+                    SEPARATION_MODE_VOCAL,
+                    "Vocal Separation"
+                    if vocal_split_capability.available
+                    else "Vocal Separation · In development",
+                ),
+            ),
+            selected_option=self._separation_submode,
+        )
+        self.primary_navigation.set_page_option_enabled(
+            PAGE_SEPARATION,
+            SEPARATION_MODE_VOCAL,
+            vocal_split_capability.available,
+            disabled_tooltip=tr(vocal_split_capability.detail),
         )
 
         self.theme_button = ThemeToggleButton()
@@ -796,7 +834,50 @@ class MainWindow(QMainWindow):
             stretch_factors=(0, 1),
             collapsible=(True, False),
         )
+        # Keep the established audio workspace directly in the page layout so
+        # the nested stem pools retain their splitter geometry and selection UX.
         layout.addWidget(self.separation_splitter, 1)
+
+        self.vocal_split_workspace = VocalSplitWorkspace()
+        self.vocal_split_workspace.action.triggered.connect(self._start_vocal_split)
+        self.vocal_split_workspace.create_group_requested.connect(
+            self._create_vocal_split_group
+        )
+        self.vocal_split_workspace.source_changed.connect(
+            self._on_vocal_split_source_changed
+        )
+        self.vocal_split_workspace.group_selected.connect(
+            self._on_vocal_split_group_selected
+        )
+        self.vocal_split_workspace.rename_requested.connect(
+            self._rename_vocal_split_stem
+        )
+        self.vocal_split_workspace.remove_run_requested.connect(
+            self._remove_vocal_split_run
+        )
+        self.vocal_split_workspace.result_timeline.seek_requested.connect(
+            self._seek_output_playback
+        )
+        self.vocal_split_workspace.result_timeline.playback_settings_changed.connect(
+            lambda: self._refresh_output_playback_queue(
+                WorkspacePlaybackScope.SEPARATION
+            )
+        )
+        self.vocal_split_workspace.transport_bar.play_toggled.connect(
+            self._toggle_global_playback
+        )
+        self.vocal_split_workspace.transport_bar.seek_requested.connect(
+            self._seek_global_playback
+        )
+        self.vocal_split_workspace.hide()
+        capability = singer_split_capability()
+        self.vocal_split_workspace.set_backend_status(
+            capability.available,
+            capability.detail,
+            minimum_reference_ms=capability.minimum_reference_ms,
+            maximum_reference_ms=capability.maximum_reference_ms,
+        )
+        layout.addWidget(self.vocal_split_workspace, 1)
         return page
 
     def _build_conversion_page(self) -> QWidget:
@@ -889,6 +970,9 @@ class MainWindow(QMainWindow):
         self.studio_transport_bar.split_mode_changed.connect(
             self.studio_editor.set_split_mode
         )
+        self.studio_transport_bar.snapping_changed.connect(
+            self._set_studio_snapping_enabled
+        )
         self.studio_editor.split_mode_changed.connect(
             self.studio_transport_bar.set_split_mode
         )
@@ -899,6 +983,12 @@ class MainWindow(QMainWindow):
         self.studio_transport_bar.redo_requested.connect(self.studio_editor.redo)
         self.studio_editor.history_availability_changed.connect(
             self.studio_transport_bar.set_history_available
+        )
+        self.studio_editor.set_snapping_enabled(
+            self.settings.studio_layout.snapping_enabled
+        )
+        self.studio_transport_bar.set_snapping(
+            self.settings.studio_layout.snapping_enabled
         )
 
         studio_preview_area = QWidget()
@@ -969,10 +1059,25 @@ class MainWindow(QMainWindow):
             workspace_sizes=workspace_sizes,
             center_sizes=center_sizes,
             left_sizes=left_sizes,
+            snapping_enabled=self.settings.studio_layout.snapping_enabled,
         )
         if studio_layout == self.settings.studio_layout:
             return
         self.settings = replace(self.settings, studio_layout=studio_layout)
+        save_app_settings(self.settings)
+
+    def _set_studio_snapping_enabled(self, enabled: bool) -> None:
+        next_enabled = bool(enabled)
+        self.studio_editor.set_snapping_enabled(next_enabled)
+        if next_enabled == self.settings.studio_layout.snapping_enabled:
+            return
+        self.settings = replace(
+            self.settings,
+            studio_layout=replace(
+                self.settings.studio_layout,
+                snapping_enabled=next_enabled,
+            ),
+        )
         save_app_settings(self.settings)
 
     def _build_export_page(self) -> QWidget:
@@ -1076,13 +1181,9 @@ class MainWindow(QMainWindow):
         rvc_settings_layout.setContentsMargins(0, 0, 6, 0)
         rvc_settings_layout.setSpacing(14)
 
-        self.conversion_input_pool = VocalVersionPool(
-            "vocal",
-            title_key="Conversion Input",
-        )
-        self.conversion_input_pool.setProperty("poolContext", "conversionInput")
-        self.conversion_input_pool.selection_changed.connect(
-            self._on_conversion_input_version_changed
+        self.conversion_input_pool = ConversionInputPool()
+        self.conversion_input_pool.choice_changed.connect(
+            self._on_conversion_input_choice_changed
         )
         self.conversion_input_pool.setMinimumHeight(190)
         self.conversion_input_pool.setMaximumHeight(300)
@@ -1287,6 +1388,8 @@ class MainWindow(QMainWindow):
             self.separation_results_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "separation_stem_pool"):
             self.separation_stem_pool.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "vocal_split_workspace"):
+            self.vocal_split_workspace.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "conversion_input_pool"):
             self.conversion_input_pool.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "rvc_inference_controls"):
@@ -1334,6 +1437,7 @@ class MainWindow(QMainWindow):
         self.model_workspace_page.apply_language()
         self.separation_results_panel.apply_language()
         self.separation_stem_pool.apply_language()
+        self.vocal_split_workspace.apply_language()
         self.conversion_input_pool.apply_language()
         self.rvc_inference_controls.apply_language()
         self.rvc_settings_header.apply_language()
@@ -1378,6 +1482,12 @@ class MainWindow(QMainWindow):
         self,
         scope: WorkspacePlaybackScope | None,
     ) -> ResultTransportBar | None:
+        if (
+            scope is WorkspacePlaybackScope.SEPARATION
+            and getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO)
+            == SEPARATION_MODE_VOCAL
+        ):
+            return self.vocal_split_workspace.transport_bar
         return {
             WorkspacePlaybackScope.SEPARATION: getattr(
                 self, "separation_transport_bar", None
@@ -1399,6 +1509,13 @@ class MainWindow(QMainWindow):
             transport = getattr(self, transport_name, None)
             if transport is not None and transport is not except_transport:
                 transport.clear()
+        vocal_transport = getattr(
+            getattr(self, "vocal_split_workspace", None),
+            "transport_bar",
+            None,
+        )
+        if vocal_transport is not None and vocal_transport is not except_transport:
+            vocal_transport.clear()
 
     def _position_processing_queue(self) -> None:
         if not hasattr(self, "processing_queue_panel"):
@@ -1722,10 +1839,13 @@ class MainWindow(QMainWindow):
                 return
             dialog.set_installing_runtime()
             worker = TaskWorker(
-                lambda progress: install_update_runtime_components(
+                lambda progress: provision_update_runtime_components(
                     plan,
                     self._downloaded_update,
                     APP_PATHS.runtime_root,
+                    cache_dir=(
+                        APP_PATHS.cache_dir / "updates" / plan.release.version
+                    ),
                     progress=progress,
                 )
             )
@@ -1862,6 +1982,14 @@ class MainWindow(QMainWindow):
 
     def _navigate_to_vocal_step(self, index: int) -> None:
         self._navigate_to_page(PAGE_SEPARATION if index == 0 else PAGE_CONVERSION)
+
+    def _on_primary_page_option_requested(self, page_id: int, option: str) -> None:
+        if page_id != PAGE_SEPARATION:
+            return
+        if option == SEPARATION_MODE_VOCAL and not singer_split_capability().available:
+            return
+        self._on_separation_submode_changed(option)
+        self._navigate_to_page(PAGE_SEPARATION)
 
     def _choose_audio_files(self, *_args) -> None:
         suffixes = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_AUDIO_EXTENSIONS))
@@ -3080,6 +3208,207 @@ class MainWindow(QMainWindow):
     def _selected_separation_recipe(self) -> SeparationRecipe:
         return self.separation_recipe_selector.selected_recipe()
 
+    def _on_separation_submode_changed(self, mode: str) -> None:
+        if mode == SEPARATION_MODE_VOCAL and not singer_split_capability().available:
+            mode = SEPARATION_MODE_AUDIO
+        if mode == getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO):
+            return
+        vocal_mode = mode == SEPARATION_MODE_VOCAL
+        self._separation_submode = mode
+        self._suspend_playback()
+        self.primary_navigation.set_page_option(PAGE_SEPARATION, mode)
+        self.separation_splitter.setVisible(not vocal_mode)
+        self.vocal_split_workspace.setVisible(vocal_mode)
+        if vocal_mode:
+            self._refresh_vocal_split_versions()
+            self.vocal_split_workspace.result_timeline.refresh_layout()
+            QTimer.singleShot(
+                0,
+                self.vocal_split_workspace.result_timeline.refresh_layout,
+            )
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _refresh_vocal_split_versions(
+        self,
+        selected: SongVocalVersion | None = None,
+    ) -> None:
+        versions = self._current_vocal_versions()
+        selected_version = self.vocal_split_workspace.set_versions(
+            versions,
+            selected.job_dir if selected is not None else None,
+        )
+        self._refresh_vocal_split_runs(selected_version)
+
+    def _refresh_vocal_split_runs(
+        self,
+        version: SongVocalVersion | None = None,
+        preferred_path: Path | None = None,
+        preferred_group_id: str = "",
+    ) -> VocalSplitStem | None:
+        selected = version or self.vocal_split_workspace.selected_version()
+        runs = self.vocal_split_store.runs(selected.job_dir) if selected is not None else ()
+        return self.vocal_split_workspace.set_groups(
+            runs,
+            preferred_path,
+            preferred_group_id,
+        )
+
+    def _on_vocal_split_source_changed(self, version: SongVocalVersion) -> None:
+        self._suspend_playback()
+        self._refresh_vocal_split_runs(version)
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _on_vocal_split_group_selected(self, _run: VocalSplitRun) -> None:
+        self._suspend_playback()
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _create_vocal_split_group(self, version: SongVocalVersion) -> None:
+        try:
+            group = self.vocal_split_store.create_group(
+                version.job_dir,
+                version.vocals_path,
+                label="Original vocal",
+            )
+        except VocalSplitStoreError as exc:
+            self.vocal_split_workspace.action.set_status(_last_error_line(str(exc)))
+            return
+        self._refresh_vocal_split_runs(
+            version,
+            preferred_path=group.stems[0].path,
+            preferred_group_id=group.run_id,
+        )
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _start_vocal_split(self, *_args) -> None:
+        version = self.vocal_split_workspace.selected_version()
+        group = self.vocal_split_workspace.selected_group()
+        stem = self.vocal_split_workspace.selected_stem()
+        reference_regions = self.vocal_split_workspace.reference_regions()
+        song = self.current_work_item
+        if song is None or version is None or group is None or stem is None:
+            self.vocal_split_workspace.action.set_status("Select a vocal group and vocal.")
+            return
+        if not reference_regions:
+            self.vocal_split_workspace.action.set_status("Select at least one solo reference range.")
+            return
+        capability = singer_split_capability()
+        if not capability.available:
+            self.vocal_split_workspace.action.set_status(capability.detail)
+            return
+        self._stop_playback()
+        self.vocal_split_workspace.action.set_running(True)
+        self.vocal_split_workspace.action.set_progress(2)
+        self.vocal_split_workspace.action.set_status("Separating selected vocal")
+        scope = WorkTaskScope(song.id)
+        worker = TaskWorker(
+            lambda progress: split_selected_vocal(
+                group,
+                stem,
+                reference_regions,
+                progress,
+                store=self.vocal_split_store,
+            )
+        )
+        self._run_worker(
+            worker,
+            lambda result: self._on_vocal_split_succeeded(
+                scope,
+                version,
+                stem,
+                result,
+            ),
+            lambda error: self._on_vocal_split_failed(scope, error),
+            self.vocal_split_workspace.action,
+            task_title="Separate selected vocal",
+            task_detail=f"{song.title} / {stem.label}",
+            action_scope=lambda: scope.is_current(self.current_work_item),
+        )
+
+    def _on_vocal_split_succeeded(
+        self,
+        scope: WorkTaskScope,
+        version: SongVocalVersion,
+        previous_stem: VocalSplitStem,
+        result: object,
+    ) -> None:
+        self.vocal_split_workspace.refresh_asset_status()
+        run = result if isinstance(result, VocalSplitRun) else None
+        if run is None:
+            self._on_vocal_split_failed(scope, "Vocal separation returned no result.")
+            return
+        if not scope.is_current(self.current_work_item):
+            return
+        preferred = next(
+            (
+                stem.path
+                for stem in run.stems
+                if stem.parent_stem_id == previous_stem.stem_id
+            ),
+            run.stems[0].path if run.stems else None,
+        )
+        selected = self.vocal_split_workspace.selected_version()
+        if selected is not None and selected.job_dir.resolve() == version.job_dir.resolve():
+            self._refresh_vocal_split_runs(
+                selected,
+                preferred,
+                preferred_group_id=run.run_id,
+            )
+        self.vocal_split_workspace.action.set_progress(100)
+        self.vocal_split_workspace.action.set_status("Done")
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _on_vocal_split_failed(self, scope: WorkTaskScope, error: str) -> None:
+        self.vocal_split_workspace.refresh_asset_status()
+        if not scope.is_current(self.current_work_item):
+            return
+        self.vocal_split_workspace.action.set_status("Failed")
+        self.vocal_split_workspace.action.set_detail(
+            f"{LOG_FILE}\n{_last_error_line(error)}"
+        )
+
+    def _rename_vocal_split_stem(
+        self,
+        run: VocalSplitRun,
+        stem: VocalSplitStem,
+    ) -> None:
+        label, accepted = TextInputDialog.get_text(
+            self,
+            tr("Rename Vocal"),
+            tr("Vocal name"),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Rename"),
+            cancel_label=tr("Cancel"),
+            initial_value=stem.label,
+        )
+        if not accepted:
+            return
+        try:
+            self.vocal_split_store.rename_stem(run, stem.stem_id, label)
+        except VocalSplitStoreError as exc:
+            self.vocal_split_workspace.action.set_status(_last_error_line(str(exc)))
+            return
+        self._refresh_vocal_split_runs(preferred_path=stem.path)
+
+    def _remove_vocal_split_run(self, run: VocalSplitRun) -> None:
+        if not ConfirmationDialog.confirm(
+            self,
+            tr("Remove Vocal Separation"),
+            tr("Remove this vocal separation and all of its vocal files?"),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Remove"),
+            cancel_label=tr("Cancel"),
+        ):
+            return
+        try:
+            self.vocal_split_store.remove_run(run)
+        except VocalSplitStoreError as exc:
+            self.vocal_split_workspace.action.set_status(_last_error_line(str(exc)))
+            return
+        self._refresh_vocal_split_runs()
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
     def _reusable_fast_separation(
         self,
         song: SongItem | None,
@@ -3314,7 +3643,7 @@ class MainWindow(QMainWindow):
         session = MainWindow._work_output_session(self)
         legacy_sound_sets = scan_output_sound_sets(self.settings.output_root)
         self.library.add_output_sets(legacy_sound_sets)
-        sound_sets = self.library.output_sound_sets()
+        sound_sets = self.library.refresh_output_sound_sets()
         if hasattr(self, "song_list"):
             self._refresh_song_list()
 
@@ -3554,6 +3883,8 @@ class MainWindow(QMainWindow):
 
         def clear_result_pools() -> None:
             self.separation_stem_pool.set_versions((), None)
+            self.vocal_split_workspace.set_versions((), None)
+            self.vocal_split_workspace.set_groups(())
             self._apply_separation_stem_selection(None, None)
             versions = self._current_vocal_versions()
             self._refresh_conversion_input_choices(versions, None)
@@ -3662,6 +3993,8 @@ class MainWindow(QMainWindow):
     def _refresh_vocal_project_panel(self) -> None:
         if self.current_output_set is None:
             self.separation_stem_pool.set_versions((), None)
+            self.vocal_split_workspace.set_versions((), None)
+            self.vocal_split_workspace.set_groups(())
             self._apply_separation_stem_selection(None, None)
             self._refresh_conversion_input_choices(self._current_vocal_versions(), None)
             return
@@ -3679,6 +4012,7 @@ class MainWindow(QMainWindow):
             selected.job_dir if selected is not None else None,
         )
         self._apply_separation_stem_selection(vocal_result, instrumental_result)
+        self._refresh_vocal_split_versions(selected)
 
     def _on_separation_stem_selection_changed(
         self,
@@ -3727,11 +4061,26 @@ class MainWindow(QMainWindow):
             current_output_job_dir=selected_job_dir,
             preferred_converted_path=preferred_converted_path,
         )
-        self.conversion_input_pool.set_versions(
-            versions,
-            context.input_version.job_dir if context.input_version is not None else None,
-            preserve_selection=False,
+        input_job_dir = (
+            context.input_version.job_dir
+            if context.input_version is not None
+            else selected_job_dir
         )
+        set_choices = getattr(self.conversion_input_pool, "set_choices", None)
+        if callable(set_choices):
+            selected_choice = set_choices(
+                self._conversion_input_choices(versions),
+                selected_job_dir=input_job_dir,
+                preserve_selection=True,
+            )
+            if selected_choice is not None:
+                convert_session.select_input_job_dir(selected_choice.version.job_dir)
+        else:
+            self.conversion_input_pool.set_versions(
+                versions,
+                input_job_dir,
+                preserve_selection=False,
+            )
         projects = convert_session.projects(
             self.vocal_project_store.load,
             on_error=self._on_conversion_project_load_failed,
@@ -3744,6 +4093,24 @@ class MainWindow(QMainWindow):
         convert_session.select_converted_path(
             self.conversion_result_browser.selected_path()
         )
+        MainWindow._sync_conversion_context_from_session(self)
+
+    def _conversion_input_choices(
+        self,
+        versions: tuple[SongVocalVersion, ...],
+    ) -> tuple[VocalInputChoice, ...]:
+        return tuple(original_vocal_choice(version) for version in versions)
+
+    def _on_conversion_input_choice_changed(
+        self,
+        choice: VocalInputChoice | None,
+    ) -> None:
+        version = choice.version if choice is not None else None
+        MainWindow._work_convert_session(self).select_input_job_dir(
+            version.job_dir if version is not None else None,
+            clear_selected_converted=True,
+        )
+        self.conversion_result_browser.select_converted(None)
         MainWindow._sync_conversion_context_from_session(self)
 
     def _on_conversion_input_version_changed(
@@ -4040,7 +4407,25 @@ class MainWindow(QMainWindow):
         )
         if job_dir is None:
             return None
-        return load_output_sound_set(job_dir, self.settings.output_root)
+        sound_set = load_output_sound_set(job_dir, self.settings.output_root)
+        if sound_set is None:
+            return None
+        selected_choice = getattr(self.conversion_input_pool, "selected_choice", None)
+        choice = selected_choice() if callable(selected_choice) else None
+        if (
+            choice is None
+            or choice.version.job_dir.expanduser().resolve()
+            != sound_set.job_dir.expanduser().resolve()
+            or not choice.path.is_file()
+        ):
+            return sound_set
+        return OutputSoundSet(
+            label=sound_set.label,
+            job_dir=sound_set.job_dir,
+            vocals_path=choice.path,
+            instrumental_path=sound_set.instrumental_path,
+            converted_vocal_paths=sound_set.converted_vocal_paths,
+        )
 
     def _on_rvc_succeeded(
         self,
@@ -4903,6 +5288,12 @@ class MainWindow(QMainWindow):
         self,
         scope: WorkspacePlaybackScope | None = None,
     ) -> list[tuple[Path, float]]:
+        if (
+            scope is WorkspacePlaybackScope.SEPARATION
+            and getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO)
+            == SEPARATION_MODE_VOCAL
+        ):
+            return list(self.vocal_split_workspace.result_timeline.playback_tracks())
         if scope is WorkspacePlaybackScope.CONVERSION:
             panel = getattr(self, "vocal_results_panel", None)
             playback_tracks = getattr(panel, "playback_tracks", None)
@@ -4956,6 +5347,13 @@ class MainWindow(QMainWindow):
             return self._studio_timeline_playback_queue()
         tracks = self._playback_track_paths(scope)
         duration_ms = self._duration_ms_for_paths([path for path, _volume in tracks])
+        if (
+            scope is WorkspacePlaybackScope.SEPARATION
+            and getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO)
+            == SEPARATION_MODE_VOCAL
+            and not tracks
+        ):
+            return None
         if not tracks or duration_ms <= 0:
             item = self.current_work_item
             if item is None or item.kind != "source":
@@ -5052,6 +5450,13 @@ class MainWindow(QMainWindow):
         scope = self._workspace_scope_for_queue(queue)
         if scope is None:
             self.separation_results_panel.set_playhead_ratio(0.0)
+            vocal_timeline = getattr(
+                getattr(self, "vocal_split_workspace", None),
+                "result_timeline",
+                None,
+            )
+            if vocal_timeline is not None:
+                vocal_timeline.set_playhead_ratio(0.0)
             self.vocal_results_panel.set_playhead_ratio(0.0)
             studio_editor = getattr(self, "studio_editor", None)
             if studio_editor is not None:
@@ -5059,7 +5464,13 @@ class MainWindow(QMainWindow):
             for track in self.output_tracks:
                 track.set_playhead_ratio(0.0)
         elif scope is WorkspacePlaybackScope.SEPARATION:
-            self.separation_results_panel.set_playhead_ratio(ratio)
+            if (
+                getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO)
+                == SEPARATION_MODE_VOCAL
+            ):
+                self.vocal_split_workspace.result_timeline.set_playhead_ratio(ratio)
+            else:
+                self.separation_results_panel.set_playhead_ratio(ratio)
         elif scope is WorkspacePlaybackScope.CONVERSION:
             self.vocal_results_panel.set_playhead_ratio(ratio)
         elif scope is WorkspacePlaybackScope.STUDIO:

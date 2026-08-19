@@ -2,12 +2,28 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel
+from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QTextEdit,
+)
 
 from jang_app.qt_app.localization import set_translated_tooltip
 from jang_app.qt_app.transport_controls import TransportControls
 from jang_app.qt_app.widgets import ScrollSafeSlider, SvgIconButton
 from jang_app.services.i18n import tr
+from jang_app.services.studio_zoom import (
+    STUDIO_BASE_PIXELS_PER_SECOND,
+    STUDIO_MAX_PIXELS_PER_SECOND,
+    STUDIO_MIN_PIXELS_PER_SECOND,
+    studio_zoom_label,
+)
 
 
 class StudioTransportBar(QFrame):
@@ -15,6 +31,7 @@ class StudioTransportBar(QFrame):
     seek_requested = Signal(int)
     zoom_changed = Signal(int)
     split_mode_changed = Signal(bool)
+    snapping_changed = Signal(bool)
     undo_requested = Signal()
     redo_requested = Signal()
 
@@ -32,16 +49,25 @@ class StudioTransportBar(QFrame):
         self.zoom_label.setObjectName("StudioTransportToolLabel")
         self.zoom_slider = ScrollSafeSlider(Qt.Orientation.Horizontal)
         self.zoom_slider.setObjectName("StudioZoomSlider")
-        self.zoom_slider.setRange(2, 24)
-        self.zoom_slider.setValue(7)
+        self.zoom_slider.setRange(
+            STUDIO_MIN_PIXELS_PER_SECOND,
+            STUDIO_MAX_PIXELS_PER_SECOND,
+        )
+        self.zoom_slider.setValue(STUDIO_BASE_PIXELS_PER_SECOND)
         self.zoom_slider.setFixedWidth(130)
-        self.zoom_slider.valueChanged.connect(self.zoom_changed.emit)
+        self.zoom_slider.valueChanged.connect(self._on_zoom_changed)
 
         self.split_button = SvgIconButton("split", size=34)
         self.split_button.setObjectName("StudioSplitButton")
         self.split_button.setCheckable(True)
         self.split_button.setEnabled(False)
         self.split_button.toggled.connect(self._on_split_mode_toggled)
+
+        self.snap_button = SvgIconButton("magnet", size=34)
+        self.snap_button.setObjectName("StudioSnapButton")
+        self.snap_button.setCheckable(True)
+        self.snap_button.setChecked(True)
+        self.snap_button.toggled.connect(self.snapping_changed.emit)
 
         self.undo_button = SvgIconButton("undo", size=34)
         self.undo_button.setObjectName("StudioUndoButton")
@@ -58,6 +84,9 @@ class StudioTransportBar(QFrame):
         self.exit_split_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self.exit_split_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self.exit_split_shortcut.activated.connect(self._exit_split_mode)
+        self.snap_shortcut = QShortcut(QKeySequence("N"), self)
+        self.snap_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.snap_shortcut.activated.connect(self._toggle_snapping)
 
         transport_divider = _divider()
         zoom_divider = _divider()
@@ -70,6 +99,7 @@ class StudioTransportBar(QFrame):
         layout.addWidget(self.undo_button)
         layout.addWidget(self.redo_button)
         layout.addWidget(self.split_button)
+        layout.addWidget(self.snap_button)
         layout.addWidget(zoom_divider)
         layout.addWidget(self.zoom_label)
         layout.addWidget(self.zoom_slider)
@@ -93,6 +123,7 @@ class StudioTransportBar(QFrame):
             max(self.zoom_slider.minimum(), min(value, self.zoom_slider.maximum()))
         )
         self.zoom_slider.blockSignals(False)
+        self._sync_zoom_label()
 
     def set_split_enabled(self, enabled: bool) -> None:
         if not enabled and self.split_button.isChecked():
@@ -105,6 +136,12 @@ class StudioTransportBar(QFrame):
         self.split_button.blockSignals(False)
         self._sync_split_tooltip()
         self.split_button.update()
+
+    def set_snapping(self, enabled: bool) -> None:
+        self.snap_button.blockSignals(True)
+        self.snap_button.setChecked(bool(enabled))
+        self.snap_button.blockSignals(False)
+        self.snap_button.update()
 
     def set_history_available(self, can_undo: bool, can_redo: bool) -> None:
         self.undo_button.setEnabled(can_undo)
@@ -122,6 +159,26 @@ class StudioTransportBar(QFrame):
         self._sync_split_tooltip(enabled)
         self.split_mode_changed.emit(enabled)
 
+    def _toggle_snapping(self) -> None:
+        if isinstance(
+            QApplication.focusWidget(),
+            (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox),
+        ):
+            return
+        self.snap_button.toggle()
+
+    def _on_zoom_changed(self, pixels_per_second: int) -> None:
+        self._sync_zoom_label(pixels_per_second)
+        self.zoom_changed.emit(pixels_per_second)
+
+    def _sync_zoom_label(self, pixels_per_second: int | None = None) -> None:
+        value = (
+            self.zoom_slider.value()
+            if pixels_per_second is None
+            else pixels_per_second
+        )
+        self.zoom_label.setText(f"{tr('Zoom')}  {studio_zoom_label(value)}")
+
     def _sync_split_tooltip(self, enabled: bool | None = None) -> None:
         is_active = self.split_button.isChecked() if enabled is None else bool(enabled)
         set_translated_tooltip(
@@ -136,14 +193,16 @@ class StudioTransportBar(QFrame):
     def set_theme_mode(self, theme_mode: str) -> None:
         self.transport.set_theme_mode(theme_mode)
         self.split_button.set_theme_mode(theme_mode)
+        self.snap_button.set_theme_mode(theme_mode)
         self.undo_button.set_theme_mode(theme_mode)
         self.redo_button.set_theme_mode(theme_mode)
 
     def apply_language(self) -> None:
         self.transport.apply_language()
-        self.zoom_label.setText(tr("Zoom"))
+        self._sync_zoom_label()
         set_translated_tooltip(self.undo_button, "Undo Studio edit (Ctrl+Z)")
         set_translated_tooltip(self.redo_button, "Redo Studio edit (Ctrl+Y)")
+        set_translated_tooltip(self.snap_button, "Snapping (N, hold Alt to bypass)")
         self._sync_split_tooltip()
 
 

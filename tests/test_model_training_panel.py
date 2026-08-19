@@ -438,6 +438,21 @@ class ModelTrainingPanelTests(unittest.TestCase):
         self.assertEqual(requested, [True])
         panel.close()
 
+    def test_native_crash_shows_a_readable_failure_summary(self) -> None:
+        panel = ModelTrainingPanel()
+
+        panel.set_failure(
+            "Windows fatal exception: access violation\n"
+            "00007FF8530AAD6C ntdll.dll!RtlUserThreadStart",
+        )
+
+        self.assertEqual(
+            panel.stage_label.text(),
+            "The RVC runtime stopped unexpectedly inside Windows or the GPU driver.",
+        )
+        self.assertNotIn("RtlUserThreadStart", panel.stage_label.text())
+        panel.close()
+
 
 def _record(root: Path, layout: RvcModelPackageLayout) -> RvcModelRecord:
     runtime = root / "runtime"

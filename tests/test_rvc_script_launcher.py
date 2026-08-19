@@ -150,7 +150,7 @@ class RvcScriptLauncherTests(unittest.TestCase):
             (runtime / "lib" / "__init__.py").write_text("", encoding="utf-8")
             (package / "__init__.py").write_text("", encoding="utf-8")
             (package / "utils.py").write_text(
-                "import logging\nlogger = logging.getLogger('probe')\n",
+                _COMPACT_CHECKPOINT_UTILS,
                 encoding="utf-8",
             )
             script = runtime / "compact_probe.py"
@@ -166,7 +166,8 @@ class RvcScriptLauncherTests(unittest.TestCase):
             completed = _run_python((str(launcher),), cwd=workspace)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "ready")
+            self.assertIn("JJZERO_CHECKPOINT_LOADED file=compact.pth epoch=5", completed.stdout)
+            self.assertTrue(completed.stdout.rstrip().endswith("ready"))
 
     def test_launcher_configures_parallel_windowless_data_loading(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -321,6 +322,7 @@ print("ready" if loaded["value"].tolist() == [1, 2, 3] else "failed")
 
 _COMPACT_CHECKPOINT_PROBE = """\
 from pathlib import Path
+from types import SimpleNamespace
 import torch
 from lib.train import utils
 
@@ -335,14 +337,40 @@ model = torch.nn.Linear(3, 2)
 utils.save_checkpoint(model, UnusedOptimizer(), 0.0001, 5, target)
 loaded = torch.load(target, map_location="cpu", weights_only=False)
 restored = torch.nn.Linear(3, 2)
-restored.load_state_dict(loaded["model"])
+optimizer = torch.optim.AdamW(restored.parameters())
+hps = SimpleNamespace(train=SimpleNamespace(lr_decay=0.9))
+_, _, _, resumed_epoch = utils.load_checkpoint(target, restored, optimizer)
+scheduler = torch.optim.lr_scheduler.ExponentialLR(
+    optimizer,
+    gamma=hps.train.lr_decay,
+    last_epoch=resumed_epoch - 2,
+)
 is_ready = (
     loaded["optimizer"] is None
     and loaded["iteration"] == 5
     and loaded["model"]["weight"].dtype == torch.float16
     and restored.weight.dtype == torch.float32
+    and resumed_epoch == 5
+    and optimizer.param_groups[0]["initial_lr"] == 0.0001
+    and abs(optimizer.param_groups[0]["lr"] - (0.0001 * (0.9 ** 5))) < 1e-12
+    and scheduler.last_epoch == 4
 )
 print("ready" if is_ready else "failed")
+"""
+
+_COMPACT_CHECKPOINT_UTILS = """\
+import logging
+import torch
+
+logger = logging.getLogger("probe")
+
+
+def load_checkpoint(checkpoint_path, model, optimizer=None, load_opt=1):
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    model.load_state_dict(checkpoint["model"])
+    if optimizer is not None and load_opt:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+    return model, optimizer, checkpoint["learning_rate"], checkpoint["iteration"]
 """
 
 _DATA_LOADER_PROBE = """\

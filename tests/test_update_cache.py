@@ -44,6 +44,31 @@ class UpdateCacheTests(unittest.TestCase):
             self.assertEqual(report.removed_files, 0)
             self.assertTrue(partial.is_file())
 
+    def test_unmarked_partial_from_an_older_version_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "cache"
+            partial = cache / "updates" / "0.3.0" / "setup.exe.part"
+            partial.parent.mkdir(parents=True)
+            partial.write_bytes(b"partial")
+
+            report = cleanup_completed_updates(cache, "0.3.1")
+
+            self.assertEqual(report.removed_files, 1)
+            self.assertGreaterEqual(report.reclaimed_bytes, len(b"partial"))
+            self.assertFalse(partial.parent.exists())
+
+    def test_unmarked_partial_from_a_future_version_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "cache"
+            partial = cache / "updates" / "0.3.2" / "setup.exe.part"
+            partial.parent.mkdir(parents=True)
+            partial.write_bytes(b"partial")
+
+            report = cleanup_completed_updates(cache, "0.3.1")
+
+            self.assertEqual(report.removed_files, 0)
+            self.assertTrue(partial.is_file())
+
     def test_external_update_directory_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

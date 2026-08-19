@@ -74,6 +74,12 @@ _DATA_LOADER_FAILURE_MARKERS = (
     "dataloader timed out",
     "data loader timed out",
 )
+_NATIVE_RUNTIME_CRASH_MARKERS = (
+    "windows fatal exception: access violation",
+    "0xc0000005",
+    "3221225477",
+    "rtluserthreadstart",
+)
 
 
 class RvcTrainingRunError(RuntimeError):
@@ -233,8 +239,11 @@ def train_rvc_model(
     active_monitor: RvcTrainingAttemptMonitor | None = None
     attempt_log_offset = log_offset
     last_returncode: int | None = None
+    resume_load_error = ""
+    safe_retry_requested = False
 
     def handle_output(line: str) -> None:
+        nonlocal resume_load_error, safe_retry_requested
         text = line.strip()
         if not text:
             return
@@ -247,6 +256,12 @@ def train_rvc_model(
             recent_output_set.add(text)
             if len(recent_output) > 2048:
                 recent_output_set.discard(recent_output.popleft())
+            if resumed and text.startswith("JJZERO_CHECKPOINT_LOAD_FAILED"):
+                resume_load_error = text
+                token.request_cancel()
+            if text.startswith("JJZERO_DATA_LOADER_WORKER_EXITED"):
+                safe_retry_requested = True
+                token.terminate_current()
             step_match = _EPOCH_STEP_PATTERN.search(text)
             if step_match is not None:
                 _report_epoch_step(
@@ -308,19 +323,26 @@ def train_rvc_model(
                     attempt_log_offset,
                 )
             loader_diagnostics = (
+                f"returncode={result.returncode} "
+                f"windows_status=0x{result.returncode & 0xFFFFFFFF:08X}\n"
                 f"{result.output}\n{_log_delta(log_path, attempt_log_offset)}"
             )
             if (
                 data_loader_settings.workers > 0
                 and not result.cancelled
                 and not token.is_requested
-                and _is_data_loader_failure(loader_diagnostics)
+                and (
+                    safe_retry_requested
+                    or _is_data_loader_failure(loader_diagnostics)
+                    or _is_native_runtime_crash(loader_diagnostics)
+                )
             ):
                 logger.warning(
-                    "Parallel RVC data loading failed; retrying safely: "
-                    "model=%s workers=%s",
+                    "RVC training process failed with parallel data loading; "
+                    "retrying safely: model=%s workers=%s native_crash=%s",
                     model_id,
                     data_loader_settings.workers,
+                    _is_native_runtime_crash(loader_diagnostics),
                 )
                 handle_output("JJZERO_DATA_LOADER_FALLBACK workers=0")
                 if training_diagnostics is not None and active_attempt is not None:
@@ -384,6 +406,11 @@ def train_rvc_model(
                         attempt_log_offset,
                     )
         refreshed = state_store.refresh_checkpoint_pair()
+        if resume_load_error:
+            raise RvcTrainingRunError(
+                "RVC could not restore the saved training checkpoint: "
+                f"{resume_load_error}"
+            )
         if result.cancelled or token.is_requested:
             if training_diagnostics is not None and active_attempt is not None:
                 training_diagnostics.finish_attempt(
@@ -528,6 +555,11 @@ def _training_command(
 def _is_data_loader_failure(output: str) -> bool:
     lowered = str(output).casefold()
     return any(marker in lowered for marker in _DATA_LOADER_FAILURE_MARKERS)
+
+
+def _is_native_runtime_crash(output: str) -> bool:
+    lowered = str(output).casefold()
+    return any(marker in lowered for marker in _NATIVE_RUNTIME_CRASH_MARKERS)
 
 
 def _prepare_package_config(

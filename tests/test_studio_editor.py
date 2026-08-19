@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import soundfile as sf
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
@@ -34,6 +34,62 @@ class StudioEditorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_timeline_zoom_accepts_twenty_times_the_default_scale(self) -> None:
+        timeline = StudioTimelineView()
+
+        timeline.set_zoom(140)
+        self.assertEqual(timeline._pixels_per_second, 140)
+
+        timeline.set_zoom(500)
+        self.assertEqual(timeline._pixels_per_second, 140)
+        timeline.close()
+
+    def test_timeline_scrollbar_starts_after_header_and_ctrl_wheel_moves_it(self) -> None:
+        reference = StudioAssetRef("long", TRACK_ORIGINAL_VOCAL)
+        clip = StudioClip("long-clip", reference, 0, 0, 120_000)
+        session = StudioSession(
+            tracks=(
+                StudioTrack(
+                    "track-original-vocal",
+                    "Original Vocal",
+                    TRACK_ORIGINAL_VOCAL,
+                    clips=(clip,),
+                ),
+            )
+        )
+        editor = StudioEditor(include_sidebars=False)
+        editor.resize(720, 420)
+        editor.set_context(session, ())
+        editor.set_zoom(140)
+        editor.show()
+        self.app.processEvents()
+
+        native_scroll = editor.timeline_scroll.horizontalScrollBar()
+        visible_scroll = editor.timeline_horizontal_scroll
+        self.assertGreater(native_scroll.maximum(), 0)
+        self.assertEqual(visible_scroll.maximum(), native_scroll.maximum())
+        self.assertEqual(
+            visible_scroll.geometry().left(),
+            editor.timeline.HEADER_WIDTH,
+        )
+
+        wheel = QWheelEvent(
+            QPointF(10, 10),
+            QPointF(10, 10),
+            QPoint(),
+            QPoint(0, -120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.ControlModifier,
+            Qt.ScrollPhase.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(editor.timeline_scroll.viewport(), wheel)
+        self.app.processEvents()
+
+        self.assertGreater(native_scroll.value(), 0)
+        self.assertEqual(visible_scroll.value(), native_scroll.value())
+        editor.close()
 
     def test_sound_pool_drop_adds_non_destructive_clip_at_target_position(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -107,6 +163,91 @@ class StudioEditorTests(unittest.TestCase):
             self.assertEqual(editor.session().tracks[0].clips[0].effects, (effect,))
             editor.close()
 
+    def test_effect_drop_can_link_all_pieces_from_the_same_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            reference = asset.reference
+            clips = (
+                StudioClip("clip-1", reference, 0, 0, 1_000),
+                StudioClip("clip-2", reference, 1_000, 1_000, 2_000),
+            )
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "track-original-vocal",
+                        "Original Vocal",
+                        TRACK_ORIGINAL_VOCAL,
+                        clips=clips,
+                    ),
+                )
+            )
+            editor = StudioEditor()
+            editor.set_context(session, (asset,))
+
+            with patch(
+                "jang_app.qt_app.studio_editor.StudioEffectScopeDialog.choose",
+                return_value="source",
+            ) as choose:
+                editor._drop_effect("reverb", "clip-1")
+
+            first, second = editor.session().tracks[0].clips
+            self.assertEqual(choose.call_args.args[1], 2)
+            self.assertEqual(first.effects, second.effects)
+            self.assertEqual(len(first.effects), 1)
+
+            changed = replace(
+                first.effects[0],
+                reverb=replace(first.effects[0].reverb, dry_wet_percent=67),
+            )
+            editor._update_effect("clip-2", changed)
+            first, second = editor.session().tracks[0].clips
+            self.assertEqual(first.effects, (changed,))
+            self.assertEqual(second.effects, (changed,))
+
+            editor._remove_effect("clip-1", changed.effect_id)
+            self.assertTrue(
+                all(not clip.effects for clip in editor.session().tracks[0].clips)
+            )
+            self.assertTrue(editor.undo())
+            self.assertTrue(
+                all(
+                    clip.effects == (changed,)
+                    for clip in editor.session().tracks[0].clips
+                )
+            )
+            editor.close()
+
+    def test_effect_scope_cancel_keeps_split_pieces_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            reference = asset.reference
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "track-original-vocal",
+                        "Original Vocal",
+                        TRACK_ORIGINAL_VOCAL,
+                        clips=(
+                            StudioClip("clip-1", reference, 0, 0, 1_000),
+                            StudioClip("clip-2", reference, 1_000, 1_000, 2_000),
+                        ),
+                    ),
+                )
+            )
+            editor = StudioEditor()
+            editor.set_context(session, (asset,))
+
+            with patch(
+                "jang_app.qt_app.studio_editor.StudioEffectScopeDialog.choose",
+                return_value=None,
+            ):
+                editor._drop_effect("reverb", "clip-1")
+
+            self.assertTrue(
+                all(not clip.effects for clip in editor.session().tracks[0].clips)
+            )
+            editor.close()
+
     def test_delay_drop_adds_an_editable_clip_effect(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             asset = _asset(Path(temporary))
@@ -166,6 +307,25 @@ class StudioEditorTests(unittest.TestCase):
             self.assertEqual(effects[0].delay.feedback_percent, 24)
             self.assertEqual(effects[1].reverb.decay_ms, 1_250)
             self.assertEqual(effects[1].reverb.dry_wet_percent, 22)
+            self.assertTrue(editor.undo())
+            self.assertEqual(editor.session().tracks[0].clips[0].effects, ())
+            editor.close()
+
+    def test_lush_preset_adds_bloom_and_level_match_as_one_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            editor = StudioEditor()
+            editor.set_context(_session(), (asset,))
+
+            editor._drop_effect("preset:lush", "clip-1")
+
+            effects = editor.session().tracks[0].clips[0].effects
+            self.assertEqual(
+                tuple(effect.kind for effect in effects),
+                ("reverb", "level_match"),
+            )
+            self.assertEqual(effects[0].reverb.decay_ms, 950)
+            self.assertEqual(effects[1].level_match.strength_percent, 75)
             self.assertTrue(editor.undo())
             self.assertEqual(editor.session().tracks[0].clips[0].effects, ())
             editor.close()
@@ -263,6 +423,60 @@ class StudioEditorTests(unittest.TestCase):
         self.assertAlmostEqual(nominal_height, 23.4)
         self.assertAlmostEqual(available_height, 31.0)
 
+    def test_timeline_only_selects_clips_intersecting_the_exposed_region(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        clips = tuple(
+            StudioClip(
+                f"clip-{index}",
+                reference,
+                index * 1_000,
+                index * 1_000,
+                (index + 1) * 1_000,
+            )
+            for index in range(500)
+        )
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=clips,
+        )
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(StudioSession(tracks=(track,)), ())
+        exposed = QRectF(
+            timeline._ms_to_x(200_000),
+            timeline.RULER_HEIGHT,
+            240,
+            timeline.LANE_HEIGHT,
+        )
+
+        visible = timeline._visible_track_clips(track, 0, exposed)
+
+        self.assertLess(len(visible), 20)
+        self.assertIn("clip-205", {clip.clip_id for clip in visible})
+        self.assertNotIn("clip-20", {clip.clip_id for clip in visible})
+
+    def test_playhead_move_invalidates_only_narrow_regions(self) -> None:
+        class RecordingTimeline(StudioTimelineView):
+            def __init__(self) -> None:
+                self.updated_regions = []
+                super().__init__()
+
+            def update(self, *args) -> None:
+                if args:
+                    self.updated_regions.append(args[0])
+
+        timeline = RecordingTimeline()
+        timeline.set_context(_session(), ())
+        timeline.updated_regions.clear()
+
+        timeline.set_playhead(1_000)
+        timeline.set_playhead(1_000)
+
+        self.assertEqual(len(timeline.updated_regions), 2)
+        self.assertTrue(all(region.width() <= 16 for region in timeline.updated_regions))
+
     def test_clip_follows_pointer_before_release_and_commits_once(self) -> None:
         timeline = StudioTimelineView()
         timeline.set_zoom(24)
@@ -312,6 +526,311 @@ class StudioEditorTests(unittest.TestCase):
         self.assertEqual(moved.count(), 1)
         self.assertEqual(moved.at(0), ["clip-1", "track-original-vocal", 2_000])
 
+    def test_drag_preview_snaps_to_neighbor_boundary_before_release(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        first = StudioClip("first", reference, 0, 0, 1_000)
+        second = StudioClip("second", reference, 2_000, 0, 1_000)
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(first, second),
+        )
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(StudioSession(tracks=(track,)), ())
+        moved = QSignalSpy(timeline.clip_moved)
+        start = timeline._clip_rect(first, 0).center()
+        destination = QPointF(timeline._ms_to_x(2_100), start.y())
+
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                start,
+                start,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        timeline.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                destination,
+                destination,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(timeline._drag_clip.timeline_start_ms, 1_000)
+        self.assertTrue(timeline._drag_snapped)
+
+        timeline.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                destination,
+                destination,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(moved.at(0), ["first", "track-original-vocal", 1_000])
+
+    def test_magnet_snaps_move_to_cross_track_edge_and_alt_temporarily_bypasses_it(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        moving = StudioClip("moving", reference, 0, 0, 1_000)
+        marker = StudioClip("marker", reference, 3_000, 0, 1_000)
+        session = StudioSession(
+            tracks=(
+                StudioTrack("track-a", "Audio A", clips=(moving,)),
+                StudioTrack("track-b", "Audio B", clips=(marker,)),
+            )
+        )
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(session, ())
+        start = timeline._clip_rect(moving, 0).center()
+        destination = QPointF(timeline._ms_to_x(3_100), start.y())
+
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                start,
+                start,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        timeline.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                destination,
+                destination,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(timeline._drag_clip.timeline_start_ms, 3_000)
+        self.assertEqual(timeline._snap_preview.target.position_ms, 3_000)
+
+        timeline.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                destination,
+                destination,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.AltModifier,
+            )
+        )
+
+        self.assertEqual(timeline._drag_clip.timeline_start_ms, 2_600)
+        self.assertIsNone(timeline._snap_preview)
+
+    def test_playhead_and_split_tool_share_the_edit_point_index(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        long_clip = StudioClip("long", reference, 0, 0, 5_000)
+        marker = StudioClip("marker", reference, 2_000, 0, 1_000)
+        session = StudioSession(
+            tracks=(
+                StudioTrack("track-a", "Audio A", clips=(long_clip,)),
+                StudioTrack("track-b", "Audio B", clips=(marker,)),
+            )
+        )
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(session, ())
+
+        ruler_point = QPointF(
+            timeline._ms_to_x(1_800),
+            timeline._ruler_top() + 8,
+        )
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                ruler_point,
+                ruler_point,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        self.assertEqual(timeline._playhead_ms, 2_000)
+        self.assertEqual(timeline._snap_preview.target.position_ms, 2_000)
+
+        timeline.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                ruler_point,
+                ruler_point,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        timeline.set_split_mode(True)
+        split_point = QPoint(
+            round(timeline._ms_to_x(1_800)),
+            round(timeline._clip_rect(long_clip, 0).center().y()),
+        )
+        timeline._update_cursor(split_point, Qt.KeyboardModifier.NoModifier)
+
+        self.assertEqual(timeline._split_hover, ("long", 2_000))
+        self.assertEqual(timeline._snap_preview.target.position_ms, 2_000)
+
+    def test_sound_pool_drop_uses_the_same_magnetic_position_resolver(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            marker = StudioClip("marker", asset.reference, 5_000, 0, 1_000)
+            session = StudioSession(
+                tracks=(
+                    StudioTrack("track-a", "Audio A"),
+                    StudioTrack("track-b", "Audio B", clips=(marker,)),
+                )
+            )
+            timeline = StudioTimelineView()
+            timeline.set_zoom(24)
+            timeline.set_context(session, (asset,))
+
+            position_ms, snap_result = timeline._resolve_asset_drop_position(
+                asset.asset_id,
+                session.tracks[0],
+                timeline._ms_to_x(4_650),
+                Qt.KeyboardModifier.NoModifier,
+            )
+
+            self.assertEqual(position_ms, 5_000)
+            self.assertTrue(snap_result.snapped)
+
+    def test_left_trim_preview_stops_at_previous_clip_boundary(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        previous = StudioClip("previous", reference, 0, 0, 1_000)
+        middle = StudioClip("middle", reference, 1_500, 1_000, 2_000)
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(previous, middle),
+        )
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(StudioSession(tracks=(track,)), ())
+        trimmed = QSignalSpy(timeline.clip_trimmed)
+        rect = timeline._clip_rect(middle, 0)
+        start = QPointF(rect.left(), rect.center().y())
+        destination = QPointF(timeline._ms_to_x(500), start.y())
+
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                start,
+                start,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        timeline.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                destination,
+                destination,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(
+            (timeline._drag_clip.timeline_start_ms, timeline._drag_clip.source_start_ms),
+            (1_000, 500),
+        )
+        self.assertTrue(timeline._drag_snapped)
+
+        timeline.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                destination,
+                destination,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(trimmed.at(0), ["middle", 500, 2_000, True])
+
+    def test_drag_to_incompatible_track_is_rejected_without_commit(self) -> None:
+        audio_ref = StudioAssetRef("audio", TRACK_ORIGINAL_VOCAL)
+        video_ref = StudioAssetRef("video", TRACK_VIDEO)
+        audio = StudioClip("audio-clip", audio_ref, 0, 0, 1_000)
+        video = StudioClip("video-clip", video_ref, 0, 0, 1_000)
+        session = StudioSession(
+            tracks=(
+                StudioTrack(
+                    "track-audio",
+                    "Original Vocal",
+                    TRACK_ORIGINAL_VOCAL,
+                    clips=(audio,),
+                ),
+                StudioTrack(
+                    "track-video",
+                    "Media",
+                    TRACK_VIDEO,
+                    clips=(video,),
+                ),
+            )
+        )
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(session, ())
+        moved = QSignalSpy(timeline.clip_moved)
+        start = timeline._clip_rect(audio, 0).center()
+        destination = QPointF(start.x(), timeline._clip_rect(video, 1).center().y())
+
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                start,
+                start,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        timeline.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                destination,
+                destination,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertFalse(timeline._drag_target_valid)
+
+        timeline.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                destination,
+                destination,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(moved.count(), 0)
+
     def test_click_without_drag_does_not_commit_a_clip_move(self) -> None:
         timeline = StudioTimelineView()
         timeline.set_context(_session(), ())
@@ -342,7 +861,7 @@ class StudioEditorTests(unittest.TestCase):
 
         self.assertEqual(moved.count(), 0)
 
-    def test_playhead_follows_pointer_until_release_without_moving_clip(self) -> None:
+    def test_playhead_line_in_clip_lane_does_not_capture_clip_interaction(self) -> None:
         timeline = StudioTimelineView()
         timeline.set_zoom(24)
         timeline.set_context(_session(), ())
@@ -353,11 +872,6 @@ class StudioEditorTests(unittest.TestCase):
             timeline._ms_to_x(1_000),
             timeline.RULER_HEIGHT + timeline.LANE_HEIGHT / 2,
         )
-        destination = QPointF(
-            timeline._ms_to_x(1_500),
-            start.y(),
-        )
-
         timeline.mousePressEvent(
             QMouseEvent(
                 QEvent.Type.MouseButtonPress,
@@ -368,27 +882,17 @@ class StudioEditorTests(unittest.TestCase):
                 Qt.KeyboardModifier.NoModifier,
             )
         )
-        timeline.mouseMoveEvent(
-            QMouseEvent(
-                QEvent.Type.MouseMove,
-                destination,
-                destination,
-                Qt.MouseButton.NoButton,
-                Qt.MouseButton.LeftButton,
-                Qt.KeyboardModifier.NoModifier,
-            )
-        )
 
-        self.assertEqual(timeline._drag_mode, "playhead")
-        self.assertEqual(timeline._playhead_ms, 1_500)
-        self.assertEqual(seeked.at(seeked.count() - 1), [1_500])
+        self.assertEqual(timeline._drag_mode, "move")
+        self.assertEqual(timeline._playhead_ms, 1_000)
+        self.assertEqual(seeked.count(), 0)
         self.assertEqual(moved.count(), 0)
 
         timeline.mouseReleaseEvent(
             QMouseEvent(
                 QEvent.Type.MouseButtonRelease,
-                destination,
-                destination,
+                start,
+                start,
                 Qt.MouseButton.LeftButton,
                 Qt.MouseButton.NoButton,
                 Qt.KeyboardModifier.NoModifier,
@@ -396,8 +900,35 @@ class StudioEditorTests(unittest.TestCase):
         )
 
         self.assertEqual(timeline._drag_mode, "")
-        self.assertEqual(timeline._playhead_ms, 1_500)
+        self.assertEqual(timeline._playhead_ms, 1_000)
         self.assertEqual(moved.count(), 0)
+
+    def test_cut_tool_can_split_a_clip_directly_under_the_playhead_line(self) -> None:
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(_session(), ())
+        timeline.set_playhead(1_000)
+        timeline.set_split_mode(True)
+        split = QSignalSpy(timeline.clip_split_requested)
+        point = QPointF(
+            timeline._ms_to_x(1_000),
+            timeline.RULER_HEIGHT + timeline.LANE_HEIGHT / 2,
+        )
+
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                point,
+                point,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(split.count(), 1)
+        self.assertEqual(split.at(0), ["clip-1", 1_000])
+        self.assertNotEqual(timeline._drag_mode, "playhead")
 
     def test_ruler_drag_clamps_playhead_to_session_duration(self) -> None:
         timeline = StudioTimelineView()
@@ -607,7 +1138,32 @@ class StudioEditorTests(unittest.TestCase):
             self.assertEqual(editor._playhead_ms, 1_500)
             editor.close()
 
-    def test_adding_at_playhead_keeps_existing_clips_in_place(self) -> None:
+    def test_right_click_exits_cut_tool_without_editing_the_timeline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = _asset(Path(temporary))
+            editor = StudioEditor()
+            editor.set_context(_session(), (asset,))
+            mode_changed = QSignalSpy(editor.split_mode_changed)
+            original_session = editor.session()
+            editor.set_split_mode(True)
+
+            QTest.mouseClick(
+                editor.timeline,
+                Qt.MouseButton.RightButton,
+                pos=QPoint(
+                    round(editor.timeline._ms_to_x(1_000)),
+                    editor.timeline.RULER_HEIGHT + editor.timeline.LANE_HEIGHT // 2,
+                ),
+            )
+
+            self.assertFalse(editor._split_mode)
+            self.assertFalse(editor.timeline._split_mode)
+            self.assertEqual(tuple(mode_changed.at(0)), (True,))
+            self.assertEqual(tuple(mode_changed.at(1)), (False,))
+            self.assertEqual(editor.session(), original_session)
+            editor.close()
+
+    def test_adding_at_occupied_playhead_keeps_existing_clip_and_snaps_new_clip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             asset = _asset(Path(temporary))
             editor = StudioEditor()
@@ -617,7 +1173,55 @@ class StudioEditorTests(unittest.TestCase):
             clips = editor.session().tracks[0].clips
             original = next(clip for clip in clips if clip.clip_id == "clip-1")
             self.assertEqual(original.timeline_start_ms, 0)
-            self.assertEqual([clip.timeline_start_ms for clip in clips], [0, 0])
+            self.assertEqual([clip.timeline_start_ms for clip in clips], [0, 2_000])
+
+    def test_legacy_overlap_warning_clears_after_user_resolves_the_conflict(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        first = StudioClip("first", reference, 0, 0, 2_000)
+        second = StudioClip("second", reference, 1_000, 0, 2_000)
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(first, second),
+        )
+        editor = StudioEditor()
+
+        editor.set_context(StudioSession(tracks=(track,)), ())
+
+        self.assertFalse(editor.status_label.isHidden())
+        self.assertEqual(editor._legacy_overlap_count, 1)
+
+        editor._move_clip("second", track.track_id, 2_000)
+
+        self.assertTrue(editor.status_label.isHidden())
+        self.assertEqual(editor._legacy_overlap_count, 0)
+        editor.close()
+
+    def test_snapped_move_is_restored_as_one_undo_and_redo_step(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        first = StudioClip("first", reference, 0, 0, 1_000)
+        second = StudioClip("second", reference, 2_000, 0, 1_000)
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(first, second),
+        )
+        original = StudioSession(tracks=(track,))
+        editor = StudioEditor()
+        editor.set_context(original, ())
+
+        editor._move_clip("first", track.track_id, 1_600)
+
+        moved = next(clip for clip in editor.session().tracks[0].clips if clip.clip_id == "first")
+        self.assertEqual(moved.timeline_start_ms, 1_000)
+        self.assertTrue(editor.undo())
+        self.assertEqual(editor.session(), original)
+        self.assertTrue(editor.redo())
+        moved = next(clip for clip in editor.session().tracks[0].clips if clip.clip_id == "first")
+        self.assertEqual(moved.timeline_start_ms, 1_000)
+        editor.close()
 
     def test_add_track_row_appends_and_selects_an_empty_track(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

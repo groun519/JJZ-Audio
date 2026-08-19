@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.app_paths import discover_app_paths
 from jang_app.services.data_migrations import run_data_migrations
@@ -42,6 +43,19 @@ class DataMigrationTests(unittest.TestCase):
 
             self.assertEqual(result.previous_schema, 1)
             self.assertEqual(result.applied, ())
+
+    def test_current_schema_does_not_rewrite_unchanged_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = _paths(Path(temporary))
+            run_data_migrations(paths)
+
+            with patch(
+                "jang_app.services.data_migrations.write_json_atomic"
+            ) as write_state:
+                result = run_data_migrations(paths)
+
+            self.assertEqual(result.applied, ())
+            write_state.assert_not_called()
 
     def test_newer_data_schema_is_not_downgraded(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -32,7 +32,20 @@ class StudioTransportBarTests(unittest.TestCase):
         bar.set_zoom(12)
 
         self.assertEqual(bar.zoom_slider.value(), 12)
+        self.assertIn("1.7x", bar.zoom_label.text())
         self.assertEqual(changed.count(), 0)
+        bar.close()
+
+    def test_zoom_range_reaches_twenty_times_and_keeps_value_visible(self) -> None:
+        bar = StudioTransportBar()
+        changed = QSignalSpy(bar.zoom_changed)
+
+        self.assertIn("1x", bar.zoom_label.text())
+        bar.zoom_slider.setValue(bar.zoom_slider.maximum())
+
+        self.assertEqual(bar.zoom_slider.maximum(), 140)
+        self.assertIn("20x", bar.zoom_label.text())
+        self.assertEqual(changed.at(0), [140])
         bar.close()
 
     def test_split_button_toggles_persistent_cut_tool_only_when_available(self) -> None:
@@ -80,6 +93,33 @@ class StudioTransportBarTests(unittest.TestCase):
 
         self.assertEqual(undo_requested.count(), 1)
         self.assertEqual(redo_requested.count(), 1)
+        bar.close()
+
+    def test_magnet_button_and_n_shortcut_share_the_snapping_state(self) -> None:
+        bar = StudioTransportBar()
+        changed = QSignalSpy(bar.snapping_changed)
+
+        self.assertTrue(bar.snap_button.isChecked())
+        light_active_palette = bar.snap_button._button_palette()
+        self.assertEqual(light_active_palette["background"].name(), "#dcefe8")
+        self.assertEqual(light_active_palette["border"].name(), "#70a995")
+        self.assertEqual(light_active_palette["icon"].name(), "#236b58")
+        bar.snap_button.click()
+        self.assertFalse(bar.snap_button.isChecked())
+        light_idle_palette = bar.snap_button._button_palette()
+        self.assertEqual(light_idle_palette["background"].alpha(), 0)
+        self.assertEqual(light_idle_palette["icon"].name(), "#6e6a61")
+        self.assertEqual(changed.at(0), [False])
+
+        bar.snap_shortcut.activated.emit()
+        self.assertTrue(bar.snap_button.isChecked())
+        bar.set_theme_mode("dark")
+        dark_active_palette = bar.snap_button._button_palette()
+        self.assertEqual(dark_active_palette["background"].name(), "#183a35")
+        self.assertEqual(dark_active_palette["border"].name(), "#4f8f7d")
+        self.assertEqual(dark_active_palette["icon"].name(), "#75d9bc")
+        self.assertEqual(changed.at(1), [True])
+        self.assertIn("N", bar.snap_button.toolTip())
         bar.close()
 
 

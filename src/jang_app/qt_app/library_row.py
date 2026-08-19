@@ -161,6 +161,7 @@ class SongListRow(QWidget):
         self.source_badge.setObjectName("SourceBadge")
         self.source_badge.setProperty("sourceType", metadata.source_type)
         self.source_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.source_badge.setContentsMargins(0, 0, 0, 3)
         self.source_badge.setFixedSize(52, 52)
 
         self.title_label = OverflowTitleLabel(title)

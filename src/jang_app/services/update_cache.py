@@ -74,7 +74,10 @@ def cleanup_completed_updates(
         if managed is None:
             continue
         target = _marker_target(managed / UPDATE_CLEANUP_MARKER)
-        if target is None or current < target:
+        cached_version = _version_tuple(managed.name)
+        completed = target is not None and current >= target
+        obsolete = cached_version is not None and cached_version < current
+        if not completed and not obsolete:
             continue
         report = report.merged(_remove_update_directory(managed))
     return report

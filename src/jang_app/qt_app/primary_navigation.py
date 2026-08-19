@@ -2,12 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QSizePolicy
+from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPen
+from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QFrame,
+    QHBoxLayout,
+    QSizePolicy,
+    QVBoxLayout,
+)
 
 from jang_app.qt_app.navigation_work_song_selector import NavigationWorkSongSelector
 from jang_app.qt_app.widgets import FeedbackButton, TransparentContainer, render_app_icon
+from jang_app.qt_app.window_lifecycle import allow_top_level_window
+from jang_app.services.i18n import tr
 
 
 _PAGE_ICONS = {
@@ -22,6 +31,9 @@ _PAGE_ICONS = {
 
 
 class NavigationItemButton(FeedbackButton):
+    hover_entered = Signal()
+    hover_left = Signal()
+
     def __init__(self, label: str, icon_name: str) -> None:
         super().__init__(label)
         self.setObjectName("NavigationItemButton")
@@ -30,10 +42,23 @@ class NavigationItemButton(FeedbackButton):
         self.setAccessibleName(label)
         self._icon_name = icon_name
         self._theme_mode = "white"
+        self._has_submenu = False
+
+    def set_has_submenu(self, has_submenu: bool) -> None:
+        self._has_submenu = bool(has_submenu)
+        self.update()
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
         self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        super().enterEvent(event)
+        self.hover_entered.emit()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        super().leaveEvent(event)
+        self.hover_left.emit()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
@@ -70,10 +95,182 @@ class NavigationItemButton(FeedbackButton):
             self.text(),
         )
 
+        if self._has_submenu:
+            chevron = QPen(palette["foreground"], 1.4)
+            chevron.setCapStyle(Qt.PenCapStyle.RoundCap)
+            chevron.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(chevron)
+            center_x = rect.right() - 8
+            center_y = rect.center().y()
+            painter.drawLine(
+                QPoint(int(center_x - 3), int(center_y - 1)),
+                QPoint(int(center_x), int(center_y + 2)),
+            )
+            painter.drawLine(
+                QPoint(int(center_x), int(center_y + 2)),
+                QPoint(int(center_x + 3), int(center_y - 1)),
+            )
+
         if bool(self.property("keyboardFocus")):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(palette["focus"], 1))
             painter.drawRoundedRect(rect.adjusted(3, 3, -3, -3), 9, 9)
+
+
+class _NavigationSubmenuOption(FeedbackButton):
+    def __init__(self, option: str, label: str) -> None:
+        super().__init__(label)
+        self.option = option
+        self._theme_mode = "white"
+        self.setCheckable(True)
+        self.setFixedHeight(34)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAccessibleName(label)
+
+    def set_label(self, label: str) -> None:
+        self.setText(label)
+        self.setAccessibleName(label)
+        self.update()
+
+    def set_theme_mode(self, theme_mode: str) -> None:
+        self._theme_mode = theme_mode
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        dark = self._theme_mode == "dark"
+        enabled = self.isEnabled()
+        selected = self.isChecked() and enabled
+        hovered = self._is_pointer_hovered() and enabled
+        pressed = (self._is_pointer_pressed() or self.isDown()) and enabled
+        background = QColor(0, 0, 0, 0)
+        if pressed:
+            background = QColor("#353532" if dark else "#ddd6ca")
+        elif hovered or selected:
+            background = QColor("#292927" if dark else "#ede7dc")
+        foreground = QColor("#777570" if dark else "#a29c91")
+        if enabled:
+            foreground = QColor("#ecebe7" if dark else "#24231f")
+        if enabled and not hovered and not selected:
+            foreground = QColor("#aaa8a2" if dark else "#6f6b63")
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 8, 8)
+        if selected:
+            painter.setBrush(QColor("#d6a13a" if dark else "#a56c16"))
+            painter.drawEllipse(QRectF(11, rect.center().y() - 3, 6, 6))
+
+        font = QFont(self.font())
+        font.setPixelSize(12)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        painter.setPen(foreground)
+        painter.drawText(
+            QRectF(26, 0, rect.width() - 34, rect.height()),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            self.text(),
+        )
+
+
+class _NavigationSubmenu(QFrame):
+    option_selected = Signal(str)
+
+    def __init__(
+        self,
+        options: Iterable[tuple[str, str]],
+        parent: QFrame,
+    ) -> None:
+        super().__init__(
+            parent,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint,
+        )
+        self.setObjectName("NavigationSubmenu")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+        allow_top_level_window(self)
+        self._theme_mode = "white"
+        self.buttons: dict[str, _NavigationSubmenuOption] = {}
+        self.label_keys: dict[str, str] = {}
+        self.button_group = QButtonGroup(self)
+        self.button_group.setExclusive(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(2)
+        for option, label_key in options:
+            button = _NavigationSubmenuOption(option, tr(label_key))
+            button.clicked.connect(
+                lambda _checked=False, value=option: self.option_selected.emit(value)
+            )
+            self.button_group.addButton(button)
+            layout.addWidget(button)
+            self.buttons[option] = button
+            self.label_keys[option] = label_key
+        label_font = QFont(self.font())
+        label_font.setPixelSize(12)
+        label_font.setWeight(QFont.Weight.DemiBold)
+        label_metrics = QFontMetrics(label_font)
+        self._minimum_width = max(
+            156,
+            max(
+                (
+                    label_metrics.horizontalAdvance(button.text())
+                    for button in self.buttons.values()
+                ),
+                default=0,
+            )
+            + 48,
+        )
+        self.setFixedWidth(self._minimum_width)
+        self.setFixedHeight(12 + len(self.buttons) * 34 + max(0, len(self.buttons) - 1) * 2)
+
+    def set_selected(self, option: str) -> None:
+        button = self.buttons.get(option)
+        if button is not None:
+            button.setChecked(True)
+
+    def apply_language(self) -> None:
+        for option, label_key in self.label_keys.items():
+            self.buttons[option].set_label(tr(label_key))
+
+    def set_theme_mode(self, theme_mode: str) -> None:
+        self._theme_mode = theme_mode
+        for button in self.buttons.values():
+            button.set_theme_mode(theme_mode)
+        self.update()
+
+    def show_for(self, anchor: NavigationItemButton) -> None:
+        self.setFixedWidth(max(self._minimum_width, anchor.width()))
+        target = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
+        screen = QApplication.screenAt(target) or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            target.setX(
+                min(
+                    max(target.x(), available.left() + 8),
+                    available.right() - self.width() - 8,
+                )
+            )
+        self.move(target)
+        self.show()
+        self.raise_()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        dark = self._theme_mode == "dark"
+        rect = QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75)
+        painter.setBrush(QColor("#1b1b19" if dark else "#f7f3eb"))
+        painter.setPen(QPen(QColor("#3d3d39" if dark else "#d3ccbf"), 1.25))
+        painter.drawRoundedRect(rect, 10, 10)
 
 
 class NavigationActionButton(FeedbackButton):
@@ -121,6 +318,7 @@ class NavigationActionButton(FeedbackButton):
 
 class PrimaryNavigationBar(QFrame):
     page_requested = Signal(int)
+    page_option_requested = Signal(int, str)
     settings_requested = Signal()
     work_song_changed = Signal(str)
 
@@ -140,6 +338,11 @@ class PrimaryNavigationBar(QFrame):
 
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
+        self._theme_mode = "white"
+        self._page_menus: dict[int, _NavigationSubmenu] = {}
+        self._page_menu_actions: dict[int, dict[str, _NavigationSubmenuOption]] = {}
+        self._page_menu_labels: dict[int, dict[str, str]] = {}
+        self._submenu_close_timers: dict[int, QTimer] = {}
 
         self.leading_buttons = [self._add_button(label, page_id) for label, page_id in leading_items]
         self.workflow_buttons = [self._add_button(label, page_id) for label, page_id in workflow_items]
@@ -192,7 +395,7 @@ class PrimaryNavigationBar(QFrame):
         layout.addWidget(self.channel_slot, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.trailing_slot, 1)
 
-        self.button_group.idClicked.connect(self.page_requested.emit)
+        self.button_group.idClicked.connect(self._on_page_clicked)
         self.set_current_page(leading_items[0][1])
 
     def set_current_page(self, page_id: int) -> None:
@@ -213,6 +416,71 @@ class PrimaryNavigationBar(QFrame):
         button.setEnabled(enabled)
         button.setToolTip("" if enabled else disabled_tooltip)
 
+    def set_page_options(
+        self,
+        page_id: int,
+        options: Iterable[tuple[str, str]],
+        *,
+        selected_option: str,
+    ) -> None:
+        button = self.button_group.button(page_id)
+        if not isinstance(button, NavigationItemButton):
+            return
+        previous_menu = self._page_menus.pop(page_id, None)
+        if previous_menu is not None:
+            previous_menu.hide()
+            previous_menu.deleteLater()
+
+        menu = _NavigationSubmenu(options, self)
+        menu.set_theme_mode(self._theme_mode)
+        menu.option_selected.connect(
+            lambda value, requested_page=page_id: self._request_page_option(
+                requested_page,
+                value,
+            )
+        )
+        self._page_menus[page_id] = menu
+        self._page_menu_actions[page_id] = menu.buttons
+        self._page_menu_labels[page_id] = menu.label_keys
+        if page_id not in self._submenu_close_timers:
+            close_timer = QTimer(self)
+            close_timer.setSingleShot(True)
+            close_timer.setInterval(140)
+            close_timer.timeout.connect(
+                lambda value=page_id: self._close_page_menu_if_unhovered(value)
+            )
+            self._submenu_close_timers[page_id] = close_timer
+            button.hover_entered.connect(
+                lambda value=page_id: self._on_submenu_hover_entered(value)
+            )
+            button.hover_left.connect(
+                lambda value=page_id: self._on_submenu_button_left(value)
+            )
+        button.set_has_submenu(bool(menu.buttons))
+        self.set_page_option(page_id, selected_option)
+
+    def set_page_option(self, page_id: int, option: str) -> None:
+        menu = self._page_menus.get(page_id)
+        if menu is not None:
+            menu.set_selected(option)
+
+    def set_page_option_enabled(
+        self,
+        page_id: int,
+        option: str,
+        enabled: bool,
+        *,
+        disabled_tooltip: str = "",
+    ) -> None:
+        button = self._page_menu_actions.get(page_id, {}).get(option)
+        if button is None:
+            return
+        button.setEnabled(enabled)
+        button.setToolTip("" if enabled else disabled_tooltip)
+        if not enabled and button.isChecked():
+            button.setChecked(False)
+        button.update()
+
     def set_work_songs(
         self,
         songs: Iterable[tuple[str, str]],
@@ -225,17 +493,79 @@ class PrimaryNavigationBar(QFrame):
 
     def apply_language(self) -> None:
         self.work_song_selector.apply_language()
+        for menu in self._page_menus.values():
+            menu.apply_language()
 
     def set_theme_mode(self, theme_mode: str) -> None:
+        self._theme_mode = theme_mode
         self.work_song_selector.set_theme_mode(theme_mode)
         for button in self.buttons:
             button.set_theme_mode(theme_mode)
+        for menu in self._page_menus.values():
+            menu.set_theme_mode(theme_mode)
         self.settings_button.set_theme_mode(theme_mode)
 
     def _add_button(self, label: str, page_id: int) -> NavigationItemButton:
         button = NavigationItemButton(label, _PAGE_ICONS.get(label, "missing"))
         self.button_group.addButton(button, page_id)
         return button
+
+    def _on_page_clicked(self, page_id: int) -> None:
+        self._cancel_page_menu_close(page_id)
+        menu = self._page_menus.get(page_id)
+        if menu is not None:
+            menu.hide()
+        self.page_requested.emit(page_id)
+
+    def _on_submenu_hover_entered(self, page_id: int) -> None:
+        self._cancel_page_menu_close(page_id)
+        self._show_page_menu(page_id)
+
+    def _on_submenu_button_left(self, page_id: int) -> None:
+        self._schedule_page_menu_close(page_id)
+
+    def _cancel_page_menu_close(self, page_id: int) -> None:
+        timer = self._submenu_close_timers.get(page_id)
+        if timer is not None:
+            timer.stop()
+
+    def _schedule_page_menu_close(self, page_id: int) -> None:
+        timer = self._submenu_close_timers.get(page_id)
+        if timer is not None:
+            timer.start()
+
+    def _close_page_menu_if_unhovered(self, page_id: int) -> None:
+        menu = self._page_menus.get(page_id)
+        button = self.button_group.button(page_id)
+        if menu is None or button is None:
+            return
+        button_rect = QRect(button.mapToGlobal(QPoint(0, 0)), button.size())
+        menu_rect = QRect(menu.pos(), menu.size())
+        if button_rect.united(menu_rect).contains(QCursor.pos()):
+            self._schedule_page_menu_close(page_id)
+            return
+        menu.hide()
+
+    def _show_page_menu(self, page_id: int) -> None:
+        menu = self._page_menus.get(page_id)
+        button = self.button_group.button(page_id)
+        if (
+            menu is None
+            or button is None
+            or not button.isVisible()
+            or not button.isEnabled()
+            or menu.isVisible()
+        ):
+            return
+        menu.show_for(button)
+        self._schedule_page_menu_close(page_id)
+
+    def _request_page_option(self, page_id: int, option: str) -> None:
+        menu = self._page_menus.get(page_id)
+        if menu is not None:
+            menu.hide()
+        self.set_page_option(page_id, option)
+        self.page_option_requested.emit(page_id, option)
 
 
 def _navigation_divider() -> QFrame:

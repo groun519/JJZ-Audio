@@ -141,6 +141,11 @@ class UpdatePlan:
             selected.extend(self.release.ai_runtime.artifacts)
         if self.rvc_profile_required and self.rvc_profile_component is not None:
             selected.extend(self.rvc_profile_component.artifacts)
+        return tuple(selected)
+
+    @property
+    def fallback_runtime_artifacts(self) -> tuple[ReleaseArtifact, ...]:
+        selected: list[ReleaseArtifact] = []
         if self.rvc_profile_required and self.rvc_fallback_component is not None:
             selected.extend(self.rvc_fallback_component.artifacts)
         return tuple(selected)

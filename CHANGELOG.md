@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.3.8 - 2026-08-19
+
+### Added
+
+- Added magnetic Studio timeline editing with shared snapping for the playhead, clip movement, trimming, splitting, and sound-pool drops.
+- Added per-clip or linked-source effect scope so one effect can follow every piece split from the same recording.
+- Added a bundled Deno JavaScript runtime for reliable YouTube audio and video extraction without an external JavaScript installation.
+
+### Changed
+
+- Expanded Studio timeline zoom, horizontal navigation, and viewport rendering for precise editing of long projects.
+- Prevented new clip moves and trims from creating same-track overlaps while preserving recoverable legacy sessions.
+- Improved RVC training progress recovery from checkpoints, logs, and exported weights after interrupted sessions.
+- Downloaded GPU fallback components only when the preferred AMD profile fails, reducing unnecessary update transfers.
+- Refreshed converted-vocal discovery after output changes so newly generated takes appear without restarting Studio.
+
+### Fixed
+
+- Retried native RVC training crashes and dead data workers with the safe single-worker loading path.
+- Prevented a damaged resume checkpoint from silently starting a new training run.
+- Improved native-runtime crash diagnostics and stale update-cache cleanup.
+- Corrected small navigation, badge, transport, and model-training layout inconsistencies.
+
+### Quality
+
+- Added regression coverage for Studio snapping, overlap prevention, linked effects, long-timeline rendering, RVC recovery, AMD profile fallback, converted-output refresh, and bundled YouTube extraction.
+
 ## 0.3.7 - 2026-08-16
 
 ### Fixed

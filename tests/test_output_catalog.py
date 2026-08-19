@@ -34,7 +34,7 @@ class OutputCatalogTests(unittest.TestCase):
             self.assertEqual({item.job_dir for item in sound_sets}, {first, second})
             self.assertEqual(wav_files.call_count, 2)
 
-    def test_discovers_descriptive_and_compact_rvc_outputs(self) -> None:
+    def test_discovers_rvc_outputs_from_every_conversion_input_name(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             job_dir = root / "run"
@@ -42,9 +42,11 @@ class OutputCatalogTests(unittest.TestCase):
             (job_dir / "vocals.wav").write_bytes(b"vocals")
             (job_dir / "no_vocals.wav").write_bytes(b"instrumental")
             descriptive = job_dir / "vocals_rvc_voice_pitch_p0_noindex_rmvpe.wav"
+            pooled_input = job_dir / "kim_melband_vocals_rvc_voice_pitch_p0_noindex_rmvpe.wav"
             compact = job_dir / "rvc_p0_0123456789.wav"
             unrelated = job_dir / "preview.wav"
             descriptive.write_bytes(b"descriptive")
+            pooled_input.write_bytes(b"pooled input")
             compact.write_bytes(b"compact")
             unrelated.write_bytes(b"preview")
 
@@ -53,7 +55,7 @@ class OutputCatalogTests(unittest.TestCase):
             self.assertIsNotNone(sound_set)
             self.assertEqual(
                 set(sound_set.converted_vocal_paths),
-                {descriptive.resolve(), compact.resolve()},
+                {descriptive.resolve(), pooled_input.resolve(), compact.resolve()},
             )
 
 

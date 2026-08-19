@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from deno import find_deno_bin
+from PyInstaller.utils.hooks import collect_data_files
+
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parent
 SOURCE_ROOT = PROJECT_ROOT / "src"
@@ -18,13 +21,18 @@ datas = [
         "jang_app/rvc_tools",
     ),
 ]
+datas += collect_data_files("yt_dlp_ejs", includes=["**/*.js"])
+
+binaries = [
+    (find_deno_bin(), "."),
+]
 
 analysis = Analysis(
     [str(PACKAGE_ROOT / "__main__.py")],
     pathex=[str(SOURCE_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=["deno", "yt_dlp_ejs"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

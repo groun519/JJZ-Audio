@@ -1635,7 +1635,8 @@ class ModelWorkspacePage(QWidget):
         self._stop_training_telemetry()
         self.training_log_console.append_batch(traceback_text)
         task_id = self._training_task_id
-        diagnostic_code = classify_error(traceback_text).code
+        classification = classify_error(traceback_text)
+        diagnostic_code = classification.code
         if self._processing_queue is not None and self._training_task_id:
             self._processing_queue.fail(self._training_task_id, traceback_text)
             diagnostics = self._processing_queue.diagnostics
@@ -1667,7 +1668,12 @@ class ModelWorkspacePage(QWidget):
                 task_id=task_id,
                 diagnostic_code=diagnostic_code,
             )
-        self.show_status(f"Training failed: {_last_error_line(traceback_text)}")
+        summary = (
+            classification.summary
+            if diagnostic_code != "UNEXPECTED_ERROR"
+            else _last_error_line(traceback_text)
+        )
+        self.show_status(f"Training failed: {summary}")
 
     def _open_training_diagnostics(self, task_id: str) -> None:
         if not task_id or self._processing_queue is None:

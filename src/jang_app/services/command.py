@@ -61,6 +61,13 @@ class CommandCancellation:
         if process is not None:
             _terminate_process_tree(process)
 
+    def terminate_current(self) -> None:
+        """Stop the attached process without marking a user cancellation."""
+        with self._lock:
+            process = self._process
+        if process is not None:
+            _terminate_process_tree(process)
+
     def _attach(self, process: subprocess.Popen[str]) -> None:
         with self._lock:
             self._process = process

@@ -42,7 +42,16 @@ def advise_rvc_training_recovery(
     diagnostic_code: str = "",
 ) -> RvcTrainingRecoveryAdvice:
     classified = classify_error(error)
-    code = diagnostic_code.strip() or classified.code
+    stored_code = diagnostic_code.strip()
+    code = (
+        classified.code
+        if not stored_code
+        or (
+            stored_code == "UNEXPECTED_ERROR"
+            and classified.code != "UNEXPECTED_ERROR"
+        )
+        else stored_code
+    )
 
     if code == "CUDA_OUT_OF_MEMORY":
         current_batch = max(1, int(current_batch_size))

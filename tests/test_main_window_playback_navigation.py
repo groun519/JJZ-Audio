@@ -542,6 +542,22 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         self.assertEqual(window.settings.studio_layout, expected)
         save.assert_called_once_with(window.settings)
 
+    def test_studio_snapping_preference_updates_editor_and_persists(self) -> None:
+        applied: list[bool] = []
+        window = SimpleNamespace(
+            studio_editor=SimpleNamespace(
+                set_snapping_enabled=lambda enabled: applied.append(enabled)
+            ),
+            settings=AppSettings(),
+        )
+
+        with patch("jang_app.qt_app.main_window.save_app_settings") as save:
+            MainWindow._set_studio_snapping_enabled(window, False)
+
+        self.assertEqual(applied, [False])
+        self.assertFalse(window.settings.studio_layout.snapping_enabled)
+        save.assert_called_once_with(window.settings)
+
     def test_library_queue_state_updates_only_the_expanded_row(self) -> None:
         separation = _WorkspacePlaybackTarget()
         conversion = _WorkspacePlaybackTarget()

@@ -10,10 +10,39 @@ from jang_app.services.job_diagnostics import (
     diagnostic_task,
 )
 from jang_app.services import job_diagnostics
-from jang_app.services.rvc_training_diagnostics import RvcTrainingDiagnostics
+from jang_app.services.rvc_training_diagnostics import (
+    RvcTrainingAttemptMonitor,
+    RvcTrainingDiagnostics,
+    RvcTrainingProcessStatus,
+)
 
 
 class RvcTrainingDiagnosticsTests(unittest.TestCase):
+    def test_monitor_reports_a_dead_worker_only_once(self) -> None:
+        activity: list[str] = []
+        monitor = RvcTrainingAttemptMonitor(
+            None,
+            None,
+            activity_callback=activity.append,
+        )
+        workers = (
+            RvcTrainingProcessStatus(
+                123,
+                "Process-1",
+                "worker",
+                False,
+                3221225477,
+            ),
+        )
+
+        monitor._report_dead_workers(workers)
+        monitor._report_dead_workers(workers)
+
+        self.assertEqual(
+            activity,
+            ["JJZERO_DATA_LOADER_WORKER_EXITED pid=123 exit_code=3221225477"],
+        )
+
     def test_records_attempt_and_captures_only_current_log_delta(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -102,6 +131,17 @@ class RvcTrainingDiagnosticsTests(unittest.TestCase):
             self.assertEqual(
                 training.diagnose_attempt(exited_attempt, "worker stopped"),
                 "RVC_WORKER_EXITED",
+            )
+
+            crash_attempt = training.begin_attempt({"data_loader_workers": 4})
+            (crash_attempt.folder / "processes" / "789.log").write_text(
+                "Windows fatal exception: access violation\n"
+                "ntdll.dll!RtlUserThreadStart\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                training.diagnose_attempt(crash_attempt, "trainer stopped"),
+                "RVC_NATIVE_RUNTIME_CRASH",
             )
 
 

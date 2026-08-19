@@ -14,7 +14,8 @@ dependencies = [
     "soundfile>=0.12.1",
     "mutagen>=1.47.0",
     "PySide6>=6.7.0",
-    "yt-dlp>=2025.1.15",
+    "yt-dlp[default]==2026.8.17.73947.dev0",
+    "deno==2.9.5",
 ]
 
 [project.scripts]
@@ -27,4 +28,4 @@ where = ["src"]
 version = {attr = "jang_app.version.__version__"}
 
 [tool.setuptools.package-data]
-jang_app = ["assets/*.svg", "assets/*.json", "rvc_tools/jjzero_device.py"]
+jang_app = ["assets/*.svg", "assets/*.json", "assets/*.txt", "rvc_tools/jjzero_device.py"]

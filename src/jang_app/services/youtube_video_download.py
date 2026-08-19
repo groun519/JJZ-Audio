@@ -12,6 +12,7 @@ from jang_app.services.app_logging import get_logger
 from jang_app.services.command import run_command
 from jang_app.services.environment import MissingExecutableError, require_executable
 from jang_app.services.file_names import safe_filename_stem
+from jang_app.services.youtube_runtime import YouTubeRuntimeError, youtube_dl_runtime_options
 
 
 class YouTubeVideoDownloadError(RuntimeError):
@@ -66,6 +67,7 @@ def download_youtube_video(
     report = _progress_reporter(progress_callback)
     report(1)
     try:
+        runtime_options = youtube_dl_runtime_options()
         with tempfile.TemporaryDirectory(prefix="video-download-", dir=target_dir) as temporary:
             download_dir = Path(temporary)
             options = {
@@ -79,6 +81,7 @@ def download_youtube_video(
                 "ffmpeg_location": str(FFMPEG_BIN_DIR) if FFMPEG_BIN_DIR.exists() else None,
                 "progress_hooks": [_build_progress_hook(report)],
                 "postprocessor_hooks": [_build_postprocessor_hook(report)],
+                **runtime_options,
             }
             options = {key: value for key, value in options.items() if value is not None}
             with yt_dlp.YoutubeDL(options) as downloader:
@@ -91,6 +94,8 @@ def download_youtube_video(
             title_stem = safe_filename_stem(title, fallback="youtube_video", max_length=64)
             target = target_dir / f"{title_stem}_{video_id}.mp4"
             os.replace(downloaded, target)
+    except YouTubeRuntimeError as exc:
+        raise YouTubeVideoDownloadError(str(exc)) from exc
     except YouTubeVideoDownloadError:
         raise
     except Exception as exc:

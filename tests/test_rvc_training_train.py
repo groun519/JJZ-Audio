@@ -282,6 +282,79 @@ class RvcTrainingRunTests(unittest.TestCase):
             self.assertTrue(result.completed)
             self.assertEqual(worker_settings, [4, 0])
 
+    def test_native_training_crash_retries_with_safe_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            (runtime / "runtime" / "pythonw.exe").write_bytes(b"pythonw")
+            worker_settings: list[int] = []
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                launcher = Path(args[1]).read_text(encoding="utf-8")
+                workers = 4 if "JJZERO_DATA_LOADER_WORKERS = 4" in launcher else 0
+                worker_settings.append(workers)
+                if workers:
+                    _checkpoint_pair(layout, 100)
+                    return CommandResult(
+                        args,
+                        3221225477,
+                        "",
+                        "",
+                    )
+                _write_training_success(layout, output_callback, target_epoch=20)
+                return CommandResult(args, 0, "Training is done.", "")
+
+            with patch(
+                "jang_app.services.rvc_training_performance.os.cpu_count",
+                return_value=16,
+            ):
+                result = train_rvc_model(
+                    model_id,
+                    layout,
+                    runtime,
+                    RvcTrainingRunSettings(target_epoch=20),
+                    command_runner=runner,
+                    runtime_inspector=_ready_runtime,
+                )
+
+            self.assertTrue(result.completed)
+            self.assertEqual(worker_settings, [4, 0])
+
+    def test_dead_worker_watchdog_signal_retries_with_safe_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            (runtime / "runtime" / "pythonw.exe").write_bytes(b"pythonw")
+            worker_settings: list[int] = []
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                launcher = Path(args[1]).read_text(encoding="utf-8")
+                workers = 4 if "JJZERO_DATA_LOADER_WORKERS = 4" in launcher else 0
+                worker_settings.append(workers)
+                if workers:
+                    assert output_callback is not None
+                    output_callback(
+                        "JJZERO_DATA_LOADER_WORKER_EXITED "
+                        "pid=123 exit_code=3221225477"
+                    )
+                    return CommandResult(args, 1, "", "worker parent stopped")
+                _write_training_success(layout, output_callback, target_epoch=20)
+                return CommandResult(args, 0, "Training is done.", "")
+
+            with patch(
+                "jang_app.services.rvc_training_performance.os.cpu_count",
+                return_value=16,
+            ):
+                result = train_rvc_model(
+                    model_id,
+                    layout,
+                    runtime,
+                    RvcTrainingRunSettings(target_epoch=20),
+                    command_runner=runner,
+                    runtime_inspector=_ready_runtime,
+                )
+
+            self.assertTrue(result.completed)
+            self.assertEqual(worker_settings, [4, 0])
+
     def test_existing_checkpoint_pair_is_resumed_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             model_id, layout, runtime = _training_setup(Path(temporary))
@@ -306,6 +379,38 @@ class RvcTrainingRunTests(unittest.TestCase):
             self.assertTrue(result.resumed)
             self.assertEqual(result.state.checkpoint_step, 200)
             self.assertFalse((layout.experiment_dir / "G_100.pth").exists())
+
+    def test_resume_checkpoint_load_failure_cannot_fall_back_to_new_training(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            _checkpoint_pair(layout, 100)
+            RvcTrainingStateStore(model_id, layout).refresh_checkpoint_pair()
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                if output_callback is not None:
+                    output_callback(
+                        "JJZERO_CHECKPOINT_LOAD_FAILED "
+                        "file=G_100.pth type=RuntimeError detail=invalid checkpoint"
+                    )
+                    output_callback("Train Epoch: 1 [0%]")
+                return CommandResult(args, 1, "", "fallback was stopped", cancelled=True)
+
+            with self.assertRaisesRegex(
+                RvcTrainingRunError,
+                "could not restore the saved training checkpoint",
+            ):
+                train_rvc_model(
+                    model_id,
+                    layout,
+                    runtime,
+                    RvcTrainingRunSettings(target_epoch=30),
+                    command_runner=runner,
+                    runtime_inspector=_ready_runtime,
+                )
+
+            state = RvcTrainingStateStore(model_id, layout).load()
+            self.assertEqual(state.phase, RvcTrainingPhase.FAILED)
+            self.assertTrue(state.can_resume)
 
     def test_incomplete_checkpoint_is_removed_before_training(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

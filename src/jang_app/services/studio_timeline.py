@@ -28,6 +28,18 @@ def session_duration_ms(session: StudioSession) -> int:
     )
 
 
+def studio_overlap_count(session: StudioSession) -> int:
+    """Count clips that overlap a preceding clip on the same track."""
+    count = 0
+    for track in session.tracks:
+        maximum_end = 0
+        for clip in _sorted_clips(track.clips):
+            if clip.timeline_start_ms < maximum_end:
+                count += 1
+            maximum_end = max(maximum_end, clip.timeline_end_ms)
+    return count
+
+
 def add_studio_clip(
     session: StudioSession,
     track_id: str,
@@ -41,10 +53,16 @@ def add_studio_clip(
     target_track = _find_track(session, track_id)
     if not _track_accepts_asset(target_track, asset):
         raise StudioTimelineError("Media can only be placed on the media track.")
+    resolved_start = resolve_studio_clip_position(
+        session,
+        track_id,
+        timeline_start_ms=timeline_start_ms,
+        duration_ms=source_duration_ms,
+    )
     clip = StudioClip(
         clip_id=f"clip-{uuid.uuid4().hex}",
         asset=asset,
-        timeline_start_ms=max(0, int(timeline_start_ms)),
+        timeline_start_ms=resolved_start,
         source_start_ms=0,
         source_end_ms=int(source_duration_ms),
     )
@@ -76,7 +94,14 @@ def move_studio_clip(
     target_track = _find_track(session, track_id)
     if not _track_accepts_asset(target_track, clip.asset):
         raise StudioTimelineError("Media can only be placed on the media track.")
-    updated_clip = replace(clip, timeline_start_ms=max(0, int(timeline_start_ms)))
+    resolved_start = resolve_studio_clip_position(
+        session,
+        track_id,
+        timeline_start_ms=timeline_start_ms,
+        duration_ms=clip.duration_ms,
+        exclude_clip_id=clip_id,
+    )
+    updated_clip = replace(clip, timeline_start_ms=resolved_start)
     tracks: list[StudioTrack] = []
     for track in session.tracks:
         clips = tuple(candidate for candidate in track.clips if candidate.clip_id != clip_id)
@@ -96,21 +121,14 @@ def trim_studio_clip(
     source_end_ms: int,
     preserve_timeline_end: bool = False,
 ) -> StudioSession:
-    track, clip = _find_clip(session, clip_id)
-    start = max(0, int(source_start_ms))
-    end = max(0, int(source_end_ms))
-    if end <= start:
-        raise StudioTimelineError("A clip must contain at least one millisecond of audio.")
-    timeline_start = clip.timeline_start_ms
-    if preserve_timeline_end:
-        timeline_start += start - clip.source_start_ms
-    updated = replace(
-        clip,
-        timeline_start_ms=max(0, timeline_start),
-        source_start_ms=start,
-        source_end_ms=end,
+    track, _clip = _find_clip(session, clip_id)
+    updated = resolve_studio_clip_trim(
+        session,
+        clip_id,
+        source_start_ms=source_start_ms,
+        source_end_ms=source_end_ms,
+        preserve_timeline_end=preserve_timeline_end,
     )
-    updated = _with_clamped_fades(updated)
     return _replace_track(
         session,
         track.track_id,
@@ -120,6 +138,141 @@ def trim_studio_clip(
                 tuple(updated if candidate.clip_id == clip_id else candidate for candidate in current.clips)
             ),
         ),
+    )
+
+
+def resolve_studio_clip_position(
+    session: StudioSession,
+    track_id: str,
+    *,
+    timeline_start_ms: int,
+    duration_ms: int,
+    exclude_clip_id: str = "",
+) -> int:
+    """Return the nearest non-overlapping start position on a track."""
+    duration = int(duration_ms)
+    if duration <= 0:
+        raise StudioTimelineError("The source duration must be greater than zero.")
+    track = _find_track(session, track_id)
+    requested = max(0, int(timeline_start_ms))
+    forbidden = sorted(
+        (
+            clip.timeline_start_ms - duration,
+            clip.timeline_end_ms,
+        )
+        for clip in track.clips
+        if clip.clip_id != exclude_clip_id
+    )
+    merged: list[tuple[int, int]] = []
+    for left, right in forbidden:
+        if merged and left < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+        else:
+            merged.append((left, right))
+    for left, right in merged:
+        if not left < requested < right:
+            continue
+        candidates = [right]
+        if left >= 0:
+            candidates.append(left)
+        return min(
+            candidates,
+            key=lambda position: (
+                abs(position - requested),
+                position < requested,
+                position,
+            ),
+        )
+    return requested
+
+
+def resolve_studio_clip_trim(
+    session: StudioSession,
+    clip_id: str,
+    *,
+    source_start_ms: int,
+    source_end_ms: int,
+    preserve_timeline_end: bool = False,
+) -> StudioClip:
+    """Build a trimmed clip without crossing adjacent non-overlapping clips."""
+    track, clip = _find_clip(session, clip_id)
+    start = max(0, int(source_start_ms))
+    end = max(0, int(source_end_ms))
+    if end <= start:
+        raise StudioTimelineError("A clip must contain at least one millisecond of audio.")
+    timeline_start = clip.timeline_start_ms
+    if preserve_timeline_end:
+        timeline_start += start - clip.source_start_ms
+        minimum_start = max(
+            (
+                candidate.timeline_end_ms
+                for candidate in track.clips
+                if candidate.clip_id != clip_id
+                and candidate.timeline_end_ms <= clip.timeline_start_ms
+            ),
+            default=0,
+        )
+        if timeline_start < minimum_start:
+            start += minimum_start - timeline_start
+            timeline_start = minimum_start
+    updated = replace(
+        clip,
+        timeline_start_ms=max(0, timeline_start),
+        source_start_ms=start,
+        source_end_ms=end,
+    )
+    if not preserve_timeline_end:
+        maximum_end = min(
+            (
+                candidate.timeline_start_ms
+                for candidate in track.clips
+                if candidate.clip_id != clip_id
+                and candidate.timeline_start_ms >= clip.timeline_end_ms
+            ),
+            default=updated.timeline_end_ms,
+        )
+        if updated.timeline_end_ms > maximum_end:
+            end = start + maximum_end - updated.timeline_start_ms
+            updated = replace(updated, source_end_ms=end)
+    if updated.duration_ms <= 0:
+        raise StudioTimelineError("A clip must contain at least one millisecond of audio.")
+    return _with_clamped_fades(updated)
+
+
+def set_studio_clip_timing(
+    session: StudioSession,
+    clip_id: str,
+    *,
+    timeline_start_ms: int,
+    source_start_ms: int,
+    source_end_ms: int,
+) -> StudioSession:
+    """Atomically edit clip timing and snap the result into a legal track gap."""
+    track, clip = _find_clip(session, clip_id)
+    start = max(0, int(source_start_ms))
+    end = max(0, int(source_end_ms))
+    if end <= start:
+        raise StudioTimelineError("A clip must contain at least one millisecond of audio.")
+    resolved_start = resolve_studio_clip_position(
+        session,
+        track.track_id,
+        timeline_start_ms=timeline_start_ms,
+        duration_ms=end - start,
+        exclude_clip_id=clip_id,
+    )
+    updated = _with_clamped_fades(
+        replace(
+            clip,
+            timeline_start_ms=resolved_start,
+            source_start_ms=start,
+            source_end_ms=end,
+        )
+    )
+    return _replace_clip(
+        session,
+        track.track_id,
+        clip_id,
+        lambda _candidate: updated,
     )
 
 
@@ -191,25 +344,33 @@ def add_studio_clip_effect(
     )
 
 
+def studio_clip_siblings(
+    session: StudioSession,
+    clip_id: str,
+) -> tuple[StudioClip, ...]:
+    """Return every timeline piece backed by the selected clip's source asset."""
+    _track, clip = _find_clip(session, clip_id)
+    return tuple(
+        candidate
+        for track in session.tracks
+        for candidate in track.clips
+        if candidate.asset == clip.asset
+    )
+
+
 def update_studio_clip_effect(
     session: StudioSession,
     clip_id: str,
     effect: StudioEffect,
 ) -> StudioSession:
-    track, clip = _find_clip(session, clip_id)
+    _track, clip = _find_clip(session, clip_id)
     if not any(candidate.effect_id == effect.effect_id for candidate in clip.effects):
         raise StudioTimelineError(f"Unknown Studio effect: {effect.effect_id}")
-    return _replace_clip(
+    return _replace_linked_effect_clips(
         session,
-        track.track_id,
-        clip_id,
-        lambda candidate: replace(
-            candidate,
-            effects=tuple(
-                effect if current.effect_id == effect.effect_id else current
-                for current in candidate.effects
-            ),
-        ),
+        asset=clip.asset,
+        effect_id=effect.effect_id,
+        update=lambda _current: effect,
     )
 
 
@@ -218,19 +379,14 @@ def remove_studio_clip_effect(
     clip_id: str,
     effect_id: str,
 ) -> StudioSession:
-    track, clip = _find_clip(session, clip_id)
+    _track, clip = _find_clip(session, clip_id)
     if not any(candidate.effect_id == effect_id for candidate in clip.effects):
         raise StudioTimelineError(f"Unknown Studio effect: {effect_id}")
-    return _replace_clip(
+    return _replace_linked_effect_clips(
         session,
-        track.track_id,
-        clip_id,
-        lambda candidate: replace(
-            candidate,
-            effects=tuple(
-                current for current in candidate.effects if current.effect_id != effect_id
-            ),
-        ),
+        asset=clip.asset,
+        effect_id=effect_id,
+        update=lambda _current: None,
     )
 
 
@@ -409,6 +565,37 @@ def _replace_clip(session: StudioSession, track_id: str, clip_id: str, update) -
             clips=tuple(
                 update(clip) if clip.clip_id == clip_id else clip for clip in track.clips
             ),
+        ),
+    )
+
+
+def _replace_linked_effect_clips(
+    session: StudioSession,
+    *,
+    asset: StudioAssetRef,
+    effect_id: str,
+    update,
+) -> StudioSession:
+    def update_clip(clip: StudioClip) -> StudioClip:
+        if clip.asset != asset or not any(
+            effect.effect_id == effect_id for effect in clip.effects
+        ):
+            return clip
+        effects: list[StudioEffect] = []
+        for effect in clip.effects:
+            if effect.effect_id != effect_id:
+                effects.append(effect)
+                continue
+            replacement = update(effect)
+            if replacement is not None:
+                effects.append(replacement)
+        return replace(clip, effects=tuple(effects))
+
+    return replace(
+        session,
+        tracks=tuple(
+            replace(track, clips=tuple(update_clip(clip) for clip in track.clips))
+            for track in session.tracks
         ),
     )
 

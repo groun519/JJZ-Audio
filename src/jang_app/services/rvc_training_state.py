@@ -21,6 +21,15 @@ TRAINING_STATE_FILE_NAME = "training.json"
 DEFAULT_TARGET_EPOCH = 20
 _CHECKPOINT_PATTERN = re.compile(r"^(?P<kind>[GD])_(?P<step>\d+)\.pth$", re.IGNORECASE)
 _DATASET_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_TRAIN_LOG_CHECKPOINT_PATTERN = re.compile(
+    r"Saving (?:compact )?(?:model|discriminator)(?: and optimizer)? state "
+    r"at epoch (?P<epoch>\d+) to .*[\\/](?P<kind>[GD])_(?P<step>\d+)\.pth",
+    re.IGNORECASE,
+)
+_WEIGHT_EXPORT_PATTERN = re.compile(
+    r"^.+_e(?P<epoch>\d+)_s(?P<step>\d+)\.pth$",
+    re.IGNORECASE,
+)
 
 
 class RvcTrainingStateError(RuntimeError):
@@ -119,8 +128,17 @@ class RvcTrainingStateStore:
     def refresh_checkpoint_pair(self) -> RvcTrainingState:
         state = self.load()
         generator, discriminator, step = _latest_checkpoint_pair(self.layout.experiment_dir)
+        current_epoch = state.current_epoch
+        target_epoch = state.target_epoch
+        if step > 0:
+            inferred_epoch = _infer_checkpoint_epoch(self.layout, step)
+            if inferred_epoch > 0:
+                current_epoch = inferred_epoch
+                target_epoch = max(target_epoch, inferred_epoch)
         refreshed = replace(
             state,
+            current_epoch=current_epoch,
+            target_epoch=target_epoch,
             checkpoint_step=step,
             generator_checkpoint=generator,
             discriminator_checkpoint=discriminator,
@@ -365,6 +383,42 @@ def _latest_checkpoint_pair(experiment_dir: Path) -> tuple[Path | None, Path | N
         return None, None, 0
     step = max(shared_steps)
     return generators[step], discriminators[step], step
+
+
+def _infer_checkpoint_epoch(layout: RvcModelPackageLayout, checkpoint_step: int) -> int:
+    epoch = _infer_epoch_from_weights(layout.weights_dir, checkpoint_step)
+    if epoch > 0:
+        return epoch
+    return _infer_epoch_from_train_log(
+        layout.experiment_dir / "train.log",
+        checkpoint_step,
+    )
+
+
+def _infer_epoch_from_train_log(path: Path, checkpoint_step: int) -> int:
+    if not path.is_file():
+        return 0
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0
+    for line in reversed(lines):
+        match = _TRAIN_LOG_CHECKPOINT_PATTERN.search(line)
+        if match is not None and int(match.group("step")) == checkpoint_step:
+            return int(match.group("epoch"))
+    return 0
+
+
+def _infer_epoch_from_weights(weights_dir: Path, checkpoint_step: int) -> int:
+    if not weights_dir.is_dir():
+        return 0
+    epochs: list[int] = []
+    for path in weights_dir.glob("*.pth"):
+        match = _WEIGHT_EXPORT_PATTERN.fullmatch(path.name) if path.is_file() else None
+        if match is None or int(match.group("step")) != checkpoint_step:
+            continue
+        epochs.append(int(match.group("epoch")))
+    return max(epochs, default=0)
 
 
 def _checkpoint_step(path: Path | None, expected_kind: str) -> int:

@@ -19,6 +19,7 @@ from jang_app.services.runtime_bootstrap import (
     install_update_runtime_components,
     provision_ai_runtime,
     provision_ai_runtime_offline,
+    provision_update_runtime_components,
 )
 from jang_app.services.runtime_installation import RuntimeInstallation
 
@@ -143,9 +144,19 @@ class RuntimeBootstrapTests(unittest.TestCase):
             )
             expected = RuntimeInstallation("2", paths.runtime_root, 1)
             attempted: list[str] = []
+            downloaded: list[str] = []
+            events: list[str] = []
+            progress: list[int] = []
+
+            def download(item, destination, *, progress):
+                downloaded.append(item.name)
+                events.append(f"download:{item.name}")
+                progress(100)
+                return destination / item.name
 
             def install_profile(_packages, _root, profile, _version, **kwargs):
                 attempted.append(profile)
+                events.append(f"install:{profile}")
                 if profile == "rocm-win":
                     raise RuntimeError("HIP unavailable")
                 return object()
@@ -155,7 +166,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 patch("jang_app.services.runtime_bootstrap.detect_rvc_runtime_profile", return_value="rocm-win"),
                 patch(
                     "jang_app.services.runtime_bootstrap.download_artifact",
-                    side_effect=lambda item, destination, *, progress: destination / item.name,
+                    side_effect=download,
                 ),
                 patch("jang_app.services.runtime_bootstrap.install_runtime_packages", return_value=expected),
                 patch(
@@ -163,9 +174,175 @@ class RuntimeBootstrapTests(unittest.TestCase):
                     side_effect=install_profile,
                 ),
             ):
-                result = provision_ai_runtime(paths)
+                result = provision_ai_runtime(paths, progress=progress.append)
 
             self.assertEqual(result, expected)
+            self.assertEqual(attempted, ["rocm-win", "directml"])
+            self.assertEqual(downloaded, ["runtime.zip", "rocm.zip", "directml.zip"])
+            self.assertLess(
+                events.index("install:rocm-win"),
+                events.index("download:directml.zip"),
+            )
+            self.assertEqual(progress, sorted(progress))
+            self.assertEqual(progress[-1], 100)
+
+    def test_rocm_success_does_not_download_directml_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = lambda name: ReleaseArtifact(
+                name, 1, "a" * 64, f"https://example/{name}"
+            )
+            release = ReleaseManifest(
+                "0.2.2",
+                (
+                    ReleaseComponent("application", "0.2.2", "installer", ()),
+                    ReleaseComponent("ai-runtime", "2", "extract", ()),
+                    ReleaseComponent("rvc-runtime-rocm-win", "1", "extract", (artifact("rocm.zip"),)),
+                    ReleaseComponent("rvc-runtime-directml", "1", "extract", (artifact("directml.zip"),)),
+                ),
+            )
+            plan = create_update_plan(
+                release,
+                current_version="0.2.2",
+                runtime_version="2",
+                desired_rvc_profile="rocm-win",
+                installed_rvc_profile="cu118",
+            )
+            package = root / "rocm.zip"
+            package.write_bytes(b"rocm")
+
+            with (
+                patch("jang_app.services.runtime_bootstrap.download_artifact") as download,
+                patch(
+                    "jang_app.services.runtime_bootstrap.install_rvc_runtime_profile_packages",
+                    return_value=object(),
+                ) as install_profile,
+            ):
+                provision_update_runtime_components(
+                    plan,
+                    (package,),
+                    root / "runtime",
+                    cache_dir=root / "cache",
+                )
+
+            download.assert_not_called()
+            self.assertEqual(install_profile.call_args.args[2], "rocm-win")
+
+    def test_lazily_downloaded_fallback_is_removed_after_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = lambda name: ReleaseArtifact(
+                name, 1, "a" * 64, f"https://example/{name}"
+            )
+            release = ReleaseManifest(
+                "0.2.2",
+                (
+                    ReleaseComponent("application", "0.2.2", "installer", ()),
+                    ReleaseComponent("ai-runtime", "2", "extract", ()),
+                    ReleaseComponent("rvc-runtime-rocm-win", "1", "extract", (artifact("rocm.zip"),)),
+                    ReleaseComponent("rvc-runtime-directml", "1", "extract", (artifact("directml.zip"),)),
+                ),
+            )
+            plan = create_update_plan(
+                release,
+                current_version="0.2.2",
+                runtime_version="2",
+                desired_rvc_profile="rocm-win",
+                installed_rvc_profile="cu118",
+            )
+            primary = root / "rocm.zip"
+            primary.write_bytes(b"rocm")
+            cache = root / "cache"
+
+            def download(item, destination, *, progress):
+                destination.mkdir(parents=True, exist_ok=True)
+                package = destination / item.name
+                package.write_bytes(item.name.encode("utf-8"))
+                progress(100)
+                return package
+
+            def install_profile(_packages, _root, profile, _version, **kwargs):
+                if profile == "rocm-win":
+                    raise RuntimeError("HIP unavailable")
+                return object()
+
+            with (
+                patch(
+                    "jang_app.services.runtime_bootstrap.download_artifact",
+                    side_effect=download,
+                ),
+                patch(
+                    "jang_app.services.runtime_bootstrap.install_rvc_runtime_profile_packages",
+                    side_effect=install_profile,
+                ),
+            ):
+                provision_update_runtime_components(
+                    plan,
+                    (primary,),
+                    root / "runtime",
+                    cache_dir=cache,
+                )
+
+            self.assertTrue(primary.is_file())
+            self.assertFalse((cache / "directml.zip").exists())
+
+    def test_offline_packages_use_local_directml_after_rocm_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = lambda name: ReleaseArtifact(
+                name, 1, "a" * 64, f"https://offline.invalid/{name}"
+            )
+            release = ReleaseManifest(
+                "0.2.2",
+                (
+                    ReleaseComponent("application", "0.2.2", "installer", ()),
+                    ReleaseComponent("ai-runtime", "2", "extract", ()),
+                    ReleaseComponent(
+                        "rvc-runtime-rocm-win",
+                        "1",
+                        "extract",
+                        (artifact("rocm.zip"),),
+                    ),
+                    ReleaseComponent(
+                        "rvc-runtime-directml",
+                        "1",
+                        "extract",
+                        (artifact("directml.zip"),),
+                    ),
+                ),
+            )
+            plan = create_update_plan(
+                release,
+                current_version="0.2.2",
+                runtime_version="2",
+                desired_rvc_profile="rocm-win",
+                installed_rvc_profile="cu118",
+            )
+            packages = (root / "rocm.zip", root / "directml.zip")
+            for package in packages:
+                package.write_bytes(package.stem.encode("utf-8"))
+            attempted: list[str] = []
+
+            def install_profile(_packages, _root, profile, _version, **kwargs):
+                attempted.append(profile)
+                if profile == "rocm-win":
+                    raise RuntimeError("HIP unavailable")
+                return object()
+
+            with (
+                patch("jang_app.services.runtime_bootstrap.download_artifact") as download,
+                patch(
+                    "jang_app.services.runtime_bootstrap.install_rvc_runtime_profile_packages",
+                    side_effect=install_profile,
+                ),
+            ):
+                install_update_runtime_components(
+                    plan,
+                    packages,
+                    root / "runtime",
+                )
+
+            download.assert_not_called()
             self.assertEqual(attempted, ["rocm-win", "directml"])
 
     def test_missing_accelerator_packages_records_cpu_fallback_without_runtime_reinstall(self) -> None:

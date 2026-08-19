@@ -25,6 +25,9 @@ class YouTubeVideoDownloadTests(unittest.TestCase):
                 with patch(
                     "jang_app.services.youtube_video_download._ensure_preview_compatible",
                     side_effect=lambda source, *_args: source,
+                ), patch(
+                    "jang_app.services.youtube_video_download.youtube_dl_runtime_options",
+                    return_value={"js_runtimes": {"deno": {"path": "deno.exe"}}},
                 ):
                     with patch.dict(sys.modules, {"yt_dlp": fake_module}):
                         result = download_youtube_video(
@@ -40,6 +43,10 @@ class YouTubeVideoDownloadTests(unittest.TestCase):
             self.assertEqual(progress[-1], 100)
             self.assertIn("vcodec^=avc1", _FakeYoutubeDL.options_seen["format"])
             self.assertNotIn("+ba", _FakeYoutubeDL.options_seen["format"])
+            self.assertEqual(
+                _FakeYoutubeDL.options_seen["js_runtimes"],
+                {"deno": {"path": "deno.exe"}},
+            )
 
     def test_transcodes_an_incompatible_video_to_h264_mp4(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

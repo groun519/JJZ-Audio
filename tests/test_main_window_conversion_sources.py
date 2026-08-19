@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,8 +9,11 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.main_window import MainWindow
+from jang_app.qt_app.conversion_input_pool import ConversionInputPool
 from jang_app.qt_app.vocal_version_pool import VocalVersionPool
+from jang_app.services.output_catalog import OutputSoundSet
 from jang_app.services.song_library import SongVocalVersion
+from jang_app.services.vocal_input import VocalInputChoice
 from jang_app.services.work_convert import WorkConvertSession
 
 
@@ -37,6 +41,72 @@ class MainWindowConversionSourceTests(unittest.TestCase):
         self.assertIs(result, expected)
         loader.assert_called_once_with(selected_job, Path("output"))
         pool.close()
+
+    def test_split_vocal_is_used_as_input_without_changing_the_output_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            job_dir = root / "separation"
+            job_dir.mkdir()
+            original = job_dir / "vocals.wav"
+            instrumental = job_dir / "no_vocals.wav"
+            split = job_dir / "vocal_splits" / "run-1" / "lead.wav"
+            split.parent.mkdir(parents=True)
+            for path in (original, instrumental, split):
+                path.write_bytes(b"audio")
+            version = SongVocalVersion(
+                version_id="precision",
+                label="Precision",
+                job_dir=job_dir,
+                added_at="2026-08-18T00:00:00+09:00",
+                vocals_path=original,
+                instrumental_path=instrumental,
+                converted_vocal_paths=(),
+                separation_recipe_label="Precision Separation",
+            )
+            choice = VocalInputChoice(
+                "split:run-1:lead",
+                version,
+                split,
+                "Lead Vocal",
+                kind="lead",
+            )
+            pool = ConversionInputPool()
+            pool.set_choices((choice,), selected_job_dir=job_dir)
+            session = WorkConvertSession()
+            session.refresh((version,), current_output_job_dir=job_dir)
+            sound_set = OutputSoundSet(
+                "Precision",
+                job_dir,
+                original,
+                instrumental,
+                (),
+            )
+            window = SimpleNamespace(
+                conversion_input_pool=pool,
+                work_convert_session=session,
+                settings=SimpleNamespace(output_root=root),
+            )
+
+            with patch(
+                "jang_app.qt_app.main_window.load_output_sound_set",
+                return_value=sound_set,
+            ):
+                selected = MainWindow._conversion_input_sound_set(window)
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected.vocals_path, split)
+            self.assertEqual(selected.job_dir, job_dir)
+            pool.close()
+
+    def test_vocal_split_results_are_not_offered_as_conversion_inputs(self) -> None:
+        version = _version("precision")
+        window = SimpleNamespace()
+
+        choices = MainWindow._conversion_input_choices(window, (version,))
+
+        self.assertEqual(len(choices), 1)
+        self.assertEqual(choices[0].kind, "original")
+        self.assertEqual(choices[0].path, version.vocals_path)
 
     def test_preview_refresh_does_not_replace_the_explicit_conversion_input(self) -> None:
         first = _version("standard")

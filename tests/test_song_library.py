@@ -189,6 +189,32 @@ class SongLibraryTests(unittest.TestCase):
             self.assertEqual(len(versions), 1)
             self.assertEqual(versions[0].job_dir, job_dir.resolve())
 
+    def test_refresh_output_sound_sets_discovers_new_converted_vocal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"source")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            song = library.add_paths([source])[0]
+            output_root = library.vocal_separation_root(song.id)
+            job_dir = output_root / "r_test"
+            job_dir.mkdir()
+            (job_dir / "vocals.wav").write_bytes(b"vocals")
+            (job_dir / "no_vocals.wav").write_bytes(b"instrumental")
+            library.register_output(song.id, job_dir, "Precision")
+            self.assertEqual(library.vocal_versions(song.id)[0].converted_vocal_paths, ())
+
+            converted = job_dir / "vocals_rvc_voice_pitch_p0_voice_rmvpe.wav"
+            converted.write_bytes(b"converted")
+            sound_sets = library.refresh_output_sound_sets()
+
+            self.assertEqual(sound_sets[0].converted_vocal_paths, (converted.resolve(),))
+            self.assertEqual(
+                library.vocal_versions(song.id)[0].converted_vocal_paths,
+                (converted.resolve(),),
+            )
+
     def test_studio_workspace_reuses_the_asset_snapshot_for_its_session(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)
