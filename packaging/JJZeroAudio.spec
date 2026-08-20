@@ -33,6 +33,9 @@ analysis = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=["deno", "yt_dlp_ejs"],
+    # AI workloads run in separately versioned component runtimes. Bundling these
+    # packages here would duplicate several gigabytes in every app-only update.
+    excludes=["demucs", "torch", "torchaudio", "torchvision"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
