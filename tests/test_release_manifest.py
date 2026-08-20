@@ -159,6 +159,115 @@ class ReleaseManifestTests(unittest.TestCase):
                 "v0.3.0/ai-runtime.zip",
             )
 
+    def test_reused_runtime_keeps_original_release_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.3.2-Setup.exe").write_bytes(b"installer")
+            components = []
+            versions = {
+                "ai-runtime": "4",
+                "rvc-runtime-cu128": RVC_RUNTIME_PROFILE_VERSIONS["cu128"],
+                "rvc-runtime-directml": RVC_RUNTIME_PROFILE_VERSIONS["directml"],
+                "rvc-runtime-rocm-win": RVC_RUNTIME_PROFILE_VERSIONS["rocm-win"],
+            }
+            for component_id, version in versions.items():
+                name = f"{component_id}.zip"
+                components.append(
+                    {
+                        "id": component_id,
+                        "version": version,
+                        "install_mode": "extract",
+                        "artifacts": [
+                            {
+                                "name": name,
+                                "size": 10,
+                                "sha256": "a" * 64,
+                                "url": (
+                                    "https://github.com/groun519/JJZ-Audio/releases/"
+                                    f"download/v0.3.0/{name}"
+                                ),
+                            }
+                        ],
+                    }
+                )
+            prior = release / "v0.3.1-latest.json"
+            prior.write_text(
+                json.dumps(
+                    {
+                        "product": "JJZero Audio",
+                        "architecture": "x64",
+                        "components": components,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = create_release_manifest(
+                release,
+                "0.3.2",
+                "4",
+                runtime_release_tag="v0.3.1",
+                runtime_manifest_path=prior,
+            )
+
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            remote_urls = [
+                artifact["url"]
+                for component in data["components"]
+                if component["id"] != "application"
+                for artifact in component["artifacts"]
+            ]
+            self.assertTrue(remote_urls)
+            self.assertTrue(all("/download/v0.3.0/" in url for url in remote_urls))
+
+    def test_rejects_reused_runtime_url_from_another_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.3.2-Setup.exe").write_bytes(b"installer")
+            components = []
+            versions = {
+                "ai-runtime": "4",
+                "rvc-runtime-cu128": RVC_RUNTIME_PROFILE_VERSIONS["cu128"],
+                "rvc-runtime-directml": RVC_RUNTIME_PROFILE_VERSIONS["directml"],
+                "rvc-runtime-rocm-win": RVC_RUNTIME_PROFILE_VERSIONS["rocm-win"],
+            }
+            for component_id, version in versions.items():
+                name = f"{component_id}.zip"
+                components.append(
+                    {
+                        "id": component_id,
+                        "version": version,
+                        "artifacts": [
+                            {
+                                "name": name,
+                                "size": 10,
+                                "sha256": "a" * 64,
+                                "url": f"https://example.test/v0.3.0/{name}",
+                            }
+                        ],
+                    }
+                )
+            prior = release / "prior.json"
+            prior.write_text(
+                json.dumps(
+                    {
+                        "product": "JJZero Audio",
+                        "architecture": "x64",
+                        "components": components,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Invalid reused runtime package URL"):
+                create_release_manifest(
+                    release,
+                    "0.3.2",
+                    "4",
+                    runtime_release_tag="v0.3.1",
+                    runtime_manifest_path=prior,
+                )
+
     def test_rejects_invalid_runtime_release_tag(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             release = Path(temporary)

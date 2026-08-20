@@ -33,7 +33,7 @@ from jang_app.qt_app.studio_effect_scope_dialog import (
 )
 from jang_app.qt_app.studio_inspector import StudioInspector
 from jang_app.qt_app.studio_timeline_scroll import StudioTimelineScrollArea
-from jang_app.qt_app.widgets import danger_icon_button_palette, render_app_icon
+from jang_app.qt_app.widgets import SvgIconButton, danger_icon_button_palette, render_app_icon
 from jang_app.qt_app.workspace_splitter import create_workspace_splitter
 from jang_app.qt_app.theme import theme_tokens
 from jang_app.services.i18n import tr
@@ -65,20 +65,25 @@ from jang_app.services.studio_snapping import (
     StudioSnapResult,
     build_studio_snap_index,
     snap_studio_clip_position,
+    snap_studio_clip_group_delta,
     snap_studio_clip_trim,
     snap_studio_timeline_point,
 )
 from jang_app.services.snapshot_history import SnapshotHistory
 from jang_app.services.studio_timeline import (
     StudioTimelineError,
+    adjust_studio_clips,
     add_studio_clip,
     add_studio_clip_effect,
     add_studio_track,
     move_studio_clip,
+    move_studio_clips,
     remove_studio_clip,
+    remove_studio_clips,
     remove_studio_clip_effect,
     remove_studio_track,
     resolve_studio_clip_position,
+    resolve_studio_clip_group_delta,
     resolve_studio_clip_trim,
     set_studio_clip_media,
     set_studio_clip_mix,
@@ -118,8 +123,10 @@ _ROLE_COLORS = {
 
 class StudioTimelineView(QWidget):
     clip_selected = Signal(str)
+    clip_selection_changed = Signal(object, str)
     track_selected = Signal(str)
     clip_moved = Signal(str, str, int)
+    clips_moved = Signal(object, int)
     clip_trimmed = Signal(str, int, int, bool)
     asset_dropped = Signal(str, str, int)
     effect_dropped = Signal(str, str)
@@ -181,6 +188,7 @@ class StudioTimelineView(QWidget):
         self._hover_effect: tuple[str, str] | None = None
         self._effect_drop_clip_id = ""
         self._selected_clip_id = ""
+        self._selected_clip_ids: set[str] = set()
         self._selected_track_id = ""
         self._drag_mode = ""
         self._drag_origin = QPoint()
@@ -189,6 +197,10 @@ class StudioTimelineView(QWidget):
         self._drag_pointer_offset_ms = 0
         self._drag_track_id = ""
         self._drag_clip: StudioClip | None = None
+        self._drag_group_originals: dict[str, StudioClip] = {}
+        self._drag_group_clips: dict[str, StudioClip] = {}
+        self._drag_group_track_ids: dict[str, str] = {}
+        self._drag_group_delta_ms = 0
         self._drag_snapped = False
         self._drag_constrained = False
         self._drag_target_valid = True
@@ -197,6 +209,10 @@ class StudioTimelineView(QWidget):
         self._hover_control: tuple[str, str] | None = None
         self._hover_track_id = ""
         self._add_track_hovered = False
+        self._marquee_origin: QPoint | None = None
+        self._marquee_rect: QRectF | None = None
+        self._marquee_base_selection: set[str] = set()
+        self._marquee_track_id = ""
         self._waveform_request_timer = QTimer(self)
         self._waveform_request_timer.setSingleShot(True)
         self._waveform_request_timer.setInterval(70)
@@ -218,8 +234,9 @@ class StudioTimelineView(QWidget):
         """Refresh timeline state without reloading unchanged waveform data."""
         self._session = session
         self._rebuild_session_index()
-        if self._selected_clip_id and self._clip(self._selected_clip_id) is None:
-            self._selected_clip_id = ""
+        self._selected_clip_ids.intersection_update(self._clip_by_id)
+        if self._selected_clip_id not in self._selected_clip_ids:
+            self._selected_clip_id = self._ordered_clip_ids(self._selected_clip_ids)[0] if self._selected_clip_ids else ""
         if self._selected_track_id and self._track(self._selected_track_id) is None:
             self._selected_track_id = ""
         if self._hover_track_id and self._track(self._hover_track_id) is None:
@@ -272,6 +289,9 @@ class StudioTimelineView(QWidget):
         )
         self._update_extent()
         self.update()
+
+    def zoom_value(self) -> int:
+        return self._pixels_per_second
 
     def set_horizontal_offset(self, offset: int) -> None:
         next_offset = max(0, int(offset))
@@ -355,6 +375,9 @@ class StudioTimelineView(QWidget):
     def selected_clip_id(self) -> str:
         return self._selected_clip_id
 
+    def selected_clip_ids(self) -> tuple[str, ...]:
+        return self._ordered_clip_ids(self._selected_clip_ids)
+
     def selected_track_id(self) -> str:
         return self._selected_track_id
 
@@ -369,18 +392,62 @@ class StudioTimelineView(QWidget):
         )
         if track is None:
             return
-        self._selected_clip_id = clip_id
-        self._selected_track_id = track.track_id
-        self.clip_selected.emit(clip_id)
-        self.update()
+        self._set_clip_selection((clip_id,), primary_clip_id=clip_id)
+
+    def select_clips(
+        self,
+        clip_ids: tuple[str, ...] | list[str],
+        primary_clip_id: str = "",
+    ) -> None:
+        self._set_clip_selection(clip_ids, primary_clip_id=primary_clip_id)
+
+    def clear_selection(self) -> None:
+        self._set_clip_selection(())
 
     def select_track(self, track_id: str) -> None:
         if self._track(track_id) is None:
             return
         self._selected_clip_id = ""
+        self._selected_clip_ids.clear()
         self._selected_track_id = track_id
+        self.clip_selection_changed.emit((), "")
         self.track_selected.emit(track_id)
         self.update()
+
+    def _set_clip_selection(
+        self,
+        clip_ids: tuple[str, ...] | list[str] | set[str],
+        *,
+        primary_clip_id: str = "",
+        emit: bool = True,
+    ) -> None:
+        selected = {clip_id for clip_id in clip_ids if clip_id in self._clip_by_id}
+        ordered = self._ordered_clip_ids(selected)
+        primary = primary_clip_id if primary_clip_id in selected else (
+            self._selected_clip_id if self._selected_clip_id in selected else (ordered[0] if ordered else "")
+        )
+        changed = selected != self._selected_clip_ids or primary != self._selected_clip_id
+        self._selected_clip_ids = selected
+        self._selected_clip_id = primary
+        if primary:
+            track = self._track_for_clip(primary)
+            self._selected_track_id = track.track_id if track is not None else ""
+        elif selected:
+            self._selected_track_id = ""
+        if emit and changed:
+            self.clip_selection_changed.emit(ordered, primary)
+            if primary:
+                self.clip_selected.emit(primary)
+        if changed:
+            self.update()
+
+    def _ordered_clip_ids(self, clip_ids: set[str] | frozenset[str]) -> tuple[str, ...]:
+        return tuple(
+            clip.clip_id
+            for track in self._session.tracks
+            for clip in track.clips
+            if clip.clip_id in clip_ids
+        )
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -393,7 +460,26 @@ class StudioTimelineView(QWidget):
             self._paint_add_track_row(painter)
         self._paint_ruler(painter, exposed)
         self._paint_snap_guide(painter)
+        self._paint_marquee(painter)
         self._paint_playhead(painter)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.matches(QKeySequence.StandardKey.SelectAll):
+            self._set_clip_selection(
+                set(self._clip_by_id),
+                primary_clip_id=self._selected_clip_id,
+            )
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            if self._split_mode:
+                self.split_mode_cancel_requested.emit()
+            else:
+                self._clear_drag()
+                self._set_clip_selection(())
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton:
@@ -422,8 +508,7 @@ class StudioTimelineView(QWidget):
         effect_hit = self._effect_at(event.position().toPoint())
         if effect_hit is not None:
             clip, effect, _chip_rect, remove_rect = effect_hit
-            self._selected_clip_id = clip.clip_id
-            self.clip_selected.emit(clip.clip_id)
+            self._set_clip_selection((clip.clip_id,), primary_clip_id=clip.clip_id)
             if self._hover_effect == (clip.clip_id, effect.effect_id) and remove_rect.contains(
                 event.position()
             ):
@@ -447,9 +532,7 @@ class StudioTimelineView(QWidget):
                     event.modifiers(),
                 )
                 self._set_snap_preview(snap_result)
-                self._selected_track_id = track.track_id
-                self._selected_clip_id = clip.clip_id
-                self.clip_selected.emit(clip.clip_id)
+                self._set_clip_selection((clip.clip_id,), primary_clip_id=clip.clip_id)
                 if split_position is not None:
                     self.clip_split_requested.emit(clip.clip_id, split_position)
             event.accept()
@@ -469,6 +552,8 @@ class StudioTimelineView(QWidget):
                 return
             self._selected_track_id = track.track_id
             self._selected_clip_id = ""
+            self._selected_clip_ids.clear()
+            self.clip_selection_changed.emit((), "")
             self.track_selected.emit(track.track_id)
             if kind == "mute":
                 self.track_mix_changed.emit(
@@ -486,18 +571,42 @@ class StudioTimelineView(QWidget):
         hit = self._clip_at(event.position().toPoint())
         if hit is None:
             track = self._track_at_y(event.position().y())
+            if track is not None and event.position().x() >= self._header_right():
+                self._drag_mode = "marquee-pending"
+                self._marquee_origin = point
+                self._marquee_rect = QRectF(point, point)
+                self._marquee_base_selection = (
+                    set(self._selected_clip_ids)
+                    if event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                    else set()
+                )
+                self._marquee_track_id = track.track_id
+                event.accept()
+                return
             if track is not None:
-                self._selected_track_id = track.track_id
-                self._selected_clip_id = ""
-                self.track_selected.emit(track.track_id)
-            if event.position().x() >= self._header_right():
-                self.seek_requested.emit(self._x_to_ms(event.position().x()))
-            self.update()
+                self.select_track(track.track_id)
             return
 
         track, clip, rect = hit
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            selected = set(self._selected_clip_ids)
+            if clip.clip_id in selected:
+                selected.remove(clip.clip_id)
+            else:
+                selected.add(clip.clip_id)
+            self._set_clip_selection(selected, primary_clip_id=clip.clip_id)
+            event.accept()
+            return
+        handle_width = self._trim_handle_width(rect)
+        is_trim_handle = (
+            abs(event.position().x() - rect.left()) <= handle_width
+            or abs(event.position().x() - rect.right()) <= handle_width
+        )
+        if clip.clip_id not in self._selected_clip_ids or is_trim_handle:
+            self._set_clip_selection((clip.clip_id,), primary_clip_id=clip.clip_id)
+        else:
+            self._set_clip_selection(self._selected_clip_ids, primary_clip_id=clip.clip_id)
         self._selected_track_id = track.track_id
-        self._selected_clip_id = clip.clip_id
         self._drag_origin = event.position().toPoint()
         self._drag_origin_track_id = track.track_id
         self._drag_origin_clip = clip
@@ -511,14 +620,23 @@ class StudioTimelineView(QWidget):
         self._drag_constrained = False
         self._drag_target_valid = True
         self._set_snap_preview(None)
-        if abs(event.position().x() - rect.left()) <= self.HANDLE_WIDTH:
+        if abs(event.position().x() - rect.left()) <= handle_width:
             self._drag_mode = "trim-left"
-        elif abs(event.position().x() - rect.right()) <= self.HANDLE_WIDTH:
+        elif abs(event.position().x() - rect.right()) <= handle_width:
             self._drag_mode = "trim-right"
         else:
             self._drag_mode = "move"
+            if len(self._selected_clip_ids) > 1:
+                self._drag_group_originals = {
+                    clip_id: self._clip_by_id[clip_id]
+                    for clip_id in self._selected_clip_ids
+                }
+                self._drag_group_clips = dict(self._drag_group_originals)
+                self._drag_group_track_ids = {
+                    clip_id: self._track_by_clip_id[clip_id].track_id
+                    for clip_id in self._selected_clip_ids
+                }
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
-        self.clip_selected.emit(clip.clip_id)
         self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -532,17 +650,87 @@ class StudioTimelineView(QWidget):
                 self._drag_volume_value = self._track_volume_from_x(track, event.position().x())
                 self.update()
             return
+        if self._drag_mode in {"marquee-pending", "marquee"}:
+            if self._marquee_origin is None:
+                self._clear_drag()
+                return
+            point = event.position().toPoint()
+            if (
+                self._drag_mode == "marquee-pending"
+                and (point - self._marquee_origin).manhattanLength() < 5
+            ):
+                return
+            self._drag_mode = "marquee"
+            self._marquee_rect = QRectF(self._marquee_origin, point).normalized()
+            hits = self._clips_in_rect(self._marquee_rect)
+            self._set_clip_selection(
+                self._marquee_base_selection | hits,
+                primary_clip_id=self._selected_clip_id,
+            )
+            event.accept()
+            self.update()
+            return
         if self._drag_clip is None or not self._drag_mode:
             self._update_cursor(event.position().toPoint(), event.modifiers())
             return super().mouseMoveEvent(event)
         previous_drag_clip = self._drag_clip
         previous_drag_track_id = self._drag_track_id
+        previous_group_clips = tuple(self._drag_group_clips.values())
         original = self._drag_origin_clip or self._original_clip()
         delta_ms = round((event.position().x() - self._drag_origin.x()) * 1000 / self._pixels_per_second)
         snap_result: StudioSnapResult | None = None
         self._drag_snapped = False
         self._drag_constrained = False
         if self._drag_mode == "move":
+            if len(self._drag_group_originals) > 1:
+                requested_delta = round(
+                    (event.position().x() - self._drag_origin.x())
+                    * 1000
+                    / self._pixels_per_second
+                )
+                resolved_delta = resolve_studio_clip_group_delta(
+                    self._session,
+                    self.selected_clip_ids(),
+                    requested_delta,
+                )
+                if self._snapping_active(event.modifiers()):
+                    candidate = snap_studio_clip_group_delta(
+                        self._session,
+                        self._snap_index,
+                        self.selected_clip_ids(),
+                        requested_delta_ms=requested_delta,
+                        threshold_ms=self._snap_threshold_ms(),
+                        playhead_ms=self._playhead_ms,
+                    )
+                    if candidate.snapped:
+                        snap_result = candidate
+                        resolved_delta = candidate.position_ms
+                self._drag_group_delta_ms = resolved_delta
+                self._drag_group_clips = {
+                    clip_id: replace(
+                        group_clip,
+                        timeline_start_ms=(
+                            group_clip.timeline_start_ms + resolved_delta
+                        ),
+                    )
+                    for clip_id, group_clip in self._drag_group_originals.items()
+                }
+                self._drag_clip = self._drag_group_clips[original.clip_id]
+                self._drag_constrained = (
+                    resolved_delta != requested_delta and snap_result is None
+                )
+                self._drag_snapped = snap_result is not None or self._drag_constrained
+                self._set_snap_preview(snap_result)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                group_track_ids = self._drag_group_track_ids
+                self._update_clip_regions(
+                    *(
+                        (preview, group_track_ids.get(preview.clip_id, ""))
+                        for preview in (*previous_group_clips, *self._drag_group_clips.values())
+                    )
+                )
+                event.accept()
+                return
             target = self._track_at_y(event.position().y())
             self._drag_target_valid = bool(
                 target is not None
@@ -657,6 +845,23 @@ class StudioTimelineView(QWidget):
         )
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._drag_mode in {"marquee-pending", "marquee"}
+        ):
+            mode = self._drag_mode
+            track_id = self._marquee_track_id
+            position_ms = self._x_to_ms(event.position().x())
+            self._clear_drag()
+            if mode == "marquee-pending":
+                self._set_clip_selection(())
+                if track_id:
+                    self._selected_track_id = track_id
+                    self.track_selected.emit(track_id)
+                self.seek_requested.emit(position_ms)
+            self._update_cursor(event.position().toPoint())
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._drag_mode == "playhead":
             self._scrub_playhead(event.position().x(), event.modifiers())
             self._drag_mode = ""
@@ -687,8 +892,15 @@ class StudioTimelineView(QWidget):
         target_valid = self._drag_target_valid
         original = self._drag_origin_clip
         original_track = self._drag_origin_track_id
+        group_ids = self.selected_clip_ids() if len(self._drag_group_originals) > 1 else ()
+        group_delta = self._drag_group_delta_ms
         self._clear_drag()
         if mode == "move":
+            if group_ids:
+                if group_delta:
+                    self.clips_moved.emit(group_ids, group_delta)
+                self._update_cursor(event.position().toPoint())
+                return
             if not target_valid:
                 self._update_cursor(event.position().toPoint())
                 return
@@ -833,10 +1045,27 @@ class StudioTimelineView(QWidget):
         painter.drawLine(0, int(lane.bottom()), self.width(), int(lane.bottom()))
 
         for clip in self._visible_track_clips(track, index, exposed):
-            if self._drag_clip is not None and clip.clip_id == self._drag_clip.clip_id:
+            if clip.clip_id in self._drag_group_clips or (
+                self._drag_clip is not None and clip.clip_id == self._drag_clip.clip_id
+            ):
                 continue
             self._paint_clip(painter, track, clip, index, exposed)
-        if self._drag_clip is not None and self._drag_track_id == track.track_id:
+        group_previews = (
+            self._drag_group_clips.values()
+            if self._drag_group_clips
+            else ()
+        )
+        for preview in group_previews:
+            if self._drag_group_track_ids.get(preview.clip_id) != track.track_id:
+                continue
+            drag_rect = self._clip_rect(preview, index)
+            if drag_rect.intersects(exposed):
+                self._paint_clip(painter, track, preview, index, exposed)
+        if (
+            not self._drag_group_clips
+            and self._drag_clip is not None
+            and self._drag_track_id == track.track_id
+        ):
             drag_rect = self._clip_rect(self._drag_clip, index)
             if drag_rect.intersects(exposed):
                 self._paint_clip(painter, track, self._drag_clip, index, exposed)
@@ -915,7 +1144,8 @@ class StudioTimelineView(QWidget):
             color.setAlpha(70)
         else:
             color.setAlpha(170)
-        selected = clip.clip_id == self._selected_clip_id
+        selected = clip.clip_id in self._selected_clip_ids
+        primary = clip.clip_id == self._selected_clip_id
         drop_target = clip.clip_id == self._effect_drop_clip_id
         dragging = self._drag_clip is not None and clip.clip_id == self._drag_clip.clip_id
         if dragging and not self._drag_target_valid:
@@ -928,8 +1158,8 @@ class StudioTimelineView(QWidget):
             outline = QColor("#b68a54")
             outline_width = 2
         else:
-            outline = color.lighter(155) if selected else color.darker(115)
-            outline_width = 2 if selected else 1
+            outline = color.lighter(175 if primary else 150) if selected else color.darker(115)
+            outline_width = 3 if primary else (2 if selected else 1)
         painter.setPen(QPen(outline, outline_width))
         painter.setBrush(color)
         painter.drawRoundedRect(rect, 6, 6)
@@ -950,8 +1180,15 @@ class StudioTimelineView(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
         if selected:
-            painter.fillRect(QRectF(rect.left(), rect.top(), self.HANDLE_WIDTH, rect.height()), color.lighter(145))
-            painter.fillRect(QRectF(rect.right() - self.HANDLE_WIDTH, rect.top(), self.HANDLE_WIDTH, rect.height()), color.lighter(145))
+            handle_width = self._trim_handle_width(rect)
+            painter.fillRect(
+                QRectF(rect.left(), rect.top(), handle_width, rect.height()),
+                color.lighter(145),
+            )
+            painter.fillRect(
+                QRectF(rect.right() - handle_width, rect.top(), handle_width, rect.height()),
+                color.lighter(145),
+            )
         if self._split_hover is not None and self._split_hover[0] == clip.clip_id:
             split_x = self._ms_to_x(self._split_hover[1])
             painter.setPen(QPen(QColor(self._theme["accent"]), 2))
@@ -990,12 +1227,15 @@ class StudioTimelineView(QWidget):
             elif not hovered:
                 painter.drawText(chip_rect, Qt.AlignmentFlag.AlignCenter, "FX")
             if hovered:
+                painter.save()
+                painter.setClipRect(chip_rect.adjusted(1, 1, -1, -1))
                 render_app_icon(
                     painter,
-                    remove_rect.adjusted(4, 4, -4, -4),
+                    self._effect_remove_icon_rect(remove_rect),
                     "close",
                     QColor(self._theme["text"]),
                 )
+                painter.restore()
         painter.restore()
 
     @staticmethod
@@ -1031,6 +1271,12 @@ class StudioTimelineView(QWidget):
             regions.append((effect, chip, remove))
             left = chip.right() + 4
         return tuple(regions)
+
+    @staticmethod
+    def _effect_remove_icon_rect(remove_rect: QRectF) -> QRectF:
+        size = max(1.0, min(10.0, remove_rect.width() - 3.0, remove_rect.height() - 3.0))
+        center = remove_rect.center()
+        return QRectF(center.x() - size / 2, center.y() - size / 2, size, size)
 
     def _effect_at(
         self,
@@ -1192,6 +1438,29 @@ class StudioTimelineView(QWidget):
         painter.drawEllipse(QRectF(x - 3.5, top + 3, 7, 7))
         painter.restore()
 
+    def _paint_marquee(self, painter: QPainter) -> None:
+        if self._drag_mode != "marquee" or self._marquee_rect is None:
+            return
+        rect = self._marquee_rect.intersected(
+            QRectF(
+                self._header_right(),
+                self._ruler_top() + self.RULER_HEIGHT,
+                max(0, self.width() - self._header_right()),
+                max(0, self._tracks_bottom() - self.RULER_HEIGHT),
+            )
+        )
+        if rect.isEmpty():
+            return
+        color = QColor(self._theme["focus"])
+        fill = QColor(color)
+        fill.setAlpha(36)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(color, 1, Qt.PenStyle.DashLine))
+        painter.setBrush(fill)
+        painter.drawRect(rect)
+        painter.restore()
+
     def _paint_add_track_row(self, painter: QPainter) -> None:
         row = self._add_track_rect()
         background = self._theme["hover"] if self._add_track_hovered else self._theme["raised"]
@@ -1228,6 +1497,9 @@ class StudioTimelineView(QWidget):
         top = self._track_top(track_index) + inset
         return QRectF(left, top, width, lane_height - inset * 2)
 
+    def _trim_handle_width(self, rect: QRectF) -> float:
+        return min(float(self.HANDLE_WIDTH), max(2.0, rect.width() / 3.0))
+
     def _clip_at(self, point: QPoint) -> tuple[StudioTrack, StudioClip, QRectF] | None:
         if self._point_in_header(point.x()):
             return None
@@ -1248,6 +1520,19 @@ class StudioTimelineView(QWidget):
                 return track, clip, self._clip_rect(clip, index)
             candidate_index -= 1
         return None
+
+    def _clips_in_rect(self, rect: QRectF) -> set[str]:
+        selected: set[str] = set()
+        for index, track in enumerate(self._session.tracks):
+            lane = QRectF(0, self._track_top(index), self.width(), self._track_height(track))
+            if not lane.intersects(rect):
+                continue
+            selected.update(
+                clip.clip_id
+                for clip in track.clips
+                if self._clip_rect(clip, index).intersects(rect)
+            )
+        return selected
 
     def _track_at_y(self, y: float) -> StudioTrack | None:
         if self._point_in_ruler(y):
@@ -1488,11 +1773,19 @@ class StudioTimelineView(QWidget):
         self._drag_origin_clip = None
         self._drag_pointer_offset_ms = 0
         self._drag_clip = None
+        self._drag_group_originals.clear()
+        self._drag_group_clips.clear()
+        self._drag_group_track_ids.clear()
+        self._drag_group_delta_ms = 0
         self._drag_track_id = ""
         self._drag_snapped = False
         self._drag_constrained = False
         self._drag_target_valid = True
         self._asset_drop_preview = None
+        self._marquee_origin = None
+        self._marquee_rect = None
+        self._marquee_base_selection.clear()
+        self._marquee_track_id = ""
         self._set_snap_preview(None)
         self.update()
 
@@ -1628,7 +1921,11 @@ class StudioTimelineView(QWidget):
             self.unsetCursor()
             return
         _track, _clip, rect = hit
-        if abs(point.x() - rect.left()) <= self.HANDLE_WIDTH or abs(point.x() - rect.right()) <= self.HANDLE_WIDTH:
+        handle_width = self._trim_handle_width(rect)
+        if (
+            abs(point.x() - rect.left()) <= handle_width
+            or abs(point.x() - rect.right()) <= handle_width
+        ):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
         else:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -1875,6 +2172,7 @@ class StudioEditor(QWidget):
     split_tool_available_changed = Signal(bool)
     history_availability_changed = Signal(bool, bool)
     asset_remove_requested = Signal(object)
+    project_history_requested = Signal()
 
     def __init__(self, *, include_sidebars: bool = True) -> None:
         super().__init__()
@@ -1912,12 +2210,17 @@ class StudioEditor(QWidget):
         timeline_header.addWidget(self.timeline_title)
         timeline_header.addWidget(self.status_label, 1)
         timeline_header.addStretch(1)
+        self.project_history_button = SvgIconButton("restore", size=30)
+        self.project_history_button.setObjectName("StudioProjectHistoryButton")
+        self.project_history_button.clicked.connect(self.project_history_requested.emit)
+        timeline_header.addWidget(self.project_history_button)
 
         self.timeline = StudioTimelineView()
         self.timeline.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.timeline.clip_selected.connect(self._select_clip)
+        self.timeline.clip_selection_changed.connect(self._select_clips)
         self.timeline.track_selected.connect(self._select_track)
         self.timeline.clip_moved.connect(self._move_clip)
+        self.timeline.clips_moved.connect(self._move_clips)
         self.timeline.clip_trimmed.connect(self._trim_clip)
         self.timeline.asset_dropped.connect(self._drop_asset)
         self.timeline.effect_dropped.connect(self._drop_effect)
@@ -1998,6 +2301,9 @@ class StudioEditor(QWidget):
         self.inspector.track_name_changed.connect(self._set_track_name)
         self.inspector.effect_changed.connect(self._update_effect)
         self.inspector.effect_remove_requested.connect(self._remove_effect)
+        self.inspector.multi_clip_adjust_requested.connect(
+            self._adjust_selected_clips
+        )
         self.inspector.open_location_requested.connect(self.open_location_requested.emit)
         self.inspector_scroll = QScrollArea(self)
         self.inspector_scroll.setObjectName("StudioInspectorScroll")
@@ -2086,6 +2392,39 @@ class StudioEditor(QWidget):
     def playhead_position_ms(self) -> int:
         return self._playhead_ms
 
+    def zoom_value(self) -> int:
+        return self.timeline.zoom_value()
+
+    def selected_clip_id(self) -> str:
+        return self.timeline.selected_clip_id()
+
+    def selected_clip_ids(self) -> tuple[str, ...]:
+        return self.timeline.selected_clip_ids()
+
+    def selected_track_id(self) -> str:
+        return self.timeline.selected_track_id()
+
+    def restore_selection(
+        self,
+        clip_id: str,
+        track_id: str,
+        clip_ids: tuple[str, ...] | list[str] = (),
+    ) -> None:
+        valid_clip_ids = tuple(
+            candidate for candidate in clip_ids if self._clip(candidate) is not None
+        )
+        if valid_clip_ids:
+            self.timeline.select_clips(valid_clip_ids, clip_id)
+            self._sync_inspector(clip_id=clip_id or valid_clip_ids[0])
+            return
+        if clip_id and self._clip(clip_id) is not None:
+            self.timeline.select_clip(clip_id)
+            self._sync_inspector(clip_id=clip_id)
+            return
+        if track_id and self._track(track_id) is not None:
+            self.timeline.select_track(track_id)
+            self._sync_inspector(track_id=track_id)
+
     def timeline_view_position(self) -> tuple[int, int]:
         return (
             self.timeline_scroll.horizontalScrollBar().value(),
@@ -2132,7 +2471,6 @@ class StudioEditor(QWidget):
         except StudioTimelineError as exc:
             self.set_status(str(exc))
             return
-        self._seek(position_ms)
         self._commit(updated)
 
     def set_status(self, text: str) -> None:
@@ -2141,6 +2479,7 @@ class StudioEditor(QWidget):
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode
+        self.project_history_button.set_theme_mode(theme_mode)
         self.sound_pool.set_theme_mode(theme_mode)
         self.fx_pool.set_theme_mode(theme_mode)
         self.timeline.set_theme_mode(theme_mode)
@@ -2161,6 +2500,7 @@ class StudioEditor(QWidget):
 
     def apply_language(self) -> None:
         self.timeline_title.setText(tr("Timeline"))
+        self.project_history_button.setToolTip(tr("Studio project history"))
         self.sound_pool.apply_language()
         self.fx_pool.apply_language()
         self.inspector.apply_language()
@@ -2219,9 +2559,14 @@ class StudioEditor(QWidget):
             return
         if not effects:
             return
+        selected_ids = self.timeline.selected_clip_ids()
         siblings = studio_clip_siblings(self._session, clip_id)
-        target_ids = (clip_id,)
-        if len(siblings) > 1:
+        target_ids = (
+            selected_ids
+            if clip_id in selected_ids and len(selected_ids) > 1
+            else (clip_id,)
+        )
+        if len(target_ids) == 1 and len(siblings) > 1:
             logo_path = Path(__file__).resolve().parents[1] / "assets" / "jjzero_logo.svg"
             scope = StudioEffectScopeDialog.choose(
                 self,
@@ -2237,9 +2582,17 @@ class StudioEditor(QWidget):
             updated = self._session
             for target_id in target_ids:
                 for effect in effects:
-                    updated = add_studio_clip_effect(updated, target_id, effect)
+                    independent_effect = replace(
+                        effect,
+                        effect_id=f"fx-{uuid.uuid4().hex}",
+                    )
+                    updated = add_studio_clip_effect(
+                        updated,
+                        target_id,
+                        independent_effect,
+                    )
             self._commit(updated)
-            self.timeline.select_clip(clip_id)
+            self.timeline.select_clips(target_ids, clip_id)
         except StudioTimelineError as exc:
             self.set_status(str(exc))
 
@@ -2291,6 +2644,18 @@ class StudioEditor(QWidget):
                     clip_id,
                     track_id=track_id,
                     timeline_start_ms=position_ms,
+                )
+            )
+        except StudioTimelineError as exc:
+            self.set_status(str(exc))
+
+    def _move_clips(self, clip_ids: tuple[str, ...], delta_ms: int) -> None:
+        try:
+            self._commit(
+                move_studio_clips(
+                    self._session,
+                    clip_ids,
+                    delta_ms=delta_ms,
                 )
             )
         except StudioTimelineError as exc:
@@ -2382,6 +2747,27 @@ class StudioEditor(QWidget):
             self.set_status(str(exc))
             self._sync_inspector(clip_id=clip_id)
 
+    def _adjust_selected_clips(
+        self,
+        clip_ids: tuple[str, ...],
+        gain_delta_db: float,
+        pitch_delta_semitones: int,
+        muted: bool | None,
+    ) -> None:
+        try:
+            self._commit(
+                adjust_studio_clips(
+                    self._session,
+                    clip_ids,
+                    gain_delta_db=gain_delta_db,
+                    pitch_delta_semitones=pitch_delta_semitones,
+                    muted=muted,
+                )
+            )
+            self.timeline.select_clips(clip_ids, self.timeline.selected_clip_id())
+        except StudioTimelineError as exc:
+            self.set_status(str(exc))
+
     def _remove_clip(self, clip_id: str) -> None:
         self._commit(remove_studio_clip(self._session, clip_id))
 
@@ -2391,9 +2777,9 @@ class StudioEditor(QWidget):
             (QLineEdit, QAbstractSpinBox, QTextEdit, QPlainTextEdit),
         ):
             return
-        clip_id = self.timeline.selected_clip_id()
-        if clip_id:
-            self._remove_clip(clip_id)
+        clip_ids = self.timeline.selected_clip_ids()
+        if clip_ids:
+            self._commit(remove_studio_clips(self._session, clip_ids))
 
     def _set_track_mix(
         self,
@@ -2419,6 +2805,9 @@ class StudioEditor(QWidget):
 
     def _select_clip(self, clip_id: str) -> None:
         self._sync_inspector(clip_id=clip_id)
+
+    def _select_clips(self, clip_ids: tuple[str, ...], primary_clip_id: str) -> None:
+        self._sync_inspector(clip_id=primary_clip_id)
 
     def _select_effect(self, clip_id: str, effect_id: str) -> None:
         self._sync_inspector(clip_id=clip_id)
@@ -2458,7 +2847,10 @@ class StudioEditor(QWidget):
             self.timeline.set_context(session, self._assets)
         else:
             self.timeline.update_session(session)
-        self._sync_inspector(clip_id=self.timeline.selected_clip_id(), track_id=self.timeline.selected_track_id())
+        self._sync_inspector(
+            clip_id=self.timeline.selected_clip_id(),
+            track_id=self.timeline.selected_track_id(),
+        )
         self._update_split_tool_availability()
         self._update_history_availability()
         self._update_overlap_status()
@@ -2486,6 +2878,15 @@ class StudioEditor(QWidget):
         self.split_tool_available_changed.emit(available)
 
     def _sync_inspector(self, *, clip_id: str = "", track_id: str = "") -> None:
+        selected_ids = self.timeline.selected_clip_ids()
+        if len(selected_ids) > 1:
+            clips = tuple(
+                clip
+                for selected_id in selected_ids
+                if (clip := self._clip(selected_id)) is not None
+            )
+            self.inspector.set_multi_selection(clips)
+            return
         clip = self._clip(clip_id) if clip_id else None
         track = self._track_for_clip(clip.clip_id) if clip is not None else self._track(track_id)
         asset = self._assets_by_id.get(clip.asset.asset_id) if clip is not None else None

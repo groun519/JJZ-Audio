@@ -20,9 +20,9 @@
 </p>
 
 > [!NOTE]
-> This document describes the released **JJZero Audio 0.3.9**. Download the installer from [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest).
+> This document describes the released **JJZero Audio 0.3.10**. Download the installer from [GitHub Releases](https://github.com/groun519/JJZ-Audio/releases/latest).
 
-See the [0.3.9 release notes](docs/releases/0.3.9.md) for pitch guidance, model precision evaluation, Hard Tune, and session reliability improvements.
+See the [0.3.10 release notes](docs/releases/0.3.10.md) for Studio multi-editing, project recovery, and RVC training and update reliability improvements.
 
 ## One Connected Workflow
 

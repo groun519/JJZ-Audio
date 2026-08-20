@@ -33,10 +33,25 @@ try {
     $version = [string]$manifest.version
     $tag = "v$version"
     $assets = @($manifestPath)
+    $remoteAssets = @{}
     foreach ($component in $manifest.components) {
         foreach ($artifact in $component.artifacts) {
             if (-not $artifact.url) {
                 $assets += Join-Path $releaseDir $artifact.name
+            }
+            else {
+                $url = [string]$artifact.url
+                if ($url -notmatch '^https://github\.com/groun519/JJZ-Audio/releases/download/(?<tag>v\d+\.\d+\.\d+)/(?<asset>[^/?#]+)$') {
+                    throw "Unsupported remote release asset URL: $url"
+                }
+                $remoteTag = $Matches.tag
+                if (-not $remoteAssets.ContainsKey($remoteTag)) {
+                    $remoteAssets[$remoteTag] = @()
+                }
+                $remoteAssets[$remoteTag] += [PSCustomObject]@{
+                    Name = [Uri]::UnescapeDataString($Matches.asset)
+                    Size = [Int64]$artifact.size
+                }
             }
         }
     }
@@ -47,6 +62,22 @@ try {
         }
         if ((Get-Item -LiteralPath $asset).Length -ge 2GB) {
             throw "Release asset exceeds GitHub's 2 GiB limit: $asset"
+        }
+    }
+
+    foreach ($remoteTag in $remoteAssets.Keys) {
+        $remoteReleaseJson = & $gh.Source api "repos/groun519/JJZ-Audio/releases/tags/$remoteTag"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not inspect reused runtime release: $remoteTag"
+        }
+        $remoteRelease = $remoteReleaseJson | ConvertFrom-Json
+        foreach ($expected in $remoteAssets[$remoteTag]) {
+            $published = @($remoteRelease.assets) | Where-Object {
+                $_.name -eq $expected.Name -and [Int64]$_.size -eq $expected.Size
+            } | Select-Object -First 1
+            if (-not $published) {
+                throw "Reused release asset is missing or has the wrong size: $remoteTag/$($expected.Name)"
+            }
         }
     }
 

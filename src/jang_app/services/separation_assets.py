@@ -37,6 +37,7 @@ class RoFormerModelAssets:
     managed_download: bool = False
     config_source: str = ""
     config_replacements: tuple[tuple[str, str], ...] = ()
+    registry_group: str = "roformer_download_list"
 
 
 _MODEL_REPOSITORY = (
@@ -118,6 +119,21 @@ _ROFORMER_MODEL_ASSETS = {
             ),
             ("  target_instrument: noreverb", "  target_instrument: Vocals"),
         ),
+    ),
+    "UVR-De-Echo-Normal.pth": RoFormerModelAssets(
+        model="UVR-De-Echo-Normal.pth",
+        config="",
+        registry_name="JJZero Audio: UVR De-Echo Normal",
+        files=(
+            RoFormerModelFile(
+                "UVR-De-Echo-Normal.pth",
+                127_139_365,
+                "b849dd575643b075c257fb7a96c2ef5a79d7a5e7df74a2b319ad47118f1ee769",
+                f"{_MODEL_REPOSITORY}/UVR-De-Echo-Normal.pth",
+            ),
+        ),
+        managed_download=True,
+        registry_group="vr_download_list",
     ),
 }
 

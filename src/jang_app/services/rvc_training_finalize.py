@@ -61,7 +61,7 @@ def inspect_rvc_inference_model(
         raise RvcTrainingFinalizeError(
             f"RVC inference model validation failed with exit code {completed.returncode}: {completed.output}"
         )
-    data = _last_json_object(completed.output)
+    data = _last_json_object(_command_output(completed))
     if (
         data.get("version") != "v2"
         or data.get("sample_rate") != 40000
@@ -128,6 +128,10 @@ def _last_json_object(output: str) -> dict[str, object]:
         if isinstance(value, dict):
             return value
     raise RvcTrainingFinalizeError("RVC artifact worker did not return a model report.")
+
+
+def _command_output(result: CommandResult) -> str:
+    return "\n".join(part for part in (result.stdout, result.stderr) if part)
 
 
 def _artifact_worker_path() -> Path:

@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from jang_app.qt_app.main_window import MainWindow
+from jang_app.qt_app.main_window import (
+    SEPARATION_MODE_AUDIO,
+    SEPARATION_MODE_CLEANUP,
+    MainWindow,
+)
 from jang_app.services.song_library import SongVocalVersion
 from jang_app.services.vocal_split import VocalReferenceRegion
 from jang_app.services.vocal_split_store import VocalSplitStore
@@ -24,6 +28,30 @@ class MainWindowVocalSplitTests(unittest.TestCase):
         MainWindow._on_primary_page_option_requested(window, 2, "vocal")
 
         self.assertEqual(navigated, [])
+
+    def test_unfinished_cleanup_mode_request_does_not_navigate(self) -> None:
+        navigated: list[int] = []
+        window = SimpleNamespace(
+            _on_separation_submode_changed=lambda _mode: self.fail(
+                "Unfinished vocal cleanup must not be selected"
+            ),
+            _navigate_to_page=navigated.append,
+        )
+
+        MainWindow._on_primary_page_option_requested(
+            window,
+            2,
+            SEPARATION_MODE_CLEANUP,
+        )
+
+        self.assertEqual(navigated, [])
+
+    def test_direct_cleanup_mode_request_falls_back_to_audio(self) -> None:
+        window = SimpleNamespace(_separation_submode=SEPARATION_MODE_AUDIO)
+
+        MainWindow._on_separation_submode_changed(window, SEPARATION_MODE_CLEANUP)
+
+        self.assertEqual(window._separation_submode, SEPARATION_MODE_AUDIO)
 
     def test_group_creation_is_immediate_and_selects_the_new_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -152,6 +152,19 @@ class RoFormerEngineTests(unittest.TestCase):
             self.assertEqual(dry_path.read_bytes(), b"dry")
             self.assertEqual(effect_path.read_bytes(), b"ambience")
 
+    def test_deecho_outputs_are_normalized_to_no_echo_and_removed_echo(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "song_(No Echo)_model.wav").write_bytes(b"dry")
+            (root / "song_(Instrumental)_model.wav").write_bytes(b"echo")
+
+            dry_path, echo_path = roformer_engine.normalize_deecho_outputs(root)
+
+            self.assertEqual(dry_path.name, "no_echo.wav")
+            self.assertEqual(echo_path.name, "removed_echo.wav")
+            self.assertEqual(dry_path.read_bytes(), b"dry")
+            self.assertEqual(echo_path.read_bytes(), b"echo")
+
     def test_engine_publishes_from_short_workspace_to_managed_run(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -17,7 +17,11 @@ from jang_app.services.google_drive import (
     GoogleDriveQuota,
     GoogleDriveUnavailableError,
 )
-from jang_app.services.google_drive_download import download_public_drive_file
+from jang_app.services.google_drive_download import (
+    GoogleDriveDownloadError,
+    download_public_drive_file,
+    google_drive_file_id,
+)
 from jang_app.services.google_drive_share import (
     GoogleDriveShareResult,
     GoogleDriveShareService,
@@ -221,6 +225,13 @@ class GoogleDriveController(QObject):
         return self._target_is_shared(self._model_work_target(record))
 
     def import_model_link(self, link: str) -> None:
+        link = link.strip()
+        try:
+            google_drive_file_id(link)
+        except GoogleDriveDownloadError as exc:
+            self._logger.warning("Rejected Drive model import before download: %s", exc)
+            self._model_status(str(exc))
+            return
         self._model_status("Downloading shared model...")
 
         def import_model(progress: Callable[[int], None]) -> tuple[RvcModelRecord, ...]:

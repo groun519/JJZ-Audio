@@ -180,6 +180,7 @@ class ExportPageTests(unittest.TestCase):
         row.share_action.set_actions_expanded(True)
 
         self.assertEqual(row.share_button.icon_name(), "cloud_check")
+        self.assertEqual(row.share_action.delete_button.icon_name(), "cloud_remove")
         self.assertFalse(row.share_action.delete_button.isHidden())
         row.share_action.delete_button.click()
         self.assertEqual(deleted.at(0)[0], audio.path)

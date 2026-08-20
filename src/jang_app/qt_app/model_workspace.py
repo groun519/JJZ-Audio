@@ -920,6 +920,9 @@ class ModelWorkspacePage(QWidget):
         )
 
     def _show_add_model_dialog(self) -> None:
+        if self.training_in_progress():
+            self.show_status(tr("Finish or stop model training before importing another model."))
+            return
         request = ModelAddDialog.get_request(
             self,
             APP_ICON_PATH,
@@ -931,7 +934,11 @@ class ModelWorkspacePage(QWidget):
             self._create_model()
             return
         if request.source == ModelImportSource.DRIVE_LINK:
-            self.drive_import_requested.emit(request.link)
+            link = request.link.strip()
+            if not link:
+                self.show_status(tr("Paste a Google Drive file link before importing."))
+                return
+            self.drive_import_requested.emit(link)
             return
         if request.source == ModelImportSource.INFERENCE_FILE:
             self._choose_inference_file(request.mode)
@@ -1043,14 +1050,21 @@ class ModelWorkspacePage(QWidget):
             worker.deleteLater()
 
     def _set_busy(self, is_busy: bool) -> None:
-        self.add_model_button.setDisabled(is_busy)
-        self.refresh_button.setDisabled(is_busy)
+        self._sync_model_library_controls()
         self.workspace_back_button.setDisabled(is_busy)
         selected = self._selected_record()
         self.workspace_open_button.setDisabled(is_busy or selected is None or not selected.primary_location.exists())
         self.workspace_work_share_action.setDisabled(is_busy)
         self.import_progress.setVisible(is_busy)
         self.detail_panel.set_busy(is_busy)
+
+    def training_in_progress(self) -> bool:
+        return self._training_worker is not None
+
+    def _sync_model_library_controls(self) -> None:
+        is_busy = self._active_worker is not None or self.training_in_progress()
+        self.add_model_button.setDisabled(is_busy)
+        self.refresh_button.setDisabled(is_busy)
 
     def _on_model_selection_changed(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         model_id = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
@@ -1420,6 +1434,7 @@ class ModelWorkspacePage(QWidget):
         worker.failed.connect(self._on_training_failed)
         worker.finished.connect(self._on_training_finished)
         self._training_worker = worker
+        self._sync_model_library_controls()
         self._training_runtime_timer.start()
         self._refresh_training_runtime()
         self._start_training_telemetry()
@@ -1697,6 +1712,7 @@ class ModelWorkspacePage(QWidget):
         worker = self._training_worker
         trained_model_id = self._training_model_id
         self._training_worker = None
+        self._sync_model_library_controls()
         self._stop_training_telemetry()
         self._training_cancellation = None
         self._training_model_id = ""

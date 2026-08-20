@@ -14,7 +14,7 @@ from jang_app.qt_app.window_lifecycle import (
     WindowLifecycleGuard,
     install_window_lifecycle_guard,
 )
-from jang_app.qt_app.widgets import DangerIconButton, TrackRow
+from jang_app.qt_app.widgets import SvgIconButton, TrackRow
 from jang_app.services.song_assets import SongAsset, SongAssetDetails
 
 
@@ -88,7 +88,8 @@ class WindowLifecycleGuardTests(unittest.TestCase):
         share_action = ShareProgressAction(parent=host)
         self.app.processEvents()
 
-        self.assertIsInstance(share_action.delete_button, DangerIconButton)
+        self.assertIsInstance(share_action.delete_button, SvgIconButton)
+        self.assertEqual(share_action.delete_button.icon_name(), "cloud_remove")
         self.assertEqual(guard.blocked_count, 0)
         layout.addWidget(result_panel)
         layout.addWidget(track_row)

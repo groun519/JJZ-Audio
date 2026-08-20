@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.3.10 - 2026-08-21
+
+### Added
+
+- Added Studio multi-clip selection with marquee, Shift selection, grouped movement, removal, and relative gain, pitch, or mute adjustments.
+- Added Studio project revision history with explicit restore actions, view-state persistence, and missing-asset recovery notices.
+- Added validated public Google Drive model-link imports.
+
+### Changed
+
+- Blocked model-library mutations while RVC training is active and clarified busy controls.
+- Validated the selected RVC training runtime and GPU acceleration before launching native training.
+- Preserved immutable runtime URLs when generating app-only release manifests and verified every reused remote asset before publication.
+- Kept the unfinished Vocal Cleanup workspace inaccessible in the release UI.
+
+### Fixed
+
+- Recognized successful RVC completion markers before handling late worker exits or process shutdown.
+- Improved RVC runtime and command-output diagnostics for failed training jobs.
+- Removed Studio project internals together with managed song data without exposing revision files as ordinary outputs.
+- Normalized echo-removal model outputs and runtime registry preparation.
+
+### Quality
+
+- Added regression coverage for Studio multi-editing and project recovery, training runtime validation and completion, Drive imports, managed asset removal, release manifests, and the Vocal Cleanup release lock.
+
 ## 0.3.9 - 2026-08-20
 
 ### Added

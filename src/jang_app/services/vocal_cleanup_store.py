@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from jang_app.services.managed_files import file_sha256, write_json_atomic
 from jang_app.services.vocal_cleanup import (
-    VOCAL_CLEANUP_EFFECT_DEREVERB,
+    VOCAL_CLEANUP_EFFECTS,
     VOCAL_CLEANUP_STRENGTHS,
     VocalCleanupProject,
     VocalCleanupRegion,
@@ -272,7 +272,7 @@ def _validate_range(start_ms: int, end_ms: int) -> None:
 
 
 def _validate_effect(effect: str, strength: str) -> None:
-    if effect != VOCAL_CLEANUP_EFFECT_DEREVERB:
+    if effect not in VOCAL_CLEANUP_EFFECTS:
         raise VocalCleanupStoreError(f"Unsupported vocal cleanup effect: {effect}")
     if strength not in VOCAL_CLEANUP_STRENGTHS:
         raise VocalCleanupStoreError(f"Unsupported vocal cleanup strength: {strength}")

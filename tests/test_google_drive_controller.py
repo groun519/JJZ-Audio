@@ -22,6 +22,29 @@ class GoogleDriveControllerTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_empty_model_import_link_is_rejected_before_creating_a_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            statuses: list[str] = []
+            parent = QWidget()
+            controller = GoogleDriveController(
+                parent,
+                paths=SimpleNamespace(cache_dir=root / "cache"),
+                oauth_asset=root / "oauth.json",
+                model_workspace=RvcModelWorkspace(root / "models"),
+                run_worker=lambda *_args, **_kwargs: self.fail(
+                    "an invalid link must not create a background task"
+                ),
+                model_status=statuses.append,
+                models_imported=lambda _records: None,
+                logger=logging.getLogger("test.google-drive"),
+            )
+
+            controller.import_model_link("   ")
+
+            self.assertEqual(statuses, ["Enter a Google Drive file link."])
+            parent.close()
+
     def test_remote_policy_disables_sharing_and_can_be_reenabled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

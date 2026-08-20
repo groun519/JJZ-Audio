@@ -20,6 +20,7 @@ from jang_app.services.command import (
 from jang_app.services.managed_files import copy_file_atomic, file_sha256, write_json_atomic
 from jang_app.services.live_text_file import LiveTextFile
 from jang_app.services.rvc_environment import build_rvc_environment
+from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_script_launcher import (
     prepare_rvc_script_launcher,
@@ -177,6 +178,26 @@ class RvcTrainingRunResult:
 TrainingCommandRunner = Callable[..., CommandResult]
 
 
+def validate_rvc_training_runtime(inspection: RvcTrainingRuntimeInspection) -> None:
+    if not inspection.assets_ready:
+        missing = ", ".join(path.as_posix() for path in inspection.missing_paths)
+        raise RvcTrainingRunError(f"RVC training runtime is incomplete: {missing}")
+    if not inspection.ready:
+        raise RvcTrainingRunError(
+            inspection.cuda_error or "The RVC runtime cannot train a model on this PC."
+        )
+    if (
+        inspection.backend in {RvcComputeBackend.CUDA, RvcComputeBackend.ROCM}
+        and not inspection.training_accelerated
+    ):
+        backend = inspection.backend.value.upper()
+        raise RvcTrainingRunError(
+            f"The {backend} training runtime is installed, but GPU acceleration is not "
+            "available. CPU fallback is disabled for this GPU profile. Repair the RVC "
+            "runtime and try again."
+        )
+
+
 def train_rvc_model(
     model_id: str,
     layout: RvcModelPackageLayout,
@@ -190,19 +211,14 @@ def train_rvc_model(
     runtime_callback: Callable[[RvcTrainingRuntimeInspection], None] | None = None,
     command_runner: TrainingCommandRunner = run_cancellable_command,
     runtime_inspector: Callable[..., RvcTrainingRuntimeInspection] = inspect_rvc_training_runtime,
+    runtime_inspection: RvcTrainingRuntimeInspection | None = None,
 ) -> RvcTrainingRunResult:
     settings.validate()
     runtime = runtime_root.expanduser().resolve()
-    inspection = runtime_inspector(runtime, check_cuda=True)
-    if runtime_callback is not None:
+    inspection = runtime_inspection or runtime_inspector(runtime, check_cuda=True)
+    if runtime_callback is not None and runtime_inspection is None:
         runtime_callback(inspection)
-    if not inspection.assets_ready:
-        missing = ", ".join(path.as_posix() for path in inspection.missing_paths)
-        raise RvcTrainingRunError(f"RVC training runtime is incomplete: {missing}")
-    if not inspection.ready:
-        raise RvcTrainingRunError(
-            inspection.cuda_error or "The RVC runtime cannot train a model on this PC."
-        )
+    validate_rvc_training_runtime(inspection)
     if inspection.training_accelerated and settings.gpu_index >= inspection.cuda_device_count:
         raise RvcTrainingRunError("The selected GPU is not available for RVC training.")
 
@@ -297,12 +313,16 @@ def train_rvc_model(
     last_returncode: int | None = None
     resume_load_error = ""
     safe_retry_requested = False
+    training_completed = False
 
     def handle_output(line: str) -> None:
-        nonlocal resume_load_error, safe_retry_requested
+        nonlocal resume_load_error, safe_retry_requested, training_completed
         text = line.strip()
         if not text:
             return
+        lowered = text.casefold()
+        if _COMPLETE_MARKER in lowered or _FINAL_CHECKPOINT_MARKER in lowered:
+            training_completed = True
         completion_guard.observe(text)
         if active_monitor is not None:
             active_monitor.observe_output(text)
@@ -316,7 +336,10 @@ def train_rvc_model(
             if resumed and text.startswith("JJZERO_CHECKPOINT_LOAD_FAILED"):
                 resume_load_error = text
                 token.request_cancel()
-            if text.startswith("JJZERO_DATA_LOADER_WORKER_EXITED"):
+            if (
+                text.startswith("JJZERO_DATA_LOADER_WORKER_EXITED")
+                and not training_completed
+            ):
                 safe_retry_requested = True
                 token.terminate_current()
             step_match = _EPOCH_STEP_PATTERN.search(text)

@@ -125,6 +125,28 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_drive_model_import_is_rejected_while_training(self) -> None:
+        statuses: list[str] = []
+        window = SimpleNamespace(
+            _logger=SimpleNamespace(warning=lambda *_args: None),
+            model_workspace_page=SimpleNamespace(
+                training_in_progress=lambda: True,
+                show_status=statuses.append,
+            ),
+            google_drive=SimpleNamespace(
+                import_model_link=lambda _link: self.fail(
+                    "Drive import must not start during training"
+                )
+            ),
+        )
+
+        MainWindow._start_drive_model_import(window, "https://drive.google.com/file/d/test/view")
+
+        self.assertEqual(
+            statuses,
+            ["Finish or stop model training before importing another model."],
+        )
+
     def test_studio_mix_save_reuses_the_editor_asset_snapshot(self) -> None:
         from jang_app.services.studio_session import StudioSession, StudioTrack
 

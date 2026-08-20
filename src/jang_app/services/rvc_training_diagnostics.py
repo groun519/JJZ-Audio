@@ -20,6 +20,10 @@ from jang_app.version import __version__
 
 _FIRST_BATCH_MARKER = "JJZERO_TRAINING_FIRST_BATCH_READY"
 _LOADER_START_MARKER = "JJZERO_TRAINING_DATA_LOADER_START"
+_TRAINING_COMPLETE_MARKERS = (
+    "training is done",
+    "saving final ckpt:success",
+)
 _LOADER_TIMEOUT_MARKERS = (
     "dataloader timed out",
     "data loader timed out",
@@ -238,6 +242,7 @@ class RvcTrainingAttemptMonitor:
         self._last_output_at = self._started_at
         self._loader_started_at = 0.0
         self._first_batch_ready_at = 0.0
+        self._training_completed_at = 0.0
         self._reported_dead_workers: set[int] = set()
         self._stop = threading.Event()
         self._lock = threading.RLock()
@@ -267,6 +272,12 @@ class RvcTrainingAttemptMonitor:
                     "first_batch_ready",
                     duration_seconds=round(max(0.0, now - self._loader_started_at), 3),
                 )
+            if (
+                self._training_completed_at <= 0
+                and any(marker in text.casefold() for marker in _TRAINING_COMPLETE_MARKERS)
+            ):
+                self._training_completed_at = now
+                self._event("training_output_completed")
 
     def stop(self) -> None:
         self._stop.set()
@@ -310,7 +321,7 @@ class RvcTrainingAttemptMonitor:
         self,
         workers: tuple[RvcTrainingProcessStatus, ...],
     ) -> None:
-        if self._activity_callback is None:
+        if self._activity_callback is None or self._training_completed_at > 0:
             return
         for worker in workers:
             if worker.alive or worker.pid in self._reported_dead_workers:

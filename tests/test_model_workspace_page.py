@@ -365,6 +365,28 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual(requested, [link])
             page.close()
 
+    def test_add_model_dialog_does_not_emit_an_empty_drive_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            requested: list[str] = []
+            page.drive_import_requested.connect(requested.append)
+
+            with patch(
+                "jang_app.qt_app.model_workspace.ModelAddDialog.get_request",
+                return_value=ModelAddRequest(
+                    ModelAddAction.IMPORT,
+                    ModelImportSource.DRIVE_LINK,
+                    ModelImportMode.MANAGED,
+                    "   ",
+                ),
+            ):
+                page.add_model_button.click()
+
+            self.assertEqual(requested, [])
+            page.close()
+
     def test_selected_inference_model_can_be_shared(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -511,6 +533,10 @@ class ModelWorkspacePageTests(unittest.TestCase):
             row = page._rows_by_id[record.model_id]
 
             self.assertEqual(row.share_button.icon_name(), "cloud_check")
+            self.assertEqual(
+                row.share_action.delete_button.icon_name(),
+                "cloud_remove",
+            )
             self.assertFalse(row.share_action.isHidden())
             self.assertTrue(row.share_action.delete_button.isHidden())
 
@@ -622,6 +648,7 @@ class ModelWorkspacePageTests(unittest.TestCase):
                 page._start_training(RvcTrainingRunSettings(target_epoch=20))
                 worker = page._training_worker
                 self.assertIsNotNone(worker)
+                self.assertFalse(page.add_model_button.isEnabled())
                 worker.wait()
                 self.app.processEvents()
                 self.app.processEvents()
@@ -631,6 +658,7 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual(task.progress, 100)
             self.assertEqual(pipeline_roots, [execution_runtime.resolve()])
             self.assertIsNone(page._training_worker)
+            self.assertTrue(page.add_model_button.isEnabled())
             page.close()
 
     def test_training_failure_persists_recovery_diagnostics(self) -> None:

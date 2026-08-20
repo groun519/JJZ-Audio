@@ -168,6 +168,44 @@ class RoFormerModelAssetTests(unittest.TestCase):
                 {"effect.ckpt": "effect-runtime.yaml"},
             )
 
+    def test_preparation_registers_a_configless_vr_model(self) -> None:
+        assets = RoFormerModelAssets(
+            model="deecho.pth",
+            config="",
+            registry_name="Test De-Echo",
+            files=(
+                RoFormerModelFile("deecho.pth", 4, "a" * 64, "https://example/model"),
+            ),
+            managed_download=True,
+            registry_group="vr_download_list",
+        )
+
+        def download(artifact, destination, **kwargs):
+            target = destination / artifact.name
+            target.write_bytes(b"x" * artifact.size)
+            kwargs["progress"](100)
+            return target
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch(
+                "jang_app.services.roformer_model_assets.roformer_model_assets",
+                return_value=assets,
+            ),
+            patch(
+                "jang_app.services.roformer_model_assets.download_artifact",
+                side_effect=download,
+            ),
+        ):
+            prepared = prepare_roformer_model_assets(assets.model, Path(temporary))
+            registry = json.loads(prepared.registry.read_text(encoding="utf-8"))
+
+        self.assertEqual([path.name for path in prepared.files], ["deecho.pth"])
+        self.assertEqual(
+            registry["vr_download_list"]["Test De-Echo"],
+            "deecho.pth",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

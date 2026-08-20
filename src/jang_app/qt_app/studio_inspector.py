@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QButtonGroup,
     QGridLayout,
@@ -205,10 +206,12 @@ class StudioInspector(QFrame):
     open_location_requested = Signal(object)
     effect_changed = Signal(str, object)
     effect_remove_requested = Signal(str, str)
+    multi_clip_adjust_requested = Signal(object, float, int, object)
 
     EMPTY_PAGE = 0
     CLIP_PAGE = 1
     TRACK_PAGE = 2
+    MULTI_PAGE = 3
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -218,6 +221,7 @@ class StudioInspector(QFrame):
         self._track: StudioTrack | None = None
         self._clip: StudioClip | None = None
         self._asset: StudioSoundAsset | None = None
+        self._multi_clips: tuple[StudioClip, ...] = ()
         self._theme_mode = "white"
         self._loading = False
         self._active_effect_id = ""
@@ -237,6 +241,7 @@ class StudioInspector(QFrame):
         self.stack.addWidget(self._build_empty_page())
         self.stack.addWidget(self._build_clip_page())
         self.stack.addWidget(self._build_track_page())
+        self.stack.addWidget(self._build_multi_page())
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -519,6 +524,55 @@ class StudioInspector(QFrame):
         layout.addStretch(1)
         return page
 
+    def _build_multi_page(self) -> QWidget:
+        page = QWidget()
+        self.multi_header = InspectorHeader()
+        self.multi_section = InspectorSection("Selected Clips")
+        self.multi_detail = QLabel()
+        self.multi_detail.setObjectName("MutedText")
+        self.multi_detail.setWordWrap(True)
+
+        self.multi_mute_check = QCheckBox()
+        self.multi_mute_check.setTristate(True)
+        self.multi_gain_spin = ScrollSafeDoubleSpinBox()
+        self.multi_gain_spin.setRange(-30.0, 30.0)
+        self.multi_gain_spin.setDecimals(1)
+        self.multi_gain_spin.setSingleStep(0.5)
+        self.multi_gain_spin.setSuffix(" dB")
+        self.multi_pitch_spin = ScrollSafeSpinBox()
+        self.multi_pitch_spin.setRange(-48, 48)
+        self.multi_pitch_spin.setSuffix(" st")
+        self.multi_gain_label, gain_field = _field_widget(
+            "Gain Change",
+            self.multi_gain_spin,
+        )
+        self.multi_pitch_label, pitch_field = _field_widget(
+            "Pitch Change",
+            self.multi_pitch_spin,
+        )
+        fields = QGridLayout()
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.setHorizontalSpacing(8)
+        fields.setVerticalSpacing(8)
+        fields.addWidget(gain_field, 0, 0)
+        fields.addWidget(pitch_field, 0, 1)
+
+        self.multi_apply_button = FeedbackButton()
+        self.multi_apply_button.setObjectName("PrimaryButton")
+        self.multi_apply_button.clicked.connect(self._emit_multi_clip_adjustment)
+        self.multi_section.content_layout.addWidget(self.multi_detail)
+        self.multi_section.content_layout.addWidget(self.multi_mute_check)
+        self.multi_section.content_layout.addLayout(fields)
+        self.multi_section.content_layout.addWidget(self.multi_apply_button)
+
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        layout.addWidget(self.multi_header)
+        layout.addWidget(self.multi_section)
+        layout.addStretch(1)
+        return page
+
     def set_selection(
         self,
         track: StudioTrack | None,
@@ -530,6 +584,7 @@ class StudioInspector(QFrame):
         self._track = track
         self._clip = clip
         self._asset = asset
+        self._multi_clips = ()
         if clip is not None and track is not None:
             if previous_clip_id != clip.clip_id:
                 self._active_effect_id = ""
@@ -542,6 +597,30 @@ class StudioInspector(QFrame):
             self.stack.setCurrentIndex(self.TRACK_PAGE)
         else:
             self.stack.setCurrentIndex(self.EMPTY_PAGE)
+        self._loading = False
+
+    def set_multi_selection(self, clips: tuple[StudioClip, ...]) -> None:
+        if len(clips) < 2:
+            self.clear_selection()
+            return
+        self._loading = True
+        self._track = None
+        self._clip = None
+        self._asset = None
+        self._multi_clips = clips
+        self._active_effect_id = ""
+        self.multi_gain_spin.setValue(0.0)
+        self.multi_pitch_spin.setValue(0)
+        muted_count = sum(clip.muted for clip in clips)
+        if muted_count == len(clips):
+            state = Qt.CheckState.Checked
+        elif muted_count == 0:
+            state = Qt.CheckState.Unchecked
+        else:
+            state = Qt.CheckState.PartiallyChecked
+        self.multi_mute_check.setCheckState(state)
+        self._refresh_multi_selection_text()
+        self.stack.setCurrentIndex(self.MULTI_PAGE)
         self._loading = False
 
     def clear_selection(self) -> None:
@@ -563,6 +642,14 @@ class StudioInspector(QFrame):
         self.clip_tab_button.setText(tr("Clip"))
         self.empty_title.setText(tr("Nothing selected"))
         self.empty_detail.setText(tr("Select a clip or track on the timeline to edit its properties."))
+        self.multi_section.title_label.setText(tr("Selected Clips"))
+        self.multi_detail.setText(
+            tr("Gain and pitch are adjusted relative to each clip's current value.")
+        )
+        self.multi_mute_check.setText(tr("Mute selected clips"))
+        self.multi_gain_label.setText(tr("Gain Change"))
+        self.multi_pitch_label.setText(tr("Pitch Change"))
+        self.multi_apply_button.setText(tr("Apply to Selected Clips"))
         for section in (
             self.clip_section,
             self.time_section,
@@ -608,6 +695,20 @@ class StudioInspector(QFrame):
         for editor in self.effect_editors.values():
             editor.apply_language()
         self._refresh_selection_text()
+
+    def _emit_multi_clip_adjustment(self) -> None:
+        if self._loading or len(self._multi_clips) < 2:
+            return
+        state = self.multi_mute_check.checkState()
+        muted = None if state == Qt.CheckState.PartiallyChecked else (
+            state == Qt.CheckState.Checked
+        )
+        self.multi_clip_adjust_requested.emit(
+            tuple(clip.clip_id for clip in self._multi_clips),
+            self.multi_gain_spin.value(),
+            self.multi_pitch_spin.value(),
+            muted,
+        )
 
     def effect_tab_ids(self) -> tuple[str, ...]:
         return tuple(self.effect_tab_buttons)
@@ -789,6 +890,7 @@ class StudioInspector(QFrame):
         self._refresh_selection_text()
 
     def _refresh_selection_text(self) -> None:
+        self._refresh_multi_selection_text()
         if self._clip is not None and self._track is not None:
             name = self._asset.label if self._asset is not None else tr("Missing sound")
             meta = f"{tr(_role_name(self._clip.asset.role))}  /  {_format_timecode(self._clip.duration_ms)}"
@@ -802,6 +904,16 @@ class StudioInspector(QFrame):
                 self._track.role,
             )
             self.track_meta.setText(f"{tr(_role_name(self._track.role))}  /  {meta}")
+
+    def _refresh_multi_selection_text(self) -> None:
+        if len(self._multi_clips) < 2:
+            return
+        self.multi_header.set_content(
+            tr("Clips"),
+            tr("{count} clips selected").format(count=len(self._multi_clips)),
+            tr("Relative changes preserve differences between clips."),
+            TRACK_AUDIO,
+        )
 
     def _sync_gain_from_slider(self, value: int) -> None:
         self.gain_spin.setValue(value / 10.0)

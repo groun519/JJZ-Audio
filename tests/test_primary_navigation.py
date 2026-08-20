@@ -203,8 +203,9 @@ class PrimaryNavigationBarTests(unittest.TestCase):
         self.app.processEvents()
         button = navigation.workflow_buttons[0]
         menu = navigation._page_menus[2]
+        QCursor.setPos(button.mapToGlobal(button.rect().center()))
         QTest.mouseMove(button, button.rect().center())
-        self.app.processEvents()
+        QTest.qWait(60)
         self.assertTrue(menu.isVisible())
 
         QTest.mouseMove(menu, menu.rect().center())

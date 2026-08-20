@@ -37,7 +37,10 @@ from jang_app.services.rvc_training_preprocess import (
     load_rvc_preprocess_result,
     preprocess_rvc_training_dataset,
 )
-from jang_app.services.rvc_training_runtime import RvcTrainingRuntimeInspection
+from jang_app.services.rvc_training_runtime import (
+    RvcTrainingRuntimeInspection,
+    inspect_rvc_training_runtime,
+)
 from jang_app.services.rvc_training_state import (
     RvcTrainingPhase,
     RvcTrainingState,
@@ -52,6 +55,7 @@ from jang_app.services.rvc_training_train import (
     RvcTrainingRunResult,
     RvcTrainingRunSettings,
     train_rvc_model,
+    validate_rvc_training_runtime,
 )
 
 
@@ -99,6 +103,7 @@ def run_rvc_training_pipeline(
     preprocess_callback: Callable[[RvcTrainingPreprocessResult], None] | None = None,
     output_callback: Callable[[str], None] | None = None,
     runtime_callback: Callable[[RvcTrainingRuntimeInspection], None] | None = None,
+    runtime_inspector: Callable[..., RvcTrainingRuntimeInspection] = inspect_rvc_training_runtime,
 ) -> RvcTrainingPipelineResult:
     token = cancellation or CommandCancellation()
     state_store = RvcTrainingStateStore(model_id, layout)
@@ -106,6 +111,18 @@ def run_rvc_training_pipeline(
     fingerprint = ""
     logger = get_logger()
     try:
+        runtime_inspection = runtime_inspector(runtime_root, check_cuda=True)
+        if runtime_callback is not None:
+            runtime_callback(runtime_inspection)
+        if output_callback is not None:
+            output_callback(
+                "JJZERO_RUNTIME_CHECK "
+                f"backend={runtime_inspection.backend.value} "
+                f"accelerated={runtime_inspection.training_accelerated} "
+                f"torch={runtime_inspection.torch_version or 'unknown'}"
+            )
+        validate_rvc_training_runtime(runtime_inspection)
+
         _stage(stage_callback, RvcTrainingStage.SNAPSHOT)
         raise_if_training_cancelled(token)
         previous_fingerprint = state_store.load().dataset_fingerprint
@@ -197,7 +214,7 @@ def run_rvc_training_pipeline(
             progress=_scaled_progress(progress, 32, 95),
             epoch_callback=epoch_callback,
             output_callback=output_callback,
-            runtime_callback=runtime_callback,
+            runtime_inspection=runtime_inspection,
         )
         if training.stopped:
             return RvcTrainingPipelineResult(

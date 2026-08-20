@@ -39,6 +39,17 @@ from jang_app.services.song_export import (
     song_audio_export_dir,
 )
 from jang_app.services.studio_assets import StudioSoundAsset, studio_sound_pool
+from jang_app.services.studio_project import (
+    StudioProjectRecoveryNotice,
+    StudioProjectRevision,
+    StudioProjectViewState,
+    consume_studio_project_recovery_notice,
+    load_studio_project_view_state,
+    save_studio_project_view_state,
+    restore_studio_project_revision,
+    studio_project_missing_asset_ids,
+    studio_project_revisions,
+)
 from jang_app.services.studio_session import (
     StudioSession,
     load_studio_session as load_package_studio_session,
@@ -117,6 +128,7 @@ class SongVocalVersion:
 class StudioWorkspaceSnapshot:
     session: StudioSession
     assets: tuple[StudioSoundAsset, ...]
+    missing_asset_ids: tuple[str, ...] = ()
 
 
 class SongLibrary:
@@ -254,12 +266,37 @@ class SongLibrary:
     def studio_assets(self, item_id: str) -> tuple[StudioSoundAsset, ...]:
         return studio_sound_pool(self._store.require(item_id))
 
+    def studio_view_state(self, item_id: str) -> StudioProjectViewState:
+        return load_studio_project_view_state(self._store.require(item_id))
+
+    def save_studio_view_state(
+        self,
+        item_id: str,
+        state: StudioProjectViewState,
+    ) -> Path:
+        return save_studio_project_view_state(self._store.require(item_id), state)
+
+    def consume_studio_recovery_notice(
+        self,
+        item_id: str,
+    ) -> StudioProjectRecoveryNotice:
+        return consume_studio_project_recovery_notice(self._store.require(item_id))
+
+    def studio_revisions(self, item_id: str) -> tuple[StudioProjectRevision, ...]:
+        return studio_project_revisions(self._store.require(item_id))
+
+    def restore_studio_revision(self, item_id: str, revision: int) -> StudioSession:
+        package = self._store.require(item_id)
+        restore_studio_project_revision(package, revision)
+        return load_package_studio_session(package)
+
     def studio_workspace(self, item_id: str) -> StudioWorkspaceSnapshot:
         package = self._store.require(item_id)
         assets = studio_sound_pool(package)
         return StudioWorkspaceSnapshot(
             load_package_studio_session(package, assets=assets),
             assets,
+            studio_project_missing_asset_ids(package),
         )
 
     def studio_mix_sources(

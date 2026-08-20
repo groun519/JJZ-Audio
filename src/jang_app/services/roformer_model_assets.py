@@ -69,7 +69,7 @@ def prepare_roformer_model_assets(
     registry = _update_model_registry(root, assets)
     _report(progress, 100)
     prepared_files = [root / item.filename for item in assets.files]
-    if runtime_config not in prepared_files:
+    if runtime_config is not None and runtime_config not in prepared_files:
         prepared_files.append(runtime_config)
     return PreparedRoFormerAssets(
         files=tuple(prepared_files),
@@ -77,7 +77,9 @@ def prepare_roformer_model_assets(
     )
 
 
-def _prepare_runtime_config(root: Path, assets: RoFormerModelAssets) -> Path:
+def _prepare_runtime_config(root: Path, assets: RoFormerModelAssets) -> Path | None:
+    if not assets.config:
+        return None
     source = root / (assets.config_source or assets.config)
     target = root / assets.config
     if not assets.config_replacements:
@@ -105,11 +107,15 @@ def _prepare_runtime_config(root: Path, assets: RoFormerModelAssets) -> Path:
 def _update_model_registry(root: Path, assets: RoFormerModelAssets) -> Path:
     target = root / MODEL_REGISTRY_FILE
     data = _load_registry(target)
-    downloads = data.setdefault("roformer_download_list", {})
+    downloads = data.setdefault(assets.registry_group, {})
     if not isinstance(downloads, dict):
         downloads = {}
-        data["roformer_download_list"] = downloads
-    downloads[assets.registry_name] = {assets.model: assets.config}
+        data[assets.registry_group] = downloads
+    downloads[assets.registry_name] = (
+        assets.model
+        if assets.registry_group == "vr_download_list"
+        else {assets.model: assets.config}
+    )
     write_json_atomic(target, data)
     return target
 

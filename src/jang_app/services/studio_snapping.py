@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from jang_app.services.studio_session import StudioClip, StudioSession, StudioTrack
 from jang_app.services.studio_timeline import (
     StudioTimelineError,
+    resolve_studio_clip_group_delta,
     resolve_studio_clip_position,
     resolve_studio_clip_trim,
 )
@@ -162,6 +163,64 @@ def snap_studio_clip_position(
     return StudioSnapResult(requested)
 
 
+def snap_studio_clip_group_delta(
+    session: StudioSession,
+    index: StudioSnapIndex,
+    clip_ids: tuple[str, ...] | list[str],
+    *,
+    requested_delta_ms: int,
+    threshold_ms: int,
+    playhead_ms: int | None = None,
+) -> StudioSnapResult:
+    """Snap a horizontal clip group by its outer boundaries."""
+    selected = tuple(dict.fromkeys(str(clip_id) for clip_id in clip_ids if clip_id))
+    if not selected:
+        return StudioSnapResult(0)
+    clips = tuple(_find_clip(session, clip_id)[1] for clip_id in selected)
+    group_start = min(clip.timeline_start_ms for clip in clips)
+    group_end = max(clip.timeline_end_ms for clip in clips)
+    requested = resolve_studio_clip_group_delta(
+        session,
+        selected,
+        requested_delta_ms,
+    )
+    excluded = frozenset(selected)
+    candidates: list[tuple[tuple[int, int, int], StudioSnapResult]] = []
+    for edge_order, (moving_edge, boundary) in enumerate(
+        (("group_start", group_start), ("group_end", group_end))
+    ):
+        anchor = boundary + int(requested_delta_ms)
+        for point in _point_candidates(
+            index,
+            anchor,
+            threshold_ms=max(0, int(threshold_ms)),
+            preferred_track_id="",
+            playhead_ms=playhead_ms,
+            exclude_clip_id="",
+            minimum_ms=0,
+            maximum_ms=None,
+            exclude_clip_ids=excluded,
+        ):
+            if point.target is None:
+                continue
+            delta = point.position_ms - boundary
+            if resolve_studio_clip_group_delta(session, selected, delta) != delta:
+                continue
+            candidates.append(
+                (
+                    (
+                        abs(delta - int(requested_delta_ms)),
+                        edge_order,
+                        point.target.position_ms,
+                    ),
+                    StudioSnapResult(delta, point.target, moving_edge),
+                )
+            )
+    if not candidates:
+        return StudioSnapResult(requested)
+    return min(candidates, key=lambda item: item[0])[1]
+
+
 def snap_studio_clip_trim(
     session: StudioSession,
     index: StudioSnapIndex,
@@ -257,6 +316,7 @@ def _point_candidates(
     exclude_clip_id: str,
     minimum_ms: int,
     maximum_ms: int | None,
+    exclude_clip_ids: frozenset[str] = frozenset(),
 ) -> tuple[StudioSnapResult, ...]:
     lower = requested_ms - threshold_ms
     upper = requested_ms + threshold_ms
@@ -270,6 +330,7 @@ def _point_candidates(
         target
         for target in targets
         if (not exclude_clip_id or target.clip_id != exclude_clip_id)
+        and target.clip_id not in exclude_clip_ids
         and target.position_ms >= minimum_ms
         and (maximum_ms is None or target.position_ms <= maximum_ms)
     )

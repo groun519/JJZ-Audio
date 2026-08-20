@@ -93,6 +93,7 @@ from jang_app.qt_app.separation_recipe_selector import SeparationRecipeSelector
 from jang_app.qt_app.separation_stem_pool import SeparationStemPoolPanel
 from jang_app.qt_app.studio_session_autosave import StudioSessionAutosave
 from jang_app.qt_app.studio_editor import StudioEditor
+from jang_app.qt_app.studio_project_history_dialog import StudioProjectHistoryDialog
 from jang_app.qt_app.studio_transport_bar import StudioTransportBar
 from jang_app.qt_app.task_attention import TaskAttentionController
 from jang_app.qt_app.theme import build_stylesheet, next_theme_mode
@@ -220,6 +221,7 @@ from jang_app.services.song_assets import (
 from jang_app.services.song_library import SongItem, SongLibrary, SongVocalVersion, sort_song_items
 from jang_app.services.song_metadata import build_song_display_metadata
 from jang_app.services.studio_assets import StudioSoundAsset
+from jang_app.services.studio_project import StudioProjectViewState
 from jang_app.services.studio_session import StudioSession, StudioTrackState
 from jang_app.services.studio_timeline import session_duration_ms, set_studio_track_mix
 from jang_app.services.update_polling import UpdateCheckOutcome, UpdatePollingPolicy
@@ -344,6 +346,9 @@ class MainWindow(QMainWindow):
         )
         self.studio_session_autosave = StudioSessionAutosave(self.library.save_studio_session, parent=self)
         self.studio_session_autosave.save_failed.connect(self._on_studio_session_save_failed)
+        self.studio_session_autosave.save_state_changed.connect(
+            self._on_studio_autosave_state_changed
+        )
 
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setWindowTitle(APP_NAME)
@@ -439,6 +444,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "studio_layout_save_timer"):
             self.studio_layout_save_timer.stop()
             self._save_studio_layout()
+        MainWindow._remember_studio_timeline_state(self)
         self.google_drive.shutdown()
         self.task_attention.close()
         self.studio_session_autosave.flush()
@@ -665,23 +671,20 @@ class MainWindow(QMainWindow):
         )
         self._separation_submode = SEPARATION_MODE_AUDIO
         vocal_split_capability = singer_split_capability()
+        separation_options = [
+            (SEPARATION_MODE_AUDIO, "Audio Separation"),
+            (
+                SEPARATION_MODE_VOCAL,
+                "Vocal Separation"
+                if vocal_split_capability.available
+                else "Vocal Separation · In development",
+            ),
+        ]
+        if VOCAL_CLEANUP_AVAILABLE:
+            separation_options.append((SEPARATION_MODE_CLEANUP, "Vocal Cleanup"))
         self.primary_navigation.set_page_options(
             PAGE_SEPARATION,
-            (
-                (SEPARATION_MODE_AUDIO, "Audio Separation"),
-                (
-                    SEPARATION_MODE_VOCAL,
-                    "Vocal Separation"
-                    if vocal_split_capability.available
-                    else "Vocal Separation · In development",
-                ),
-                (
-                    SEPARATION_MODE_CLEANUP,
-                    "Vocal Cleanup"
-                    if VOCAL_CLEANUP_AVAILABLE
-                    else "Vocal Cleanup · In development",
-                ),
-            ),
+            tuple(separation_options),
             selected_option=self._separation_submode,
         )
         self.primary_navigation.set_page_option_enabled(
@@ -690,13 +693,6 @@ class MainWindow(QMainWindow):
             vocal_split_capability.available,
             disabled_tooltip=tr(vocal_split_capability.detail),
         )
-        self.primary_navigation.set_page_option_enabled(
-            PAGE_SEPARATION,
-            SEPARATION_MODE_CLEANUP,
-            VOCAL_CLEANUP_AVAILABLE,
-            disabled_tooltip=tr("Planned for version 0.3.9 or later."),
-        )
-
         self.theme_button = ThemeToggleButton()
         self.theme_button.clicked.connect(self._toggle_theme)
         self.language_button = FeedbackButton("KR")
@@ -951,6 +947,9 @@ class MainWindow(QMainWindow):
         self.vocal_cleanup_workspace.commit_preview_requested.connect(
             self._commit_vocal_cleanup_preview
         )
+        self.vocal_cleanup_workspace.cancel_preview_requested.connect(
+            self._cancel_vocal_cleanup_preview
+        )
         self.vocal_cleanup_workspace.region_remove_requested.connect(
             self._remove_vocal_cleanup_region
         )
@@ -1061,6 +1060,9 @@ class MainWindow(QMainWindow):
         self.studio_editor.asset_remove_requested.connect(self._remove_studio_pool_asset)
         self.studio_editor.seek_requested.connect(self._seek_studio_timeline)
         self.studio_editor.open_location_requested.connect(self._open_track_location)
+        self.studio_editor.project_history_requested.connect(
+            self._show_studio_project_history
+        )
         self.studio_transport_bar = StudioTransportBar()
         self.studio_transport_bar.play_toggled.connect(self._toggle_global_playback)
         self.studio_transport_bar.seek_requested.connect(self._seek_studio_timeline)
@@ -3448,12 +3450,20 @@ class MainWindow(QMainWindow):
         effect: str,
         strength: str,
     ) -> None:
-        project = self._load_vocal_cleanup_project(version)
-        if project is None:
+        try:
+            project = self.vocal_cleanup_store.load(
+                version.job_dir,
+                version.vocals_path,
+            )
+        except (OSError, VocalCleanupStoreError) as exc:
+            self.vocal_cleanup_workspace.set_preview_status(
+                _last_error_line(str(exc))
+            )
             return
-        self._vocal_cleanup_preview_generation += 1
+        self._invalidate_vocal_cleanup_preview()
         generation = self._vocal_cleanup_preview_generation
         self._stop_playback()
+        self.vocal_cleanup_workspace.clear_pending_preview()
         self.vocal_cleanup_workspace.set_preview_running(True)
         self.vocal_cleanup_workspace.set_preview_progress(2)
         self.vocal_cleanup_workspace.set_preview_status("Preparing cleanup preview")
@@ -3521,6 +3531,16 @@ class MainWindow(QMainWindow):
         self.vocal_cleanup_workspace.set_preview_progress(100)
         self.vocal_cleanup_workspace.set_preview_status(
             "Preview ready. Compare before adding this range."
+        )
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _cancel_vocal_cleanup_preview(self) -> None:
+        self._stop_playback()
+        self._invalidate_vocal_cleanup_preview()
+        self.vocal_cleanup_workspace.clear_pending_preview()
+        self.vocal_cleanup_workspace.set_preview_progress(0)
+        self.vocal_cleanup_workspace.set_preview_status(
+            "Preview canceled. Adjust settings and try again."
         )
         self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
 
@@ -5337,6 +5357,25 @@ class MainWindow(QMainWindow):
             workspace.assets,
             song_id=item.id,
         )
+        missing_asset_ids = getattr(workspace, "missing_asset_ids", ())
+        if missing_asset_ids:
+            self.studio_editor.set_status(
+                tr("{count} timeline assets are missing.").format(
+                    count=len(missing_asset_ids)
+                )
+            )
+        consume_notice = getattr(self.library, "consume_studio_recovery_notice", None)
+        if callable(consume_notice):
+            try:
+                notice = consume_notice(item.id)
+            except (KeyError, OSError, ValueError):
+                self._logger.exception(
+                    "Studio recovery notice could not be read | song=%s",
+                    item.id,
+                )
+            else:
+                if notice.recovered:
+                    self.studio_editor.set_status(tr("Recovered the latest Studio autosave."))
 
     def _remember_studio_timeline_state(self) -> None:
         item = getattr(self, "current_work_item", None) or getattr(self, "current_song", None)
@@ -5368,6 +5407,32 @@ class MainWindow(QMainWindow):
             position_ms,
             duration_ms=duration_ms,
         )
+        library = getattr(self, "library", None)
+        save_view_state = getattr(library, "save_studio_view_state", None)
+        if callable(save_view_state):
+            horizontal, vertical = view_positions[item.id]
+            zoom_value = getattr(editor, "zoom_value", lambda: 7)()
+            selected_clip_id = getattr(editor, "selected_clip_id", lambda: "")()
+            selected_clip_ids = getattr(editor, "selected_clip_ids", lambda: ())()
+            selected_track_id = getattr(editor, "selected_track_id", lambda: "")()
+            try:
+                save_view_state(
+                    item.id,
+                    StudioProjectViewState(
+                        playhead_ms=position_ms,
+                        horizontal_scroll=horizontal,
+                        vertical_scroll=vertical,
+                        zoom=zoom_value,
+                        selected_clip_id=selected_clip_id,
+                        selected_track_id=selected_track_id,
+                        selected_clip_ids=selected_clip_ids,
+                    ),
+                )
+            except (KeyError, OSError, ValueError):
+                self._logger.exception(
+                    "Studio view state could not be saved | song=%s",
+                    item.id,
+                )
 
     def _restore_studio_timeline_state(self) -> None:
         item = getattr(self, "current_work_item", None) or getattr(self, "current_song", None)
@@ -5376,6 +5441,17 @@ class MainWindow(QMainWindow):
             return
         duration_ms = session_duration_ms(editor.session())
         route = ("output", f"studio:{item.id}")
+        persisted = StudioProjectViewState()
+        library = getattr(self, "library", None)
+        load_view_state = getattr(library, "studio_view_state", None)
+        if callable(load_view_state):
+            try:
+                persisted = load_view_state(item.id)
+            except (KeyError, OSError, ValueError):
+                self._logger.exception(
+                    "Studio view state could not be loaded | song=%s",
+                    item.id,
+                )
         queue = getattr(self, "current_playback_queue", None)
         if (
             queue is not None
@@ -5388,16 +5464,32 @@ class MainWindow(QMainWindow):
                 else self._playback_position_ms
             )
         else:
-            position_ms = MainWindow._playback_session(self).resume_positions.get(route, 0)
+            resume_positions = MainWindow._playback_session(self).resume_positions
+            position_ms = resume_positions.get(route, persisted.playhead_ms)
         position_ms = max(0, min(int(position_ms), duration_ms))
         playback_session = MainWindow._playback_session(self)
         playback_session.set_position_ms(position_ms)
         MainWindow._sync_playback_session_state(self, playback_session)
         editor.set_playhead(position_ms)
 
-        view_position = getattr(self, "_studio_timeline_view_positions", {}).get(item.id)
-        if view_position is not None:
-            editor.restore_timeline_view_position(*view_position)
+        set_zoom = getattr(editor, "set_zoom", None)
+        if callable(set_zoom):
+            set_zoom(persisted.zoom)
+        transport = getattr(self, "studio_transport_bar", None)
+        if transport is not None:
+            transport.set_zoom(persisted.zoom)
+        view_position = getattr(self, "_studio_timeline_view_positions", {}).get(
+            item.id,
+            (persisted.horizontal_scroll, persisted.vertical_scroll),
+        )
+        editor.restore_timeline_view_position(*view_position)
+        restore_selection = getattr(editor, "restore_selection", None)
+        if callable(restore_selection):
+            restore_selection(
+                persisted.selected_clip_id,
+                persisted.selected_track_id,
+                persisted.selected_clip_ids,
+            )
 
     def _apply_studio_session(
         self,
@@ -5767,6 +5859,41 @@ class MainWindow(QMainWindow):
 
     def _on_studio_session_save_failed(self, error: str) -> None:
         _set_optional_label(self.output_status_label, f"Session failed: {_last_error_line(error)}")
+
+    def _on_studio_autosave_state_changed(self, song_id: str, state: str) -> None:
+        if song_id != self._studio_session_song_id:
+            return
+        if state in {"pending", "saving"}:
+            self.studio_editor.set_status(tr("Saving Studio project..."))
+        elif state == "saved":
+            self.studio_editor.set_status(tr("Studio project saved."))
+        elif state == "failed":
+            self.studio_editor.set_status(tr("Studio project save failed."))
+
+    def _show_studio_project_history(self) -> None:
+        item = self.current_work_item or self.current_song
+        if item is None or self.studio_session_autosave.flush() is False:
+            return
+        try:
+            revisions = self.library.studio_revisions(item.id)
+        except (KeyError, OSError, ValueError) as exc:
+            self.studio_editor.set_status(_last_error_line(str(exc)))
+            return
+        revision = StudioProjectHistoryDialog.choose(
+            self,
+            revisions,
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+        )
+        if revision is None:
+            return
+        try:
+            self.library.restore_studio_revision(item.id, revision)
+        except (KeyError, OSError, ValueError) as exc:
+            self.studio_editor.set_status(_last_error_line(str(exc)))
+            return
+        self._restore_current_studio_session()
+        self.studio_editor.set_status(tr("Studio project revision restored."))
 
     def _sync_global_playback_state(self) -> None:
         queue = self.current_playback_queue
@@ -6623,6 +6750,18 @@ class MainWindow(QMainWindow):
         self.current_output_set = session.sound_set
 
     def _start_drive_model_import(self, link: str) -> None:
+        if self.model_workspace_page.training_in_progress():
+            self._logger.warning("Rejected Drive model import while model training is active")
+            self.model_workspace_page.show_status(
+                tr("Finish or stop model training before importing another model.")
+            )
+            return
+        link = link.strip()
+        if not link:
+            self.model_workspace_page.show_status(
+                tr("Paste a Google Drive file link before importing.")
+            )
+            return
         self.google_drive.import_model_link(link)
 
     def _on_drive_models_imported(

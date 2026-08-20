@@ -7,18 +7,16 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from jang_app.qt_app.main_window import (
-    SEPARATION_MODE_AUDIO,
-    SEPARATION_MODE_CLEANUP,
-    VOCAL_CLEANUP_AVAILABLE,
-    MainWindow,
-)
+from jang_app.qt_app.main_window import MainWindow
 from jang_app.qt_app.vocal_cleanup_workspace import (
+    PLAYBACK_ORIGINAL,
     PLAYBACK_PROCESSED,
     VocalCleanupWorkspace,
 )
 from jang_app.services.song_library import SongVocalVersion
 from jang_app.services.vocal_cleanup import (
+    VOCAL_CLEANUP_EFFECT_DENOISE,
+    VOCAL_CLEANUP_EFFECTS,
     VocalCleanupProject,
     VocalCleanupRegion,
     VocalCleanupResult,
@@ -30,17 +28,6 @@ class VocalCleanupWorkspaceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
-
-    def test_cleanup_workspace_stays_locked_until_feature_release(self) -> None:
-        class WindowStub:
-            _separation_submode = SEPARATION_MODE_AUDIO
-
-        window = WindowStub()
-
-        MainWindow._on_separation_submode_changed(window, SEPARATION_MODE_CLEANUP)
-
-        self.assertFalse(VOCAL_CLEANUP_AVAILABLE)
-        self.assertEqual(window._separation_submode, SEPARATION_MODE_AUDIO)
 
     def test_workspace_loads_regions_results_and_preview_request(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -112,6 +99,69 @@ class VocalCleanupWorkspaceTests(unittest.TestCase):
             self.assertIs(child.window(), workspace)
 
         workspace.close()
+
+    def test_tool_change_discards_preview_and_requests_selected_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "vocals.wav"
+            processed = root / "processed.wav"
+            removed = root / "removed.wav"
+            for path in (source, processed, removed):
+                _write_wav(path)
+            version = _version(root, source)
+            workspace = VocalCleanupWorkspace()
+            workspace.set_versions((version,), version.job_dir)
+            workspace.set_project(VocalCleanupProject(source, "fingerprint"))
+            workspace._on_selection_changed(300, 1_100)
+            workspace.set_preview_paths(processed, removed)
+            requests: list[tuple[object, int, int, str, str]] = []
+            invalidations: list[bool] = []
+            workspace.preview_requested.connect(lambda *values: requests.append(values))
+            workspace.preview_invalidated.connect(lambda: invalidations.append(True))
+
+            workspace.tool_buttons[VOCAL_CLEANUP_EFFECT_DENOISE].click()
+            workspace.preview_action.button.click()
+
+            self.assertEqual(
+                workspace.tool_detail_stack.currentIndex(),
+                VOCAL_CLEANUP_EFFECTS.index(VOCAL_CLEANUP_EFFECT_DENOISE),
+            )
+            self.assertFalse(workspace.preview_action.preview_available())
+            self.assertEqual(workspace._playback_mode, PLAYBACK_ORIGINAL)
+            self.assertEqual(len(invalidations), 1)
+            self.assertEqual(
+                requests,
+                [(version, 300, 1_100, VOCAL_CLEANUP_EFFECT_DENOISE, "standard")],
+            )
+            workspace.close()
+
+    def test_preview_actions_offer_retry_cancel_and_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "vocals.wav"
+            processed = root / "processed.wav"
+            removed = root / "removed.wav"
+            for path in (source, processed, removed):
+                _write_wav(path)
+            workspace = VocalCleanupWorkspace()
+            workspace.set_project(VocalCleanupProject(source, "fingerprint"))
+            cancelled: list[bool] = []
+            committed: list[bool] = []
+            workspace.cancel_preview_requested.connect(lambda: cancelled.append(True))
+            workspace.commit_preview_requested.connect(lambda: committed.append(True))
+
+            workspace.set_preview_paths(processed, removed)
+            workspace.preview_action.cancel_button.click()
+            workspace.preview_action.commit_button.click()
+
+            self.assertTrue(workspace.preview_action.preview_available())
+            self.assertTrue(workspace.preview_action.cancel_button.isVisibleTo(workspace))
+            self.assertEqual(cancelled, [True])
+            self.assertEqual(committed, [True])
+            workspace.clear_pending_preview()
+            self.assertFalse(workspace.preview_action.preview_available())
+            self.assertEqual(workspace._playback_mode, PLAYBACK_ORIGINAL)
+            workspace.close()
 
     def test_rendered_cleanup_result_is_offered_as_conversion_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

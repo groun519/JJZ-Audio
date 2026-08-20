@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from jang_app.services.command import CommandCancellation
 from jang_app.services.model_dataset import ModelDatasetStore
+from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_training_extract import RvcTrainingExtractError
 from jang_app.services.rvc_training_filelist import RvcTrainingFilelistError
 from jang_app.services.rvc_training_index import RvcTrainingIndexError
@@ -16,13 +17,52 @@ from jang_app.services.rvc_training_pipeline import (
     run_rvc_training_pipeline,
 )
 from jang_app.services.rvc_training_preprocess import RvcTrainingPreprocessError
+from jang_app.services.rvc_training_runtime import RvcTrainingRuntimeInspection
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingStateStore
 from jang_app.services.rvc_training_spectrogram import RvcTrainingSpectrogramError
-from jang_app.services.rvc_training_train import RvcTrainingRunResult, RvcTrainingRunSettings
+from jang_app.services.rvc_training_train import (
+    RvcTrainingRunError,
+    RvcTrainingRunResult,
+    RvcTrainingRunSettings,
+)
+from tests.test_rvc_training_extract import _ready_runtime
 from tests.test_rvc_training_train import _training_setup
 
 
 class RvcTrainingPipelineTests(unittest.TestCase):
+    def test_cuda_profile_without_acceleration_fails_before_dataset_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model_id, layout, runtime = _training_setup(root)
+            dataset = ModelDatasetStore(root / "workspace").load(model_id)
+
+            def unavailable_cuda_runtime(root, check_cuda=False):
+                return RvcTrainingRuntimeInspection(
+                    Path(root).resolve(),
+                    (),
+                    cuda_available=False,
+                    cpu_ready=True,
+                    backend=RvcComputeBackend.CUDA,
+                )
+
+            with patch(
+                "jang_app.services.rvc_training_pipeline.RvcTrainingSnapshotStore.build"
+            ) as snapshot:
+                with self.assertRaisesRegex(
+                    RvcTrainingRunError,
+                    "CPU fallback is disabled for this GPU profile",
+                ):
+                    run_rvc_training_pipeline(
+                        model_id,
+                        layout,
+                        runtime,
+                        dataset,
+                        RvcTrainingRunSettings(),
+                        runtime_inspector=unavailable_cuda_runtime,
+                    )
+
+            snapshot.assert_not_called()
+
     def test_reuses_every_valid_preparation_stage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -59,6 +99,7 @@ class RvcTrainingPipelineTests(unittest.TestCase):
                     progress=progress.append,
                     stage_callback=stages.append,
                     preprocess_callback=preprocess_results.append,
+                    runtime_inspector=_ready_runtime,
                 )
 
             preprocess.assert_not_called()
@@ -123,6 +164,7 @@ class RvcTrainingPipelineTests(unittest.TestCase):
                     runtime,
                     dataset,
                     RvcTrainingRunSettings(),
+                    runtime_inspector=_ready_runtime,
                 )
 
             preprocess.assert_called_once()
@@ -152,6 +194,7 @@ class RvcTrainingPipelineTests(unittest.TestCase):
                     RvcTrainingRunSettings(),
                     cancellation=cancellation,
                     stage_callback=stage_changed,
+                    runtime_inspector=_ready_runtime,
                 )
 
             train.assert_not_called()

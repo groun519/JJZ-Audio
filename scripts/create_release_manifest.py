@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 from jang_app.runtime_version import AI_RUNTIME_VERSION, RVC_RUNTIME_PROFILE_VERSIONS
 
@@ -218,7 +218,7 @@ def _reused_runtime_components(
                 "id": component_id,
                 "version": expected_version,
                 "install_mode": "extract",
-                "artifacts": _with_release_urls(
+                "artifacts": _with_fallback_release_urls(
                     [_validated_remote_artifact(artifact) for artifact in artifacts],
                     release_tag,
                 ),
@@ -250,11 +250,15 @@ def _validated_remote_artifact(data: object) -> dict[str, object]:
         raise ValueError(f"Invalid reused runtime package size: {name}")
     if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-fA-F]{64}", sha256) is None:
         raise ValueError(f"Invalid reused runtime package hash: {name}")
-    return {
+    artifact = {
         key: data[key]
         for key in ("name", "size", "unpacked_size", "file_count", "sha256")
         if key in data
     }
+    url = data.get("url")
+    if url is not None:
+        artifact["url"] = _validated_reused_url(url, name)
+    return artifact
 
 
 def _artifact_data(path: Path, *, signing_publisher: str = "") -> dict[str, object]:
@@ -321,6 +325,51 @@ def _with_release_urls(
         }
         for artifact in artifacts
     ]
+
+
+def _with_fallback_release_urls(
+    artifacts: list[dict[str, object]],
+    release_tag: str,
+) -> list[dict[str, object]]:
+    """Keep immutable source URLs and only fill URLs missing from old manifests."""
+    result: list[dict[str, object]] = []
+    for artifact in artifacts:
+        if artifact.get("url"):
+            result.append(artifact)
+        else:
+            result.extend(_with_release_urls([artifact], release_tag))
+    return result
+
+
+def _validated_reused_url(value: object, artifact_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid reused runtime package URL: {artifact_name}")
+    parsed = urlparse(value)
+    prefix = "/groun519/JJZ-Audio/releases/download/"
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "github.com"
+        or not parsed.path.startswith(prefix)
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"Invalid reused runtime package URL: {artifact_name}")
+    suffix = parsed.path[len(prefix) :]
+    encoded_tag, separator, encoded_name = suffix.partition("/")
+    release_tag = unquote(encoded_tag)
+    if (
+        not separator
+        or _validated_release_tag(release_tag) != release_tag
+        or unquote(encoded_name) != artifact_name
+    ):
+        raise ValueError(f"Invalid reused runtime package URL: {artifact_name}")
+    expected = (
+        f"{GITHUB_RELEASE_DOWNLOAD_ROOT}/{quote(release_tag, safe='')}/"
+        f"{quote(artifact_name, safe='')}"
+    )
+    if value != expected:
+        raise ValueError(f"Invalid reused runtime package URL: {artifact_name}")
+    return value
 
 
 def _sha256(path: Path) -> str:

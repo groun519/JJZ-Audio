@@ -82,6 +82,33 @@ class RvcTrainingFinalizeTests(unittest.TestCase):
             with self.assertRaises(RvcTrainingFinalizeError):
                 inspect_rvc_inference_model(model, runtime, command_runner=runner)
 
+    def test_model_report_is_read_when_stderr_contains_a_torch_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = _runtime(root / "runtime")
+            model = root / "model.pth"
+            model.write_bytes(b"model")
+
+            def runner(args, **kwargs):
+                report = {
+                    "version": "v2",
+                    "sample_rate": 40000,
+                    "f0": True,
+                    "epoch_info": "900epoch",
+                    "weight_count": 457,
+                }
+                warning = "UserWarning: TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected"
+                return CommandResult(args, 0, json.dumps(report), warning)
+
+            inspection = inspect_rvc_inference_model(
+                model,
+                runtime,
+                command_runner=runner,
+            )
+
+            self.assertEqual(inspection.epoch_info, "900epoch")
+            self.assertEqual(inspection.weight_count, 457)
+
 
 def _valid_model_runner(args, **kwargs):
     report = {

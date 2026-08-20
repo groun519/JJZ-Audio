@@ -125,6 +125,9 @@ class StudioTransportBar(QFrame):
         self.zoom_slider.blockSignals(False)
         self._sync_zoom_label()
 
+    def zoom_value(self) -> int:
+        return self.zoom_slider.value()
+
     def set_split_enabled(self, enabled: bool) -> None:
         if not enabled and self.split_button.isChecked():
             self.split_button.setChecked(False)

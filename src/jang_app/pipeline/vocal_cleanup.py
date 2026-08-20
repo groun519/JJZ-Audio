@@ -14,10 +14,12 @@ from jang_app.pipeline.roformer_engine import (
     build_roformer_command,
     build_roformer_environment,
     build_roformer_progress_callback,
+    normalize_deecho_outputs,
     normalize_roformer_effect_outputs,
     require_roformer_tools,
 )
 from jang_app.pipeline.separation_engine import SeparationError
+from jang_app.services.audio_denoise import AudioDenoiseError, render_denoised_audio
 from jang_app.services.command import run_command
 from jang_app.services.roformer_model_assets import (
     RoFormerModelAssetError,
@@ -26,7 +28,11 @@ from jang_app.services.roformer_model_assets import (
 from jang_app.services.separation_recipe import EFFECT_REMOVAL_RECIPE
 from jang_app.services.tool_workspace import ToolWorkspace
 from jang_app.services.vocal_cleanup import (
+    VOCAL_CLEANUP_DEECHO_MODEL,
+    VOCAL_CLEANUP_EFFECT_DEECHO,
+    VOCAL_CLEANUP_EFFECT_DENOISE,
     VOCAL_CLEANUP_EFFECT_DEREVERB,
+    VOCAL_CLEANUP_EFFECTS,
     VocalCleanupProject,
     VocalCleanupRegion,
 )
@@ -43,6 +49,11 @@ _STRENGTH_MIX = {
     "conservative": 0.45,
     "standard": 0.72,
     "strong": 1.0,
+}
+_DENOISE_STRENGTH = {
+    "conservative": 30,
+    "standard": 50,
+    "strong": 70,
 }
 
 
@@ -83,7 +94,13 @@ def preview_vocal_cleanup(
     processed_segment = preview_root / "processed-segment.wav"
     removed_segment = preview_root / "removed-segment.wav"
     try:
-        _render_dereverb_segment(
+        renderers = {
+            VOCAL_CLEANUP_EFFECT_DEREVERB: _render_dereverb_segment,
+            VOCAL_CLEANUP_EFFECT_DEECHO: _render_deecho_segment,
+            VOCAL_CLEANUP_EFFECT_DENOISE: _render_denoise_segment,
+        }
+        renderer = renderers[effect]
+        renderer(
             source,
             processed_segment,
             removed_segment,
@@ -259,6 +276,144 @@ def _render_dereverb_segment(
     sf.write(removed_target, removed_core, source_rate, subtype="FLOAT")
 
 
+def _render_denoise_segment(
+    source_path: Path,
+    processed_target: Path,
+    removed_target: Path,
+    *,
+    start_ms: int,
+    end_ms: int,
+    strength: str,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    source_audio, source_rate = _read_audio(source_path)
+    start_frame = _ms_to_frame(start_ms, source_rate)
+    end_frame = _ms_to_frame(end_ms, source_rate)
+    context_frames = _ms_to_frame(_CONTEXT_MS, source_rate)
+    padded_start = max(0, start_frame - context_frames)
+    padded_end = min(len(source_audio), end_frame + context_frames)
+    padded_audio = source_audio[padded_start:padded_end]
+    if padded_audio.size == 0:
+        raise VocalCleanupError("The selected vocal range is empty.")
+
+    with ToolWorkspace(TOOL_WORKSPACE_DIR, "vocaldenoise") as workspace:
+        staged_source = workspace.root / "i.wav"
+        denoised_path = workspace.root / "o.wav"
+        sf.write(staged_source, padded_audio, source_rate, subtype="FLOAT")
+        try:
+            render_denoised_audio(
+                staged_source,
+                denoised_path,
+                _DENOISE_STRENGTH[strength],
+                progress=_scaled_progress(progress_callback, 4, 94),
+            )
+        except AudioDenoiseError as exc:
+            raise VocalCleanupError(str(exc)) from exc
+        denoised_audio, denoised_rate = _read_audio(denoised_path)
+
+    denoised_audio = _match_audio_format(
+        denoised_audio,
+        denoised_rate,
+        source_rate,
+        padded_audio.shape[1],
+        len(padded_audio),
+    )
+    core_start = start_frame - padded_start
+    core_length = end_frame - start_frame
+    processed_core = _match_frame_count(
+        denoised_audio[core_start : core_start + core_length],
+        core_length,
+    )
+    source_core = source_audio[start_frame:end_frame]
+    removed_core = source_core - processed_core
+    processed_target.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(processed_target, processed_core, source_rate, subtype="FLOAT")
+    sf.write(removed_target, removed_core, source_rate, subtype="FLOAT")
+    _report(progress_callback, 100)
+
+
+def _render_deecho_segment(
+    source_path: Path,
+    processed_target: Path,
+    removed_target: Path,
+    *,
+    start_ms: int,
+    end_ms: int,
+    strength: str,
+    progress_callback: ProgressCallback | None,
+) -> None:
+    require_roformer_tools()
+    source_audio, source_rate = _read_audio(source_path)
+    start_frame = _ms_to_frame(start_ms, source_rate)
+    end_frame = _ms_to_frame(end_ms, source_rate)
+    context_frames = _ms_to_frame(_CONTEXT_MS, source_rate)
+    padded_start = max(0, start_frame - context_frames)
+    padded_end = min(len(source_audio), end_frame + context_frames)
+    padded_audio = source_audio[padded_start:padded_end]
+    if padded_audio.size == 0:
+        raise VocalCleanupError("The selected vocal range is empty.")
+
+    try:
+        prepare_roformer_model_assets(
+            VOCAL_CLEANUP_DEECHO_MODEL,
+            ROFORMER_MODEL_DIR,
+            _scaled_progress(progress_callback, 0, 24),
+        )
+    except RoFormerModelAssetError as exc:
+        raise VocalCleanupError(str(exc)) from exc
+
+    with ToolWorkspace(TOOL_WORKSPACE_DIR, "vocaldeecho") as workspace:
+        staged_source = workspace.root / "i.wav"
+        sf.write(staged_source, padded_audio, source_rate, subtype="FLOAT")
+        completed = run_command(
+            build_roformer_command(
+                staged_source,
+                workspace.output_dir,
+                EFFECT_REMOVAL_RECIPE,
+                model=VOCAL_CLEANUP_DEECHO_MODEL,
+                model_dir=ROFORMER_MODEL_DIR,
+            ),
+            env=build_roformer_environment(),
+            output_callback=build_roformer_progress_callback(
+                _scaled_progress(progress_callback, 24, 82),
+                minimum_percent=5,
+                maximum_percent=92,
+            ),
+        )
+        if completed.returncode != 0:
+            raise VocalCleanupError(
+                f"Vocal de-echo failed with exit code {completed.returncode}. "
+                "See logs for details."
+            )
+        try:
+            no_echo_path, _echo_path = normalize_deecho_outputs(workspace.output_dir)
+        except SeparationError as exc:
+            raise VocalCleanupError(str(exc)) from exc
+        no_echo_audio, no_echo_rate = _read_audio(no_echo_path)
+
+    no_echo_audio = _match_audio_format(
+        no_echo_audio,
+        no_echo_rate,
+        source_rate,
+        padded_audio.shape[1],
+        len(padded_audio),
+    )
+    mix = _STRENGTH_MIX[strength]
+    processed_audio = padded_audio + (no_echo_audio - padded_audio) * mix
+    core_start = start_frame - padded_start
+    core_length = end_frame - start_frame
+    processed_core = _match_frame_count(
+        processed_audio[core_start : core_start + core_length],
+        core_length,
+    )
+    source_core = source_audio[start_frame:end_frame]
+    removed_core = source_core - processed_core
+    processed_target.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(processed_target, processed_core, source_rate, subtype="FLOAT")
+    sf.write(removed_target, removed_core, source_rate, subtype="FLOAT")
+    _report(progress_callback, 100)
+
+
 def _compose_audio(
     source_path: Path,
     regions: Iterable[VocalCleanupRegion],
@@ -366,7 +521,7 @@ def _region_weights(frames: int, sample_rate: int) -> np.ndarray:
 def _validate_request(start_ms: int, end_ms: int, effect: str, strength: str) -> None:
     if end_ms - start_ms < 250:
         raise VocalCleanupError("Select at least 0.25 seconds of vocal audio.")
-    if effect != VOCAL_CLEANUP_EFFECT_DEREVERB:
+    if effect not in VOCAL_CLEANUP_EFFECTS:
         raise VocalCleanupError(f"Unsupported vocal cleanup effect: {effect}")
     if strength not in _STRENGTH_MIX:
         raise VocalCleanupError(f"Unsupported vocal cleanup strength: {strength}")

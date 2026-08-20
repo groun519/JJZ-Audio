@@ -113,6 +113,86 @@ def move_studio_clip(
     return replace(session, tracks=tuple(tracks))
 
 
+def resolve_studio_clip_group_delta(
+    session: StudioSession,
+    clip_ids: tuple[str, ...] | list[str],
+    requested_delta_ms: int,
+) -> int:
+    """Return the nearest common delta that keeps every selected clip legal."""
+    selected = _selected_clip_ids(session, clip_ids)
+    if not selected:
+        return 0
+
+    selected_set = frozenset(selected)
+    selected_clips = tuple(_find_clip(session, clip_id) for clip_id in selected)
+    minimum_delta = -min(clip.timeline_start_ms for _track, clip in selected_clips)
+    requested = max(minimum_delta, int(requested_delta_ms))
+    forbidden: list[tuple[int, int]] = []
+    for track, moving in selected_clips:
+        forbidden.extend(
+            (
+                obstacle.timeline_start_ms - moving.timeline_end_ms,
+                obstacle.timeline_end_ms - moving.timeline_start_ms,
+            )
+            for obstacle in track.clips
+            if obstacle.clip_id not in selected_set
+        )
+
+    merged: list[tuple[int, int]] = []
+    for left, right in sorted(forbidden):
+        if merged and left < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+        else:
+            merged.append((left, right))
+    for left, right in merged:
+        if not left < requested < right:
+            continue
+        candidates = [max(minimum_delta, right)]
+        if left >= minimum_delta:
+            candidates.append(left)
+        return min(
+            candidates,
+            key=lambda delta: (
+                abs(delta - requested),
+                delta < requested,
+                delta,
+            ),
+        )
+    return requested
+
+
+def move_studio_clips(
+    session: StudioSession,
+    clip_ids: tuple[str, ...] | list[str],
+    *,
+    delta_ms: int,
+) -> StudioSession:
+    """Move clips horizontally as one collision-safe edit."""
+    selected = _selected_clip_ids(session, clip_ids)
+    if not selected:
+        return session
+    resolved_delta = resolve_studio_clip_group_delta(session, selected, delta_ms)
+    selected_set = frozenset(selected)
+    return replace(
+        session,
+        tracks=tuple(
+            replace(
+                track,
+                clips=_sorted_clips(
+                    replace(
+                        clip,
+                        timeline_start_ms=clip.timeline_start_ms + resolved_delta,
+                    )
+                    if clip.clip_id in selected_set
+                    else clip
+                    for clip in track.clips
+                ),
+            )
+            for track in session.tracks
+        ),
+    )
+
+
 def trim_studio_clip(
     session: StudioSession,
     clip_id: str,
@@ -295,6 +375,10 @@ def split_studio_clip(
         timeline_start_ms=split_position,
         source_start_ms=source_split,
         fade_in_ms=0,
+        effects=tuple(
+            replace(effect, effect_id=f"fx-{uuid.uuid4().hex}")
+            for effect in clip.effects
+        ),
     )
     left = _with_clamped_fades(left)
     right = _with_clamped_fades(right)
@@ -324,6 +408,27 @@ def remove_studio_clip(session: StudioSession, clip_id: str) -> StudioSession:
         lambda current: replace(
             current,
             clips=tuple(candidate for candidate in current.clips if candidate.clip_id != clip_id),
+        ),
+    )
+
+
+def remove_studio_clips(
+    session: StudioSession,
+    clip_ids: tuple[str, ...] | list[str],
+) -> StudioSession:
+    selected = frozenset(_selected_clip_ids(session, clip_ids))
+    if not selected:
+        return session
+    return replace(
+        session,
+        tracks=tuple(
+            replace(
+                track,
+                clips=tuple(
+                    clip for clip in track.clips if clip.clip_id not in selected
+                ),
+            )
+            for track in session.tracks
         ),
     )
 
@@ -363,14 +468,20 @@ def update_studio_clip_effect(
     clip_id: str,
     effect: StudioEffect,
 ) -> StudioSession:
-    _track, clip = _find_clip(session, clip_id)
+    track, clip = _find_clip(session, clip_id)
     if not any(candidate.effect_id == effect.effect_id for candidate in clip.effects):
         raise StudioTimelineError(f"Unknown Studio effect: {effect.effect_id}")
-    return _replace_linked_effect_clips(
+    return _replace_clip(
         session,
-        asset=clip.asset,
-        effect_id=effect.effect_id,
-        update=lambda _current: effect,
+        track.track_id,
+        clip_id,
+        lambda candidate: replace(
+            candidate,
+            effects=tuple(
+                effect if current.effect_id == effect.effect_id else current
+                for current in candidate.effects
+            ),
+        ),
     )
 
 
@@ -379,14 +490,19 @@ def remove_studio_clip_effect(
     clip_id: str,
     effect_id: str,
 ) -> StudioSession:
-    _track, clip = _find_clip(session, clip_id)
+    track, clip = _find_clip(session, clip_id)
     if not any(candidate.effect_id == effect_id for candidate in clip.effects):
         raise StudioTimelineError(f"Unknown Studio effect: {effect_id}")
-    return _replace_linked_effect_clips(
+    return _replace_clip(
         session,
-        asset=clip.asset,
-        effect_id=effect_id,
-        update=lambda _current: None,
+        track.track_id,
+        clip_id,
+        lambda candidate: replace(
+            candidate,
+            effects=tuple(
+                effect for effect in candidate.effects if effect.effect_id != effect_id
+            ),
+        ),
     )
 
 
@@ -490,6 +606,42 @@ def set_studio_clip_pitch(
     )
 
 
+def adjust_studio_clips(
+    session: StudioSession,
+    clip_ids: tuple[str, ...] | list[str],
+    *,
+    gain_delta_db: float = 0.0,
+    pitch_delta_semitones: int = 0,
+    muted: bool | None = None,
+) -> StudioSession:
+    """Apply relative clip changes in one immutable session update."""
+    selected = frozenset(_selected_clip_ids(session, clip_ids))
+    if not selected:
+        return session
+    gain_delta = float(gain_delta_db)
+    pitch_delta = int(pitch_delta_semitones)
+
+    def update(clip: StudioClip) -> StudioClip:
+        if clip.clip_id not in selected:
+            return clip
+        return replace(
+            clip,
+            gain_db=clamp_studio_clip_gain_db(clip.gain_db + gain_delta),
+            pitch_semitones=clamp_studio_clip_pitch(
+                clip.pitch_semitones + pitch_delta
+            ),
+            muted=clip.muted if muted is None else bool(muted),
+        )
+
+    return replace(
+        session,
+        tracks=tuple(
+            replace(track, clips=tuple(update(clip) for clip in track.clips))
+            for track in session.tracks
+        ),
+    )
+
+
 def set_studio_clip_mix(
     session: StudioSession,
     clip_id: str,
@@ -569,37 +721,6 @@ def _replace_clip(session: StudioSession, track_id: str, clip_id: str, update) -
     )
 
 
-def _replace_linked_effect_clips(
-    session: StudioSession,
-    *,
-    asset: StudioAssetRef,
-    effect_id: str,
-    update,
-) -> StudioSession:
-    def update_clip(clip: StudioClip) -> StudioClip:
-        if clip.asset != asset or not any(
-            effect.effect_id == effect_id for effect in clip.effects
-        ):
-            return clip
-        effects: list[StudioEffect] = []
-        for effect in clip.effects:
-            if effect.effect_id != effect_id:
-                effects.append(effect)
-                continue
-            replacement = update(effect)
-            if replacement is not None:
-                effects.append(replacement)
-        return replace(clip, effects=tuple(effects))
-
-    return replace(
-        session,
-        tracks=tuple(
-            replace(track, clips=tuple(update_clip(clip) for clip in track.clips))
-            for track in session.tracks
-        ),
-    )
-
-
 def _find_track(session: StudioSession, track_id: str) -> StudioTrack:
     track = next((candidate for candidate in session.tracks if candidate.track_id == track_id), None)
     if track is None:
@@ -613,6 +734,22 @@ def _find_clip(session: StudioSession, clip_id: str) -> tuple[StudioTrack, Studi
         if clip is not None:
             return track, clip
     raise StudioTimelineError(f"Unknown Studio clip: {clip_id}")
+
+
+def _selected_clip_ids(
+    session: StudioSession,
+    clip_ids: tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    requested = tuple(dict.fromkeys(str(clip_id) for clip_id in clip_ids if clip_id))
+    known = {
+        clip.clip_id
+        for track in session.tracks
+        for clip in track.clips
+    }
+    missing = tuple(clip_id for clip_id in requested if clip_id not in known)
+    if missing:
+        raise StudioTimelineError(f"Unknown Studio clip: {missing[0]}")
+    return requested
 
 
 def _sorted_clips(clips) -> tuple[StudioClip, ...]:

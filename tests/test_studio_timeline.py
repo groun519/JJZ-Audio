@@ -16,10 +16,14 @@ from jang_app.services.studio_session import (
 )
 from jang_app.services.studio_timeline import (
     StudioTimelineError,
+    adjust_studio_clips,
     add_studio_clip,
     add_studio_track,
     move_studio_clip,
+    move_studio_clips,
+    remove_studio_clips,
     remove_studio_track,
+    resolve_studio_clip_group_delta,
     resolve_studio_clip_position,
     resolve_studio_clip_trim,
     set_studio_clip_mix,
@@ -95,6 +99,79 @@ class StudioTimelineTests(unittest.TestCase):
 
         moved = next(clip for clip in updated.tracks[0].clips if clip.clip_id == "first")
         self.assertEqual(moved.timeline_start_ms, 1_000)
+
+    def test_group_move_preserves_relative_positions_and_resolves_one_delta(self) -> None:
+        first = StudioClip("first", _asset("first"), 0, 0, 1_000)
+        second = StudioClip("second", _asset("second"), 1_500, 0, 500)
+        obstacle = StudioClip("obstacle", _asset("obstacle"), 3_000, 0, 1_000)
+        session = _session(first, second, obstacle)
+
+        delta = resolve_studio_clip_group_delta(
+            session,
+            ("first", "second"),
+            2_000,
+        )
+        updated = move_studio_clips(
+            session,
+            ("first", "second"),
+            delta_ms=2_000,
+        )
+
+        clips = {clip.clip_id: clip for clip in updated.tracks[0].clips}
+        self.assertEqual(delta, 1_000)
+        self.assertEqual(clips["first"].timeline_start_ms, 1_000)
+        self.assertEqual(clips["second"].timeline_start_ms, 2_500)
+        self.assertEqual(clips["obstacle"], obstacle)
+
+    def test_group_move_ignores_selected_clips_as_obstacles_across_tracks(self) -> None:
+        first = StudioClip("first", _asset("first"), 500, 0, 500)
+        second = StudioClip("second", _asset("second"), 1_000, 0, 500)
+        session = StudioSession(
+            tracks=(
+                StudioTrack("track-a", "A", clips=(first,)),
+                StudioTrack("track-b", "B", clips=(second,)),
+            )
+        )
+
+        updated = move_studio_clips(
+            session,
+            ("first", "second"),
+            delta_ms=-2_000,
+        )
+
+        self.assertEqual(updated.tracks[0].clips[0].timeline_start_ms, 0)
+        self.assertEqual(updated.tracks[1].clips[0].timeline_start_ms, 500)
+
+    def test_group_delete_and_relative_mix_edit_are_atomic(self) -> None:
+        first = StudioClip("first", _asset("first"), 0, 0, 1_000, gain_db=28.0)
+        second = StudioClip(
+            "second",
+            _asset("second"),
+            1_000,
+            0,
+            1_000,
+            gain_db=-99.0,
+            pitch_semitones=47,
+        )
+        untouched = StudioClip("untouched", _asset("untouched"), 2_000, 0, 1_000)
+        session = _session(first, second, untouched)
+
+        adjusted = adjust_studio_clips(
+            session,
+            ("first", "second"),
+            gain_delta_db=5.0,
+            pitch_delta_semitones=3,
+            muted=True,
+        )
+        clips = {clip.clip_id: clip for clip in adjusted.tracks[0].clips}
+        removed = remove_studio_clips(adjusted, ("first", "second"))
+
+        self.assertEqual((clips["first"].gain_db, clips["first"].pitch_semitones), (30.0, 3))
+        self.assertEqual((clips["second"].gain_db, clips["second"].pitch_semitones), (-94.0, 48))
+        self.assertTrue(clips["first"].muted)
+        self.assertTrue(clips["second"].muted)
+        self.assertEqual(clips["untouched"], untouched)
+        self.assertEqual(removed.tracks[0].clips, (untouched,))
 
     def test_trim_edges_stop_at_adjacent_clip_boundaries(self) -> None:
         previous = StudioClip("previous", _asset("previous"), 0, 0, 1_000)
@@ -220,7 +297,10 @@ class StudioTimelineTests(unittest.TestCase):
 
         split = split_studio_clip(_session(clip), clip.clip_id, timeline_position_ms=2_000)
 
-        self.assertEqual(tuple(part.effects for part in split.tracks[0].clips), ((effect,), (effect,)))
+        left, right = split.tracks[0].clips
+        self.assertEqual(left.effects, (effect,))
+        self.assertEqual(right.effects[0].reverb, effect.reverb)
+        self.assertNotEqual(right.effects[0].effect_id, effect.effect_id)
         with self.assertRaises(StudioTimelineError):
             studio_timeline.add_studio_clip_effect(_session(clip), clip.clip_id, effect)
         with self.assertRaises(StudioTimelineError):
@@ -232,7 +312,7 @@ class StudioTimelineTests(unittest.TestCase):
         with self.assertRaises(StudioTimelineError):
             studio_timeline.remove_studio_clip_effect(_session(clip), clip.clip_id, "missing")
 
-    def test_linked_effect_update_and_remove_follow_same_source_pieces(self) -> None:
+    def test_effect_update_and_remove_only_change_the_selected_piece(self) -> None:
         shared_asset = _asset("shared")
         other_asset = _asset("other")
         effect = studio_session.StudioEffect("fx-linked", "reverb")
@@ -250,9 +330,9 @@ class StudioTimelineTests(unittest.TestCase):
         )
 
         self.assertEqual(updated.tracks[0].clips[0].effects, (changed,))
-        self.assertEqual(updated.tracks[0].clips[1].effects, (changed,))
+        self.assertEqual(updated.tracks[0].clips[1].effects, (effect,))
         self.assertEqual(updated.tracks[0].clips[2].effects, (effect,))
-        self.assertEqual(removed.tracks[0].clips[0].effects, ())
+        self.assertEqual(removed.tracks[0].clips[0].effects, (changed,))
         self.assertEqual(removed.tracks[0].clips[1].effects, ())
         self.assertEqual(removed.tracks[0].clips[2].effects, (effect,))
 
@@ -269,7 +349,7 @@ class StudioTimelineTests(unittest.TestCase):
 
         self.assertEqual(tuple(clip.clip_id for clip in siblings), ("first", "second"))
 
-    def test_new_split_inherits_and_keeps_a_linked_effect(self) -> None:
+    def test_new_split_inherits_an_independent_effect(self) -> None:
         shared_asset = _asset("shared")
         effect = studio_session.StudioEffect("fx-linked", "delay")
         first = StudioClip("first", shared_asset, 0, 0, 1_000, effects=(effect,))
@@ -284,9 +364,9 @@ class StudioTimelineTests(unittest.TestCase):
         updated = studio_timeline.update_studio_clip_effect(split, "first", changed)
 
         self.assertEqual(len(updated.tracks[0].clips), 3)
-        self.assertTrue(
-            all(clip.effects == (changed,) for clip in updated.tracks[0].clips)
-        )
+        self.assertEqual(updated.tracks[0].clips[0].effects, (changed,))
+        self.assertNotEqual(updated.tracks[0].clips[1].effects, (changed,))
+        self.assertNotEqual(updated.tracks[0].clips[2].effects, (changed,))
 
     def test_add_track_appends_an_empty_audio_track(self) -> None:
         session = _session(StudioClip("first", _asset("first"), 0, 0, 1_000))

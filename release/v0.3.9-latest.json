@@ -29,7 +29,7 @@
           "unpacked_size": 1782579200,
           "file_count": 890,
           "sha256": "ef677598b96ddb55e47d313bc5f42c0794fb26e99a4fbf795c1c3253bfe42b74",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-Runtime-4-part01.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-Runtime-4-part01.zip"
         },
         {
           "name": "JJZero-Runtime-4-part02.zip",
@@ -37,7 +37,7 @@
           "unpacked_size": 1782579200,
           "file_count": 10,
           "sha256": "8c760ff0209dde78ba64ba9bc89f5c91567aa5be6b3977b82f9d190ef859efb9",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-Runtime-4-part02.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-Runtime-4-part02.zip"
         },
         {
           "name": "JJZero-Runtime-4-part03.zip",
@@ -45,7 +45,7 @@
           "unpacked_size": 1782579200,
           "file_count": 14,
           "sha256": "84b31c617bb0fbaa599f8f3037fb40413307b2c86514394185de7c424f952635",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-Runtime-4-part03.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-Runtime-4-part03.zip"
         },
         {
           "name": "JJZero-Runtime-4-part04.zip",
@@ -53,7 +53,7 @@
           "unpacked_size": 1782579200,
           "file_count": 1649,
           "sha256": "b4715abb75a55ddaa3f93901751ca7b47ba7af8fdd0ecbf38914f9bfab078120",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-Runtime-4-part04.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-Runtime-4-part04.zip"
         },
         {
           "name": "JJZero-Runtime-4-part05.zip",
@@ -61,7 +61,7 @@
           "unpacked_size": 213158017,
           "file_count": 42772,
           "sha256": "0600533040a5b4b77e9d12f57c0861407a6a47d97de07ee91fe74fff2c7e5cdf",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-Runtime-4-part05.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-Runtime-4-part05.zip"
         }
       ]
     },
@@ -76,7 +76,7 @@
           "unpacked_size": 1782579200,
           "file_count": 808,
           "sha256": "4a440c40ece1fbfe7a45560a5d6320619caa8385645ba8734edde507d7e1a3b9",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-cu128-1-part01.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-cu128-1-part01.zip"
         },
         {
           "name": "JJZero-RVC-cu128-1-part02.zip",
@@ -84,7 +84,7 @@
           "unpacked_size": 1782579200,
           "file_count": 7,
           "sha256": "8fdcd4b30776c69795b960f7c7a9e8e446baaf3ff5b000de79ca18f10160c83c",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-cu128-1-part02.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-cu128-1-part02.zip"
         },
         {
           "name": "JJZero-RVC-cu128-1-part03.zip",
@@ -92,7 +92,7 @@
           "unpacked_size": 1782579200,
           "file_count": 9,
           "sha256": "fe1b8f18d5db9c81652c7accff8e845af182adcf8c237c74e05d0c446ae2c54a",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-cu128-1-part03.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-cu128-1-part03.zip"
         },
         {
           "name": "JJZero-RVC-cu128-1-part04.zip",
@@ -100,7 +100,7 @@
           "unpacked_size": 1782579200,
           "file_count": 1306,
           "sha256": "46a404bbc9e81e09d0eebba2f263cf9ad968e40e38a83e0ced7dcbf97f78f2c6",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-cu128-1-part04.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-cu128-1-part04.zip"
         },
         {
           "name": "JJZero-RVC-cu128-1-part05.zip",
@@ -108,7 +108,7 @@
           "unpacked_size": 246171796,
           "file_count": 43569,
           "sha256": "cd3f6ce1394874f8f000c1c1ba463b5a1b9bb322f193a70ba5f34cdd5c7b7c9f",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-cu128-1-part05.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-cu128-1-part05.zip"
         }
       ]
     },
@@ -123,7 +123,7 @@
           "unpacked_size": 1782579200,
           "file_count": 823,
           "sha256": "531223e7e04a998f06f07bff78198c088d6abb0f93a1a3adf7239d1a97f3b88e",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-directml-2-part01.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-directml-2-part01.zip"
         },
         {
           "name": "JJZero-RVC-directml-2-part02.zip",
@@ -131,7 +131,7 @@
           "unpacked_size": 855585929,
           "file_count": 44542,
           "sha256": "0f2a5b8bdff465cda4d0aee712d28b59628ce32d340aae4d619610151674c68a",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-directml-2-part02.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-directml-2-part02.zip"
         }
       ]
     },
@@ -146,7 +146,7 @@
           "unpacked_size": 1782579200,
           "file_count": 674,
           "sha256": "081894cad6adac919a7838f3aa6795fbb73e312e7371096c2ec29aa44f0bab62",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-rocm-win-2-part01.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-rocm-win-2-part01.zip"
         },
         {
           "name": "JJZero-RVC-rocm-win-2-part02.zip",
@@ -154,7 +154,7 @@
           "unpacked_size": 1782579200,
           "file_count": 18,
           "sha256": "c7c4b435425c9539e7fd9f39f79cd96737bd6c53b69b0f60f3a566aff414111f",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-rocm-win-2-part02.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-rocm-win-2-part02.zip"
         },
         {
           "name": "JJZero-RVC-rocm-win-2-part03.zip",
@@ -162,7 +162,7 @@
           "unpacked_size": 1782579200,
           "file_count": 132,
           "sha256": "4626f98289220eaa927b72df6ea156b9e3c19578ef600ad58d6bd41c95c057c4",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-rocm-win-2-part03.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-rocm-win-2-part03.zip"
         },
         {
           "name": "JJZero-RVC-rocm-win-2-part04.zip",
@@ -170,7 +170,7 @@
           "unpacked_size": 1698060912,
           "file_count": 38533,
           "sha256": "59d01e643499c9658c662d8070665c72b22b71b47573e40651357cf90102e0e5",
-          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.2/JJZero-RVC-rocm-win-2-part04.zip"
+          "url": "https://github.com/groun519/JJZ-Audio/releases/download/v0.3.0/JJZero-RVC-rocm-win-2-part04.zip"
         }
       ]
     }

@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
 
-from jang_app.pipeline.vocal_cleanup import render_vocal_cleanup
-from jang_app.services.vocal_cleanup import VocalCleanupProject
+from jang_app.pipeline.vocal_cleanup import (
+    _render_deecho_segment,
+    _render_denoise_segment,
+    discard_vocal_cleanup_preview,
+    preview_vocal_cleanup,
+    render_vocal_cleanup,
+)
+from jang_app.services.vocal_cleanup import (
+    VOCAL_CLEANUP_EFFECT_DEECHO,
+    VocalCleanupProject,
+)
 from jang_app.services.vocal_cleanup_store import VocalCleanupStore, VocalCleanupStoreError
 
 
@@ -81,6 +92,183 @@ class VocalCleanupStoreTests(unittest.TestCase):
             )
         self.assertTrue(processed.is_file())
         self.assertTrue(removed.is_file())
+
+    def test_noise_removal_region_round_trip_is_supported(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        processed, removed = self._preview_segments("denoise", 13_230)
+
+        project = self.store.import_preview(
+            self.job_dir,
+            project,
+            start_ms=100,
+            end_ms=400,
+            effect="denoise",
+            strength="conservative",
+            processed_segment_path=processed,
+            removed_segment_path=removed,
+        )
+        restored = self.store.load(self.job_dir, self.source)
+
+        self.assertEqual(project.regions[0].effect, "denoise")
+        self.assertEqual(restored.regions[0].effect, "denoise")
+
+    def test_noise_removal_preview_dispatches_to_denoise_renderer(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+
+        def render_segment(_source, processed, removed, **_kwargs) -> None:
+            samples = np.zeros((13_230, 2), dtype=np.float32)
+            sf.write(processed, samples, 44_100, subtype="FLOAT")
+            sf.write(removed, samples, 44_100, subtype="FLOAT")
+
+        def compose(_source, _regions, processed, removed, **_kwargs) -> None:
+            samples = np.zeros((44_100, 2), dtype=np.float32)
+            sf.write(processed, samples, 44_100, subtype="FLOAT")
+            sf.write(removed, samples, 44_100, subtype="FLOAT")
+
+        with (
+            patch(
+                "jang_app.pipeline.vocal_cleanup._render_denoise_segment",
+                side_effect=render_segment,
+            ) as denoise,
+            patch("jang_app.pipeline.vocal_cleanup._render_dereverb_segment") as dereverb,
+            patch("jang_app.pipeline.vocal_cleanup._compose_audio", side_effect=compose),
+        ):
+            preview = preview_vocal_cleanup(
+                self.source,
+                self.job_dir,
+                project.regions,
+                start_ms=100,
+                end_ms=400,
+                effect="denoise",
+                strength="standard",
+            )
+
+        self.assertEqual(preview.effect, "denoise")
+        denoise.assert_called_once()
+        dereverb.assert_not_called()
+        discard_vocal_cleanup_preview(preview)
+
+    def test_echo_removal_preview_dispatches_to_deecho_renderer(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+
+        def render_segment(_source, processed, removed, **_kwargs) -> None:
+            samples = np.zeros((13_230, 2), dtype=np.float32)
+            sf.write(processed, samples, 44_100, subtype="FLOAT")
+            sf.write(removed, samples, 44_100, subtype="FLOAT")
+
+        def compose(_source, _regions, processed, removed, **_kwargs) -> None:
+            samples = np.zeros((44_100, 2), dtype=np.float32)
+            sf.write(processed, samples, 44_100, subtype="FLOAT")
+            sf.write(removed, samples, 44_100, subtype="FLOAT")
+
+        with (
+            patch(
+                "jang_app.pipeline.vocal_cleanup._render_deecho_segment",
+                side_effect=render_segment,
+            ) as deecho,
+            patch("jang_app.pipeline.vocal_cleanup._render_dereverb_segment") as dereverb,
+            patch("jang_app.pipeline.vocal_cleanup._render_denoise_segment") as denoise,
+            patch("jang_app.pipeline.vocal_cleanup._compose_audio", side_effect=compose),
+        ):
+            preview = preview_vocal_cleanup(
+                self.source,
+                self.job_dir,
+                project.regions,
+                start_ms=100,
+                end_ms=400,
+                effect=VOCAL_CLEANUP_EFFECT_DEECHO,
+                strength="standard",
+            )
+
+        self.assertEqual(preview.effect, VOCAL_CLEANUP_EFFECT_DEECHO)
+        deecho.assert_called_once()
+        dereverb.assert_not_called()
+        denoise.assert_not_called()
+        discard_vocal_cleanup_preview(preview)
+
+    def test_noise_removal_uses_managed_short_path_workspace(self) -> None:
+        processed = self.root / "denoised-segment.wav"
+        removed = self.root / "removed-segment.wav"
+
+        def render(source, target, _strength, *, progress=None, **_kwargs):
+            shutil.copyfile(source, target)
+            if progress is not None:
+                progress(100)
+            return target
+
+        with (
+            patch(
+                "jang_app.pipeline.vocal_cleanup.TOOL_WORKSPACE_DIR",
+                self.root / "tool-workspaces",
+            ),
+            patch(
+                "jang_app.pipeline.vocal_cleanup.render_denoised_audio",
+                side_effect=render,
+            ),
+        ):
+            _render_denoise_segment(
+                self.source,
+                processed,
+                removed,
+                start_ms=100,
+                end_ms=400,
+                strength="standard",
+                progress_callback=None,
+            )
+
+        self.assertTrue(processed.is_file())
+        self.assertTrue(removed.is_file())
+        self.assertEqual(
+            list((self.root / "tool-workspaces" / "vocaldenoise").glob("j_*")),
+            [],
+        )
+
+    def test_echo_removal_uses_managed_short_path_workspace(self) -> None:
+        processed = self.root / "deechoed-segment.wav"
+        removed = self.root / "removed-echo.wav"
+
+        def run(command, **_kwargs):
+            output = Path(command[command.index("--output_dir") + 1])
+            output.mkdir(parents=True, exist_ok=True)
+            sf.write(
+                output / "i_(No Echo)_model.wav",
+                np.zeros((44_100, 2), dtype=np.float32),
+                44_100,
+                subtype="FLOAT",
+            )
+            sf.write(
+                output / "i_(Instrumental)_model.wav",
+                np.zeros((44_100, 2), dtype=np.float32),
+                44_100,
+                subtype="FLOAT",
+            )
+            return type("Completed", (), {"returncode": 0})()
+
+        with (
+            patch(
+                "jang_app.pipeline.vocal_cleanup.TOOL_WORKSPACE_DIR",
+                self.root / "tool-workspaces",
+            ),
+            patch("jang_app.pipeline.vocal_cleanup.require_roformer_tools"),
+            patch("jang_app.pipeline.vocal_cleanup.prepare_roformer_model_assets"),
+            patch("jang_app.pipeline.vocal_cleanup.run_command", side_effect=run),
+        ):
+            _render_deecho_segment(
+                self.source,
+                processed,
+                removed,
+                start_ms=100,
+                end_ms=400,
+                strength="standard",
+                progress_callback=None,
+            )
+
+        self.assertTrue(processed.is_file())
+        self.assertTrue(removed.is_file())
+        self.assertEqual(
+            list((self.root / "tool-workspaces" / "vocaldeecho").glob("j_*")),
+            [],
+        )
 
     def test_render_keeps_length_channels_and_unselected_audio(self) -> None:
         project = self.store.load(self.job_dir, self.source)

@@ -10,9 +10,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from jang_app.services.managed_files import write_json_atomic
-from jang_app.services.song_package import STUDIO_STAGE, SongPackage
+from jang_app.services.song_package import SongPackage
 from jang_app.services.studio_audio_levels import clamp_studio_clip_gain_db
 from jang_app.services.studio_pitch import clamp_studio_clip_pitch
+from jang_app.services.studio_project import (
+    commit_studio_project_session,
+    ensure_studio_project,
+    recover_studio_project_session,
+    save_studio_project_assets,
+    studio_project_history_paths,
+)
 
 if TYPE_CHECKING:
     from jang_app.services.studio_assets import StudioSoundAsset
@@ -262,6 +269,14 @@ def load_studio_session(
     if not path.is_file():
         return _session_with_default_tracks(package, StudioSession(), assets)
     data = _read_session_data(path, package.song_id)
+    data, project_recovery = recover_studio_project_session(package, data)
+    if project_recovery.recovered:
+        logging.getLogger("jang_app").warning(
+            "Recovered Studio project journal | song=%s revision=%s reason=%s",
+            package.song_id,
+            project_recovery.revision,
+            project_recovery.reason,
+        )
     if data is None:
         data = _latest_valid_history_data(package)
         if data is not None:
@@ -300,31 +315,29 @@ def save_studio_session(
     assets: tuple[StudioSoundAsset, ...] | None = None,
 ) -> Path:
     path = studio_session_path(package)
-    normalized = _normalized_session(package, session, _studio_assets(package, assets))
+    resolved_assets = _studio_assets(package, assets)
+    normalized = _normalized_session(package, session, resolved_assets)
     payload = {
         "version": STUDIO_SESSION_VERSION,
         "song_id": package.song_id,
         "updated_at": normalized.updated_at,
         "tracks": [_track_to_data(track) for track in normalized.tracks],
     }
+    save_studio_project_assets(package, resolved_assets, payload)
     previous = _read_session_data(path, package.song_id) if path.is_file() else None
     if previous is not None and previous.get("tracks") == payload["tracks"]:
         return path
     if previous is not None:
         _archive_session_data(package, previous)
-    write_json_atomic(path, payload)
-    return path
+    return commit_studio_project_session(package, payload)
 
 
 def studio_session_path(package: SongPackage) -> Path:
-    return package.folder / STUDIO_STAGE / STUDIO_SESSION_NAME
+    return ensure_studio_project(package).session
 
 
 def studio_session_history_paths(package: SongPackage) -> tuple[Path, ...]:
-    root = studio_session_path(package).parent / STUDIO_SESSION_HISTORY_DIR
-    if not root.is_dir():
-        return ()
-    return tuple(sorted(root.glob("session-*.json"), reverse=True))
+    return studio_project_history_paths(package)
 
 
 def remove_studio_session_history(package: SongPackage) -> None:

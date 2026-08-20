@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from jang_app.services.command import CommandCancellation, CommandResult
+from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_training_filelist import build_rvc_training_filelist
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingStateStore
 from jang_app.services.rvc_training_train import (
@@ -225,6 +226,40 @@ class RvcTrainingRunTests(unittest.TestCase):
 
             self.assertTrue(result.completed)
 
+    def test_cuda_profile_rejects_cpu_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            command_called = False
+
+            def unavailable_cuda_runtime(root, check_cuda=False):
+                return RvcTrainingRuntimeInspection(
+                    Path(root).resolve(),
+                    (),
+                    cuda_available=False,
+                    cpu_ready=True,
+                    backend=RvcComputeBackend.CUDA,
+                )
+
+            def runner(*args, **kwargs):
+                nonlocal command_called
+                command_called = True
+                raise AssertionError("The trainer must not start without CUDA acceleration.")
+
+            with self.assertRaisesRegex(
+                RvcTrainingRunError,
+                "CPU fallback is disabled for this GPU profile",
+            ):
+                train_rvc_model(
+                    model_id,
+                    layout,
+                    runtime,
+                    RvcTrainingRunSettings(),
+                    command_runner=runner,
+                    runtime_inspector=unavailable_cuda_runtime,
+                )
+
+            self.assertFalse(command_called)
+
     def test_cuda_training_uses_parallel_windowless_data_loading(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             model_id, layout, runtime = _training_setup(Path(temporary))
@@ -401,6 +436,38 @@ class RvcTrainingRunTests(unittest.TestCase):
 
             self.assertTrue(result.completed)
             self.assertEqual(worker_settings, [4, 0])
+
+    def test_worker_exit_after_completion_does_not_trigger_safe_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            calls = 0
+
+            def runner(
+                args,
+                cwd=None,
+                env=None,
+                output_callback=None,
+                cancellation=None,
+            ):
+                nonlocal calls
+                calls += 1
+                _write_training_success(layout, output_callback, target_epoch=20)
+                output_callback(
+                    "JJZERO_DATA_LOADER_WORKER_EXITED pid=1234 exit_code=0"
+                )
+                return CommandResult(args, 1, "", "Training is done.")
+
+            result = train_rvc_model(
+                model_id,
+                layout,
+                runtime,
+                RvcTrainingRunSettings(),
+                command_runner=runner,
+                runtime_inspector=_ready_runtime,
+            )
+
+            self.assertTrue(result.completed)
+            self.assertEqual(calls, 1)
 
     def test_existing_checkpoint_pair_is_resumed_automatically(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

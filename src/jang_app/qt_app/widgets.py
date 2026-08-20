@@ -2421,6 +2421,15 @@ _TRACK_ICON_SVGS = {
         '<path d="m9.5 13 1.8 1.8 3.7-3.7"/>'
         "</svg>"
     ),
+    "cloud_remove": (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+        'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.1" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M17.5 18H7a5 5 0 1 1 1.4-9.8A6 6 0 0 1 20 10.5a3.8 3.8 0 0 1-2.5 7.5z"/>'
+        '<path d="m10 11 4 4"/>'
+        '<path d="m14 11-4 4"/>'
+        "</svg>"
+    ),
     "split": (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
         'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2.1" '

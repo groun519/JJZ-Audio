@@ -438,6 +438,29 @@ def normalize_roformer_effect_outputs(job_dir: Path) -> tuple[Path, Path]:
     return dry_target, effect_target
 
 
+def normalize_deecho_outputs(job_dir: Path) -> tuple[Path, Path]:
+    root = job_dir.expanduser().resolve()
+    dry_target = root / "no_echo.wav"
+    echo_target = root / "removed_echo.wav"
+    candidates = tuple(
+        path for path in root.rglob("*.wav") if path not in {dry_target, echo_target}
+    )
+    dry_source = _find_named_stem(candidates, ("(no echo)", "_no_echo.", "-no_echo."))
+    echo_source = _find_named_stem(
+        candidates,
+        ("(instrumental)", "(echo)", "_echo.", "-echo."),
+    )
+    if dry_source is None or echo_source is None:
+        names = ", ".join(path.name for path in candidates) or "none"
+        raise SeparationError(
+            "Echo removal did not produce both no-echo and removed-echo stems. "
+            f"Outputs: {names}"
+        )
+    _replace_output(dry_source, dry_target)
+    _replace_output(echo_source, echo_target)
+    return dry_target, echo_target
+
+
 def _find_stem(candidates: tuple[Path, ...], stem: str) -> Path | None:
     if stem == "vocals":
         patterns = ("(vocals)", "_vocals.", "-vocals.")
@@ -470,6 +493,15 @@ def _find_effect_stem(candidates: tuple[Path, ...], *, dry: bool) -> Path | None
         if dry
         else ("(reverb)", "_reverb.", "-reverb.", "(instrumental)")
     )
+    matches = [
+        path
+        for path in candidates
+        if any(pattern in path.name.casefold() for pattern in patterns)
+    ]
+    return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
+
+
+def _find_named_stem(candidates: tuple[Path, ...], patterns: tuple[str, ...]) -> Path | None:
     matches = [
         path
         for path in candidates

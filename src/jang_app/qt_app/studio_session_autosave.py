@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 class StudioSessionAutosave(QObject):
     save_failed = Signal(str)
+    save_state_changed = Signal(str, str)
 
     def __init__(
         self,
@@ -48,6 +49,7 @@ class StudioSessionAutosave(QObject):
             if pending_song_id != song_id:
                 self._flush_song(pending_song_id)
         self._pending[song_id] = (session, assets)
+        self.save_state_changed.emit(song_id, "pending")
         self._timer.start()
 
     def flush(self) -> bool:
@@ -62,11 +64,13 @@ class StudioSessionAutosave(QObject):
         if pending is None:
             return True
         session, assets = pending
+        self.save_state_changed.emit(song_id, "saving")
         try:
             self._save_session(song_id, session, assets)
         except KeyError as exc:
             self._pending.pop(song_id, None)
             self.save_failed.emit(str(exc))
+            self.save_state_changed.emit(song_id, "failed")
             return False
         except Exception as exc:
             logging.getLogger("jang_app").exception(
@@ -74,6 +78,7 @@ class StudioSessionAutosave(QObject):
                 song_id,
             )
             self.save_failed.emit(str(exc))
+            self.save_state_changed.emit(song_id, "failed")
             return False
         if self._pending.get(song_id) is pending:
             self._pending.pop(song_id, None)
@@ -83,6 +88,7 @@ class StudioSessionAutosave(QObject):
             len(session.tracks),
             sum(len(track.clips) for track in session.tracks),
         )
+        self.save_state_changed.emit(song_id, "saved")
         return True
 
     def discard(self, song_id: str) -> None:

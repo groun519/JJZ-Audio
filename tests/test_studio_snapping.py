@@ -12,6 +12,7 @@ from jang_app.services.studio_snapping import (
     SNAP_TARGET_CLIP_END,
     SNAP_TARGET_PLAYHEAD,
     build_studio_snap_index,
+    snap_studio_clip_group_delta,
     snap_studio_clip_position,
     snap_studio_clip_trim,
     snap_studio_timeline_point,
@@ -111,6 +112,28 @@ class StudioSnappingTests(unittest.TestCase):
 
         self.assertFalse(result.snapped)
         self.assertEqual(result.position_ms, 1_050)
+
+    def test_group_move_snaps_outer_edge_and_excludes_selected_edges(self) -> None:
+        first = StudioClip("first", _asset("first"), 0, 0, 500)
+        second = StudioClip("second", _asset("second"), 1_000, 0, 500)
+        marker = StudioClip("marker", _asset("marker"), 3_000, 0, 500)
+        session = _session(
+            ("track-a", (first, second)),
+            ("track-b", (marker,)),
+        )
+
+        result = snap_studio_clip_group_delta(
+            session,
+            build_studio_snap_index(session),
+            ("first", "second"),
+            requested_delta_ms=1_480,
+            threshold_ms=30,
+        )
+
+        self.assertTrue(result.snapped)
+        self.assertEqual(result.position_ms, 1_500)
+        self.assertEqual(result.moving_edge, "group_end")
+        self.assertEqual(result.target.clip_id, "marker")
 
     def test_trim_snaps_only_the_active_edge(self) -> None:
         previous = StudioClip("previous", _asset("previous"), 0, 0, 1_400)

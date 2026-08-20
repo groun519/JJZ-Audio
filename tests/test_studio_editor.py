@@ -198,7 +198,7 @@ class StudioEditorTests(unittest.TestCase):
             self.assertEqual(editor.session().tracks[0].clips[0].effects, (effect,))
             editor.close()
 
-    def test_effect_drop_can_link_all_pieces_from_the_same_audio(self) -> None:
+    def test_effect_drop_copies_independent_effects_to_all_source_pieces(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             asset = _asset(Path(temporary))
             reference = asset.reference
@@ -227,29 +227,27 @@ class StudioEditorTests(unittest.TestCase):
 
             first, second = editor.session().tracks[0].clips
             self.assertEqual(choose.call_args.args[1], 2)
-            self.assertEqual(first.effects, second.effects)
             self.assertEqual(len(first.effects), 1)
+            self.assertEqual(first.effects[0].reverb, second.effects[0].reverb)
+            self.assertNotEqual(first.effects[0].effect_id, second.effects[0].effect_id)
 
             changed = replace(
-                first.effects[0],
-                reverb=replace(first.effects[0].reverb, dry_wet_percent=67),
+                second.effects[0],
+                reverb=replace(second.effects[0].reverb, dry_wet_percent=67),
             )
             editor._update_effect("clip-2", changed)
             first, second = editor.session().tracks[0].clips
-            self.assertEqual(first.effects, (changed,))
+            self.assertNotEqual(first.effects, (changed,))
             self.assertEqual(second.effects, (changed,))
 
-            editor._remove_effect("clip-1", changed.effect_id)
-            self.assertTrue(
-                all(not clip.effects for clip in editor.session().tracks[0].clips)
-            )
+            editor._remove_effect("clip-2", changed.effect_id)
+            first, second = editor.session().tracks[0].clips
+            self.assertEqual(len(first.effects), 1)
+            self.assertEqual(second.effects, ())
             self.assertTrue(editor.undo())
-            self.assertTrue(
-                all(
-                    clip.effects == (changed,)
-                    for clip in editor.session().tracks[0].clips
-                )
-            )
+            first, second = editor.session().tracks[0].clips
+            self.assertNotEqual(first.effects, (changed,))
+            self.assertEqual(second.effects, (changed,))
             editor.close()
 
     def test_effect_scope_cancel_keeps_split_pieces_unchanged(self) -> None:
@@ -419,7 +417,12 @@ class StudioEditorTests(unittest.TestCase):
 
         self.assertEqual(len(regions), 1)
         self.assertEqual(regions[0][0].effect_id, effect.effect_id)
-        self.assertTrue(timeline._clip_rect(clip, 0).contains(regions[0][1].center()))
+        chip_rect = regions[0][1]
+        icon_rect = timeline._effect_remove_icon_rect(regions[0][2])
+        self.assertTrue(timeline._clip_rect(clip, 0).contains(chip_rect.center()))
+        self.assertTrue(chip_rect.contains(icon_rect))
+        self.assertGreater(icon_rect.width(), 0)
+        self.assertLessEqual(icon_rect.width(), 10)
 
     def test_timeline_effect_chips_use_the_actual_effect_kind(self) -> None:
         timeline = StudioTimelineView()
@@ -896,6 +899,224 @@ class StudioEditorTests(unittest.TestCase):
 
         self.assertEqual(moved.count(), 0)
 
+    def test_short_clip_center_remains_available_for_dragging(self) -> None:
+        reference = StudioAssetRef("short", TRACK_ORIGINAL_VOCAL)
+        clip = StudioClip("short-clip", reference, 0, 0, 500)
+        session = StudioSession(
+            tracks=(
+                StudioTrack(
+                    "track-original-vocal",
+                    "Original Vocal",
+                    TRACK_ORIGINAL_VOCAL,
+                    clips=(clip,),
+                ),
+            )
+        )
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(session, ())
+        position = timeline._clip_rect(clip, 0).center()
+
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                position,
+                position,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(timeline._drag_mode, "move")
+
+    def test_track_selection_replaces_multi_clip_inspector(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        track = StudioTrack(
+            "track-original-vocal",
+            "Original Vocal",
+            TRACK_ORIGINAL_VOCAL,
+            clips=(
+                StudioClip("first", reference, 0, 0, 500),
+                StudioClip("second", reference, 1_000, 500, 1_000),
+            ),
+        )
+        editor = StudioEditor(include_sidebars=False)
+        editor.set_context(StudioSession(tracks=(track,)), ())
+        clip_ids = tuple(clip.clip_id for clip in track.clips)
+        editor.timeline.select_clips(clip_ids, clip_ids[0])
+        self.assertEqual(editor.inspector.stack.currentIndex(), editor.inspector.MULTI_PAGE)
+
+        editor.timeline.select_track(track.track_id)
+
+        self.assertEqual(editor.inspector.stack.currentIndex(), editor.inspector.TRACK_PAGE)
+
+    def test_shift_click_and_marquee_build_a_multi_clip_selection(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        first = StudioClip("first", reference, 0, 0, 1_000)
+        second = StudioClip("second", reference, 1_500, 0, 1_000)
+        session = StudioSession(
+            tracks=(
+                StudioTrack(
+                    "track-original-vocal",
+                    "Original Vocal",
+                    TRACK_ORIGINAL_VOCAL,
+                    clips=(first, second),
+                ),
+            )
+        )
+        timeline = StudioTimelineView()
+        timeline.set_zoom(24)
+        timeline.set_context(session, ())
+        timeline.select_clip("first")
+        second_point = timeline._clip_rect(second, 0).center()
+
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                second_point,
+                second_point,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.ShiftModifier,
+            )
+        )
+        self.assertEqual(timeline.selected_clip_ids(), ("first", "second"))
+
+        timeline.clear_selection()
+        origin = QPointF(timeline._header_right() + 1, timeline.RULER_HEIGHT + 2)
+        destination = QPointF(
+            timeline._clip_rect(second, 0).right() + 2,
+            timeline._clip_rect(second, 0).bottom() - 2,
+        )
+        seeked = QSignalSpy(timeline.seek_requested)
+        timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                origin,
+                origin,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        timeline.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                destination,
+                destination,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        timeline.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                destination,
+                destination,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+        self.assertEqual(timeline.selected_clip_ids(), ("first", "second"))
+        self.assertEqual(seeked.count(), 0)
+
+    def test_selected_clips_drag_and_delete_as_single_undoable_edits(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        first = StudioClip("first", reference, 0, 0, 1_000)
+        second = StudioClip("second", reference, 1_500, 0, 1_000)
+        session = StudioSession(
+            tracks=(
+                StudioTrack(
+                    "track-original-vocal",
+                    "Original Vocal",
+                    TRACK_ORIGINAL_VOCAL,
+                    clips=(first, second),
+                ),
+            )
+        )
+        editor = StudioEditor(include_sidebars=False)
+        editor.set_context(session, ())
+        editor.set_zoom(24)
+        editor.timeline.select_clips(("first", "second"), "first")
+        start = editor.timeline._clip_rect(first, 0).center()
+        destination = QPointF(start.x() + 24, start.y())
+
+        editor.timeline.mousePressEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                start,
+                start,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+        editor.timeline.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                destination,
+                destination,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.AltModifier,
+            )
+        )
+        editor.timeline.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                destination,
+                destination,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.AltModifier,
+            )
+        )
+
+        self.assertEqual(
+            tuple(clip.timeline_start_ms for clip in editor.session().tracks[0].clips),
+            (1_000, 2_500),
+        )
+        self.assertTrue(editor.undo())
+        self.assertEqual(editor.session(), session)
+        editor.timeline.select_clips(("first", "second"), "first")
+        editor._remove_selected_clip()
+        self.assertEqual(editor.session().tracks[0].clips, ())
+        self.assertTrue(editor.undo())
+        self.assertEqual(editor.session(), session)
+
+    def test_multi_inspector_and_effect_drop_apply_to_every_selected_clip(self) -> None:
+        reference = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL)
+        first = StudioClip("first", reference, 0, 0, 500)
+        second = StudioClip("second", reference, 1_000, 500, 1_000)
+        session = StudioSession(
+            tracks=(
+                StudioTrack(
+                    "track-original-vocal",
+                    "Original Vocal",
+                    TRACK_ORIGINAL_VOCAL,
+                    clips=(first, second),
+                ),
+            )
+        )
+        editor = StudioEditor(include_sidebars=False)
+        editor.set_context(session, ())
+        editor.timeline.select_clips(("first", "second"), "first")
+
+        self.assertEqual(editor.inspector.stack.currentIndex(), editor.inspector.MULTI_PAGE)
+        editor._adjust_selected_clips(("first", "second"), 3.0, 2, True)
+        editor._drop_effect("reverb", "first")
+
+        clips = editor.session().tracks[0].clips
+        self.assertEqual(tuple(clip.gain_db for clip in clips), (3.0, 3.0))
+        self.assertEqual(tuple(clip.pitch_semitones for clip in clips), (2, 2))
+        self.assertTrue(all(clip.muted for clip in clips))
+        self.assertTrue(all(len(clip.effects) == 1 for clip in clips))
+        self.assertNotEqual(clips[0].effects[0].effect_id, clips[1].effects[0].effect_id)
+
     def test_playhead_line_in_clip_lane_does_not_capture_clip_interaction(self) -> None:
         timeline = StudioTimelineView()
         timeline.set_zoom(24)
@@ -1127,6 +1348,7 @@ class StudioEditorTests(unittest.TestCase):
             availability = QSignalSpy(editor.split_tool_available_changed)
             mode_changed = QSignalSpy(editor.split_mode_changed)
             changed = QSignalSpy(editor.session_changed)
+            seeked = QSignalSpy(editor.seek_requested)
             with (
                 patch.object(_WAVEFORM_EXECUTOR, "submit"),
                 patch.object(_THUMBNAIL_WAVEFORM_EXECUTOR, "submit"),
@@ -1170,7 +1392,8 @@ class StudioEditorTests(unittest.TestCase):
             self.assertTrue(mode_changed.at(0)[0])
             self.assertTrue(editor._split_mode)
             self.assertTrue(editor.timeline._split_mode)
-            self.assertEqual(editor._playhead_ms, 1_500)
+            self.assertEqual(editor._playhead_ms, 0)
+            self.assertEqual(seeked.count(), 0)
             editor.close()
 
     def test_right_click_exits_cut_tool_without_editing_the_timeline(self) -> None:

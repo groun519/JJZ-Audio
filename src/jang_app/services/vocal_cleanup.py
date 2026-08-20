@@ -5,7 +5,15 @@ from pathlib import Path
 
 
 VOCAL_CLEANUP_EFFECT_DEREVERB = "dereverb"
+VOCAL_CLEANUP_EFFECT_DEECHO = "deecho"
+VOCAL_CLEANUP_EFFECT_DENOISE = "denoise"
+VOCAL_CLEANUP_EFFECTS = (
+    VOCAL_CLEANUP_EFFECT_DEREVERB,
+    VOCAL_CLEANUP_EFFECT_DEECHO,
+    VOCAL_CLEANUP_EFFECT_DENOISE,
+)
 VOCAL_CLEANUP_STRENGTHS = ("conservative", "standard", "strong")
+VOCAL_CLEANUP_DEECHO_MODEL = "UVR-De-Echo-Normal.pth"
 
 
 @dataclass(frozen=True)

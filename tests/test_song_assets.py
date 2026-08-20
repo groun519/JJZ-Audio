@@ -13,6 +13,7 @@ from jang_app.services.song_assets import (
 )
 from jang_app.services.song_library import SongLibrary
 from jang_app.services.song_package import SongPackageStore
+from jang_app.services.studio_session import load_studio_session
 
 
 class SongAssetDetailsTests(unittest.TestCase):
@@ -79,6 +80,21 @@ class SongAssetDetailsTests(unittest.TestCase):
             self.assertTrue(all(asset.can_remove for asset in vocal_assets))
             converted = next(asset for asset in vocal_assets if asset.role == "Converted Vocal")
             self.assertEqual(converted.removal_scope, REMOVAL_VOCAL_OUTPUT)
+
+    def test_project_metadata_is_not_exposed_as_individual_studio_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"source")
+            store = SongPackageStore(project / "workspace" / "library" / "songs", project)
+            library = SongLibrary(project / "missing.json", store)
+            song = library.add_paths([source])[0]
+
+            library.save_studio_session(song.id, load_studio_session(store.require(song.id)))
+            studio_assets = library.asset_details(song.id).assets_for(STAGE_STUDIO)
+
+            self.assertEqual(len(studio_assets), 1)
+            self.assertEqual(studio_assets[0].role, "Studio Session")
 
 
 if __name__ == "__main__":

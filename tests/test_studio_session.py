@@ -66,7 +66,7 @@ class StudioSessionTests(unittest.TestCase):
             archived = json.loads(history[0].read_text(encoding="utf-8"))
             self.assertEqual(archived["tracks"][0]["volume_percent"], 100)
 
-    def test_invalid_current_session_recovers_the_latest_valid_history(self) -> None:
+    def test_invalid_current_session_recovers_the_latest_valid_autosave(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             package = _package_with_audio_output(Path(temporary))
             original = load_studio_session(package)
@@ -83,7 +83,7 @@ class StudioSessionTests(unittest.TestCase):
 
             recovered = load_studio_session(package)
 
-            self.assertEqual(recovered.tracks[0].volume_percent, 100)
+            self.assertEqual(recovered.tracks[0].volume_percent, 137)
 
     def test_current_reverb_effect_round_trips_and_version_four_defaults_empty(self) -> None:
         self.assertTrue(hasattr(studio_session, "StudioEffect"))

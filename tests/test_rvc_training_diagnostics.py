@@ -43,6 +43,26 @@ class RvcTrainingDiagnosticsTests(unittest.TestCase):
             ["JJZERO_DATA_LOADER_WORKER_EXITED pid=123 exit_code=3221225477"],
         )
 
+    def test_monitor_ignores_worker_exit_after_training_completed(self) -> None:
+        activity: list[str] = []
+        monitor = RvcTrainingAttemptMonitor(
+            None,
+            None,
+            activity_callback=activity.append,
+        )
+        worker = RvcTrainingProcessStatus(
+            123,
+            "Process-1",
+            "worker",
+            False,
+            0,
+        )
+
+        monitor.observe_output("saving final ckpt:Success.")
+        monitor._report_dead_workers((worker,))
+
+        self.assertEqual(activity, [])
+
     def test_records_attempt_and_captures_only_current_log_delta(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

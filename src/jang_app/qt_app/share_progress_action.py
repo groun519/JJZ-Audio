@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QWidget
 
 from jang_app.qt_app.localization import set_translated_text, set_translated_tooltip
-from jang_app.qt_app.widgets import DangerIconButton, FeedbackButton, SvgIconButton
+from jang_app.qt_app.widgets import FeedbackButton, SvgIconButton
 
 
 class ShareProgressAction(QWidget):
@@ -76,7 +76,12 @@ class ShareProgressAction(QWidget):
         self._sync_share_tooltip()
         self.button.clicked.connect(self.requested.emit)
 
-        self.delete_button = DangerIconButton(size=button_extent, paint_inset=2)
+        self.delete_button = SvgIconButton(
+            "cloud_remove",
+            size=button_extent,
+            paint_inset=2,
+        )
+        self.delete_button.setObjectName("ShareRemoteDeleteButton")
         set_translated_tooltip(self.delete_button, self._delete_tooltip)
         self.delete_button.clicked.connect(self.delete_requested.emit)
 

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -26,7 +27,11 @@ from jang_app.services.separation_assets import separation_asset_status
 from jang_app.services.separation_recipe import EFFECT_REMOVAL_RECIPE
 from jang_app.services.song_library import SongVocalVersion
 from jang_app.services.vocal_cleanup import (
+    VOCAL_CLEANUP_DEECHO_MODEL,
+    VOCAL_CLEANUP_EFFECT_DEECHO,
+    VOCAL_CLEANUP_EFFECT_DENOISE,
     VOCAL_CLEANUP_EFFECT_DEREVERB,
+    VOCAL_CLEANUP_EFFECTS,
     VocalCleanupProject,
     VocalCleanupResult,
 )
@@ -42,6 +47,7 @@ class VocalCleanupWorkspace(QWidget):
     source_changed = Signal(object)
     preview_requested = Signal(object, int, int, str, str)
     commit_preview_requested = Signal()
+    cancel_preview_requested = Signal()
     region_remove_requested = Signal(str)
     render_requested = Signal()
     result_selected = Signal(object)
@@ -61,6 +67,7 @@ class VocalCleanupWorkspace(QWidget):
             PLAYBACK_REMOVED: None,
         }
         self._playback_mode = PLAYBACK_ORIGINAL
+        self._selected_effect = VOCAL_CLEANUP_EFFECT_DEREVERB
         self._theme_mode = "white"
 
         self.source_panel = self._build_source_panel()
@@ -136,12 +143,42 @@ class VocalCleanupWorkspace(QWidget):
         self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_hint.setWordWrap(True)
         layout.addLayout(header)
+        layout.addWidget(self._build_tool_selector(), 0)
         layout.addWidget(self.waveform, 1)
         layout.addWidget(self.empty_hint, 0)
         layout.addWidget(self.region_lane_label)
         layout.addWidget(self.region_lane, 0)
         layout.addWidget(self._build_compare_control(), 0)
         return panel
+
+    def _build_tool_selector(self) -> QFrame:
+        selector = QFrame()
+        selector.setObjectName("InsetCard")
+        layout = QHBoxLayout(selector)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(10)
+        self.tool_selector_title = QLabel()
+        self.tool_selector_title.setObjectName("CardTitle")
+        control = QFrame()
+        control.setObjectName("SegmentedControl")
+        control_layout = QHBoxLayout(control)
+        control_layout.setContentsMargins(4, 4, 4, 4)
+        control_layout.setSpacing(4)
+        self.tool_group = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
+        self.tool_buttons: dict[str, FeedbackButton] = {}
+        for index, effect in enumerate(VOCAL_CLEANUP_EFFECTS):
+            button = FeedbackButton()
+            button.setObjectName("SegmentButton")
+            button.setCheckable(True)
+            button.setChecked(effect == self._selected_effect)
+            self.tool_group.addButton(button, index)
+            self.tool_buttons[effect] = button
+            control_layout.addWidget(button, 1)
+        self.tool_group.idClicked.connect(self._on_tool_changed)
+        layout.addWidget(self.tool_selector_title, 0)
+        layout.addWidget(control, 1)
+        return selector
 
     def _build_compare_control(self) -> QFrame:
         control = QFrame()
@@ -174,21 +211,13 @@ class VocalCleanupWorkspace(QWidget):
         layout.setSpacing(14)
         self.inspector_title = QLabel()
         self.inspector_title.setObjectName("SectionTitle")
-        effect_card = QFrame()
-        effect_card.setObjectName("InsetCard")
-        effect_layout = QVBoxLayout(effect_card)
-        effect_layout.setContentsMargins(14, 14, 14, 14)
-        effect_layout.setSpacing(8)
-        self.effect_title = QLabel()
-        self.effect_title.setObjectName("CardTitle")
-        self.effect_description = QLabel()
-        self.effect_description.setObjectName("MutedText")
-        self.effect_description.setWordWrap(True)
-        self.model_status = QLabel()
-        self.model_status.setObjectName("StatusChip")
-        effect_layout.addWidget(self.effect_title)
-        effect_layout.addWidget(self.effect_description)
-        effect_layout.addWidget(self.model_status)
+        self.tool_detail_stack = QStackedWidget()
+        self.tool_detail_stack.setObjectName("VocalCleanupToolDetails")
+        self.tool_detail_titles: dict[str, QLabel] = {}
+        self.tool_detail_descriptions: dict[str, QLabel] = {}
+        self.tool_detail_statuses: dict[str, QLabel] = {}
+        for effect in VOCAL_CLEANUP_EFFECTS:
+            self.tool_detail_stack.addWidget(self._build_tool_detail_page(effect))
 
         self.strength_title = QLabel()
         self.strength_title.setObjectName("CardTitle")
@@ -208,20 +237,42 @@ class VocalCleanupWorkspace(QWidget):
             self.strength_group.addButton(button, index)
             self.strength_buttons[strength] = button
             strength_layout.addWidget(button, 1)
+        self.strength_group.idClicked.connect(self._on_tool_settings_changed)
 
         self.preview_action = _CleanupInlineAction()
         self.preview_action.triggered.connect(self._request_preview)
-        self.commit_button = FeedbackButton()
-        self.commit_button.setObjectName("PrimaryButton")
-        self.commit_button.clicked.connect(self.commit_preview_requested.emit)
+        self.preview_action.cancelled.connect(self.cancel_preview_requested.emit)
+        self.preview_action.commit_requested.connect(
+            self.commit_preview_requested.emit
+        )
         layout.addWidget(self.inspector_title)
-        layout.addWidget(effect_card)
+        layout.addWidget(self.tool_detail_stack)
         layout.addWidget(self.strength_title)
         layout.addWidget(strength_control)
         layout.addWidget(self.preview_action)
-        layout.addWidget(self.commit_button)
         layout.addStretch(1)
         return panel
+
+    def _build_tool_detail_page(self, effect: str) -> QFrame:
+        page = QFrame()
+        page.setObjectName("InsetCard")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
+        title = QLabel()
+        title.setObjectName("CardTitle")
+        description = QLabel()
+        description.setObjectName("MutedText")
+        description.setWordWrap(True)
+        status = QLabel()
+        status.setObjectName("StatusChip")
+        self.tool_detail_titles[effect] = title
+        self.tool_detail_descriptions[effect] = description
+        self.tool_detail_statuses[effect] = status
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addWidget(status)
+        return page
 
     def set_versions(
         self,
@@ -267,6 +318,8 @@ class VocalCleanupWorkspace(QWidget):
             PLAYBACK_PROCESSED: selected.path if selected is not None else None,
             PLAYBACK_REMOVED: None,
         }
+        self.preview_action.set_preview_available(False)
+        self.preview_action.set_progress(0)
         self._set_playback_mode(
             PLAYBACK_PROCESSED if selected is not None else PLAYBACK_ORIGINAL,
             notify=False,
@@ -277,14 +330,19 @@ class VocalCleanupWorkspace(QWidget):
         self._preview_paths[PLAYBACK_PROCESSED] = processed
         self._preview_paths[PLAYBACK_REMOVED] = removed
         self._set_playback_mode(PLAYBACK_PROCESSED)
-        self.commit_button.setEnabled(True)
+        self.preview_action.set_preview_available(True)
+        self._sync_state()
 
     def clear_pending_preview(self) -> None:
         self._preview_paths[PLAYBACK_REMOVED] = None
         result = self.result_pool.selected_result()
         self._preview_paths[PLAYBACK_PROCESSED] = result.path if result is not None else None
-        self.commit_button.setEnabled(False)
-        if self._playback_mode == PLAYBACK_REMOVED:
+        self.preview_action.set_preview_available(False)
+        self.preview_action.set_progress(0)
+        if (
+            self._playback_mode in {PLAYBACK_PROCESSED, PLAYBACK_REMOVED}
+            and self._preview_paths.get(self._playback_mode) is None
+        ):
             self._set_playback_mode(PLAYBACK_ORIGINAL)
         self._sync_state()
 
@@ -324,15 +382,37 @@ class VocalCleanupWorkspace(QWidget):
     def apply_language(self) -> None:
         self.source_title.setText(tr("Vocal Cleanup"))
         self.timeline_title.setText(tr("Cleanup Timeline"))
+        self.tool_selector_title.setText(tr("Cleanup Tool"))
         self.region_lane_label.setText(tr("Cleanup Regions"))
         self.empty_hint.setText(tr("Drag across the waveform to select a range to clean."))
-        self.inspector_title.setText(tr("Cleanup Settings"))
-        self.effect_title.setText(tr("Dereverb"))
-        self.effect_description.setText(
+        self.inspector_title.setText(tr("Tool Details"))
+        for effect, label in (
+            (VOCAL_CLEANUP_EFFECT_DEREVERB, "Dereverb"),
+            (VOCAL_CLEANUP_EFFECT_DEECHO, "De-echo"),
+            (VOCAL_CLEANUP_EFFECT_DENOISE, "Noise Removal"),
+        ):
+            self.tool_buttons[effect].setText(tr(label))
+            self.tool_detail_titles[effect].setText(tr(label))
+        self.tool_detail_descriptions[VOCAL_CLEANUP_EFFECT_DEREVERB].setText(
             tr("Reduces room reverb only in the selected vocal range while protecting quiet phrases.")
         )
+        self.tool_detail_descriptions[VOCAL_CLEANUP_EFFECT_DEECHO].setText(
+            tr("Reduces repeated and delayed vocal echoes in the selected range.")
+        )
+        self.tool_detail_descriptions[VOCAL_CLEANUP_EFFECT_DENOISE].setText(
+            tr("Reduces steady microphone and background noise in the selected vocal range.")
+        )
         status = separation_asset_status(EFFECT_REMOVAL_RECIPE.effect_model)
-        self.model_status.setText(tr(status.status_text))
+        self.tool_detail_statuses[VOCAL_CLEANUP_EFFECT_DEREVERB].setText(
+            tr(status.status_text)
+        )
+        deecho_status = separation_asset_status(VOCAL_CLEANUP_DEECHO_MODEL)
+        self.tool_detail_statuses[VOCAL_CLEANUP_EFFECT_DEECHO].setText(
+            tr(deecho_status.status_text)
+        )
+        self.tool_detail_statuses[VOCAL_CLEANUP_EFFECT_DENOISE].setText(
+            tr("Built-in processing")
+        )
         self.strength_title.setText(tr("Strength"))
         for key, label in (
             ("conservative", "Conservative"),
@@ -346,7 +426,6 @@ class VocalCleanupWorkspace(QWidget):
             (PLAYBACK_REMOVED, "Removed Sound"),
         ):
             self.playback_buttons[key].setText(tr(label))
-        self.commit_button.setText(tr("Add Cleanup Region"))
         self.preview_action.apply_language()
         self.render_bar.apply_language()
         self.source_pool.apply_language()
@@ -363,6 +442,21 @@ class VocalCleanupWorkspace(QWidget):
         self.clear_pending_preview()
         self._update_selection_label()
         self._sync_state()
+
+    def _on_tool_changed(self, index: int) -> None:
+        effect = VOCAL_CLEANUP_EFFECTS[max(0, min(index, len(VOCAL_CLEANUP_EFFECTS) - 1))]
+        if effect == self._selected_effect:
+            return
+        self._selected_effect = effect
+        self.tool_detail_stack.setCurrentIndex(VOCAL_CLEANUP_EFFECTS.index(effect))
+        self._on_tool_settings_changed()
+
+    def _on_tool_settings_changed(self, *_args) -> None:
+        had_preview = self.preview_action.preview_available()
+        self.preview_invalidated.emit()
+        self.clear_pending_preview()
+        if had_preview:
+            self.set_preview_status("Settings changed. Create a new preview.")
 
     def _on_seek_requested(self, position_ms: int) -> None:
         self.transport_bar.seek_requested.emit(position_ms)
@@ -403,7 +497,7 @@ class VocalCleanupWorkspace(QWidget):
             version,
             start_ms,
             end_ms,
-            VOCAL_CLEANUP_EFFECT_DEREVERB,
+            self._selected_effect,
             self._selected_strength(),
         )
 
@@ -415,9 +509,6 @@ class VocalCleanupWorkspace(QWidget):
         has_source = self._project is not None and self._duration_ms > 0
         has_selection = self._selection[1] - self._selection[0] >= 250
         self.preview_action.set_action_enabled(has_source and has_selection)
-        self.commit_button.setEnabled(
-            self._preview_paths.get(PLAYBACK_REMOVED) is not None
-        )
         region_count = len(self._project.regions) if self._project is not None else 0
         self.render_bar.set_region_count(region_count)
         self.render_bar.set_action_enabled(region_count > 0)
@@ -443,12 +534,15 @@ class VocalCleanupWorkspace(QWidget):
 
 class _CleanupInlineAction(QFrame):
     triggered = Signal()
+    cancelled = Signal()
+    commit_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("InsetCard")
         self._enabled = False
         self._running = False
+        self._preview_available = False
         self._status_key = "Compare before adding this range."
         self.title = QLabel()
         self.title.setObjectName("CardTitle")
@@ -461,6 +555,17 @@ class _CleanupInlineAction(QFrame):
         self.button = FeedbackButton()
         self.button.setObjectName("PrimaryButton")
         self.button.clicked.connect(self.triggered.emit)
+        self.cancel_button = FeedbackButton()
+        self.cancel_button.setObjectName("SecondaryButton")
+        self.cancel_button.clicked.connect(self.cancelled.emit)
+        self.commit_button = FeedbackButton()
+        self.commit_button.setObjectName("PrimaryButton")
+        self.commit_button.clicked.connect(self.commit_requested.emit)
+        decision_actions = QHBoxLayout()
+        decision_actions.setContentsMargins(0, 0, 0, 0)
+        decision_actions.setSpacing(8)
+        decision_actions.addWidget(self.cancel_button, 1)
+        decision_actions.addWidget(self.commit_button, 1)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(13, 13, 13, 13)
         layout.setSpacing(9)
@@ -468,7 +573,9 @@ class _CleanupInlineAction(QFrame):
         layout.addWidget(self.status)
         layout.addWidget(self.progress)
         layout.addWidget(self.button)
+        layout.addLayout(decision_actions)
         self.apply_language()
+        self._sync_enabled()
 
     def set_action_enabled(self, enabled: bool) -> None:
         self._enabled = bool(enabled)
@@ -478,6 +585,14 @@ class _CleanupInlineAction(QFrame):
         self._running = bool(running)
         self._sync_enabled()
 
+    def set_preview_available(self, available: bool) -> None:
+        self._preview_available = bool(available)
+        self.apply_language()
+        self._sync_enabled()
+
+    def preview_available(self) -> bool:
+        return self._preview_available
+
     def set_progress(self, value: int) -> None:
         self.progress.setValue(max(0, min(100, value)))
 
@@ -486,12 +601,27 @@ class _CleanupInlineAction(QFrame):
         self.status.setText(tr(self._status_key))
 
     def apply_language(self) -> None:
-        self.title.setText(tr("Selected Range Preview"))
-        self.button.setText(tr("Create Preview"))
+        self.title.setText(
+            tr("Preview Ready")
+            if self._preview_available
+            else tr("Selected Range Preview")
+        )
+        self.button.setText(
+            tr("Try Preview Again")
+            if self._preview_available
+            else tr("Create Preview")
+        )
+        self.cancel_button.setText(tr("Cancel Preview"))
+        self.commit_button.setText(tr("Apply to This Range"))
         self.status.setText(tr(self._status_key))
 
     def _sync_enabled(self) -> None:
         self.button.setEnabled(self._enabled and not self._running)
+        self.cancel_button.setVisible(self._preview_available)
+        self.commit_button.setVisible(self._preview_available)
+        self.cancel_button.setEnabled(self._preview_available and not self._running)
+        self.commit_button.setEnabled(self._preview_available and not self._running)
+        self.progress.setVisible(self._running or self._preview_available)
 
 
 class _CleanupRenderBar(QFrame):

@@ -5,7 +5,12 @@ from pathlib import Path
 
 from jang_app.services.output_catalog import load_output_sound_set
 from jang_app.services.song_package import EXPORT_STAGE, SOURCE_STAGE, STUDIO_STAGE, VOCAL_STAGE, SongPackage
-from jang_app.services.studio_session import STUDIO_SESSION_NAME
+from jang_app.services.studio_project import (
+    STUDIO_PROJECT_INDEX_NAME,
+    STUDIO_PROJECT_LEGACY_BACKUP_DIR,
+    STUDIO_PROJECTS_DIR,
+    existing_studio_session_path,
+)
 from jang_app.services.video_source import VideoSourceStore
 
 
@@ -77,8 +82,8 @@ def build_song_asset_details(package: SongPackage) -> SongAssetDetails:
         )
         known_paths.add(video_source.path.resolve())
 
-    studio_session = package.folder / STUDIO_STAGE / STUDIO_SESSION_NAME
-    if studio_session.is_file():
+    studio_session = existing_studio_session_path(package)
+    if studio_session is not None:
         assets.append(
             _asset(
                 package,
@@ -166,11 +171,33 @@ def _untracked_assets(
     assets = []
     for path in sorted((item for item in folder.rglob("*") if item.is_file()), key=lambda item: str(item).casefold()):
         resolved = path.resolve()
-        if resolved in known_paths or path.name.casefold() in _INTERNAL_STATE_FILES:
+        if (
+            resolved in known_paths
+            or path.name.casefold() in _INTERNAL_STATE_FILES
+            or _is_studio_project_internal(stage, folder, path)
+        ):
             continue
         known_paths.add(resolved)
         assets.append(_asset(package, stage, role, resolved, removal_scope=REMOVAL_FILE))
     return assets
+
+
+def _is_studio_project_internal(stage: str, folder: Path, path: Path) -> bool:
+    if stage != STAGE_STUDIO:
+        return False
+    try:
+        relative = path.relative_to(folder)
+    except ValueError:
+        return False
+    return (
+        relative.name == STUDIO_PROJECT_INDEX_NAME
+        or bool(relative.parts)
+        and relative.parts[0] in {
+            STUDIO_PROJECTS_DIR,
+            STUDIO_PROJECT_LEGACY_BACKUP_DIR,
+            ".history",
+        }
+    )
 
 
 def _asset(
