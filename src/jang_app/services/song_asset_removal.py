@@ -15,6 +15,7 @@ from jang_app.services.song_assets import (
     build_song_asset_details,
 )
 from jang_app.services.song_package import SongOutputReference, SongPackage, SongPackageStore, VOCAL_STAGE
+from jang_app.services.studio_session import remove_studio_session_history
 from jang_app.services.video_source import VideoSourceStore
 from jang_app.services.vocal_project_store import VocalProjectStore
 
@@ -55,6 +56,7 @@ class SongAssetRemovalService:
             return SongAssetRemovalResult(asset)
         if asset.removal_scope == REMOVAL_STUDIO_SESSION:
             self._remove_managed_file(package, asset.path)
+            remove_studio_session_history(package)
             return SongAssetRemovalResult(asset)
         if asset.removal_scope == REMOVAL_FILE:
             self._remove_managed_file(package, asset.path)

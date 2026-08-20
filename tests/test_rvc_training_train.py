@@ -13,6 +13,7 @@ from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingSt
 from jang_app.services.rvc_training_train import (
     RvcTrainingRunError,
     RvcTrainingRunSettings,
+    _TrainingProcessCompletionGuard,
     train_rvc_model,
 )
 from jang_app.services.rvc_training_runtime import RvcTrainingRuntimeInspection
@@ -79,6 +80,52 @@ class RvcTrainingRunTests(unittest.TestCase):
             self.assertEqual(result.state.current_epoch, 20)
             self.assertEqual(progress[-1], 100)
             self.assertFalse((runtime / "weights" / "voice.pth").exists())
+
+    def test_completion_guard_stops_a_trainer_that_does_not_exit(self) -> None:
+        cancellation = CommandCancellation()
+        timers: list[_FakeTimer] = []
+
+        def timer_factory(interval, function):
+            timer = _FakeTimer(interval, function)
+            timers.append(timer)
+            return timer
+
+        with patch("jang_app.services.rvc_training_train.Timer", timer_factory):
+            with patch.object(cancellation, "terminate_current") as terminate:
+                guard = _TrainingProcessCompletionGuard(
+                    cancellation,
+                    grace_seconds=3,
+                )
+                guard.observe("Training is done. The program is closed.")
+                self.assertEqual(timers, [])
+
+                guard.observe("saving final ckpt:Success.")
+                self.assertEqual(len(timers), 1)
+                self.assertTrue(timers[0].started)
+
+                timers[0].fire()
+
+                terminate.assert_called_once_with()
+                self.assertTrue(guard.forced)
+
+    def test_completion_guard_is_cancelled_after_normal_exit(self) -> None:
+        cancellation = CommandCancellation()
+        timers: list[_FakeTimer] = []
+
+        def timer_factory(interval, function):
+            timer = _FakeTimer(interval, function)
+            timers.append(timer)
+            return timer
+
+        with patch("jang_app.services.rvc_training_train.Timer", timer_factory):
+            with patch.object(cancellation, "terminate_current") as terminate:
+                guard = _TrainingProcessCompletionGuard(cancellation)
+                guard.observe("saving final ckpt:Success.")
+                guard.cancel()
+                timers[0].fire()
+
+                terminate.assert_not_called()
+                self.assertFalse(guard.forced)
 
     def test_reports_progress_within_an_epoch_before_it_completes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -592,6 +639,25 @@ def _checkpoint_pair(layout, step: int) -> None:
 
 def _argument(args: list[str], name: str) -> str:
     return args[args.index(name) + 1]
+
+
+class _FakeTimer:
+    def __init__(self, interval: float, function) -> None:
+        self.interval = interval
+        self.function = function
+        self.daemon = False
+        self.started = False
+        self.cancelled = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def fire(self) -> None:
+        if not self.cancelled:
+            self.function()
 
 
 if __name__ == "__main__":

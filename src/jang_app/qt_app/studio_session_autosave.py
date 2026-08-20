@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -26,11 +27,10 @@ class StudioSessionAutosave(QObject):
     ) -> None:
         super().__init__(parent)
         self._save_session = save_session
-        self._pending: tuple[
+        self._pending: dict[
             str,
-            StudioSession,
-            tuple[StudioSoundAsset, ...],
-        ] | None = None
+            tuple[StudioSession, tuple[StudioSoundAsset, ...]],
+        ] = {}
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(delay_ms)
@@ -44,25 +44,48 @@ class StudioSessionAutosave(QObject):
     ) -> None:
         if not song_id:
             return
-        if self._pending is not None and self._pending[0] != song_id:
-            self.flush()
-        self._pending = (song_id, session, assets)
+        for pending_song_id in tuple(self._pending):
+            if pending_song_id != song_id:
+                self._flush_song(pending_song_id)
+        self._pending[song_id] = (session, assets)
         self._timer.start()
 
-    def flush(self) -> None:
+    def flush(self) -> bool:
         self._timer.stop()
-        pending = self._pending
-        self._pending = None
+        saved = True
+        for song_id in tuple(self._pending):
+            saved = self._flush_song(song_id) and saved
+        return saved
+
+    def _flush_song(self, song_id: str) -> bool:
+        pending = self._pending.get(song_id)
         if pending is None:
-            return
-        song_id, session, assets = pending
+            return True
+        session, assets = pending
         try:
             self._save_session(song_id, session, assets)
-        except (KeyError, OSError) as exc:
+        except KeyError as exc:
+            self._pending.pop(song_id, None)
             self.save_failed.emit(str(exc))
+            return False
+        except Exception as exc:
+            logging.getLogger("jang_app").exception(
+                "Studio session autosave failed | song=%s",
+                song_id,
+            )
+            self.save_failed.emit(str(exc))
+            return False
+        if self._pending.get(song_id) is pending:
+            self._pending.pop(song_id, None)
+        logging.getLogger("jang_app").info(
+            "Studio session saved | song=%s tracks=%s clips=%s",
+            song_id,
+            len(session.tracks),
+            sum(len(track.clips) for track in session.tracks),
+        )
+        return True
 
     def discard(self, song_id: str) -> None:
-        if self._pending is None or self._pending[0] != song_id:
-            return
-        self._timer.stop()
-        self._pending = None
+        self._pending.pop(song_id, None)
+        if not self._pending:
+            self._timer.stop()

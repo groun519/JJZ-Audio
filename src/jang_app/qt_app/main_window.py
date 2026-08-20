@@ -59,8 +59,15 @@ from jang_app.pipeline.vocal_split import (
     singer_split_capability,
     split_selected_vocal,
 )
+from jang_app.pipeline.vocal_cleanup import (
+    VocalCleanupPreview,
+    discard_vocal_cleanup_preview,
+    preview_vocal_cleanup,
+    render_vocal_cleanup,
+)
 from jang_app.qt_app.confirmation_dialog import ConfirmationDialog
 from jang_app.qt_app.collapsible_card_header import CollapsibleCardHeader
+from jang_app.qt_app.conversion_pitch_guide import ConversionPitchGuide
 from jang_app.qt_app.conversion_result_browser import ConversionResultBrowser
 from jang_app.qt_app.conversion_input_pool import ConversionInputPool
 from jang_app.qt_app.export_page import ExportPage
@@ -99,6 +106,7 @@ from jang_app.qt_app.update_status_button import (
     update_button_position,
 )
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
+from jang_app.qt_app.vocal_cleanup_workspace import VocalCleanupWorkspace
 from jang_app.qt_app.vocal_split_workspace import VocalSplitWorkspace
 from jang_app.qt_app.video_preview_panel import VideoPreviewPanel
 from jang_app.qt_app.window_chrome import apply_window_corner_style
@@ -140,11 +148,23 @@ from jang_app.services.audio_player import (
 from jang_app.services.video_export_settings import VideoExportSettings
 from jang_app.services.audio_preview import prepare_preview_audio
 from jang_app.services.command import start_detached_command
+from jang_app.services.conversion_pitch_recommendation import (
+    PitchRangeProfile,
+    PitchRecommendationResult,
+    VocalPitchAnalysisCache,
+    analyze_conversion_pitch,
+    cached_model_analysis_is_current,
+    model_pitch_profile,
+    precision_benchmark_pitch_profile,
+)
 from jang_app.services.distribution_channel import application_updates_enabled
 from jang_app.services.file_browser import open_in_file_browser
 from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language, tr
 from jang_app.services.windows_app_mutex import close_app_mutex, create_app_mutex
 from jang_app.services.job_diagnostics import get_job_diagnostics
+from jang_app.services.model_dataset import ModelDatasetStore
+from jang_app.services.model_dataset_analysis import load_cached_model_dataset_analysis
+from jang_app.services.model_precision_benchmark import load_cached_model_precision_benchmark
 from jang_app.services.hardware_diagnostics_state import (
     recorded_hardware_selection,
 )
@@ -212,7 +232,13 @@ from jang_app.services.vocal_project import VocalConversionSettings, VocalProjec
 from jang_app.services.vocal_project_store import VocalProjectStore
 from jang_app.services.vocal_input import (
     VocalInputChoice,
+    cleanup_vocal_choice,
     original_vocal_choice,
+)
+from jang_app.services.vocal_cleanup import VocalCleanupProject, VocalCleanupResult
+from jang_app.services.vocal_cleanup_store import (
+    VocalCleanupStore,
+    VocalCleanupStoreError,
 )
 from jang_app.services.vocal_split import VocalSplitRun, VocalSplitStem
 from jang_app.services.vocal_split_store import VocalSplitStore, VocalSplitStoreError
@@ -241,6 +267,8 @@ PAGE_STUDIO = 4
 PAGE_EXPORT = 5
 SEPARATION_MODE_AUDIO = "audio"
 SEPARATION_MODE_VOCAL = "vocal"
+SEPARATION_MODE_CLEANUP = "cleanup"
+VOCAL_CLEANUP_AVAILABLE = False
 WORK_SONG_REQUIRED_PAGES = frozenset((PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO))
 GOOGLE_DRIVE_FEATURE = "google_drive_sharing"
 
@@ -290,16 +318,30 @@ class MainWindow(QMainWindow):
         self._processing_queue_drawer_open = False
         self._is_loading_rvc_settings = False
         self._is_loading_studio_session = False
+        self._studio_session_song_id = ""
         self._studio_playback_queue_dirty = False
         self._studio_playback_sources: tuple[AudioMixSource, ...] = ()
+        self._studio_timeline_view_positions: dict[str, tuple[int, int]] = {}
         self._studio_playback_prepare_worker: TaskWorker | None = None
         self._studio_playback_prepare_generation = 0
         self._studio_playback_prepare_request: (
             tuple[int, str, StudioSession, tuple[AudioMixSource, ...]] | None
         ) = None
+        self._pitch_guide_worker: TaskWorker | None = None
+        self._pitch_guide_generation = 0
+        self._pitch_guide_pending_request: (
+            tuple[int, Path, PitchRangeProfile] | None
+        ) = None
         self.vocal_project_store = VocalProjectStore()
         self.vocal_split_store = VocalSplitStore()
+        self.vocal_cleanup_store = VocalCleanupStore()
+        self._vocal_cleanup_preview: VocalCleanupPreview | None = None
+        self._vocal_cleanup_preview_generation = 0
         self.model_workspace = RvcModelWorkspace()
+        self.model_dataset_store = ModelDatasetStore(self.model_workspace.root)
+        self.pitch_analysis_cache = VocalPitchAnalysisCache(
+            APP_PATHS.cache_dir / "pitch-analysis"
+        )
         self.studio_session_autosave = StudioSessionAutosave(self.library.save_studio_session, parent=self)
         self.studio_session_autosave.save_failed.connect(self._on_studio_session_save_failed)
 
@@ -318,6 +360,11 @@ class MainWindow(QMainWindow):
         self._studio_playback_prepare_timer.setSingleShot(True)
         self._studio_playback_prepare_timer.setInterval(50)
         self._studio_playback_prepare_timer.timeout.connect(self._start_studio_playback_prepare)
+
+        self._pitch_guide_refresh_timer = QTimer(self)
+        self._pitch_guide_refresh_timer.setSingleShot(True)
+        self._pitch_guide_refresh_timer.setInterval(160)
+        self._pitch_guide_refresh_timer.timeout.connect(self._refresh_pitch_guide)
 
         self.update_poll_timer = QTimer(self)
         self.update_poll_timer.setSingleShot(True)
@@ -386,6 +433,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self.update_poll_timer.stop()
         self._studio_playback_prepare_timer.stop()
+        self._pitch_guide_refresh_timer.stop()
+        discard_vocal_cleanup_preview(self._vocal_cleanup_preview)
+        self._vocal_cleanup_preview = None
         if hasattr(self, "studio_layout_save_timer"):
             self.studio_layout_save_timer.stop()
             self._save_studio_layout()
@@ -625,6 +675,12 @@ class MainWindow(QMainWindow):
                     if vocal_split_capability.available
                     else "Vocal Separation · In development",
                 ),
+                (
+                    SEPARATION_MODE_CLEANUP,
+                    "Vocal Cleanup"
+                    if VOCAL_CLEANUP_AVAILABLE
+                    else "Vocal Cleanup · In development",
+                ),
             ),
             selected_option=self._separation_submode,
         )
@@ -633,6 +689,12 @@ class MainWindow(QMainWindow):
             SEPARATION_MODE_VOCAL,
             vocal_split_capability.available,
             disabled_tooltip=tr(vocal_split_capability.detail),
+        )
+        self.primary_navigation.set_page_option_enabled(
+            PAGE_SEPARATION,
+            SEPARATION_MODE_CLEANUP,
+            VOCAL_CLEANUP_AVAILABLE,
+            disabled_tooltip=tr("Planned for version 0.3.9 or later."),
         )
 
         self.theme_button = ThemeToggleButton()
@@ -878,6 +940,42 @@ class MainWindow(QMainWindow):
             maximum_reference_ms=capability.maximum_reference_ms,
         )
         layout.addWidget(self.vocal_split_workspace, 1)
+
+        self.vocal_cleanup_workspace = VocalCleanupWorkspace()
+        self.vocal_cleanup_workspace.source_changed.connect(
+            self._on_vocal_cleanup_source_changed
+        )
+        self.vocal_cleanup_workspace.preview_requested.connect(
+            self._start_vocal_cleanup_preview
+        )
+        self.vocal_cleanup_workspace.commit_preview_requested.connect(
+            self._commit_vocal_cleanup_preview
+        )
+        self.vocal_cleanup_workspace.region_remove_requested.connect(
+            self._remove_vocal_cleanup_region
+        )
+        self.vocal_cleanup_workspace.render_requested.connect(
+            self._start_vocal_cleanup_render
+        )
+        self.vocal_cleanup_workspace.result_remove_requested.connect(
+            self._remove_vocal_cleanup_result
+        )
+        self.vocal_cleanup_workspace.playback_source_changed.connect(
+            lambda: self._refresh_output_playback_queue(
+                WorkspacePlaybackScope.SEPARATION
+            )
+        )
+        self.vocal_cleanup_workspace.preview_invalidated.connect(
+            self._invalidate_vocal_cleanup_preview
+        )
+        self.vocal_cleanup_workspace.transport_bar.play_toggled.connect(
+            self._toggle_global_playback
+        )
+        self.vocal_cleanup_workspace.transport_bar.seek_requested.connect(
+            self._seek_global_playback
+        )
+        self.vocal_cleanup_workspace.hide()
+        layout.addWidget(self.vocal_cleanup_workspace, 1)
         return page
 
     def _build_conversion_page(self) -> QWidget:
@@ -1096,6 +1194,7 @@ class MainWindow(QMainWindow):
         )
         self.export_page.preview_seek_requested.connect(self._seek_export_preview)
         self.export_page.rename_requested.connect(self._rename_export)
+        self.export_page.remove_requested.connect(self._remove_export)
         return self.export_page
 
     def _build_models_page(self) -> QWidget:
@@ -1267,6 +1366,9 @@ class MainWindow(QMainWindow):
         primary_form.addWidget(_field_label("Pitch"), 1, 0)
         primary_form.addWidget(self.pitch_spin, 1, 1)
 
+        self.pitch_guide = ConversionPitchGuide()
+        self.pitch_spin.valueChanged.connect(self.pitch_guide.set_current_pitch)
+
         advanced_form.addWidget(_field_label("Root"), 0, 0)
         advanced_form.addWidget(self.rvc_root_edit, 0, 1)
         advanced_form.addWidget(self.browse_rvc_button, 0, 2)
@@ -1277,6 +1379,7 @@ class MainWindow(QMainWindow):
 
         settings_layout.addWidget(self.rvc_settings_header)
         settings_layout.addLayout(primary_form)
+        settings_layout.addWidget(self.pitch_guide)
         settings_layout.addWidget(self.rvc_advanced_settings_panel)
 
         self.rvc_action = TaskActionWidget("Convert Vocal", "Convert")
@@ -1390,12 +1493,16 @@ class MainWindow(QMainWindow):
             self.separation_stem_pool.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "vocal_split_workspace"):
             self.vocal_split_workspace.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "vocal_cleanup_workspace"):
+            self.vocal_cleanup_workspace.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "conversion_input_pool"):
             self.conversion_input_pool.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "rvc_inference_controls"):
             self.rvc_inference_controls.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "rvc_settings_header"):
             self.rvc_settings_header.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "pitch_guide"):
+            self.pitch_guide.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "conversion_result_browser"):
             self.conversion_result_browser.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "vocal_results_panel"):
@@ -1438,9 +1545,11 @@ class MainWindow(QMainWindow):
         self.separation_results_panel.apply_language()
         self.separation_stem_pool.apply_language()
         self.vocal_split_workspace.apply_language()
+        self.vocal_cleanup_workspace.apply_language()
         self.conversion_input_pool.apply_language()
         self.rvc_inference_controls.apply_language()
         self.rvc_settings_header.apply_language()
+        self.pitch_guide.apply_language()
         self.vocal_results_panel.apply_language()
         self.conversion_result_browser.apply_language()
         self.library_details_panel.apply_language()
@@ -1488,6 +1597,12 @@ class MainWindow(QMainWindow):
             == SEPARATION_MODE_VOCAL
         ):
             return self.vocal_split_workspace.transport_bar
+        if (
+            scope is WorkspacePlaybackScope.SEPARATION
+            and getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO)
+            == SEPARATION_MODE_CLEANUP
+        ):
+            return self.vocal_cleanup_workspace.transport_bar
         return {
             WorkspacePlaybackScope.SEPARATION: getattr(
                 self, "separation_transport_bar", None
@@ -1516,6 +1631,13 @@ class MainWindow(QMainWindow):
         )
         if vocal_transport is not None and vocal_transport is not except_transport:
             vocal_transport.clear()
+        cleanup_transport = getattr(
+            getattr(self, "vocal_cleanup_workspace", None),
+            "transport_bar",
+            None,
+        )
+        if cleanup_transport is not None and cleanup_transport is not except_transport:
+            cleanup_transport.clear()
 
     def _position_processing_queue(self) -> None:
         if not hasattr(self, "processing_queue_panel"):
@@ -1956,6 +2078,7 @@ class MainWindow(QMainWindow):
             return
         previous_index = self.page_stack.currentIndex()
         if previous_index == PAGE_STUDIO and index != PAGE_STUDIO:
+            MainWindow._remember_studio_timeline_state(self)
             self.studio_session_autosave.flush()
         workspace_pages = {PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO}
         if previous_index != index and not ({previous_index, index} <= workspace_pages):
@@ -1968,6 +2091,10 @@ class MainWindow(QMainWindow):
             self._restore_current_studio_session()
         self.page_stack.setCurrentIndex(index)
         self.primary_navigation.set_current_page(index)
+        if index == PAGE_CONVERSION:
+            schedule_pitch_guide = getattr(self, "_schedule_pitch_guide_refresh", None)
+            if callable(schedule_pitch_guide):
+                schedule_pitch_guide()
         if index == PAGE_EXPORT:
             self._refresh_export_page()
         if index == PAGE_STUDIO:
@@ -1987,6 +2114,8 @@ class MainWindow(QMainWindow):
         if page_id != PAGE_SEPARATION:
             return
         if option == SEPARATION_MODE_VOCAL and not singer_split_capability().available:
+            return
+        if option == SEPARATION_MODE_CLEANUP and not VOCAL_CLEANUP_AVAILABLE:
             return
         self._on_separation_submode_changed(option)
         self._navigate_to_page(PAGE_SEPARATION)
@@ -3211,14 +3340,24 @@ class MainWindow(QMainWindow):
     def _on_separation_submode_changed(self, mode: str) -> None:
         if mode == SEPARATION_MODE_VOCAL and not singer_split_capability().available:
             mode = SEPARATION_MODE_AUDIO
+        if mode == SEPARATION_MODE_CLEANUP and not VOCAL_CLEANUP_AVAILABLE:
+            mode = SEPARATION_MODE_AUDIO
+        if mode not in {
+            SEPARATION_MODE_AUDIO,
+            SEPARATION_MODE_VOCAL,
+            SEPARATION_MODE_CLEANUP,
+        }:
+            mode = SEPARATION_MODE_AUDIO
         if mode == getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO):
             return
         vocal_mode = mode == SEPARATION_MODE_VOCAL
+        cleanup_mode = mode == SEPARATION_MODE_CLEANUP
         self._separation_submode = mode
         self._suspend_playback()
         self.primary_navigation.set_page_option(PAGE_SEPARATION, mode)
-        self.separation_splitter.setVisible(not vocal_mode)
+        self.separation_splitter.setVisible(not vocal_mode and not cleanup_mode)
         self.vocal_split_workspace.setVisible(vocal_mode)
+        self.vocal_cleanup_workspace.setVisible(cleanup_mode)
         if vocal_mode:
             self._refresh_vocal_split_versions()
             self.vocal_split_workspace.result_timeline.refresh_layout()
@@ -3226,6 +3365,8 @@ class MainWindow(QMainWindow):
                 0,
                 self.vocal_split_workspace.result_timeline.refresh_layout,
             )
+        elif cleanup_mode:
+            self._refresh_vocal_cleanup_versions()
         self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
 
     def _refresh_vocal_split_versions(
@@ -3252,6 +3393,338 @@ class MainWindow(QMainWindow):
             preferred_path,
             preferred_group_id,
         )
+
+    def _refresh_vocal_cleanup_versions(
+        self,
+        selected: SongVocalVersion | None = None,
+    ) -> None:
+        versions = self._current_vocal_versions()
+        selected_version = self.vocal_cleanup_workspace.set_versions(
+            versions,
+            selected.job_dir if selected is not None else None,
+        )
+        self._load_vocal_cleanup_project(selected_version)
+
+    def _load_vocal_cleanup_project(
+        self,
+        version: SongVocalVersion | None,
+    ) -> VocalCleanupProject | None:
+        self._invalidate_vocal_cleanup_preview()
+        if version is None:
+            self.vocal_cleanup_workspace.set_project(None)
+            return None
+        try:
+            project = self.vocal_cleanup_store.load(
+                version.job_dir,
+                version.vocals_path,
+            )
+        except (OSError, VocalCleanupStoreError) as exc:
+            self.vocal_cleanup_workspace.set_project(None)
+            self.vocal_cleanup_workspace.set_preview_status(
+                _last_error_line(str(exc))
+            )
+            return None
+        self.vocal_cleanup_workspace.set_project(project)
+        return project
+
+    def _on_vocal_cleanup_source_changed(
+        self,
+        version: SongVocalVersion,
+    ) -> None:
+        self._suspend_playback()
+        self._load_vocal_cleanup_project(version)
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _invalidate_vocal_cleanup_preview(self) -> None:
+        self._vocal_cleanup_preview_generation += 1
+        discard_vocal_cleanup_preview(self._vocal_cleanup_preview)
+        self._vocal_cleanup_preview = None
+
+    def _start_vocal_cleanup_preview(
+        self,
+        version: SongVocalVersion,
+        start_ms: int,
+        end_ms: int,
+        effect: str,
+        strength: str,
+    ) -> None:
+        project = self._load_vocal_cleanup_project(version)
+        if project is None:
+            return
+        self._vocal_cleanup_preview_generation += 1
+        generation = self._vocal_cleanup_preview_generation
+        self._stop_playback()
+        self.vocal_cleanup_workspace.set_preview_running(True)
+        self.vocal_cleanup_workspace.set_preview_progress(2)
+        self.vocal_cleanup_workspace.set_preview_status("Preparing cleanup preview")
+        scope = WorkTaskScope(self.current_work_item.id) if self.current_work_item else None
+        worker = TaskWorker(
+            lambda progress: preview_vocal_cleanup(
+                version.vocals_path,
+                version.job_dir,
+                project.regions,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                effect=effect,
+                strength=strength,
+                progress_callback=progress,
+            )
+        )
+        self._run_worker(
+            worker,
+            lambda result: self._on_vocal_cleanup_preview_succeeded(
+                scope,
+                version,
+                generation,
+                result,
+            ),
+            lambda error: self._on_vocal_cleanup_preview_failed(
+                scope,
+                generation,
+                error,
+            ),
+            self.vocal_cleanup_workspace.preview_action,
+            task_title="Preview Vocal Cleanup",
+            task_detail=f"{version.label} / {start_ms / 1000:.1f}-{end_ms / 1000:.1f}s",
+            action_scope=lambda: scope is None or scope.is_current(self.current_work_item),
+        )
+
+    def _on_vocal_cleanup_preview_succeeded(
+        self,
+        scope: WorkTaskScope | None,
+        version: SongVocalVersion,
+        generation: int,
+        result: object,
+    ) -> None:
+        preview = result if isinstance(result, VocalCleanupPreview) else None
+        selected = self.vocal_cleanup_workspace.selected_version()
+        current = scope is None or scope.is_current(self.current_work_item)
+        selected_matches = (
+            selected is not None
+            and selected.job_dir.expanduser().resolve()
+            == version.job_dir.expanduser().resolve()
+        )
+        if (
+            preview is None
+            or generation != self._vocal_cleanup_preview_generation
+            or not current
+            or not selected_matches
+        ):
+            discard_vocal_cleanup_preview(preview)
+            return
+        discard_vocal_cleanup_preview(self._vocal_cleanup_preview)
+        self._vocal_cleanup_preview = preview
+        self.vocal_cleanup_workspace.set_preview_paths(
+            preview.preview_path,
+            preview.removed_preview_path,
+        )
+        self.vocal_cleanup_workspace.set_preview_progress(100)
+        self.vocal_cleanup_workspace.set_preview_status(
+            "Preview ready. Compare before adding this range."
+        )
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _on_vocal_cleanup_preview_failed(
+        self,
+        scope: WorkTaskScope | None,
+        generation: int,
+        error: str,
+    ) -> None:
+        if generation != self._vocal_cleanup_preview_generation:
+            return
+        if scope is not None and not scope.is_current(self.current_work_item):
+            return
+        self.vocal_cleanup_workspace.set_preview_status(_last_error_line(error))
+        self.vocal_cleanup_workspace.preview_action.status.setToolTip(
+            f"{LOG_FILE}\n{error}"
+        )
+
+    def _commit_vocal_cleanup_preview(self) -> None:
+        preview = self._vocal_cleanup_preview
+        version = self.vocal_cleanup_workspace.selected_version()
+        if preview is None or version is None:
+            return
+        try:
+            project = self.vocal_cleanup_store.load(
+                version.job_dir,
+                version.vocals_path,
+            )
+            project = self.vocal_cleanup_store.import_preview(
+                version.job_dir,
+                project,
+                start_ms=preview.start_ms,
+                end_ms=preview.end_ms,
+                effect=preview.effect,
+                strength=preview.strength,
+                processed_segment_path=preview.processed_segment_path,
+                removed_segment_path=preview.removed_segment_path,
+            )
+        except (OSError, VocalCleanupStoreError) as exc:
+            self.vocal_cleanup_workspace.set_preview_status(
+                _last_error_line(str(exc))
+            )
+            return
+        discard_vocal_cleanup_preview(preview)
+        self._vocal_cleanup_preview = None
+        self._vocal_cleanup_preview_generation += 1
+        self.vocal_cleanup_workspace.set_project(project)
+        self.vocal_cleanup_workspace.set_preview_status("Cleanup region added")
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _remove_vocal_cleanup_region(self, region_id: str) -> None:
+        version = self.vocal_cleanup_workspace.selected_version()
+        if version is None:
+            return
+        try:
+            project = self.vocal_cleanup_store.load(
+                version.job_dir,
+                version.vocals_path,
+            )
+            project = self.vocal_cleanup_store.remove_region(
+                version.job_dir,
+                project,
+                region_id,
+            )
+        except (OSError, VocalCleanupStoreError) as exc:
+            self.vocal_cleanup_workspace.set_preview_status(
+                _last_error_line(str(exc))
+            )
+            return
+        self._invalidate_vocal_cleanup_preview()
+        self.vocal_cleanup_workspace.set_project(project)
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _start_vocal_cleanup_render(self) -> None:
+        version = self.vocal_cleanup_workspace.selected_version()
+        if version is None:
+            return
+        try:
+            project = self.vocal_cleanup_store.load(
+                version.job_dir,
+                version.vocals_path,
+            )
+            target = self.vocal_cleanup_store.create_result_path(version.job_dir)
+        except (OSError, VocalCleanupStoreError) as exc:
+            self.vocal_cleanup_workspace.set_render_status(
+                _last_error_line(str(exc))
+            )
+            return
+        if not project.regions:
+            self.vocal_cleanup_workspace.set_render_status(
+                "Add at least one cleanup region."
+            )
+            return
+        self._stop_playback()
+        self.vocal_cleanup_workspace.set_render_running(True)
+        self.vocal_cleanup_workspace.set_render_progress(2)
+        self.vocal_cleanup_workspace.set_render_status("Creating clean vocal")
+        scope = WorkTaskScope(self.current_work_item.id) if self.current_work_item else None
+        worker = TaskWorker(
+            lambda progress: render_vocal_cleanup(
+                project,
+                target,
+                progress,
+            )
+        )
+        self._run_worker(
+            worker,
+            lambda result: self._on_vocal_cleanup_render_succeeded(
+                scope,
+                version,
+                project,
+                result,
+            ),
+            lambda error: self._on_vocal_cleanup_render_failed(scope, error),
+            self.vocal_cleanup_workspace.render_bar,
+            task_title="Create Clean Vocal",
+            task_detail=version.label,
+            action_scope=lambda: scope is None or scope.is_current(self.current_work_item),
+        )
+
+    def _on_vocal_cleanup_render_succeeded(
+        self,
+        scope: WorkTaskScope | None,
+        version: SongVocalVersion,
+        project: VocalCleanupProject,
+        result: object,
+    ) -> None:
+        path = result if isinstance(result, Path) else None
+        if path is None:
+            self._on_vocal_cleanup_render_failed(scope, "Cleanup render returned no result.")
+            return
+        try:
+            updated = self.vocal_cleanup_store.register_result(
+                version.job_dir,
+                project,
+                path,
+            )
+        except (OSError, VocalCleanupStoreError) as exc:
+            path.unlink(missing_ok=True)
+            self._on_vocal_cleanup_render_failed(scope, str(exc))
+            return
+        if scope is not None and not scope.is_current(self.current_work_item):
+            return
+        selected = self.vocal_cleanup_workspace.selected_version()
+        if (
+            selected is not None
+            and selected.job_dir.expanduser().resolve()
+            == version.job_dir.expanduser().resolve()
+        ):
+            selected_result_id = updated.results[0].result_id if updated.results else ""
+            self.vocal_cleanup_workspace.set_project(
+                updated,
+                selected_result_id=selected_result_id,
+            )
+            self.vocal_cleanup_workspace.set_render_progress(100)
+            self.vocal_cleanup_workspace.set_render_status("Clean vocal ready")
+        self._refresh_conversion_input_choices(
+            self._current_vocal_versions(),
+            version.job_dir,
+            preferred_input_path=path,
+        )
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
+
+    def _on_vocal_cleanup_render_failed(
+        self,
+        scope: WorkTaskScope | None,
+        error: str,
+    ) -> None:
+        if scope is not None and not scope.is_current(self.current_work_item):
+            return
+        self.vocal_cleanup_workspace.set_render_status(_last_error_line(error))
+        self.vocal_cleanup_workspace.render_bar.status.setToolTip(
+            f"{LOG_FILE}\n{error}"
+        )
+
+    def _remove_vocal_cleanup_result(
+        self,
+        result: VocalCleanupResult,
+    ) -> None:
+        version = self.vocal_cleanup_workspace.selected_version()
+        if version is None:
+            return
+        try:
+            project = self.vocal_cleanup_store.load(
+                version.job_dir,
+                version.vocals_path,
+            )
+            project = self.vocal_cleanup_store.remove_result(
+                version.job_dir,
+                project,
+                result.result_id,
+            )
+        except (OSError, VocalCleanupStoreError) as exc:
+            self.vocal_cleanup_workspace.set_render_status(
+                _last_error_line(str(exc))
+            )
+            return
+        self.vocal_cleanup_workspace.set_project(project)
+        self.vocal_cleanup_workspace.set_render_status("Cleaned vocal deleted")
+        self._refresh_conversion_input_choices(
+            self._current_vocal_versions(),
+            version.job_dir,
+        )
+        self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
 
     def _on_vocal_split_source_changed(self, version: SongVocalVersion) -> None:
         self._suspend_playback()
@@ -3885,6 +4358,8 @@ class MainWindow(QMainWindow):
             self.separation_stem_pool.set_versions((), None)
             self.vocal_split_workspace.set_versions((), None)
             self.vocal_split_workspace.set_groups(())
+            self.vocal_cleanup_workspace.set_versions((), None)
+            self.vocal_cleanup_workspace.set_project(None)
             self._apply_separation_stem_selection(None, None)
             versions = self._current_vocal_versions()
             self._refresh_conversion_input_choices(versions, None)
@@ -3995,6 +4470,8 @@ class MainWindow(QMainWindow):
             self.separation_stem_pool.set_versions((), None)
             self.vocal_split_workspace.set_versions((), None)
             self.vocal_split_workspace.set_groups(())
+            self.vocal_cleanup_workspace.set_versions((), None)
+            self.vocal_cleanup_workspace.set_project(None)
             self._apply_separation_stem_selection(None, None)
             self._refresh_conversion_input_choices(self._current_vocal_versions(), None)
             return
@@ -4013,6 +4490,11 @@ class MainWindow(QMainWindow):
         )
         self._apply_separation_stem_selection(vocal_result, instrumental_result)
         self._refresh_vocal_split_versions(selected)
+        if (
+            getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO)
+            == SEPARATION_MODE_CLEANUP
+        ):
+            self._refresh_vocal_cleanup_versions(selected)
 
     def _on_separation_stem_selection_changed(
         self,
@@ -4054,6 +4536,7 @@ class MainWindow(QMainWindow):
         versions: tuple[SongVocalVersion, ...],
         selected_job_dir: Path | None,
         preferred_converted_path: Path | None = None,
+        preferred_input_path: Path | None = None,
     ) -> None:
         convert_session = MainWindow._work_convert_session(self)
         context = convert_session.refresh(
@@ -4071,7 +4554,8 @@ class MainWindow(QMainWindow):
             selected_choice = set_choices(
                 self._conversion_input_choices(versions),
                 selected_job_dir=input_job_dir,
-                preserve_selection=True,
+                preferred_path=preferred_input_path,
+                preserve_selection=preferred_input_path is None,
             )
             if selected_choice is not None:
                 convert_session.select_input_job_dir(selected_choice.version.job_dir)
@@ -4094,12 +4578,40 @@ class MainWindow(QMainWindow):
             self.conversion_result_browser.selected_path()
         )
         MainWindow._sync_conversion_context_from_session(self)
+        schedule_pitch_guide = getattr(self, "_schedule_pitch_guide_refresh", None)
+        if callable(schedule_pitch_guide):
+            schedule_pitch_guide()
 
     def _conversion_input_choices(
         self,
         versions: tuple[SongVocalVersion, ...],
     ) -> tuple[VocalInputChoice, ...]:
-        return tuple(original_vocal_choice(version) for version in versions)
+        choices: list[VocalInputChoice] = []
+        cleanup_store = getattr(self, "vocal_cleanup_store", None)
+        for version in versions:
+            choices.append(original_vocal_choice(version))
+            if cleanup_store is None:
+                continue
+            try:
+                project = cleanup_store.load(
+                    version.job_dir,
+                    version.vocals_path,
+                )
+            except (OSError, VocalCleanupStoreError) as exc:
+                logger = getattr(self, "_logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "Could not load vocal cleanup results | job=%s error=%s",
+                        version.job_dir,
+                        exc,
+                    )
+                continue
+            choices.extend(
+                cleanup_vocal_choice(version, result)
+                for result in project.results
+                if result.path.is_file()
+            )
+        return tuple(choices)
 
     def _on_conversion_input_choice_changed(
         self,
@@ -4112,6 +4624,9 @@ class MainWindow(QMainWindow):
         )
         self.conversion_result_browser.select_converted(None)
         MainWindow._sync_conversion_context_from_session(self)
+        schedule_pitch_guide = getattr(self, "_schedule_pitch_guide_refresh", None)
+        if callable(schedule_pitch_guide):
+            schedule_pitch_guide()
 
     def _on_conversion_input_version_changed(
         self,
@@ -4123,6 +4638,9 @@ class MainWindow(QMainWindow):
         )
         self.conversion_result_browser.select_converted(None)
         MainWindow._sync_conversion_context_from_session(self)
+        schedule_pitch_guide = getattr(self, "_schedule_pitch_guide_refresh", None)
+        if callable(schedule_pitch_guide):
+            schedule_pitch_guide()
 
     def _sync_conversion_context_from_session(self) -> None:
         context = MainWindow._work_convert_session(self).context()
@@ -4227,6 +4745,9 @@ class MainWindow(QMainWindow):
         finally:
             self._is_loading_rvc_settings = False
         self._save_rvc_settings_from_controls()
+        schedule_pitch_guide = getattr(self, "_schedule_pitch_guide_refresh", None)
+        if callable(schedule_pitch_guide):
+            schedule_pitch_guide()
 
     def _populate_model_combo(
         self,
@@ -4270,6 +4791,9 @@ class MainWindow(QMainWindow):
         choice = self.model_combo.currentData()
         if not isinstance(choice, RvcModelChoice):
             self._save_rvc_settings_from_controls()
+            schedule_pitch_guide = getattr(self, "_schedule_pitch_guide_refresh", None)
+            if callable(schedule_pitch_guide):
+                schedule_pitch_guide()
             return
         self._apply_rvc_model_choice(choice)
 
@@ -4310,6 +4834,9 @@ class MainWindow(QMainWindow):
             ),
         )
         save_app_settings(self.settings)
+        schedule_pitch_guide = getattr(self, "_schedule_pitch_guide_refresh", None)
+        if callable(schedule_pitch_guide):
+            schedule_pitch_guide()
 
     def _populate_combo(self, combo: QComboBox, values: list[str], current_value: str, placeholder: str) -> None:
         combo.blockSignals(True)
@@ -4352,6 +4879,138 @@ class MainWindow(QMainWindow):
         )
         self.settings = replace(self.settings, rvc=rvc_settings)
         save_app_settings(self.settings)
+
+    def _schedule_pitch_guide_refresh(self) -> None:
+        self._pitch_guide_refresh_timer.start()
+
+    def _refresh_pitch_guide(self) -> None:
+        selected_choice = self.conversion_input_pool.selected_choice()
+        selected_model = self.model_combo.currentData()
+        if selected_choice is None or not isinstance(selected_model, RvcModelChoice):
+            self._pitch_guide_generation += 1
+            self._pitch_guide_pending_request = None
+            self.pitch_guide.clear_context()
+            return
+
+        self._pitch_guide_generation += 1
+        generation = self._pitch_guide_generation
+        self._pitch_guide_pending_request = None
+        if not selected_model.model_id:
+            self.pitch_guide.set_unavailable("Model range information is unavailable.")
+            return
+
+        model_profile = None
+        model_workspace = getattr(self, "model_workspace", None)
+        if model_workspace is not None:
+            record = next(
+                (
+                    item
+                    for item in model_workspace.records()
+                    if item.model_id == selected_model.model_id
+                ),
+                None,
+            )
+            if record is not None:
+                benchmark = load_cached_model_precision_benchmark(
+                    model_workspace.root,
+                    record,
+                )
+                model_profile = precision_benchmark_pitch_profile(benchmark)
+
+        report = None
+        if model_profile is None:
+            report = load_cached_model_dataset_analysis(
+                self.model_dataset_store,
+                selected_model.model_id,
+            )
+            model_profile = model_pitch_profile(report)
+        if model_profile is None:
+            self.pitch_guide.set_unavailable("Model range information is unavailable.")
+            return
+        if (
+            report is not None
+            and not cached_model_analysis_is_current(
+                self.model_dataset_store,
+                selected_model.model_id,
+            )
+        ):
+            self.pitch_guide.set_unavailable("Model material analysis is out of date.")
+            return
+        if not selected_choice.path.is_file():
+            self.pitch_guide.set_unavailable("Could not analyze the selected vocal.")
+            return
+
+        self.pitch_guide.set_analyzing()
+        self._pitch_guide_pending_request = (
+            generation,
+            selected_choice.path.expanduser().resolve(),
+            model_profile,
+        )
+        self._start_pending_pitch_guide_analysis()
+
+    def _start_pending_pitch_guide_analysis(self) -> None:
+        active = self._pitch_guide_worker
+        if active is not None and active.isRunning():
+            return
+        request = self._pitch_guide_pending_request
+        if request is None:
+            return
+        self._pitch_guide_pending_request = None
+        generation, source_path, model_profile = request
+        worker = TaskWorker(
+            lambda _progress: analyze_conversion_pitch(
+                self.pitch_analysis_cache,
+                source_path,
+                model_profile,
+            )
+        )
+        self._pitch_guide_worker = worker
+        self._workers.append(worker)
+        worker.succeeded.connect(
+            lambda result, requested_generation=generation: self._on_pitch_guide_succeeded(
+                requested_generation,
+                result,
+            )
+        )
+        worker.failed.connect(
+            lambda error, requested_generation=generation: self._on_pitch_guide_failed(
+                requested_generation,
+                error,
+            )
+        )
+
+        def cleanup() -> None:
+            if worker in self._workers:
+                self._workers.remove(worker)
+            if self._pitch_guide_worker is worker:
+                self._pitch_guide_worker = None
+            worker.deleteLater()
+            if self._pitch_guide_pending_request is not None:
+                QTimer.singleShot(0, self._start_pending_pitch_guide_analysis)
+
+        worker.finished.connect(cleanup)
+        worker.start()
+
+    def _on_pitch_guide_succeeded(self, generation: int, result: object) -> None:
+        if generation != self._pitch_guide_generation:
+            return
+        if not isinstance(result, PitchRecommendationResult):
+            self.pitch_guide.set_unavailable("Could not analyze the selected vocal.")
+            return
+        if result.recommendation is None:
+            self.pitch_guide.set_unavailable(
+                result.message_key or "Could not analyze the selected vocal."
+            )
+            return
+        self.pitch_guide.set_recommendation(
+            result.recommendation,
+            current_pitch=self.pitch_spin.value(),
+        )
+
+    def _on_pitch_guide_failed(self, generation: int, error: str) -> None:
+        self._logger.warning("Conversion pitch analysis failed | %s", _last_error_line(error))
+        if generation == self._pitch_guide_generation:
+            self.pitch_guide.set_unavailable("Could not analyze the selected vocal.")
 
     def _on_rvc_inference_settings_changed(self, inference: RvcInferenceSettings) -> None:
         if self._is_loading_rvc_settings:
@@ -4661,22 +5320,96 @@ class MainWindow(QMainWindow):
         self._refresh_output_playback_queue()
 
     def _restore_current_studio_session(self) -> None:
-        item = self.current_song or self.current_work_item
+        autosave = getattr(self, "studio_session_autosave", None)
+        if autosave is not None and autosave.flush() is False:
+            return
+        item = self.current_work_item or self.current_song
         if item is None:
-            self._apply_studio_session(StudioSession())
+            self._apply_studio_session(StudioSession(), song_id="")
             return
         try:
             workspace = self.library.studio_workspace(item.id)
         except KeyError:
-            self._apply_studio_session(StudioSession(), ())
+            self._apply_studio_session(StudioSession(), (), song_id=item.id)
             return
-        self._apply_studio_session(workspace.session, workspace.assets)
+        self._apply_studio_session(
+            workspace.session,
+            workspace.assets,
+            song_id=item.id,
+        )
+
+    def _remember_studio_timeline_state(self) -> None:
+        item = getattr(self, "current_work_item", None) or getattr(self, "current_song", None)
+        editor = getattr(self, "studio_editor", None)
+        if item is None or editor is None:
+            return
+        view_positions = getattr(self, "_studio_timeline_view_positions", None)
+        if view_positions is None:
+            view_positions = {}
+            self._studio_timeline_view_positions = view_positions
+        view_positions[item.id] = editor.timeline_view_position()
+
+        duration_ms = session_duration_ms(editor.session())
+        position_ms = editor.playhead_position_ms()
+        queue = getattr(self, "current_playback_queue", None)
+        if (
+            queue is not None
+            and queue.scope == WorkspacePlaybackScope.STUDIO.value
+            and queue.source_id == f"studio:{item.id}"
+        ):
+            position_ms = (
+                self.player.position_ms()
+                if self.player.is_playing()
+                else self._playback_position_ms
+            )
+        MainWindow._playback_session(self).remember_position(
+            "output",
+            f"studio:{item.id}",
+            position_ms,
+            duration_ms=duration_ms,
+        )
+
+    def _restore_studio_timeline_state(self) -> None:
+        item = getattr(self, "current_work_item", None) or getattr(self, "current_song", None)
+        editor = getattr(self, "studio_editor", None)
+        if item is None or editor is None:
+            return
+        duration_ms = session_duration_ms(editor.session())
+        route = ("output", f"studio:{item.id}")
+        queue = getattr(self, "current_playback_queue", None)
+        if (
+            queue is not None
+            and queue.scope == WorkspacePlaybackScope.STUDIO.value
+            and queue.source_id == route[1]
+        ):
+            position_ms = (
+                self.player.position_ms()
+                if self.player.is_playing()
+                else self._playback_position_ms
+            )
+        else:
+            position_ms = MainWindow._playback_session(self).resume_positions.get(route, 0)
+        position_ms = max(0, min(int(position_ms), duration_ms))
+        playback_session = MainWindow._playback_session(self)
+        playback_session.set_position_ms(position_ms)
+        MainWindow._sync_playback_session_state(self, playback_session)
+        editor.set_playhead(position_ms)
+
+        view_position = getattr(self, "_studio_timeline_view_positions", {}).get(item.id)
+        if view_position is not None:
+            editor.restore_timeline_view_position(*view_position)
 
     def _apply_studio_session(
         self,
         session: StudioSession,
         assets: tuple[StudioSoundAsset, ...] | None = None,
+        *,
+        song_id: str | None = None,
     ) -> None:
+        if song_id is None:
+            item = self.current_work_item or self.current_song
+            song_id = item.id if item is not None else ""
+        self._studio_session_song_id = song_id
         self._is_loading_studio_session = True
         try:
             self.vocal_track.set_mix_state(
@@ -4693,7 +5426,7 @@ class MainWindow(QMainWindow):
             )
             self._sync_result_playback_settings()
             if assets is None:
-                item = self.current_song or self.current_work_item
+                item = self.current_work_item or self.current_song
                 try:
                     assets = self.library.studio_assets(item.id) if item is not None else ()
                 except KeyError:
@@ -4728,14 +5461,17 @@ class MainWindow(QMainWindow):
     def _queue_current_studio_session_save(self) -> None:
         if self._is_loading_studio_session or self.current_output_set is None:
             return
-        item = self.current_song or self.current_work_item
+        item = self.current_work_item or self.current_song
         if item is None:
+            return
+        owner_id = getattr(self, "_studio_session_song_id", "") or item.id
+        if owner_id != item.id:
             return
         session = self._studio_session_from_tracks()
         if session.tracks and session != self.studio_editor.session():
             self.studio_editor.set_context(session, self.studio_editor.sound_assets())
         self.studio_session_autosave.queue(
-            item.id,
+            owner_id,
             session,
             self.studio_editor.sound_assets(),
         )
@@ -4771,6 +5507,12 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self._is_loading_studio_session:
             return
+        item = self.current_work_item or self.current_song
+        if item is None:
+            return
+        owner_id = getattr(self, "_studio_session_song_id", "") or item.id
+        if owner_id != item.id:
+            return
         self._is_loading_studio_session = True
         try:
             self.vocal_track.set_mix_state(
@@ -4788,13 +5530,11 @@ class MainWindow(QMainWindow):
             self._sync_result_playback_settings()
         finally:
             self._is_loading_studio_session = False
-        item = self.current_song or self.current_work_item
-        if item is not None:
-            self.studio_session_autosave.queue(
-                item.id,
-                session,
-                self.studio_editor.sound_assets(),
-            )
+        self.studio_session_autosave.queue(
+            owner_id,
+            session,
+            self.studio_editor.sound_assets(),
+        )
         queue = self.current_playback_queue
         if (
             item is None
@@ -5009,10 +5749,12 @@ class MainWindow(QMainWindow):
     def _prepare_studio_playback_surface(self) -> None:
         queue = self.current_playback_queue
         if queue is not None and queue.scope == WorkspacePlaybackScope.STUDIO.value:
+            MainWindow._restore_studio_timeline_state(self)
             self._refresh_playback_ui(is_playing=self.player.is_playing())
             return
         if queue is not None:
             self._suspend_playback()
+        MainWindow._restore_studio_timeline_state(self)
         self._sync_idle_studio_transport()
 
     def _sync_idle_studio_transport(self) -> None:
@@ -5294,6 +6036,12 @@ class MainWindow(QMainWindow):
             == SEPARATION_MODE_VOCAL
         ):
             return list(self.vocal_split_workspace.result_timeline.playback_tracks())
+        if (
+            scope is WorkspacePlaybackScope.SEPARATION
+            and getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO)
+            == SEPARATION_MODE_CLEANUP
+        ):
+            return list(self.vocal_cleanup_workspace.playback_tracks())
         if scope is WorkspacePlaybackScope.CONVERSION:
             panel = getattr(self, "vocal_results_panel", None)
             playback_tracks = getattr(panel, "playback_tracks", None)
@@ -5350,7 +6098,7 @@ class MainWindow(QMainWindow):
         if (
             scope is WorkspacePlaybackScope.SEPARATION
             and getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO)
-            == SEPARATION_MODE_VOCAL
+            in {SEPARATION_MODE_VOCAL, SEPARATION_MODE_CLEANUP}
             and not tracks
         ):
             return None
@@ -5457,6 +6205,9 @@ class MainWindow(QMainWindow):
             )
             if vocal_timeline is not None:
                 vocal_timeline.set_playhead_ratio(0.0)
+            cleanup_workspace = getattr(self, "vocal_cleanup_workspace", None)
+            if cleanup_workspace is not None:
+                cleanup_workspace.set_playhead_ms(0)
             self.vocal_results_panel.set_playhead_ratio(0.0)
             studio_editor = getattr(self, "studio_editor", None)
             if studio_editor is not None:
@@ -5469,6 +6220,11 @@ class MainWindow(QMainWindow):
                 == SEPARATION_MODE_VOCAL
             ):
                 self.vocal_split_workspace.result_timeline.set_playhead_ratio(ratio)
+            elif (
+                getattr(self, "_separation_submode", SEPARATION_MODE_AUDIO)
+                == SEPARATION_MODE_CLEANUP
+            ):
+                self.vocal_cleanup_workspace.set_playhead_ms(position)
             else:
                 self.separation_results_panel.set_playhead_ratio(ratio)
         elif scope is WorkspacePlaybackScope.CONVERSION:
@@ -5526,12 +6282,12 @@ class MainWindow(QMainWindow):
             audio_exports = self.library.audio_exports(song.id)
             video_exports = self.library.video_exports(song.id)
             export_dir = self.library.audio_export_dir(song.id).parent
-            video_source = self.library.video_source(song.id)
+            video_enabled = self.library.can_render_video(song.id)
         except KeyError:
             audio_exports = ()
             video_exports = ()
             export_dir = None
-            video_source = VideoSource()
+            video_enabled = False
         output_available = MainWindow._work_output_session(self).output_available(
             song.output_job_dir,
             self.settings.output_root,
@@ -5540,7 +6296,6 @@ class MainWindow(QMainWindow):
             output_available=output_available,
             item=song,
         )
-        has_local_media = video_source.path is not None and video_source.path.is_file()
         try:
             export_duration_ms = read_audio_metadata(song.path).duration_ms
         except Exception:
@@ -5549,7 +6304,7 @@ class MainWindow(QMainWindow):
         self.export_page.set_target_song(
             song.id,
             audio_enabled=capabilities.can_export,
-            video_enabled=capabilities.can_export and has_local_media,
+            video_enabled=capabilities.can_export and video_enabled,
             duration_ms=export_duration_ms,
         )
         if self._current_playback_context() == "export":
@@ -5689,6 +6444,37 @@ class MainWindow(QMainWindow):
                 f"Rename failed: {_last_error_line(str(exc))}",
                 str(exc),
             )
+            return
+        self._refresh_export_page()
+
+    def _remove_export(self, path: Path) -> None:
+        song_id = self._export_song_id
+        if not song_id:
+            return
+        resolved = path.expanduser().resolve()
+        if not ConfirmationDialog.confirm(
+            self,
+            tr("Delete Export"),
+            tr(
+                "Delete '{name}' from this song? This cannot be undone.",
+                name=resolved.name,
+            ),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Delete"),
+            cancel_label=tr("Cancel"),
+        ):
+            return
+        queue = self.current_playback_queue
+        if queue is not None and queue.context == "export" and queue.source_id == str(resolved):
+            MainWindow._playback_session(self).pop_resume_position("export", str(resolved))
+            self._stop_playback(clear_queue=True)
+        try:
+            self.library.remove_asset(song_id, resolved)
+        except Exception as exc:
+            message = f"Delete failed: {_last_error_line(str(exc))}"
+            self.export_page.set_audio_status(message, str(exc))
+            self.export_page.set_video_status(message, str(exc))
             return
         self._refresh_export_page()
 

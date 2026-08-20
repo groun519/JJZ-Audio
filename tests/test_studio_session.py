@@ -27,6 +27,7 @@ from jang_app.services.studio_session import (
     StudioTrackState,
     load_studio_session,
     save_studio_session,
+    studio_session_history_paths,
     studio_session_path,
 )
 from jang_app.services.video_source import VideoSourceStore
@@ -42,6 +43,48 @@ from jang_app.services.vocal_project_store import VocalProjectStore
 
 
 class StudioSessionTests(unittest.TestCase):
+    def test_distinct_saves_archive_the_previous_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            original = load_studio_session(package)
+            edited = replace(
+                original,
+                tracks=(
+                    replace(original.tracks[0], volume_percent=137),
+                    *original.tracks[1:],
+                ),
+            )
+
+            save_studio_session(package, original)
+            save_studio_session(package, original)
+            self.assertEqual(studio_session_history_paths(package), ())
+
+            save_studio_session(package, edited)
+
+            history = studio_session_history_paths(package)
+            self.assertEqual(len(history), 1)
+            archived = json.loads(history[0].read_text(encoding="utf-8"))
+            self.assertEqual(archived["tracks"][0]["volume_percent"], 100)
+
+    def test_invalid_current_session_recovers_the_latest_valid_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            original = load_studio_session(package)
+            edited = replace(
+                original,
+                tracks=(
+                    replace(original.tracks[0], volume_percent=137),
+                    *original.tracks[1:],
+                ),
+            )
+            save_studio_session(package, original)
+            save_studio_session(package, edited)
+            studio_session_path(package).write_text("not-json", encoding="utf-8")
+
+            recovered = load_studio_session(package)
+
+            self.assertEqual(recovered.tracks[0].volume_percent, 100)
+
     def test_current_reverb_effect_round_trips_and_version_four_defaults_empty(self) -> None:
         self.assertTrue(hasattr(studio_session, "StudioEffect"))
         with tempfile.TemporaryDirectory() as temporary:
@@ -248,6 +291,45 @@ class StudioSessionTests(unittest.TestCase):
             studio_session_path(package).write_text(json.dumps(data), encoding="utf-8")
             clamped = load_studio_session(package).tracks[0].clips[0].effects[2].bitcrusher
             self.assertEqual(clamped, studio_session.StudioBitcrusherSettings(4, 2_000, 100))
+
+    def test_hard_tune_effect_round_trips_and_clamps_invalid_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            session = load_studio_session(package)
+            track = session.tracks[0]
+            clip = track.clips[0]
+            effect = studio_session.StudioEffect(
+                "fx-hard-tune",
+                "hard_tune",
+                hard_tune=studio_session.StudioHardTuneSettings(9, "minor", 95, 30, 10),
+            )
+            edited = replace(
+                session,
+                tracks=(
+                    replace(track, clips=(replace(clip, effects=(effect,)),)),
+                    *session.tracks[1:],
+                ),
+            )
+            save_studio_session(package, edited)
+
+            restored = load_studio_session(package)
+
+            self.assertEqual(restored.tracks[0].clips[0].effects, (effect,))
+            data = json.loads(studio_session_path(package).read_text(encoding="utf-8"))
+            data["tracks"][0]["clips"][0]["effects"][0]["settings"] = {
+                "key_note": 99,
+                "scale": "unknown",
+                "strength_percent": 500,
+                "response_ms": 0,
+                "vibrato_preserve_percent": -20,
+            }
+            studio_session_path(package).write_text(json.dumps(data), encoding="utf-8")
+
+            clamped = load_studio_session(package).tracks[0].clips[0].effects[0].hard_tune
+            self.assertEqual(
+                clamped,
+                studio_session.StudioHardTuneSettings(11, "chromatic", 100, 5, 0),
+            )
 
     def test_legacy_mix_state_migrates_to_non_destructive_full_length_clips(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

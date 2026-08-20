@@ -13,8 +13,10 @@ from jang_app.services.video_export_settings import (
     ENCODING_STANDARD,
     PRESET_COMPACT_720P,
     PRESET_CUSTOM,
+    PRESET_DISCORD_10MB,
     PRESET_HIGH_QUALITY,
     PRESET_YOUTUBE_1080P,
+    VIDEO_TARGET_10MB_BYTES,
     VideoExportSettings,
     video_export_preset,
 )
@@ -47,9 +49,10 @@ class VideoExportControls(QFrame):
         preset_layout.setContentsMargins(4, 4, 4, 4)
         preset_layout.setSpacing(4)
         for preset_id, label in (
-            (PRESET_YOUTUBE_1080P, "YouTube 1080p"),
-            (PRESET_HIGH_QUALITY, "High Quality"),
-            (PRESET_COMPACT_720P, "Compact 720p"),
+            (PRESET_YOUTUBE_1080P, "1080p"),
+            (PRESET_HIGH_QUALITY, "High"),
+            (PRESET_COMPACT_720P, "720p"),
+            (PRESET_DISCORD_10MB, "10MB"),
             (PRESET_CUSTOM, "Custom"),
         ):
             button = FeedbackButton()
@@ -125,14 +128,20 @@ class VideoExportControls(QFrame):
     def settings(self) -> VideoExportSettings:
         resolution = str(self.resolution_combo.currentData() or "1920x1080")
         width, height = (int(value) for value in resolution.split("x", 1))
+        preset_id = self._selected_preset_id()
         return VideoExportSettings(
-            preset_id=self._selected_preset_id(),
+            preset_id=preset_id,
             width=int(width),
             height=int(height),
             frame_rate=int(self.frame_rate_combo.currentData() or 30),
             quality_crf=int(self.quality_combo.currentData() or 18),
             encoding_preset=str(self.encoding_combo.currentData() or ENCODING_STANDARD),
             audio_bitrate_kbps=int(self.audio_bitrate_combo.currentData() or 320),
+            target_size_bytes=(
+                VIDEO_TARGET_10MB_BYTES
+                if preset_id == PRESET_DISCORD_10MB
+                else None
+            ),
         )
 
     def select_preset(self, preset_id: str) -> None:
@@ -147,14 +156,7 @@ class VideoExportControls(QFrame):
         self._running = is_running
         for button in self.preset_buttons.values():
             button.setEnabled(not is_running)
-        for combo in (
-            self.resolution_combo,
-            self.frame_rate_combo,
-            self.quality_combo,
-            self.encoding_combo,
-            self.audio_bitrate_combo,
-        ):
-            combo.setEnabled(not is_running)
+        self._sync_detail_controls()
         self.action_footer.set_running(is_running)
 
     def set_progress(self, value: int) -> None:
@@ -176,7 +178,12 @@ class VideoExportControls(QFrame):
             apply_widget_language(button)
         _set_combo_items(
             self.resolution_combo,
-            (("1080p (1920 x 1080)", "1920x1080"), ("720p (1280 x 720)", "1280x720")),
+            (
+                ("1080p (1920 x 1080)", "1920x1080"),
+                ("720p (1280 x 720)", "1280x720"),
+                ("480p (854 x 480)", "854x480"),
+                ("360p (640 x 360)", "640x360"),
+            ),
             selected["resolution"] or "1920x1080",
         )
         _set_combo_items(
@@ -196,13 +203,17 @@ class VideoExportControls(QFrame):
         )
         _set_combo_items(
             self.audio_bitrate_combo,
-            tuple((f"AAC {value} kbps", value) for value in (192, 256, 320)),
+            tuple(
+                (f"AAC {value} kbps", value)
+                for value in (64, 96, 128, 192, 256, 320)
+            ),
             selected["audio_bitrate"] or 320,
         )
         self._updating = False
         apply_widget_language(self)
         self._apply_help_text()
         self._update_summary()
+        self._sync_detail_controls()
 
     def _select_preset_from_button(self, preset_id: str) -> None:
         if preset_id == PRESET_CUSTOM:
@@ -218,6 +229,7 @@ class VideoExportControls(QFrame):
         self.preset_buttons[PRESET_CUSTOM].setChecked(True)
         self._updating = False
         self._update_summary()
+        self._sync_detail_controls()
         self.settings_changed.emit(self.settings())
 
     def _apply_settings(self, settings: VideoExportSettings) -> None:
@@ -230,10 +242,16 @@ class VideoExportControls(QFrame):
         _select_data(self.audio_bitrate_combo, settings.audio_bitrate_kbps)
         self._updating = False
         self._update_summary()
+        self._sync_detail_controls()
         self.settings_changed.emit(self.settings())
 
     def _update_summary(self) -> None:
         settings = self.settings()
+        if settings.target_size_bytes is not None:
+            self.summary_label.setText(
+                tr("MP4 / H.264 / Content-adaptive resolution / VMAF / Two-pass / Under 10 MB")
+            )
+            return
         self.summary_label.setText(
             f"MP4 / H.264 / {settings.width} x {settings.height} / "
             f"{settings.frame_rate} fps / AAC {settings.audio_bitrate_kbps} kbps"
@@ -250,7 +268,10 @@ class VideoExportControls(QFrame):
         )
         self.quality_info.set_content(
             tr("Video Quality"),
-            tr("Higher quality preserves more detail but increases render time and file size."),
+            tr(
+                "Higher quality preserves more detail but increases render time and file size. "
+                "The 10MB preset compares representative sections and selects the highest-scoring resolution."
+            ),
         )
         self.encoding_info.set_content(
             tr("Encoding Speed"),
@@ -266,6 +287,17 @@ class VideoExportControls(QFrame):
             (preset_id for preset_id, button in self.preset_buttons.items() if button.isChecked()),
             PRESET_YOUTUBE_1080P,
         )
+
+    def _sync_detail_controls(self) -> None:
+        automatic = self._selected_preset_id() == PRESET_DISCORD_10MB
+        for combo in (
+            self.resolution_combo,
+            self.frame_rate_combo,
+            self.quality_combo,
+            self.encoding_combo,
+            self.audio_bitrate_combo,
+        ):
+            combo.setEnabled(not self._running and not automatic)
 
 
 def _setting_combo() -> ScrollSafeComboBox:

@@ -23,6 +23,7 @@ from jang_app.qt_app.studio_character_effect_editor import (
 )
 from jang_app.qt_app.studio_delay_editor import StudioDelayEditor
 from jang_app.qt_app.studio_doubler_editor import StudioDoublerEditor
+from jang_app.qt_app.studio_hard_tune_editor import StudioHardTuneEditor
 from jang_app.qt_app.studio_reverb_editor import StudioReverbEditor
 from jang_app.qt_app.widgets import (
     COMPACT_ICON_BUTTON_SIZE,
@@ -55,6 +56,7 @@ from jang_app.services.studio_session import (
     STUDIO_EFFECT_DELAY,
     STUDIO_EFFECT_DOUBLER,
     STUDIO_EFFECT_LEVEL_MATCH,
+    STUDIO_EFFECT_HARD_TUNE,
     StudioClip,
     StudioEffect,
     StudioMediaSettings,
@@ -626,6 +628,7 @@ class StudioInspector(QFrame):
             effect.effect_id: effect
             for effect in clip.effects
             if effect.kind in ("reverb", STUDIO_EFFECT_DELAY, STUDIO_EFFECT_DOUBLER)
+            or effect.kind == STUDIO_EFFECT_HARD_TUNE
             or effect.kind in EDITABLE_EFFECT_KINDS
         }
         for effect_id in tuple(self.effect_tab_buttons):
@@ -660,7 +663,12 @@ class StudioInspector(QFrame):
             self._sync_effect_reference(editor, effect, clip)
             if isinstance(
                 editor,
-                (StudioReverbEditor, StudioDelayEditor, StudioDoublerEditor),
+                (
+                    StudioReverbEditor,
+                    StudioDelayEditor,
+                    StudioDoublerEditor,
+                    StudioHardTuneEditor,
+                ),
             ):
                 editor.set_theme_mode(self._theme_mode)
             editor.effect_changed.connect(self._forward_effect_changed)
@@ -677,6 +685,7 @@ class StudioInspector(QFrame):
         editor: StudioReverbEditor
         | StudioDelayEditor
         | StudioDoublerEditor
+        | StudioHardTuneEditor
         | StudioCharacterEffectEditor,
         effect: StudioEffect,
         clip: StudioClip,
@@ -694,6 +703,7 @@ class StudioInspector(QFrame):
         StudioReverbEditor
         | StudioDelayEditor
         | StudioDoublerEditor
+        | StudioHardTuneEditor
         | StudioCharacterEffectEditor
     ):
         if effect.kind == "reverb":
@@ -702,6 +712,8 @@ class StudioInspector(QFrame):
             editor = StudioDelayEditor()
         elif effect.kind == STUDIO_EFFECT_DOUBLER:
             editor = StudioDoublerEditor()
+        elif effect.kind == STUDIO_EFFECT_HARD_TUNE:
+            editor = StudioHardTuneEditor()
         else:
             editor = StudioCharacterEffectEditor(effect.kind)
         editor.set_effect(effect)

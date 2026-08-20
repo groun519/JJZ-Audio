@@ -20,6 +20,7 @@ from jang_app.qt_app.main_window import (
 from jang_app.services.audio_export import AudioMixSource
 from jang_app.services.audio_player import PreparedPlaybackAudio
 from jang_app.services.playback_queue import PlaybackQueue
+from jang_app.services.playback_session import PlaybackSession
 from jang_app.services.settings import AppSettings, StudioLayoutSettings
 from jang_app.services.song_assets import SongAsset
 from jang_app.services.workspace_playback import WorkspacePlaybackScope
@@ -162,6 +163,53 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
 
         self.assertEqual(contexts, [(updated, assets)])
         self.assertEqual(queued, [("song-1", updated, assets)])
+
+    def test_studio_restore_flushes_pending_edits_before_reading_disk(self) -> None:
+        from jang_app.services.studio_session import StudioSession
+
+        calls: list[tuple[str, object]] = []
+        session = StudioSession()
+        assets = (object(),)
+        window = SimpleNamespace(
+            current_work_item=SimpleNamespace(id="song-1"),
+            current_song=None,
+            studio_session_autosave=SimpleNamespace(
+                flush=lambda: calls.append(("flush", None)) or True
+            ),
+            library=SimpleNamespace(
+                studio_workspace=lambda song_id: calls.append(("load", song_id))
+                or SimpleNamespace(session=session, assets=assets)
+            ),
+            _apply_studio_session=lambda loaded, loaded_assets, **kwargs: calls.append(
+                ("apply", (loaded, loaded_assets, kwargs["song_id"]))
+            ),
+        )
+
+        MainWindow._restore_current_studio_session(window)
+
+        self.assertEqual(
+            calls,
+            [
+                ("flush", None),
+                ("load", "song-1"),
+                ("apply", (session, assets, "song-1")),
+            ],
+        )
+
+    def test_stale_studio_editor_signal_cannot_save_into_a_new_work_song(self) -> None:
+        from jang_app.services.studio_session import StudioSession
+
+        window = SimpleNamespace(
+            _is_loading_studio_session=False,
+            _studio_session_song_id="song-1",
+            current_work_item=SimpleNamespace(id="song-2"),
+            current_song=SimpleNamespace(id="song-1"),
+            studio_session_autosave=SimpleNamespace(
+                queue=lambda *_args: self.fail("stale session must not be saved")
+            ),
+        )
+
+        MainWindow._on_studio_editor_session_changed(window, StudioSession(), False)
 
     def test_space_shortcut_is_reserved_for_workspace_playback(self) -> None:
         button = QPushButton()
@@ -497,6 +545,42 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [("restore", PAGE_SEPARATION), ("prepare", PAGE_STUDIO)],
+        )
+
+    def test_studio_timeline_state_is_restored_for_the_same_work_song(self) -> None:
+        restored_playheads: list[int] = []
+        restored_views: list[tuple[int, int]] = []
+        editor = SimpleNamespace(
+            session=lambda: object(),
+            playhead_position_ms=lambda: 35_000,
+            timeline_view_position=lambda: (480, 72),
+            set_playhead=restored_playheads.append,
+            restore_timeline_view_position=lambda horizontal, vertical: restored_views.append(
+                (horizontal, vertical)
+            ),
+        )
+        playback_session = PlaybackSession()
+        window = SimpleNamespace(
+            current_song=SimpleNamespace(id="song-1"),
+            current_work_item=None,
+            current_playback_queue=None,
+            playback_session=playback_session,
+            _playback_position_ms=0,
+            _playback_resume_positions=playback_session.resume_positions,
+            _studio_timeline_view_positions={},
+            studio_editor=editor,
+        )
+
+        with patch("jang_app.qt_app.main_window.session_duration_ms", return_value=90_000):
+            MainWindow._remember_studio_timeline_state(window)
+            MainWindow._restore_studio_timeline_state(window)
+
+        self.assertEqual(window._playback_position_ms, 35_000)
+        self.assertEqual(restored_playheads, [35_000])
+        self.assertEqual(restored_views, [(480, 72)])
+        self.assertEqual(
+            playback_session.resume_positions[("output", "studio:song-1")],
+            35_000,
         )
 
     def test_video_source_defers_studio_session_loading_until_studio_is_visible(self) -> None:

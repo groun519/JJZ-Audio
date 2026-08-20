@@ -135,4 +135,8 @@ class ConversionInputPool(SoundPoolList):
 
 
 def _choice_badge(kind: str) -> str:
-    return {"lead": "Lead", "backing": "Backing"}.get(kind, "Vocal")
+    return {
+        "lead": "Lead",
+        "backing": "Backing",
+        "cleanup": "Clean",
+    }.get(kind, "Vocal")

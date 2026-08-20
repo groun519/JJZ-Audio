@@ -1165,15 +1165,17 @@ class ThemeToggleButton(FeedbackButton):
 class TrackMixControl(QFrame):
     settings_changed = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, *, compact: bool = False) -> None:
         super().__init__()
         self.setObjectName("TrackMixerStrip")
-        self.setFixedHeight(34)
+        self.setFixedHeight(43 if compact else 34)
         self._is_loading = False
+        self._compact = compact
 
         self.mixer_label = QLabel("LEVEL")
         self.mixer_label.setObjectName("TrackMixerLabel")
         self.mixer_label.setFixedWidth(42)
+        self.mixer_label.setVisible(not compact)
 
         self.mute_button = SvgIconButton("speaker", size=26)
         self.mute_button.setObjectName("TrackMuteButton")
@@ -1182,8 +1184,8 @@ class TrackMixControl(QFrame):
         self.mute_button.clicked.connect(self._on_mute_changed)
 
         self.volume_slider = VolumeSlider()
-        self.volume_slider.setMinimumWidth(72)
-        self.volume_slider.setMaximumWidth(180)
+        self.volume_slider.setMinimumWidth(42 if compact else 72)
+        self.volume_slider.setMaximumWidth(1000 if compact else 180)
         self.volume_slider.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
@@ -1193,20 +1195,38 @@ class TrackMixControl(QFrame):
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
         self.volume_label = QLabel("100%")
         self.volume_label.setObjectName("VolumeValue")
-        self.volume_label.setFixedWidth(45)
+        self.volume_label.setFixedWidth(38 if compact else 45)
         self.volume_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 4, 10, 4)
-        layout.setSpacing(8)
-        layout.addStretch(1)
-        layout.addWidget(self.mixer_label, 0)
-        layout.addWidget(self.mute_button, 0)
-        layout.addWidget(self.volume_slider, 1)
-        layout.addWidget(self.volume_label, 0)
+        if compact:
+            value_row = QHBoxLayout()
+            value_row.setContentsMargins(0, 0, 0, 0)
+            value_row.addStretch(1)
+            value_row.addWidget(self.volume_label, 0)
+
+            control_row = QHBoxLayout()
+            control_row.setContentsMargins(0, 0, 0, 0)
+            control_row.setSpacing(5)
+            control_row.addWidget(self.mute_button, 0)
+            control_row.addWidget(self.volume_slider, 1)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+            layout.addLayout(value_row, 0)
+            layout.addLayout(control_row, 0)
+        else:
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(10, 4, 10, 4)
+            layout.setSpacing(8)
+            layout.addStretch(1)
+            layout.addWidget(self.mixer_label, 0)
+            layout.addWidget(self.mute_button, 0)
+            layout.addWidget(self.volume_slider, 1)
+            layout.addWidget(self.volume_label, 0)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
-        self.mixer_label.setVisible(event.size().width() >= 300)
+        self.mixer_label.setVisible(not self._compact and event.size().width() >= 300)
         super().resizeEvent(event)
 
     def set_theme_mode(self, theme_mode: str) -> None:

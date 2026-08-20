@@ -91,6 +91,41 @@ class StudioEditorTests(unittest.TestCase):
         self.assertEqual(visible_scroll.value(), native_scroll.value())
         editor.close()
 
+    def test_timeline_view_position_restores_after_layout_refresh(self) -> None:
+        reference = StudioAssetRef("long", TRACK_ORIGINAL_VOCAL)
+        clip = StudioClip("long-clip", reference, 0, 0, 120_000)
+        session = StudioSession(
+            tracks=(
+                StudioTrack(
+                    "track-original-vocal",
+                    "Original Vocal",
+                    TRACK_ORIGINAL_VOCAL,
+                    clips=(clip,),
+                ),
+            )
+        )
+        editor = StudioEditor(include_sidebars=False)
+        editor.resize(720, 420)
+        editor.set_context(session, ())
+        editor.set_zoom(140)
+        editor.show()
+        self.app.processEvents()
+
+        horizontal_scroll = editor.timeline_scroll.horizontalScrollBar()
+        expected_horizontal = min(640, horizontal_scroll.maximum())
+        horizontal_scroll.setValue(expected_horizontal)
+        editor.set_playhead(45_000)
+        saved_view = editor.timeline_view_position()
+
+        horizontal_scroll.setValue(0)
+        editor.set_context(session, ())
+        editor.restore_timeline_view_position(*saved_view)
+        self.app.processEvents()
+
+        self.assertEqual(editor.playhead_position_ms(), 45_000)
+        self.assertEqual(editor.timeline_view_position(), saved_view)
+        editor.close()
+
     def test_sound_pool_drop_adds_non_destructive_clip_at_target_position(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             asset = _asset(Path(temporary))

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.3.9 - 2026-08-20
+
+### Added
+
+- Added a conversion pitch guide that compares source-vocal range with the selected model's stable range.
+- Added model precision benchmarking with per-note stability views and cached results.
+- Added Studio Hard Tune with key, scale, strength, response, vibrato preservation, and reusable presets.
+- Added aligned result timelines for comparing original vocals, instrumentals, and converted takes.
+- Added an adaptive 10 MB video export preset for constrained sharing services.
+
+### Changed
+
+- Made converted-vocal selection explicit when multiple takes are available.
+- Improved export-result management with direct removal actions and clearer row controls.
+- Archived distinct Studio session saves and recovered the latest valid history when the current session is damaged.
+
+### Fixed
+
+- Retried failed Studio autosaves instead of discarding pending edits after a storage error.
+- Stopped completed RVC training processes that remained alive after the final checkpoint was safely written.
+- Improved video quality selection and prevented unusably low-quality output when a size target cannot be met.
+
+### Quality
+
+- Added regression coverage for pitch recommendations, model precision evaluation, Hard Tune, result timelines, Studio session recovery, adaptive video export, result removal, and completed-training shutdown.
+
 ## 0.3.8 - 2026-08-19
 
 ### Added

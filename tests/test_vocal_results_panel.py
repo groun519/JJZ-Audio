@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
 
+from jang_app.qt_app.result_timeline import timeline_ticks
 from jang_app.qt_app.vocal_results_panel import VocalResultsPanel
 from jang_app.qt_app.widgets import DangerIconButton, TrackMixControl, TrackRow, WaveformView
 from jang_app.services.i18n import tr
@@ -184,6 +185,29 @@ class VocalResultsPanelTests(unittest.TestCase):
         self.assertEqual(panel.converted_waveform.current_path(), converted[1])
         panel.close()
 
+    def test_conversion_input_change_clears_a_previous_unselected_take(self) -> None:
+        panel = VocalResultsPanel(mode="conversion")
+        first = _version("first", ())
+        second = _version("second", ())
+        previous = Path("previous-take.wav")
+
+        panel.set_conversion_context(
+            first,
+            converted_paths=(previous,),
+            selected_converted_path=previous,
+        )
+        panel.set_conversion_context(
+            second,
+            converted_paths=(previous,),
+            selected_converted_path=None,
+        )
+
+        self.assertIsNone(panel.converted_waveform.current_path())
+        self.assertIsNone(panel.converted_waveform.waveform._path)
+        self.assertFalse(panel.original_waveform.mix_control.is_muted())
+        self.assertTrue(panel.converted_waveform.mix_control.is_muted())
+        panel.close()
+
     def test_separation_mode_selects_a_saved_run(self) -> None:
         panel = VocalResultsPanel(mode="separation")
         first = _version("first", ())
@@ -357,6 +381,57 @@ class VocalResultsPanelTests(unittest.TestCase):
         self.assertEqual(control.volume_percent(), 175)
         self.assertEqual(changed.count(), 0)
         panel.close()
+
+    def test_conversion_and_separation_share_the_timeline_layout(self) -> None:
+        conversion = VocalResultsPanel(mode="conversion")
+        separation = VocalResultsPanel(mode="separation")
+
+        self.assertEqual(conversion.timeline_surface.layout().count(), 4)
+        self.assertEqual(separation.timeline_surface.layout().count(), 3)
+        self.assertEqual(
+            conversion.original_waveform.header.width(),
+            separation.original_waveform.header.width(),
+        )
+        self.assertEqual(conversion.original_waveform.objectName(), "ResultTimelineTrack")
+        self.assertEqual(separation.original_waveform.objectName(), "ResultTimelineTrack")
+        conversion.close()
+        separation.close()
+
+    def test_timeline_playhead_is_synchronized_across_ruler_and_tracks(self) -> None:
+        panel = VocalResultsPanel(mode="conversion")
+
+        panel.set_playhead_ratio(0.625)
+
+        self.assertEqual(panel.timeline_ruler._playhead_ratio, 0.625)
+        self.assertTrue(
+            all(waveform.waveform._playhead_ratio == 0.625 for waveform in panel.result_waveforms)
+        )
+        panel.close()
+
+    @patch("jang_app.qt_app.vocal_results_panel.read_audio_metadata")
+    def test_timeline_duration_is_shared_by_ruler_and_track_waveforms(
+        self,
+        read_metadata: Mock,
+    ) -> None:
+        panel = VocalResultsPanel(mode="separation")
+        version = _version("selected", ())
+        read_metadata.return_value = Mock(duration_ms=193_000)
+
+        with patch.object(Path, "is_file", return_value=True):
+            panel.set_result(version)
+
+        self.assertEqual(panel.timeline_ruler._duration_ms, 193_000)
+        self.assertTrue(
+            all(waveform.waveform._duration_ms == 193_000 for waveform in panel.result_waveforms)
+        )
+        panel.close()
+
+    def test_timeline_omits_an_end_label_that_would_overlap_the_last_tick(self) -> None:
+        self.assertEqual(
+            timeline_ticks(216_000, available_width=580),
+            (0, 30_000, 60_000, 90_000, 120_000, 150_000, 180_000, 210_000),
+        )
+        self.assertEqual(timeline_ticks(266_000, available_width=650)[-1], 266_000)
 
 
 def _version(

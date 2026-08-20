@@ -42,23 +42,31 @@ class StudioSessionAutosaveTests(unittest.TestCase):
             ],
         )
 
-    def test_reports_save_failure_without_leaving_pending_state(self) -> None:
+    def test_reports_save_failure_and_retries_the_pending_state(self) -> None:
+        attempts = 0
+        saved: list[str] = []
+
         def fail(
-            _song_id: str,
+            song_id: str,
             _session: StudioSession,
             _assets: tuple[object, ...],
         ) -> None:
-            raise OSError("disk unavailable")
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("disk unavailable")
+            saved.append(song_id)
 
         autosave = StudioSessionAutosave(fail)
         failed = QSignalSpy(autosave.save_failed)
         autosave.queue("song-1", StudioSession(), ())
 
-        autosave.flush()
-        autosave.flush()
+        self.assertFalse(autosave.flush())
+        self.assertTrue(autosave.flush())
 
         self.assertEqual(failed.count(), 1)
         self.assertEqual(failed.at(0)[0], "disk unavailable")
+        self.assertEqual(saved, ["song-1"])
 
     def test_discard_prevents_a_removed_session_from_being_recreated(self) -> None:
         saved: list[tuple[str, StudioSession, tuple[object, ...]]] = []

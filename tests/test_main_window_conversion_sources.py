@@ -12,6 +12,8 @@ from jang_app.qt_app.main_window import MainWindow
 from jang_app.qt_app.conversion_input_pool import ConversionInputPool
 from jang_app.qt_app.vocal_version_pool import VocalVersionPool
 from jang_app.services.output_catalog import OutputSoundSet
+from jang_app.services.conversion_pitch_recommendation import PitchRangeProfile
+from jang_app.services.rvc_model_choices import RvcModelChoice
 from jang_app.services.song_library import SongVocalVersion
 from jang_app.services.vocal_input import VocalInputChoice
 from jang_app.services.work_convert import WorkConvertSession
@@ -41,6 +43,123 @@ class MainWindowConversionSourceTests(unittest.TestCase):
         self.assertIs(result, expected)
         loader.assert_called_once_with(selected_job, Path("output"))
         pool.close()
+
+    def test_pitch_guide_analysis_uses_selected_input_and_managed_model_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "vocal.wav"
+            model_path = Path(temporary) / "voice.pth"
+            source.write_bytes(b"audio")
+            model_path.write_bytes(b"model")
+            profile = PitchRangeProfile(48.0, 55.0, 62.0, 200)
+            started: list[bool] = []
+            guide_states: list[str] = []
+            window = SimpleNamespace(
+                conversion_input_pool=SimpleNamespace(
+                    selected_choice=lambda: SimpleNamespace(path=source)
+                ),
+                model_combo=SimpleNamespace(
+                    currentData=lambda: RvcModelChoice(
+                        "library:voice",
+                        "Voice",
+                        Path(temporary),
+                        model_path,
+                        model_id="voice",
+                    )
+                ),
+                model_dataset_store=SimpleNamespace(),
+                pitch_guide=SimpleNamespace(
+                    clear_context=lambda: guide_states.append("cleared"),
+                    set_unavailable=lambda message: guide_states.append(message),
+                    set_analyzing=lambda: guide_states.append("analyzing"),
+                ),
+                _pitch_guide_generation=0,
+                _pitch_guide_pending_request=None,
+                _start_pending_pitch_guide_analysis=lambda: started.append(True),
+            )
+
+            with (
+                patch(
+                    "jang_app.qt_app.main_window.load_cached_model_dataset_analysis",
+                    return_value=SimpleNamespace(),
+                ),
+                patch(
+                    "jang_app.qt_app.main_window.model_pitch_profile",
+                    return_value=profile,
+                ),
+                patch(
+                    "jang_app.qt_app.main_window.cached_model_analysis_is_current",
+                    return_value=True,
+                ),
+            ):
+                MainWindow._refresh_pitch_guide(window)
+
+            self.assertEqual(guide_states, ["analyzing"])
+            self.assertEqual(started, [True])
+            self.assertEqual(
+                window._pitch_guide_pending_request,
+                (1, source.resolve(), profile),
+            )
+
+    def test_pitch_guide_prefers_precision_benchmark_for_inference_only_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "vocal.wav"
+            model_path = Path(temporary) / "voice.pth"
+            source.write_bytes(b"audio")
+            model_path.write_bytes(b"model")
+            record = SimpleNamespace(model_id="voice")
+            profile = PitchRangeProfile(36.0, 54.0, 72.0, 100)
+            started: list[bool] = []
+            guide_states: list[str] = []
+            window = SimpleNamespace(
+                conversion_input_pool=SimpleNamespace(
+                    selected_choice=lambda: SimpleNamespace(path=source)
+                ),
+                model_combo=SimpleNamespace(
+                    currentData=lambda: RvcModelChoice(
+                        "library:voice",
+                        "Voice",
+                        Path(temporary),
+                        model_path,
+                        model_id="voice",
+                    )
+                ),
+                model_workspace=SimpleNamespace(
+                    root=Path(temporary),
+                    records=lambda: [record],
+                ),
+                model_dataset_store=SimpleNamespace(),
+                pitch_guide=SimpleNamespace(
+                    clear_context=lambda: guide_states.append("cleared"),
+                    set_unavailable=lambda message: guide_states.append(message),
+                    set_analyzing=lambda: guide_states.append("analyzing"),
+                ),
+                _pitch_guide_generation=0,
+                _pitch_guide_pending_request=None,
+                _start_pending_pitch_guide_analysis=lambda: started.append(True),
+            )
+
+            with (
+                patch(
+                    "jang_app.qt_app.main_window.load_cached_model_precision_benchmark",
+                    return_value=SimpleNamespace(),
+                ),
+                patch(
+                    "jang_app.qt_app.main_window.precision_benchmark_pitch_profile",
+                    return_value=profile,
+                ),
+                patch(
+                    "jang_app.qt_app.main_window.load_cached_model_dataset_analysis"
+                ) as dataset_loader,
+            ):
+                MainWindow._refresh_pitch_guide(window)
+
+            self.assertEqual(guide_states, ["analyzing"])
+            self.assertEqual(started, [True])
+            self.assertEqual(
+                window._pitch_guide_pending_request,
+                (1, source.resolve(), profile),
+            )
+            dataset_loader.assert_not_called()
 
     def test_split_vocal_is_used_as_input_without_changing_the_output_job(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import math
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
@@ -20,6 +22,8 @@ STUDIO_SESSION_VERSION = 11
 STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10}
 STUDIO_SESSION_LEGACY_VERSION = 1
 STUDIO_SESSION_NAME = "session.json"
+STUDIO_SESSION_HISTORY_DIR = ".history"
+STUDIO_SESSION_HISTORY_LIMIT = 50
 TRACK_ORIGINAL_VOCAL = "original_vocal"
 TRACK_INSTRUMENTAL = "instrumental"
 TRACK_CONVERTED_VOCAL = "converted_vocal"
@@ -33,6 +37,7 @@ STUDIO_EFFECT_RING_MODULATOR = "ring_modulator"
 STUDIO_EFFECT_BITCRUSHER = "bitcrusher"
 STUDIO_EFFECT_DISTORTION = "distortion"
 STUDIO_EFFECT_LEVEL_MATCH = "level_match"
+STUDIO_EFFECT_HARD_TUNE = "hard_tune"
 SUPPORTED_STUDIO_EFFECTS = {
     STUDIO_EFFECT_REVERB,
     STUDIO_EFFECT_DELAY,
@@ -42,6 +47,7 @@ SUPPORTED_STUDIO_EFFECTS = {
     STUDIO_EFFECT_BITCRUSHER,
     STUDIO_EFFECT_DISTORTION,
     STUDIO_EFFECT_LEVEL_MATCH,
+    STUDIO_EFFECT_HARD_TUNE,
 }
 MEDIA_FIT = "fit"
 MEDIA_FILL = "fill"
@@ -148,6 +154,15 @@ class StudioLevelMatchSettings:
 
 
 @dataclass(frozen=True)
+class StudioHardTuneSettings:
+    key_note: int = 0
+    scale: str = "chromatic"
+    strength_percent: int = 90
+    response_ms: int = 45
+    vibrato_preserve_percent: int = 20
+
+
+@dataclass(frozen=True)
 class StudioEffect:
     effect_id: str
     kind: str
@@ -162,6 +177,7 @@ class StudioEffect:
     bitcrusher: StudioBitcrusherSettings = field(default_factory=StudioBitcrusherSettings)
     distortion: StudioDistortionSettings = field(default_factory=StudioDistortionSettings)
     level_match: StudioLevelMatchSettings = field(default_factory=StudioLevelMatchSettings)
+    hard_tune: StudioHardTuneSettings = field(default_factory=StudioHardTuneSettings)
 
 
 @dataclass(frozen=True)
@@ -245,11 +261,15 @@ def load_studio_session(
     path = studio_session_path(package)
     if not path.is_file():
         return _session_with_default_tracks(package, StudioSession(), assets)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return _session_with_default_tracks(package, StudioSession(), assets)
-    if not isinstance(data, dict) or data.get("song_id") not in (None, "", package.song_id):
+    data = _read_session_data(path, package.song_id)
+    if data is None:
+        data = _latest_valid_history_data(package)
+        if data is not None:
+            logging.getLogger("jang_app").warning(
+                "Recovered invalid Studio session from history | song=%s",
+                package.song_id,
+            )
+    if data is None:
         return _session_with_default_tracks(package, StudioSession(), assets)
 
     version = data.get("version")
@@ -281,20 +301,80 @@ def save_studio_session(
 ) -> Path:
     path = studio_session_path(package)
     normalized = _normalized_session(package, session, _studio_assets(package, assets))
-    write_json_atomic(
-        path,
-        {
-            "version": STUDIO_SESSION_VERSION,
-            "song_id": package.song_id,
-            "updated_at": normalized.updated_at,
-            "tracks": [_track_to_data(track) for track in normalized.tracks],
-        },
-    )
+    payload = {
+        "version": STUDIO_SESSION_VERSION,
+        "song_id": package.song_id,
+        "updated_at": normalized.updated_at,
+        "tracks": [_track_to_data(track) for track in normalized.tracks],
+    }
+    previous = _read_session_data(path, package.song_id) if path.is_file() else None
+    if previous is not None and previous.get("tracks") == payload["tracks"]:
+        return path
+    if previous is not None:
+        _archive_session_data(package, previous)
+    write_json_atomic(path, payload)
     return path
 
 
 def studio_session_path(package: SongPackage) -> Path:
     return package.folder / STUDIO_STAGE / STUDIO_SESSION_NAME
+
+
+def studio_session_history_paths(package: SongPackage) -> tuple[Path, ...]:
+    root = studio_session_path(package).parent / STUDIO_SESSION_HISTORY_DIR
+    if not root.is_dir():
+        return ()
+    return tuple(sorted(root.glob("session-*.json"), reverse=True))
+
+
+def remove_studio_session_history(package: SongPackage) -> None:
+    root = studio_session_path(package).parent / STUDIO_SESSION_HISTORY_DIR
+    if not root.is_dir():
+        return
+    for path in root.glob("session-*.json"):
+        path.unlink(missing_ok=True)
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+
+
+def _read_session_data(path: Path, song_id: str) -> dict[str, object] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("song_id") not in (None, "", song_id):
+        return None
+    version = data.get("version")
+    if version not in (
+        STUDIO_SESSION_LEGACY_VERSION,
+        *STUDIO_SESSION_PREVIOUS_VERSIONS,
+        STUDIO_SESSION_VERSION,
+    ):
+        return None
+    return data
+
+
+def _latest_valid_history_data(package: SongPackage) -> dict[str, object] | None:
+    for path in studio_session_history_paths(package):
+        data = _read_session_data(path, package.song_id)
+        if data is not None:
+            return data
+    return None
+
+
+def _archive_session_data(package: SongPackage, data: dict[str, object]) -> None:
+    encoded = json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()[:12]
+    root = studio_session_path(package).parent / STUDIO_SESSION_HISTORY_DIR
+    if any(root.glob(f"session-*-{digest}.json")):
+        return
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+    write_json_atomic(root / f"session-{stamp}-{digest}.json", data)
+    history = studio_session_history_paths(package)
+    for stale in history[STUDIO_SESSION_HISTORY_LIMIT:]:
+        stale.unlink(missing_ok=True)
 
 
 def _legacy_session_from_data(data: dict[str, object]) -> StudioSession:
@@ -639,6 +719,7 @@ def _effect_from_data(value: object) -> StudioEffect | None:
         STUDIO_EFFECT_BITCRUSHER: ("bitcrusher", _bitcrusher_settings_from_data),
         STUDIO_EFFECT_DISTORTION: ("distortion", _distortion_settings_from_data),
         STUDIO_EFFECT_LEVEL_MATCH: ("level_match", _level_match_settings_from_data),
+        STUDIO_EFFECT_HARD_TUNE: ("hard_tune", _hard_tune_settings_from_data),
     }
     field_name, loader = settings_loader[kind]
     return _normalized_effect(replace(effect, **{field_name: loader(settings)}))
@@ -669,6 +750,7 @@ def _normalized_effect(effect: StudioEffect) -> StudioEffect:
         bitcrusher=_normalized_bitcrusher_settings(effect.bitcrusher),
         distortion=_normalized_distortion_settings(effect.distortion),
         level_match=_normalized_level_match_settings(effect.level_match),
+        hard_tune=_normalized_hard_tune_settings(effect.hard_tune),
     )
 
 
@@ -695,6 +777,9 @@ def _effect_to_data(effect: StudioEffect) -> dict[str, object]:
         ),
         STUDIO_EFFECT_LEVEL_MATCH: _settings_to_data(
             _normalized_level_match_settings(effect.level_match)
+        ),
+        STUDIO_EFFECT_HARD_TUNE: _settings_to_data(
+            _normalized_hard_tune_settings(effect.hard_tune)
         ),
     }.get(effect.kind, {})
     return {
@@ -810,6 +895,25 @@ def _level_match_settings_from_data(value: object) -> StudioLevelMatchSettings:
     )
 
 
+def _hard_tune_settings_from_data(value: object) -> StudioHardTuneSettings:
+    data = value if isinstance(value, dict) else {}
+    defaults = StudioHardTuneSettings()
+    return _normalized_hard_tune_settings(
+        StudioHardTuneSettings(
+            key_note=_integer(data.get("key_note"), defaults.key_note),
+            scale=str(data.get("scale", defaults.scale)),
+            strength_percent=_integer(
+                data.get("strength_percent"), defaults.strength_percent
+            ),
+            response_ms=_integer(data.get("response_ms"), defaults.response_ms),
+            vibrato_preserve_percent=_integer(
+                data.get("vibrato_preserve_percent"),
+                defaults.vibrato_preserve_percent,
+            ),
+        )
+    )
+
+
 def _normalized_radio_filter_settings(
     settings: StudioRadioFilterSettings,
 ) -> StudioRadioFilterSettings:
@@ -876,6 +980,23 @@ def _normalized_level_match_settings(
         response_ms=int(_clamp(settings.response_ms, 40, 1_000)),
         max_correction_db=int(_clamp(settings.max_correction_db, 1, 12)),
         silence_threshold_db=int(_clamp(settings.silence_threshold_db, -80, -30)),
+    )
+
+
+def _normalized_hard_tune_settings(
+    settings: StudioHardTuneSettings,
+) -> StudioHardTuneSettings:
+    scale = str(settings.scale).strip().lower()
+    if scale not in {"chromatic", "major", "minor"}:
+        scale = "chromatic"
+    return StudioHardTuneSettings(
+        key_note=int(_clamp(settings.key_note, 0, 11)),
+        scale=scale,
+        strength_percent=int(_clamp(settings.strength_percent, 0, 100)),
+        response_ms=int(_clamp(settings.response_ms, 5, 250)),
+        vibrato_preserve_percent=int(
+            _clamp(settings.vibrato_preserve_percent, 0, 100)
+        ),
     )
 
 

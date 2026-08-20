@@ -35,6 +35,7 @@ class SimpleEffectField:
     suffix: str
     detail: str
     recommendation: str
+    choices: tuple[tuple[object, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,7 @@ class StudioSimpleEffectEditor(QWidget):
         self._change_timer.setSingleShot(True)
         self._change_timer.setInterval(24)
         self._change_timer.timeout.connect(self._emit_changed)
-        self.controls: dict[str, ScrollSafeSpinBox] = {}
+        self.controls: dict[str, ScrollSafeSpinBox | ScrollSafeComboBox] = {}
         self.group_title_labels: dict[str, QLabel] = {}
         self.field_labels: dict[str, QLabel] = {}
         self.field_info_buttons: dict[str, InfoPopoverButton] = {}
@@ -153,14 +154,19 @@ class StudioSimpleEffectEditor(QWidget):
             label_row.setSpacing(4)
             label_row.addWidget(label, 1)
             label_row.addWidget(info, 0, Qt.AlignmentFlag.AlignRight)
-            control = ScrollSafeSpinBox()
+            control = ScrollSafeComboBox() if field_spec.choices else ScrollSafeSpinBox()
             control.setObjectName("StudioReverbControl")
             control.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-            control.setRange(field_spec.minimum, field_spec.maximum)
-            control.setSingleStep(field_spec.step)
-            control.setSuffix(field_spec.suffix)
-            control.valueChanged.connect(self._queue_changed)
-            control.editingFinished.connect(self._flush_changed)
+            if isinstance(control, ScrollSafeComboBox):
+                for value, choice_label in field_spec.choices:
+                    control.addItem(tr(choice_label), value)
+                control.currentIndexChanged.connect(self._queue_changed)
+            else:
+                control.setRange(field_spec.minimum, field_spec.maximum)
+                control.setSingleStep(field_spec.step)
+                control.setSuffix(field_spec.suffix)
+                control.valueChanged.connect(self._queue_changed)
+                control.editingFinished.connect(self._flush_changed)
             self.controls[field_name] = control
             self.field_labels[field_name] = label
             self.field_info_buttons[field_name] = info
@@ -195,9 +201,19 @@ class StudioSimpleEffectEditor(QWidget):
             title = tr(field_spec.label)
             detail = tr(field_spec.detail)
             recommendation = tr(field_spec.recommendation)
+            control = self.controls[name]
+            if isinstance(control, ScrollSafeComboBox):
+                selected_value = control.currentData()
+                choice_blocker = QSignalBlocker(control)
+                control.clear()
+                for value, choice_label in field_spec.choices:
+                    control.addItem(tr(choice_label), value)
+                selected_index = control.findData(selected_value)
+                control.setCurrentIndex(max(0, selected_index))
+                del choice_blocker
             self.field_labels[name].setText(title)
             self.field_info_buttons[name].set_content(title, detail, recommendation)
-            self.controls[name].setToolTip(f"{detail}\n\n{recommendation}")
+            control.setToolTip(f"{detail}\n\n{recommendation}")
         self.remove_button.setToolTip(tr("Remove Effect"))
         self.remove_button.setAccessibleName(tr("Remove Effect"))
         self._sync_enabled_button(self.enabled_button.isChecked())
@@ -214,7 +230,7 @@ class StudioSimpleEffectEditor(QWidget):
         self._effect = effect
         settings = getattr(effect, self._spec.settings_field)
         for name, control in self.controls.items():
-            control.setValue(getattr(settings, name))
+            self._set_control_value(control, getattr(settings, name))
         self._select_preset(self._matching_preset(settings))
         blocker = QSignalBlocker(self.enabled_button)
         self.enabled_button.setChecked(effect.enabled)
@@ -253,14 +269,34 @@ class StudioSimpleEffectEditor(QWidget):
         self._change_timer.stop()
         self._loading = True
         for name, control in self.controls.items():
-            control.setValue(getattr(settings, name))
+            self._set_control_value(control, getattr(settings, name))
         self._loading = False
         self._emit_changed()
 
     def _current_settings(self) -> object:
         return self._spec.settings_factory(
-            **{name: control.value() for name, control in self.controls.items()}
+            **{
+                name: self._control_value(control)
+                for name, control in self.controls.items()
+            }
         )
+
+    @staticmethod
+    def _control_value(control: ScrollSafeSpinBox | ScrollSafeComboBox) -> object:
+        if isinstance(control, ScrollSafeComboBox):
+            return control.currentData()
+        return control.value()
+
+    @staticmethod
+    def _set_control_value(
+        control: ScrollSafeSpinBox | ScrollSafeComboBox,
+        value: object,
+    ) -> None:
+        if isinstance(control, ScrollSafeComboBox):
+            index = control.findData(value)
+            control.setCurrentIndex(max(0, index))
+            return
+        control.setValue(int(value))
 
     def _emit_changed(self) -> None:
         if self._loading or self._effect is None:

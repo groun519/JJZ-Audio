@@ -161,11 +161,15 @@ class SongAssetRemovalTests(unittest.TestCase):
             package = store.require(song.id)
             session_path = package.folder / "03_studio" / "session.json"
             session_path.write_text("{}", encoding="utf-8")
+            history_path = package.folder / "03_studio" / ".history" / "session-old.json"
+            history_path.parent.mkdir(parents=True)
+            history_path.write_text("{}", encoding="utf-8")
             studio_asset = library.asset_details(song.id).assets_for(STAGE_STUDIO)[0]
 
             library.remove_asset(song.id, studio_asset.path)
 
             self.assertFalse(session_path.exists())
+            self.assertFalse(history_path.parent.exists())
             self.assertTrue(package.source_path.is_file())
 
 

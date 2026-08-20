@@ -24,7 +24,7 @@ from jang_app.qt_app.transport_controls import TransportControls
 from jang_app.qt_app.video_export_controls import VideoExportControls
 from jang_app.qt_app.work_song_selector import WorkSongSelector
 from jang_app.qt_app.widgets import (
-    COMPACT_ICON_BUTTON_SIZE,
+    DangerIconButton,
     FeedbackButton,
     SvgIconButton,
 )
@@ -49,6 +49,7 @@ class ExportPage(QWidget):
     preview_play_toggled = Signal(object)
     preview_seek_requested = Signal(object, int)
     rename_requested = Signal(object, str)
+    remove_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -201,6 +202,7 @@ class ExportPage(QWidget):
             row.preview_play_toggled.connect(self.preview_play_toggled.emit)
             row.preview_seek_requested.connect(self.preview_seek_requested.emit)
             row.rename_requested.connect(self.rename_requested.emit)
+            row.remove_requested.connect(self.remove_requested.emit)
             self.export_rows.append(row)
             self.export_layout.addWidget(row, 0)
         preview_row = self._row_for_path(preview_path) if preview_path is not None else None
@@ -441,6 +443,7 @@ class _ExportRow(QFrame):
     preview_play_toggled = Signal(object)
     preview_seek_requested = Signal(object, int)
     rename_requested = Signal(object, str)
+    remove_requested = Signal(object)
 
     def __init__(self, exported: SongAudioExport | SongVideoExport, export_kind: str) -> None:
         super().__init__()
@@ -482,13 +485,16 @@ class _ExportRow(QFrame):
         text_layout.addWidget(self.name_edit)
         text_layout.addWidget(meta_label)
 
-        self.rename_button = SvgIconButton("edit", size=COMPACT_ICON_BUTTON_SIZE)
+        self.rename_button = SvgIconButton("edit", size=30)
         set_translated_tooltip(self.rename_button, "Rename")
         self.rename_button.clicked.connect(self._begin_rename)
 
         self.open_button = SvgIconButton("folder", size=30)
         set_translated_tooltip(self.open_button, "Open file location")
         self.open_button.clicked.connect(lambda: self.open_location_requested.emit(self.path))
+        self.remove_button = DangerIconButton(size=30)
+        set_translated_tooltip(self.remove_button, "Delete export")
+        self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self.path))
         self.share_action = ShareProgressAction(button_size=30, parent=self)
         self.share_action.requested.connect(lambda: self.share_requested.emit(self.path))
         self.share_action.delete_requested.connect(
@@ -501,9 +507,10 @@ class _ExportRow(QFrame):
         body_layout.setSpacing(10)
         body_layout.addWidget(badge, 0)
         body_layout.addLayout(text_layout, 1)
-        body_layout.addWidget(self.rename_button, 0)
         body_layout.addWidget(self.share_action, 0)
+        body_layout.addWidget(self.rename_button, 0)
         body_layout.addWidget(self.open_button, 0)
+        body_layout.addWidget(self.remove_button, 0)
 
         self.preview_divider = QFrame()
         self.preview_divider.setObjectName("LibraryPreviewDivider")
@@ -531,11 +538,13 @@ class _ExportRow(QFrame):
         self.share_action.set_theme_mode(theme_mode)
         self.open_button.set_theme_mode(theme_mode)
         self.rename_button.set_theme_mode(theme_mode)
+        self.remove_button.set_theme_mode(theme_mode)
         self.preview_transport.set_theme_mode(theme_mode)
 
     def apply_language(self) -> None:
         set_translated_tooltip(self.rename_button, "Rename")
         set_translated_tooltip(self.open_button, "Open file location")
+        set_translated_tooltip(self.remove_button, "Delete export")
         self.preview_transport.apply_language()
 
     def set_sharing_enabled(self, is_enabled: bool) -> None:
@@ -606,7 +615,9 @@ class _ExportRow(QFrame):
         super().mouseReleaseEvent(event)
 
     def _sync_action_visibility(self) -> None:
-        self.rename_button.setVisible(self._is_hovered or self._is_editing)
+        show_row_actions = self._is_hovered or self._is_editing
+        self.rename_button.setVisible(show_row_actions)
+        self.remove_button.setVisible(show_row_actions)
 
     def _begin_rename(self) -> None:
         self._is_editing = True

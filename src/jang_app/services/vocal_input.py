@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jang_app.services.song_library import SongVocalVersion
+from jang_app.services.vocal_cleanup import VocalCleanupResult
 from jang_app.services.vocal_split import VocalSplitRun, VocalSplitStem
 
 
@@ -40,4 +41,17 @@ def split_vocal_choice(
         kind=stem.role or "split",
         split_run=run,
         split_stem=stem,
+    )
+
+
+def cleanup_vocal_choice(
+    version: SongVocalVersion,
+    result: VocalCleanupResult,
+) -> VocalInputChoice:
+    return VocalInputChoice(
+        choice_id=f"cleanup:{version.version_id}:{result.result_id}",
+        version=version,
+        path=result.path,
+        label=result.label,
+        kind="cleanup",
     )

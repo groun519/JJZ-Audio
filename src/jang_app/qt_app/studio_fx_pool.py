@@ -19,6 +19,11 @@ from jang_app.services.i18n import tr
 STUDIO_EFFECT_MIME = "application/x-jjzero-studio-effect"
 
 _PRESET_CARD_SPECS = {
+    "preset:synth": (
+        "SY",
+        "Synth",
+        "Hard-tuned synthetic vocal chain",
+    ),
     "preset:lush": (
         "LS",
         "Lush",
@@ -39,6 +44,7 @@ _EFFECT_CARD_SPECS = {
     "bitcrusher": ("BT", "Bitcrusher", "Digital resolution damage"),
     "distortion": ("DS", "Distortion", "Saturation and grit"),
     "level_match": ("LM", "Level Match", "Follow the original vocal volume"),
+    "hard_tune": ("HT", "Hard Tune", "Lock vocal pitch to musical notes"),
 }
 
 _CARD_SPECS = {**_PRESET_CARD_SPECS, **_EFFECT_CARD_SPECS}

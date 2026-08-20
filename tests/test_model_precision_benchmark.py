@@ -13,6 +13,7 @@ import soundfile as sf
 from jang_app.pipeline.rvc_convert import RvcConversionError
 from jang_app.services.model_precision_benchmark import (
     REFERENCE_CENTER_MIDI,
+    _result_from_data,
     load_cached_model_precision_benchmark,
     run_model_precision_benchmark,
 )
@@ -102,6 +103,54 @@ class ModelPrecisionBenchmarkTests(unittest.TestCase):
             refreshed = workspace.records()[0]
 
             self.assertIsNone(load_cached_model_precision_benchmark(workspace.root, refreshed))
+
+    def test_cached_summary_ranges_are_rebuilt_from_shared_score_thresholds(self) -> None:
+        points = [
+            {
+                "shift_semitones": shift,
+                "score": 82 if shift == 0 else 81,
+                "status": "stable" if shift == 0 else "caution",
+                "pitch_error": 0.1,
+                "pitch_bias": 0.0,
+                "active_ratio": 1.0,
+                "clipping_ratio": 0.0,
+                "successful_references": 3,
+                "total_references": 3,
+            }
+            for shift in range(-2, 3)
+        ]
+        data = {
+            "model_id": "voice",
+            "generated_at": "2026-08-20T00:00:00+00:00",
+            "benchmark_version": "precision-v1",
+            "reference_count": 3,
+            "total_jobs": 15,
+            "successful_jobs": 15,
+            "failed_jobs": 0,
+            "best_shift_semitones": 0,
+            "recommended_low_shift": -2,
+            "recommended_high_shift": 2,
+            "usable_low_shift": -2,
+            "usable_high_shift": 2,
+            "stable_point_count": 5,
+            "caution_point_count": 0,
+            "avoid_point_count": 0,
+            "points": points,
+            "notes": [],
+        }
+
+        result = _result_from_data(data)
+
+        self.assertEqual(
+            (result.recommended_low_shift, result.recommended_high_shift),
+            (0, 0),
+        )
+        self.assertEqual(
+            (result.usable_low_shift, result.usable_high_shift),
+            (-2, 2),
+        )
+        self.assertEqual(result.stable_point_count, 1)
+        self.assertEqual(result.caution_point_count, 4)
 
 
 def _fake_convert(input_path: Path, output_dir: Path, settings, progress_callback=None):

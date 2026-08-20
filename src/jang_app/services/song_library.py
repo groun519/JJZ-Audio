@@ -25,6 +25,7 @@ from jang_app.services.song_package import (
 from jang_app.services.separation_recipe import load_separation_run
 from jang_app.services.song_video_export import (
     SongVideoExport,
+    can_render_song_video,
     list_song_video_exports,
     render_song_video,
     song_video_export_dir,
@@ -341,6 +342,14 @@ class SongLibrary:
             load_package_studio_session(package),
             progress=progress,
             settings=settings,
+        )
+
+    def can_render_video(self, item_id: str) -> bool:
+        package = self._store.require(item_id)
+        return can_render_song_video(
+            package,
+            self._video_sources.resolve(package),
+            load_package_studio_session(package),
         )
 
     def video_export_dir(self, item_id: str) -> Path:

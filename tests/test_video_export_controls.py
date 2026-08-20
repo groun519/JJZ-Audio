@@ -8,6 +8,7 @@ from jang_app.qt_app.video_export_controls import VideoExportControls
 from jang_app.services.video_export_settings import (
     PRESET_COMPACT_720P,
     PRESET_CUSTOM,
+    PRESET_DISCORD_10MB,
     PRESET_HIGH_QUALITY,
 )
 
@@ -38,6 +39,19 @@ class VideoExportControlsTests(unittest.TestCase):
 
         self.assertEqual(controls.settings().preset_id, PRESET_CUSTOM)
         self.assertEqual(controls.settings().frame_rate, 60)
+        controls.close()
+
+    def test_10mb_preset_exposes_automatic_size_target(self) -> None:
+        controls = VideoExportControls()
+
+        controls.select_preset(PRESET_DISCORD_10MB)
+        settings = controls.settings()
+
+        self.assertEqual(settings.preset_id, PRESET_DISCORD_10MB)
+        self.assertIsNotNone(settings.target_size_bytes)
+        self.assertIn("10MB", controls.summary_label.text().replace(" ", ""))
+        self.assertFalse(controls.resolution_combo.isEnabled())
+        self.assertFalse(controls.audio_bitrate_combo.isEnabled())
         controls.close()
 
     def test_running_state_locks_settings_and_action(self) -> None:

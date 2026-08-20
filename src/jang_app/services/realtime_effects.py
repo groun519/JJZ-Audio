@@ -9,11 +9,13 @@ from jang_app.services.audio_character_fx import (
 from jang_app.services.realtime_delay import RealtimeDelay
 from jang_app.services.realtime_doubler import RealtimeDoubler
 from jang_app.services.realtime_reverb import RealtimeReverb
+from jang_app.services.audio_hard_tune import HardTuneProcessor
 from jang_app.services.studio_character_fx_presets import CHARACTER_EFFECT_KINDS
 from jang_app.services.studio_session import (
     STUDIO_EFFECT_DELAY,
     STUDIO_EFFECT_DOUBLER,
     STUDIO_EFFECT_REVERB,
+    STUDIO_EFFECT_HARD_TUNE,
     StudioEffect,
 )
 
@@ -26,6 +28,7 @@ class RealtimeEffectChain:
         self._delays: dict[str, RealtimeDelay] = {}
         self._doublers: dict[str, RealtimeDoubler] = {}
         self._character_effects: dict[str, CharacterEffectProcessor] = {}
+        self._hard_tunes: dict[str, HardTuneProcessor] = {}
         self.update(effects)
 
     @property
@@ -73,6 +76,16 @@ class RealtimeEffectChain:
             for effect_id, processor in self._character_effects.items()
             if effect_id in character_ids
         }
+        hard_tune_ids = {
+            effect.effect_id
+            for effect in effects
+            if effect.enabled and effect.kind == STUDIO_EFFECT_HARD_TUNE
+        }
+        self._hard_tunes = {
+            effect_id: processor
+            for effect_id, processor in self._hard_tunes.items()
+            if effect_id in hard_tune_ids
+        }
         for effect in effects:
             if not effect.enabled or effect.kind != STUDIO_EFFECT_REVERB:
                 continue
@@ -101,6 +114,15 @@ class RealtimeEffectChain:
             else:
                 processor.update(effect.doubler)
         for effect in effects:
+            if not effect.enabled or effect.kind != STUDIO_EFFECT_HARD_TUNE:
+                continue
+            processor = self._hard_tunes.get(effect.effect_id)
+            if processor is None:
+                processor = HardTuneProcessor(self._sample_rate, effect.hard_tune)
+                self._hard_tunes[effect.effect_id] = processor
+            else:
+                processor.update(effect.hard_tune)
+        for effect in effects:
             if not effect.enabled or effect.kind not in CHARACTER_EFFECT_KINDS:
                 continue
             processor = self._character_effects.get(effect.effect_id)
@@ -118,6 +140,8 @@ class RealtimeEffectChain:
                 continue
             if effect.kind == STUDIO_EFFECT_REVERB:
                 processor = self._reverbs.get(effect.effect_id)
+            elif effect.kind == STUDIO_EFFECT_HARD_TUNE:
+                processor = self._hard_tunes.get(effect.effect_id)
             elif effect.kind == STUDIO_EFFECT_DELAY:
                 processor = self._delays.get(effect.effect_id)
             elif effect.kind == STUDIO_EFFECT_DOUBLER:

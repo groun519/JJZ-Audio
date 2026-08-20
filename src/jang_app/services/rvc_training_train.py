@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Timer
 
 from jang_app.services.app_logging import get_logger
 from jang_app.services.command import (
@@ -64,6 +64,8 @@ _WEIGHT_SAVE_PATTERN = re.compile(
 )
 _CHECKPOINT_PATTERN = re.compile(r"^(?P<kind>[GD])_(?P<step>\d+)\.pth$", re.IGNORECASE)
 _COMPLETE_MARKER = "training is done"
+_FINAL_CHECKPOINT_MARKER = "saving final ckpt:success"
+_TRAINER_EXIT_GRACE_SECONDS = 10.0
 _DATA_LOADER_FAILURE_MARKERS = (
     "dataloader worker",
     "data loader worker",
@@ -84,6 +86,59 @@ _NATIVE_RUNTIME_CRASH_MARKERS = (
 
 class RvcTrainingRunError(RuntimeError):
     """Raised when the RVC trainer cannot start or produce a valid result."""
+
+
+class _TrainingProcessCompletionGuard:
+    """Stop a trainer that remains alive after its final checkpoint is durable."""
+
+    def __init__(
+        self,
+        cancellation: CommandCancellation,
+        *,
+        grace_seconds: float = _TRAINER_EXIT_GRACE_SECONDS,
+    ) -> None:
+        self._cancellation = cancellation
+        self._grace_seconds = max(0.1, float(grace_seconds))
+        self._lock = RLock()
+        self._timer: Timer | None = None
+        self._closed = False
+        self._forced = False
+
+    @property
+    def forced(self) -> bool:
+        with self._lock:
+            return self._forced
+
+    def observe(self, line: str) -> None:
+        if _FINAL_CHECKPOINT_MARKER not in str(line).casefold():
+            return
+        with self._lock:
+            if self._closed or self._timer is not None:
+                return
+            timer = Timer(self._grace_seconds, self._force_stop)
+            timer.daemon = True
+            self._timer = timer
+        timer.start()
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._closed = True
+            timer = self._timer
+        if timer is not None:
+            timer.cancel()
+
+    def _force_stop(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._forced = True
+        get_logger().warning(
+            "RVC trainer remained alive %.1f seconds after the final checkpoint; "
+            "terminating the completed process tree",
+            self._grace_seconds,
+        )
+        self._cancellation.terminate_current()
 
 
 @dataclass(frozen=True)
@@ -213,6 +268,7 @@ def train_rvc_model(
     log_path = layout.experiment_dir / "train.log"
     log_offset = log_path.stat().st_size if log_path.is_file() else 0
     token = cancellation or CommandCancellation()
+    completion_guard = _TrainingProcessCompletionGuard(token)
     try:
         state_store.begin_training(settings.target_epoch)
     except Exception:
@@ -247,6 +303,7 @@ def train_rvc_model(
         text = line.strip()
         if not text:
             return
+        completion_guard.observe(text)
         if active_monitor is not None:
             active_monitor.observe_output(text)
         with output_lock:
@@ -313,6 +370,7 @@ def train_rvc_model(
                 output_callback=handle_output,
                 cancellation=token,
             )
+            completion_guard.cancel()
             last_returncode = result.returncode
             active_monitor.stop()
             active_monitor = None
@@ -386,6 +444,7 @@ def train_rvc_model(
                     activity_callback=handle_output,
                 )
                 active_monitor.start()
+                completion_guard = _TrainingProcessCompletionGuard(token)
                 attempt_log_offset = (
                     log_path.stat().st_size if log_path.is_file() else 0
                 )
@@ -396,6 +455,7 @@ def train_rvc_model(
                     output_callback=handle_output,
                     cancellation=token,
                 )
+                completion_guard.cancel()
                 last_returncode = result.returncode
                 active_monitor.stop()
                 active_monitor = None
@@ -452,6 +512,7 @@ def train_rvc_model(
         logger.info("RVC training complete: model=%s output=%s", model_id, final_model)
         return RvcTrainingRunResult(completed, final_model, log_path, resumed, False)
     except Exception as exc:
+        completion_guard.cancel()
         if active_monitor is not None:
             active_monitor.stop()
             active_monitor = None

@@ -2534,6 +2534,133 @@ def _stylesheet(
             border-radius: 12px;
         }}
 
+        QWidget#ModelBenchmarkResults,
+        QWidget#ModelBenchmarkMetrics {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QFrame#ModelBenchmarkSummaryCard,
+        QFrame#ModelBenchmarkChartPanel,
+        QFrame#ModelBenchmarkInterpretationPanel {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 14px;
+        }}
+
+        QLabel#ModelBenchmarkStatus {{
+            color: {success_text};
+            background: {success_background};
+            border: 1px solid {success_border};
+            border-radius: 9px;
+            padding: 3px 8px;
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QLabel#ModelBenchmarkStatus[tone="neutral"] {{
+            color: {muted};
+            background: {selection};
+            border-color: {border};
+        }}
+
+        QLabel#ModelBenchmarkStatus[tone="danger"] {{
+            color: {danger_text};
+            background: {danger_background};
+            border-color: {danger_border};
+        }}
+
+        QLabel#ModelBenchmarkGenerated,
+        QLabel#ModelBenchmarkDescription,
+        QLabel#ModelBenchmarkMetricHint,
+        QLabel#ModelBenchmarkTechnicalDetails {{
+            color: {muted};
+            font-size: 10px;
+        }}
+
+        QLabel#ModelBenchmarkHeadline {{
+            color: {text};
+            font-size: 20px;
+            font-weight: 900;
+        }}
+
+        QFrame#ModelBenchmarkPrimaryMetric {{
+            background: {success_background};
+            border: 1px solid {success_border};
+            border-radius: 11px;
+        }}
+
+        QFrame#ModelBenchmarkMetric,
+        QFrame#ModelBenchmarkInterpretationCard {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 11px;
+        }}
+
+        QLabel#ModelBenchmarkMetricLabel {{
+            color: {muted};
+            font-size: 9px;
+            font-weight: 800;
+        }}
+
+        QLabel#ModelBenchmarkPrimaryMetricValue {{
+            color: {success_text};
+            font-size: 24px;
+            font-weight: 900;
+        }}
+
+        QLabel#ModelBenchmarkMetricValue {{
+            color: {text};
+            font-size: 16px;
+            font-weight: 900;
+        }}
+
+        QLabel#ModelBenchmarkLegend,
+        QLabel#ModelBenchmarkRangeLegend {{
+            color: {muted};
+            font-size: 9px;
+            font-weight: 700;
+        }}
+
+        QFrame#ModelBenchmarkRangePanel {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QLabel#ModelBenchmarkRangeTitle {{
+            color: {text};
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
+        QLabel#ModelBenchmarkInterpretationKicker {{
+            color: {success_text};
+            font-size: 9px;
+            font-weight: 850;
+        }}
+
+        QLabel#ModelBenchmarkInterpretationMain {{
+            color: {text};
+            font-size: 11px;
+            font-weight: 850;
+        }}
+
+        QLabel#ModelBenchmarkScopeNotice {{
+            color: {warning_text};
+            background: {warning_background};
+            border: 1px solid {warning_border};
+            border-radius: 9px;
+            padding: 9px;
+            font-size: 9px;
+        }}
+
+        QPushButton#ModelBenchmarkDetailsButton {{
+            min-height: 34px;
+            text-align: left;
+            padding: 0 11px;
+        }}
+
         QLabel#DatasetAnalysisMetricLabel,
         QLabel#DatasetAnalysisMeta,
         QLabel#DatasetAnalysisStatus {{

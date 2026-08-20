@@ -35,6 +35,20 @@ class StudioFxChainPresetTests(unittest.TestCase):
             ("radio_filter", "bitcrusher", "distortion"),
         )
 
+    def test_synth_chain_combines_tuning_and_light_vocal_polish(self) -> None:
+        effects = studio_effect_chain("synth")
+
+        self.assertEqual(
+            tuple(effect.kind for effect in effects),
+            ("level_match", "hard_tune", "doubler", "bitcrusher", "reverb"),
+        )
+        self.assertEqual(len({effect.effect_id for effect in effects}), 5)
+        self.assertEqual(effects[1].hard_tune.scale, "chromatic")
+        self.assertEqual(effects[1].hard_tune.strength_percent, 95)
+        self.assertEqual(effects[2].doubler.dry_wet_percent, 16)
+        self.assertEqual(effects[3].bitcrusher.mix_percent, 8)
+        self.assertEqual(effects[4].reverb.dry_wet_percent, 12)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,12 +7,14 @@ import numpy as np
 from jang_app.services.audio_character_fx import apply_character_effect
 from jang_app.services.audio_delay import apply_delay
 from jang_app.services.audio_doubler import apply_doubler
+from jang_app.services.audio_hard_tune import apply_hard_tune
 from jang_app.services.audio_level_match import apply_vocal_level_match
 from jang_app.services.audio_reverb import apply_reverb
 from jang_app.services.studio_audio_levels import clamp_studio_source_volume
 from jang_app.services.studio_character_fx_presets import CHARACTER_EFFECT_KINDS
 from jang_app.services.studio_session import (
     STUDIO_EFFECT_LEVEL_MATCH,
+    STUDIO_EFFECT_HARD_TUNE,
     STUDIO_EFFECT_DELAY,
     STUDIO_EFFECT_DOUBLER,
     STUDIO_EFFECT_REVERB,
@@ -46,6 +48,8 @@ def process_mix_source(
     for effect in effects:
         if effect.enabled and effect.kind == STUDIO_EFFECT_REVERB:
             processed = apply_reverb(processed, sample_rate, effect.reverb)
+        elif effect.enabled and effect.kind == STUDIO_EFFECT_HARD_TUNE:
+            processed = apply_hard_tune(processed, sample_rate, effect.hard_tune)
         elif effect.enabled and effect.kind == STUDIO_EFFECT_DELAY:
             processed = apply_delay(processed, sample_rate, effect.delay)
         elif effect.enabled and effect.kind == STUDIO_EFFECT_DOUBLER:

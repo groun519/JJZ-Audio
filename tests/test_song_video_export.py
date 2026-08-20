@@ -13,20 +13,76 @@ from jang_app.services.song_package import SongPackageStore
 from jang_app.services.song_video_export import (
     SongVideoExportError,
     _VisualClip,
+    _render_analysis_filter,
     _render_command,
+    _select_content_adaptive_settings,
+    can_render_song_video,
     list_song_video_exports,
     render_song_video,
 )
-from jang_app.services.studio_session import MEDIA_FILL, StudioMediaSettings, StudioSession
-from jang_app.services.video_source import VIDEO_KIND_FILE, VideoSource
+from jang_app.services.studio_assets import studio_sound_pool
+from jang_app.services.studio_session import (
+    MEDIA_FILL,
+    TRACK_VIDEO,
+    StudioAssetRef,
+    StudioClip,
+    StudioMediaSettings,
+    StudioSession,
+    StudioTrack,
+)
+from jang_app.services.video_source import VIDEO_KIND_FILE, VideoSource, VideoSourceStore
 from jang_app.services.video_export_settings import (
     ENCODING_SLOW,
+    PRESET_DISCORD_10MB,
     PRESET_HIGH_QUALITY,
+    VIDEO_TARGET_10MB_BYTES,
     VideoExportSettings,
+    video_export_preset,
 )
+from jang_app.services.video_quality_optimizer import representative_video_windows
 
 
 class SongVideoExportTests(unittest.TestCase):
+    def test_timeline_media_enables_video_render_without_an_active_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            source_file = Path(temporary) / "cover.png"
+            source_file.write_bytes(b"image")
+            imported = VideoSourceStore().import_file(package, source_file)
+            media_asset = next(
+                asset for asset in studio_sound_pool(package) if asset.reference.role == TRACK_VIDEO
+            )
+            clip = StudioClip(
+                "media-clip",
+                media_asset.reference,
+                timeline_start_ms=0,
+                source_start_ms=0,
+                source_end_ms=5_000,
+            )
+            session = StudioSession(
+                tracks=(StudioTrack("media", "Media", TRACK_VIDEO, clips=(clip,)),)
+            )
+            VideoSourceStore().clear(package)
+
+            self.assertTrue(can_render_song_video(package, VideoSource(), session))
+            self.assertTrue(imported.path is not None and imported.path.is_file())
+
+    def test_missing_timeline_media_does_not_enable_video_render(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            clip = StudioClip(
+                "missing-media",
+                StudioAssetRef("missing", TRACK_VIDEO, "missing.png"),
+                timeline_start_ms=0,
+                source_start_ms=0,
+                source_end_ms=5_000,
+            )
+            session = StudioSession(
+                tracks=(StudioTrack("media", "Media", TRACK_VIDEO, clips=(clip,)),)
+            )
+
+            self.assertFalse(can_render_song_video(package, VideoSource(), session))
+
     def test_render_command_applies_image_layout_and_video_source_audio(self) -> None:
         image = _VisualClip(
             Path("cover.png"),
@@ -102,6 +158,113 @@ class SongVideoExportTests(unittest.TestCase):
         self.assertEqual(command[command.index("-preset") + 1], "slow")
         self.assertEqual(command[command.index("-crf") + 1], "16")
         self.assertEqual(command[command.index("-b:a") + 1], "256k")
+
+    def test_size_targeted_render_command_uses_two_pass_bitrate_mode(self) -> None:
+        image = _VisualClip(
+            Path("cover.png"),
+            "image",
+            0,
+            0,
+            5_000,
+            StudioMediaSettings(),
+        )
+        settings = video_export_preset(PRESET_DISCORD_10MB)
+
+        first_pass = _render_command(
+            "ffmpeg",
+            (image,),
+            Path("mix.wav"),
+            Path("pass-one.mp4"),
+            5_000,
+            settings,
+            video_bitrate_kbps=400,
+            pass_number=1,
+            pass_log_path=Path("pass-log"),
+            include_audio=False,
+        )
+        second_pass = _render_command(
+            "ffmpeg",
+            (image,),
+            Path("mix.wav"),
+            Path("output.mp4"),
+            5_000,
+            settings,
+            video_bitrate_kbps=400,
+            pass_number=2,
+            pass_log_path=Path("pass-log"),
+        )
+
+        self.assertNotIn("-crf", first_pass)
+        self.assertEqual(first_pass[first_pass.index("-b:v") + 1], "400k")
+        self.assertEqual(first_pass[first_pass.index("-pass") + 1], "1")
+        self.assertIn("-an", first_pass)
+        self.assertNotIn("-b:a", first_pass)
+        self.assertEqual(second_pass[second_pass.index("-pass") + 1], "2")
+        self.assertIn("-b:a", second_pass)
+
+    def test_adaptive_quality_selects_the_highest_scoring_candidate(self) -> None:
+        image = _VisualClip(
+            Path("cover.png"),
+            "image",
+            0,
+            0,
+            180_000,
+            StudioMediaSettings(),
+        )
+        settings = video_export_preset(PRESET_DISCORD_10MB)
+        progress: list[int] = []
+        scores = {"1080p": 82.0, "960p": 91.5, "720p": 95.0, "480p": 89.0}
+
+        def fake_command(args, **_options):
+            command = list(args)
+            if "-lavfi" in command:
+                candidate = Path(command[command.index("-i") + 1]).stem
+                label = next(label for label in scores if label in candidate)
+                return CommandResult(args, 0, "", f"VMAF score: {scores[label]:.6f}")
+            Path(command[-1]).write_bytes(b"video")
+            return CommandResult(args, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch(
+                "jang_app.services.song_video_export._source_pixel_ceiling",
+                return_value=None,
+            ):
+                with patch(
+                    "jang_app.services.song_video_export.run_command",
+                    side_effect=fake_command,
+                ):
+                    selected = _select_content_adaptive_settings(
+                        "ffmpeg",
+                        (image,),
+                        180_000,
+                        settings,
+                        294,
+                        Path(temporary),
+                        progress.append,
+                    )
+
+        self.assertEqual((selected.width, selected.height), (1280, 720))
+        self.assertEqual(progress[-1], 34)
+
+    def test_analysis_filter_concatenates_representative_timeline_windows(self) -> None:
+        image = _VisualClip(
+            Path("cover.png"),
+            "image",
+            0,
+            0,
+            180_000,
+            StudioMediaSettings(),
+        )
+
+        graph = _render_analysis_filter(
+            (image,),
+            180_000,
+            video_export_preset(PRESET_DISCORD_10MB),
+            representative_video_windows(180_000),
+        )
+
+        self.assertIn("[visual1]split=3", graph)
+        self.assertIn("concat=n=3:v=1:a=0[analysis]", graph)
 
     def test_renders_the_full_studio_mix_as_the_only_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -202,6 +365,103 @@ class SongVideoExportTests(unittest.TestCase):
                         )
 
             self.assertEqual(rendered.name, "Song - High Quality Video.mp4")
+
+    def test_10mb_video_preset_runs_two_passes_and_keeps_the_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            image = package.folder / "01_source" / "video" / "cover.png"
+            image.parent.mkdir(parents=True, exist_ok=True)
+            image.write_bytes(b"image")
+            source = VideoSource(kind=VIDEO_KIND_FILE, path=image, original_name=image.name)
+            commands: list[list[str]] = []
+            settings = video_export_preset(PRESET_DISCORD_10MB)
+
+            def fake_export(_sources, output: Path, **_options) -> Path:
+                sf.write(output, np.zeros(16_000, dtype=np.float32), 16_000)
+                return output
+
+            def fake_command(args, **_options):
+                commands.append(list(args))
+                Path(args[-1]).write_bytes(b"rendered")
+                return CommandResult(args, 0, "", "")
+
+            with patch("jang_app.services.song_video_export.require_executable", return_value="ffmpeg"):
+                with patch("jang_app.services.song_video_export.export_mix", side_effect=fake_export):
+                    with patch("jang_app.services.song_video_export.run_command", side_effect=fake_command):
+                        with patch(
+                            "jang_app.services.song_video_export._select_content_adaptive_settings",
+                            return_value=settings,
+                        ):
+                            rendered = render_song_video(
+                                package,
+                                source,
+                                StudioSession(),
+                                settings=settings,
+                            )
+
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(commands[0][commands[0].index("-pass") + 1], "1")
+            self.assertEqual(commands[1][commands[1].index("-pass") + 1], "2")
+            self.assertLessEqual(rendered.stat().st_size, VIDEO_TARGET_10MB_BYTES)
+            self.assertEqual(rendered.name, "Song - Discord 10MB Video.mp4")
+
+    def test_10mb_video_retries_with_a_lower_bitrate_when_oversized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            image = package.folder / "01_source" / "video" / "cover.png"
+            image.parent.mkdir(parents=True, exist_ok=True)
+            image.write_bytes(b"image")
+            source = VideoSource(kind=VIDEO_KIND_FILE, path=image, original_name=image.name)
+            commands: list[list[str]] = []
+            second_passes = 0
+
+            def fake_export(_sources, output: Path, **_options) -> Path:
+                sf.write(output, np.zeros(16_000, dtype=np.float32), 16_000)
+                return output
+
+            def fake_command(args, **_options):
+                nonlocal second_passes
+                command = list(args)
+                commands.append(command)
+                output = Path(command[-1])
+                if command[command.index("-pass") + 1] == "2":
+                    second_passes += 1
+                    output.write_bytes(
+                        b"x" * (1_050_000 if second_passes == 1 else 900_000)
+                    )
+                else:
+                    output.write_bytes(b"pass")
+                return CommandResult(args, 0, "", "")
+
+            settings = VideoExportSettings(
+                preset_id=PRESET_DISCORD_10MB,
+                width=854,
+                height=480,
+                frame_rate=24,
+                quality_crf=24,
+                encoding_preset=ENCODING_SLOW,
+                audio_bitrate_kbps=96,
+                target_size_bytes=1_000_000,
+            )
+            with patch("jang_app.services.song_video_export.require_executable", return_value="ffmpeg"):
+                with patch("jang_app.services.song_video_export.export_mix", side_effect=fake_export):
+                    with patch("jang_app.services.song_video_export.run_command", side_effect=fake_command):
+                        with patch(
+                            "jang_app.services.song_video_export._select_content_adaptive_settings",
+                            return_value=settings,
+                        ):
+                            rendered = render_song_video(
+                                package,
+                                source,
+                                StudioSession(),
+                                settings=settings,
+                            )
+
+            self.assertEqual(len(commands), 4)
+            self.assertLessEqual(rendered.stat().st_size, 1_000_000)
+            first_bitrate = int(commands[0][commands[0].index("-b:v") + 1][:-1])
+            retry_bitrate = int(commands[2][commands[2].index("-b:v") + 1][:-1])
+            self.assertLess(retry_bitrate, first_bitrate)
 
     def test_rejects_a_source_without_a_local_video(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

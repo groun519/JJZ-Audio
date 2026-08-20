@@ -49,6 +49,7 @@ from jang_app.services.studio_session import (
     STUDIO_EFFECT_DELAY,
     STUDIO_EFFECT_DOUBLER,
     STUDIO_EFFECT_LEVEL_MATCH,
+    STUDIO_EFFECT_HARD_TUNE,
     STUDIO_EFFECT_REVERB,
     TRACK_AUDIO,
     TRACK_ORIGINAL_VOCAL,
@@ -1887,6 +1888,7 @@ class StudioEditor(QWidget):
         self._history_availability = (False, False)
         self._theme_mode = "dark"
         self._legacy_overlap_count = 0
+        self._viewport_restore_generation = 0
 
         self.sound_pool = StudioSoundPool(self)
         self.sound_pool.remove_requested.connect(self.asset_remove_requested.emit)
@@ -2081,6 +2083,30 @@ class StudioEditor(QWidget):
         self._playhead_ms = max(0, int(position_ms))
         self.timeline.set_playhead(self._playhead_ms)
 
+    def playhead_position_ms(self) -> int:
+        return self._playhead_ms
+
+    def timeline_view_position(self) -> tuple[int, int]:
+        return (
+            self.timeline_scroll.horizontalScrollBar().value(),
+            self.timeline_scroll.verticalScrollBar().value(),
+        )
+
+    def restore_timeline_view_position(self, horizontal: int, vertical: int) -> None:
+        """Restore scrolling after the page layout has rebuilt its scrollbar ranges."""
+        self._viewport_restore_generation += 1
+        generation = self._viewport_restore_generation
+        horizontal = max(0, int(horizontal))
+        vertical = max(0, int(vertical))
+
+        def restore() -> None:
+            if generation != self._viewport_restore_generation:
+                return
+            self.timeline_scroll.horizontalScrollBar().setValue(horizontal)
+            self.timeline_scroll.verticalScrollBar().setValue(vertical)
+
+        QTimer.singleShot(0, restore)
+
     def set_split_mode(self, enabled: bool) -> None:
         next_mode = bool(enabled) and self._split_tool_available
         if next_mode == self._split_mode:
@@ -2181,6 +2207,7 @@ class StudioEditor(QWidget):
             STUDIO_EFFECT_REVERB,
             STUDIO_EFFECT_DELAY,
             STUDIO_EFFECT_DOUBLER,
+            STUDIO_EFFECT_HARD_TUNE,
         ):
             effects = (
                 StudioEffect(

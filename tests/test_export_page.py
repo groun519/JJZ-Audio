@@ -9,6 +9,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from jang_app.qt_app.export_page import EXPORT_MODE_AUDIO, EXPORT_MODE_VIDEO, ExportPage
+from jang_app.qt_app.widgets import DangerIconButton
 from jang_app.services.audio_export_settings import PRESET_LOSSLESS_FLAC, AudioExportSettings
 from jang_app.services.google_drive_share import drive_share_target_id
 from jang_app.services.song_export import SongAudioExport
@@ -238,6 +239,26 @@ class ExportPageTests(unittest.TestCase):
 
         self.assertEqual(renamed.at(0), [audio.path, "Final Mix"])
         self.assertTrue(row.name_edit.isHidden())
+        page.close()
+
+    def test_export_row_groups_rename_and_remove_actions_on_hover(self) -> None:
+        page = ExportPage()
+        export_dir = Path("song-package") / "04_exports"
+        audio = SongAudioExport(export_dir / "audio" / "mix.wav", 2048, 1_786_000_000)
+        removed = QSignalSpy(page.remove_requested)
+        page.set_exports((audio,), (), export_dir)
+        row = page.export_rows[0]
+
+        self.assertIsInstance(row.remove_button, DangerIconButton)
+        self.assertTrue(row.rename_button.isHidden())
+        self.assertTrue(row.remove_button.isHidden())
+        row._is_hovered = True
+        row._sync_action_visibility()
+
+        self.assertFalse(row.rename_button.isHidden())
+        self.assertFalse(row.remove_button.isHidden())
+        row.remove_button.click()
+        self.assertEqual(removed.at(0), [audio.path])
         page.close()
 
 

@@ -3,13 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout
 
 from jang_app.qt_app.localization import (
     apply_widget_language,
     set_translated_text,
     set_translated_tooltip,
 )
+from jang_app.qt_app.result_timeline import (
+    RESULT_TRACK_HEADER_WIDTH,
+    ResultTimelineRuler,
+    ResultTimelineWaveform,
+    result_timeline_stylesheet,
+)
+from jang_app.qt_app.theme import theme_tokens
 from jang_app.qt_app.vocal_result_labels import (
     display_result_timestamp,
     separation_postprocess_label,
@@ -21,9 +28,9 @@ from jang_app.qt_app.widgets import (
     ScrollSafeComboBox,
     SvgIconButton,
     TrackMixControl,
-    WaveformView,
 )
 from jang_app.services.i18n import tr
+from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.song_library import SongVocalVersion
 from jang_app.services.vocal_project import VocalProject, VocalTake
 
@@ -101,6 +108,7 @@ class VocalResultsPanel(QFrame):
             "Converted Vocal",
             allow_selection=mode != "conversion",
             allow_actions=mode == "all",
+            require_explicit_selection=mode == "conversion",
         )
         self.result_waveforms = {
             "all": (
@@ -135,14 +143,23 @@ class VocalResultsPanel(QFrame):
         self.converted_waveform.remove_requested.connect(self.remove_take_requested.emit)
         self.converted_waveform.reconvert_requested.connect(self.reconvert_take_requested.emit)
 
+        self.timeline_ruler = ResultTimelineRuler()
+        self.timeline_surface = QFrame()
+        self.timeline_surface.setObjectName("ResultTimelineSurface")
+        timeline_layout = QVBoxLayout(self.timeline_surface)
+        timeline_layout.setContentsMargins(0, 0, 0, 0)
+        timeline_layout.setSpacing(8)
+        timeline_layout.addWidget(self.timeline_ruler, 0)
+        for waveform in self.result_waveforms:
+            timeline_layout.addWidget(waveform, 1)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
         layout.addLayout(header)
         if mode == "conversion":
             layout.addWidget(self.context_label, 0)
-        for waveform in self.result_waveforms:
-            layout.addWidget(waveform, 1)
+        layout.addWidget(self.timeline_surface, 1)
         if mode == "separation":
             self.set_versions((), None)
         self.set_result(None)
@@ -205,7 +222,17 @@ class VocalResultsPanel(QFrame):
             takes,
             selected_converted_path,
         )
-        self._sync_conversion_default_mix(bool(converted_paths))
+        detail = (
+            tr(result.separation_recipe_label or result.label)
+            if result is not None
+            else ""
+        )
+        self.original_waveform.set_detail(detail)
+        self.instrumental_waveform.set_detail(detail)
+        self._sync_timeline_duration()
+        self._sync_conversion_default_mix(
+            self.converted_waveform.current_path() is not None
+        )
         self.open_location_button.setEnabled(result is not None)
         self._is_loading = False
 
@@ -228,6 +255,17 @@ class VocalResultsPanel(QFrame):
             if instrumental_result is not None
             else None
         )
+        self.original_waveform.set_detail(
+            tr(vocal_result.separation_recipe_label or vocal_result.label)
+            if vocal_result is not None
+            else ""
+        )
+        self.instrumental_waveform.set_detail(
+            tr(instrumental_result.separation_recipe_label or instrumental_result.label)
+            if instrumental_result is not None
+            else ""
+        )
+        self._sync_timeline_duration()
         self.open_location_button.setEnabled(self._result is not None)
         self._is_loading = False
 
@@ -278,6 +316,7 @@ class VocalResultsPanel(QFrame):
         return self.converted_waveform.select_path(path)
 
     def set_playhead_ratio(self, ratio: float) -> None:
+        self.timeline_ruler.set_playhead_ratio(ratio)
         for waveform in self.result_waveforms:
             waveform.set_playhead_ratio(ratio)
 
@@ -297,6 +336,10 @@ class VocalResultsPanel(QFrame):
         return tuple(tracks)
 
     def set_theme_mode(self, theme_mode: str) -> None:
+        self.timeline_surface.setStyleSheet(
+            result_timeline_stylesheet(theme_tokens(theme_mode))
+        )
+        self.timeline_ruler.set_theme_mode(theme_mode)
         self.open_location_button.set_theme_mode(theme_mode)
         for waveform in self.result_waveforms:
             waveform.set_theme_mode(theme_mode)
@@ -314,6 +357,7 @@ class VocalResultsPanel(QFrame):
             self._apply_result(self._result)
 
     def _on_converted_changed(self, path: Path | None) -> None:
+        self._sync_timeline_duration()
         if not self._is_loading:
             self.converted_selected.emit(path)
 
@@ -327,7 +371,11 @@ class VocalResultsPanel(QFrame):
     def _apply_result(self, result: SongVocalVersion | None) -> None:
         if self._mode == "conversion":
             converted_paths = tuple(result.converted_vocal_paths) if result is not None else ()
-            selected_path = result.active_converted_path if result is not None else None
+            selected_path = (
+                result.active_converted_path or (converted_paths[0] if converted_paths else None)
+                if result is not None
+                else None
+            )
             takes = self._project.takes if self._project is not None else ()
             self.set_conversion_context(
                 result,
@@ -342,6 +390,14 @@ class VocalResultsPanel(QFrame):
         selected_path = result.active_converted_path if result is not None else None
         takes = self._project.takes if self._project is not None else ()
         self.converted_waveform.set_takes(converted_paths, takes, selected_path)
+        detail = (
+            tr(result.separation_recipe_label or result.label)
+            if result is not None
+            else ""
+        )
+        self.original_waveform.set_detail(detail)
+        self.instrumental_waveform.set_detail(detail)
+        self._sync_timeline_duration()
         self.open_location_button.setEnabled(result is not None)
 
     def _sync_conversion_default_mix(self, has_converted: bool) -> None:
@@ -373,6 +429,21 @@ class VocalResultsPanel(QFrame):
             "converted": self.converted_waveform,
         }.get(track_id)
 
+    def _sync_timeline_duration(self) -> None:
+        durations: list[int] = []
+        for waveform in self.result_waveforms:
+            path = waveform.current_path()
+            if path is None or not path.is_file():
+                continue
+            try:
+                durations.append(read_audio_metadata(path).duration_ms)
+            except Exception:
+                continue
+        duration_ms = max(durations, default=0)
+        self.timeline_ruler.set_duration_ms(duration_ms)
+        for waveform in self.result_waveforms:
+            waveform.set_timeline_duration_ms(duration_ms)
+
 
 class _ResultWaveform(QFrame):
     seek_requested = Signal(float)
@@ -389,16 +460,21 @@ class _ResultWaveform(QFrame):
         *,
         allow_selection: bool = False,
         allow_actions: bool = False,
+        require_explicit_selection: bool = False,
     ) -> None:
         super().__init__()
-        self.setObjectName("InsetCard")
+        self.setObjectName("ResultTimelineTrack")
+        self.setMinimumHeight(108)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._is_loading = False
         self._allow_selection = allow_selection
+        self._require_explicit_selection = require_explicit_selection
         self._takes_by_path: dict[Path, VocalTake] = {}
         self._current_path: Path | None = None
+        self._base_detail = ""
 
         self.title_label = QLabel(title)
-        self.title_label.setObjectName("CardTitle")
+        self.title_label.setObjectName("ResultTimelineTrackTitle")
         self.path_combo = ScrollSafeComboBox()
         self.path_combo.setObjectName("TrackVersionCombo")
         self.path_combo.setMinimumWidth(220)
@@ -426,37 +502,53 @@ class _ResultWaveform(QFrame):
         self.open_button.clicked.connect(lambda: self._emit_for_current(self.open_requested))
         self.remove_button.clicked.connect(lambda: self._emit_for_current(self.remove_requested))
 
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(6)
-        header.addWidget(self.title_label, 0)
-        header.addWidget(self.path_combo, 1)
-        for button in self.take_action_buttons:
-            header.addWidget(button, 0)
-
         self.metadata_label = QLabel("")
-        self.metadata_label.setObjectName("VocalTakeMetadata")
+        self.metadata_label.setObjectName("ResultTimelineTrackDetail")
         self.metadata_label.setVisible(False)
 
-        self.waveform = WaveformView()
-        self.waveform.setMinimumHeight(82)
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(3)
+        for button in self.take_action_buttons:
+            action_row.addWidget(button, 0)
+        action_row.addStretch(1)
+
+        self.waveform = ResultTimelineWaveform()
+        self.waveform.setMinimumHeight(72)
         self.waveform.seek_requested.connect(self.seek_requested.emit)
-        self.mix_control = TrackMixControl()
+        self.mix_control = TrackMixControl(compact=True)
+        self.mix_control.setObjectName("ResultTimelineMixControl")
         self.mix_control.settings_changed.connect(self._on_playback_settings_changed)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
-        layout.addLayout(header)
-        layout.addWidget(self.metadata_label)
+        self.header = QFrame()
+        self.header.setObjectName("ResultTimelineTrackHeader")
+        self.header.setFixedWidth(RESULT_TRACK_HEADER_WIDTH)
+        header_layout = QVBoxLayout(self.header)
+        header_layout.setContentsMargins(13, 11, 11, 9)
+        header_layout.setSpacing(4)
+        header_layout.addWidget(self.title_label, 0)
+        header_layout.addWidget(self.path_combo, 0)
+        header_layout.addWidget(self.metadata_label, 0)
+        if allow_actions:
+            header_layout.addLayout(action_row)
+        header_layout.addStretch(1)
+        header_layout.addWidget(self.mix_control, 0)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.header, 0)
         layout.addWidget(self.waveform, 1)
-        layout.addWidget(self.mix_control, 0)
 
     def set_path(self, path: Path | None) -> None:
         self._current_path = path
         self.waveform.set_path(path)
         self.waveform.setToolTip(str(path) if path is not None else "")
         self.mix_control.set_controls_enabled(path is not None)
+
+    def set_detail(self, detail: str) -> None:
+        self._base_detail = detail.strip()
+        self._sync_detail_label()
 
     def set_options(self, paths: list[Path], selected_path: Path | None) -> None:
         self.set_takes(paths, (), selected_path)
@@ -483,7 +575,10 @@ class _ResultWaveform(QFrame):
                 Qt.ItemDataRole.ToolTipRole,
             )
         selected_index = self._path_index(selected_path)
-        self.path_combo.setCurrentIndex(selected_index if selected_index >= 0 else (0 if paths else -1))
+        fallback_index = -1 if self._require_explicit_selection else (0 if paths else -1)
+        self.path_combo.setCurrentIndex(
+            selected_index if selected_index >= 0 else fallback_index
+        )
         self.path_combo.setEnabled(bool(paths))
         self.path_combo.setVisible(self._allow_selection and len(paths) > 1)
         self.path_combo.blockSignals(False)
@@ -491,6 +586,14 @@ class _ResultWaveform(QFrame):
         self._is_loading = False
 
     def select_path(self, path: Path | None) -> bool:
+        if path is None and self._require_explicit_selection:
+            self._is_loading = True
+            was_blocked = self.path_combo.blockSignals(True)
+            self.path_combo.setCurrentIndex(-1)
+            self.path_combo.blockSignals(was_blocked)
+            self._apply_current_take()
+            self._is_loading = False
+            return True
         index = self._path_index(path)
         if index < 0:
             return False
@@ -503,6 +606,8 @@ class _ResultWaveform(QFrame):
         return True
 
     def current_path(self) -> Path | None:
+        if self._require_explicit_selection and self.path_combo.currentIndex() < 0:
+            return None
         data = self.path_combo.currentData()
         if data:
             return Path(data)
@@ -514,6 +619,9 @@ class _ResultWaveform(QFrame):
 
     def set_playhead_ratio(self, ratio: float) -> None:
         self.waveform.set_playhead_ratio(ratio)
+
+    def set_timeline_duration_ms(self, duration_ms: int) -> None:
+        self.waveform.set_duration_ms(duration_ms)
 
     def set_mix_state(self, *, muted: bool, volume_percent: int) -> None:
         self.mix_control.set_mix_state(muted=muted, volume_percent=volume_percent)
@@ -552,12 +660,21 @@ class _ResultWaveform(QFrame):
         path = self.current_path()
         take = self.current_take()
         self.set_path(path)
-        metadata = vocal_take_metadata(take)
-        self.metadata_label.setText(metadata)
-        self.metadata_label.setVisible(bool(metadata))
+        self._sync_detail_label()
         has_path = path is not None
         for button in self.take_action_buttons:
             button.setEnabled(has_path)
+
+    def _sync_detail_label(self) -> None:
+        path = self.current_path()
+        take = self.current_take()
+        metadata = vocal_take_metadata(take)
+        detail = metadata or self._base_detail
+        self.metadata_label.setText(detail)
+        self.metadata_label.setToolTip(
+            vocal_take_tooltip(take, path) if take is not None and path is not None else detail
+        )
+        self.metadata_label.setVisible(bool(detail))
 
     def _take_for_path(self, path: Path) -> VocalTake | None:
         return self._takes_by_path.get(path.expanduser().resolve())

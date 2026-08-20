@@ -13,6 +13,7 @@ import soundfile as sf
 
 from jang_app.services.audio_pitch_analysis import AudioPitchMetrics, analyze_audio_signal
 from jang_app.services.managed_files import write_json_atomic
+from jang_app.services.pitch_profile import midi_note_name
 from jang_app.services.rvc_inference_settings import RvcInferenceSettings
 from jang_app.services.rvc_model_workspace import RvcModelRecord
 from jang_app.services.settings import RVC_DEVICE_AUTO, RvcSettings
@@ -24,6 +25,8 @@ PRECISION_BENCHMARK_VERSION = "precision-v1"
 PRECISION_BENCHMARK_FILE_NAME = "precision-benchmark.json"
 REFERENCE_CENTER_MIDI = 60.0
 BENCHMARK_SHIFTS = tuple(range(-24, 25))
+STABLE_SCORE_THRESHOLD = 82
+USABLE_SCORE_THRESHOLD = 58
 
 
 class ModelPrecisionBenchmarkError(RuntimeError):
@@ -118,11 +121,15 @@ def run_model_precision_benchmark(
 
     cache_dir = _benchmark_cache_dir(root, record.model_id)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="jjzero-model-benchmark-", dir=str(cache_dir)) as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="jjzero-model-benchmark-",
+        dir=str(cache_dir),
+    ) as temporary:
         output_dir = Path(temporary)
         for shift in ordered_shifts:
             for reference in _REFERENCES:
-                label = f"{shift:+d} st  /  {reference.label}"
+                note = midi_note_name(REFERENCE_CENTER_MIDI + shift)
+                label = f"{note} ({shift:+d})  /  {reference.label}"
                 result = _run_reference_job(
                     reference_paths[reference.key],
                     reference,
@@ -148,26 +155,15 @@ def run_model_precision_benchmark(
                     )
 
     if not had_success:
-        raise ModelPrecisionBenchmarkError("The selected model did not produce a usable benchmark render.")
+        raise ModelPrecisionBenchmarkError(
+            "The selected model did not produce a usable benchmark render."
+        )
 
     ordered_points = tuple(
         _aggregate_shift_point(shift, tuple(point_map[shift]))
         for shift in BENCHMARK_SHIFTS
     )
-    best_point = _best_point(ordered_points)
-    recommended_range = _contiguous_range(
-        ordered_points,
-        lambda item: item.score >= 78 and item.successful_references >= 2,
-        anchor=best_point.shift_semitones if best_point is not None else None,
-    )
-    usable_range = _contiguous_range(
-        ordered_points,
-        lambda item: item.score >= 58 and item.successful_references >= 1,
-        anchor=best_point.shift_semitones if best_point is not None else None,
-    )
-    display_best_shift = _range_center(recommended_range)
-    if display_best_shift is None:
-        display_best_shift = best_point.shift_semitones if best_point is not None else None
+    display_best_shift, recommended_range, usable_range = _summary_ranges(ordered_points)
     result = ModelPrecisionBenchmark(
         model_id=record.model_id,
         generated_at=datetime.now(UTC).isoformat(),
@@ -221,20 +217,6 @@ def load_cached_model_precision_benchmark(
         return None
 
 
-def benchmark_shift_label(shift: int | None) -> str:
-    if shift is None:
-        return "-"
-    return f"{shift:+d} st"
-
-
-def benchmark_range_label(low_shift: int | None, high_shift: int | None) -> str:
-    if low_shift is None or high_shift is None:
-        return "-"
-    if low_shift == high_shift:
-        return benchmark_shift_label(low_shift)
-    return f"{benchmark_shift_label(low_shift)}  to  {benchmark_shift_label(high_shift)}"
-
-
 def _run_reference_job(
     reference_path: Path,
     reference: _BenchmarkReference,
@@ -281,7 +263,11 @@ def _aggregate_shift_point(
     shift: int,
     results: tuple[_ReferenceResult, ...],
 ) -> ModelPrecisionBenchmarkPoint:
-    successful = tuple(result for result in results if result.success and result.metrics is not None)
+    successful = tuple(
+        result
+        for result in results
+        if result.success and result.metrics is not None
+    )
     if not successful:
         return ModelPrecisionBenchmarkPoint(
             shift_semitones=shift,
@@ -294,8 +280,16 @@ def _aggregate_shift_point(
             successful_references=0,
             total_references=len(results),
         )
-    pitch_errors = tuple(result.pitch_error for result in successful if result.pitch_error is not None)
-    pitch_biases = tuple(result.pitch_bias for result in successful if result.pitch_bias is not None)
+    pitch_errors = tuple(
+        result.pitch_error
+        for result in successful
+        if result.pitch_error is not None
+    )
+    pitch_biases = tuple(
+        result.pitch_bias
+        for result in successful
+        if result.pitch_bias is not None
+    )
     active_ratio = float(np.mean([result.metrics.active_ratio for result in successful]))
     clipping_ratio = float(np.mean([result.metrics.clipping_ratio for result in successful]))
     pitch_error = float(np.mean(pitch_errors)) if pitch_errors else None
@@ -307,9 +301,9 @@ def _aggregate_shift_point(
         len(successful),
         len(results),
     )
-    if score >= 82:
+    if score >= STABLE_SCORE_THRESHOLD:
         status = "stable"
-    elif score >= 58:
+    elif score >= USABLE_SCORE_THRESHOLD:
         status = "caution"
     else:
         status = "avoid"
@@ -346,7 +340,9 @@ def _score_point(
     return max(0, min(100, round(total * 100)))
 
 
-def _best_point(points: tuple[ModelPrecisionBenchmarkPoint, ...]) -> ModelPrecisionBenchmarkPoint | None:
+def _best_point(
+    points: tuple[ModelPrecisionBenchmarkPoint, ...],
+) -> ModelPrecisionBenchmarkPoint | None:
     if not points:
         return None
     max_score = max(point.score for point in points)
@@ -361,6 +357,33 @@ def _best_point(points: tuple[ModelPrecisionBenchmarkPoint, ...]) -> ModelPrecis
             item.shift_semitones,
         ),
     )
+
+
+def _summary_ranges(
+    points: tuple[ModelPrecisionBenchmarkPoint, ...],
+) -> tuple[int | None, tuple[int | None, int | None], tuple[int | None, int | None]]:
+    best_point = _best_point(points)
+    anchor = best_point.shift_semitones if best_point is not None else None
+    stable_range = _contiguous_range(
+        points,
+        lambda item: (
+            item.score >= STABLE_SCORE_THRESHOLD
+            and item.successful_references >= 2
+        ),
+        anchor=anchor,
+    )
+    usable_range = _contiguous_range(
+        points,
+        lambda item: (
+            item.score >= USABLE_SCORE_THRESHOLD
+            and item.successful_references >= 1
+        ),
+        anchor=anchor,
+    )
+    center_shift = _range_center(stable_range)
+    if center_shift is None:
+        center_shift = anchor
+    return center_shift, stable_range, usable_range
 
 
 def _contiguous_range(
@@ -404,7 +427,10 @@ def _build_notes(
     if recommended_range[0] is not None and recommended_range[1] is not None:
         width = recommended_range[1] - recommended_range[0] + 1
         if width <= 5:
-            notes.append("The recommended pitch window is narrow, so large shifts may lose quality quickly.")
+            notes.append(
+                "The recommended pitch window is narrow, so large shifts may lose "
+                "quality quickly."
+            )
         elif width >= 12:
             notes.append("The model keeps a wide usable shift window in this benchmark.")
     if usable_range[0] is None:
@@ -455,6 +481,7 @@ def _result_from_data(data: dict[str, object]) -> ModelPrecisionBenchmark:
         for item in data.get("points", ())
         if isinstance(item, dict)
     )
+    center_shift, stable_range, usable_range = _summary_ranges(points)
     return ModelPrecisionBenchmark(
         model_id=str(data["model_id"]),
         generated_at=str(data["generated_at"]),
@@ -463,14 +490,14 @@ def _result_from_data(data: dict[str, object]) -> ModelPrecisionBenchmark:
         total_jobs=int(data["total_jobs"]),
         successful_jobs=int(data["successful_jobs"]),
         failed_jobs=int(data["failed_jobs"]),
-        best_shift_semitones=_int_or_none(data.get("best_shift_semitones")),
-        recommended_low_shift=_int_or_none(data.get("recommended_low_shift")),
-        recommended_high_shift=_int_or_none(data.get("recommended_high_shift")),
-        usable_low_shift=_int_or_none(data.get("usable_low_shift")),
-        usable_high_shift=_int_or_none(data.get("usable_high_shift")),
-        stable_point_count=int(data["stable_point_count"]),
-        caution_point_count=int(data["caution_point_count"]),
-        avoid_point_count=int(data["avoid_point_count"]),
+        best_shift_semitones=center_shift,
+        recommended_low_shift=stable_range[0],
+        recommended_high_shift=stable_range[1],
+        usable_low_shift=usable_range[0],
+        usable_high_shift=usable_range[1],
+        stable_point_count=sum(point.status == "stable" for point in points),
+        caution_point_count=sum(point.status == "caution" for point in points),
+        avoid_point_count=sum(point.status == "avoid" for point in points),
         points=points,
         notes=tuple(str(item) for item in data.get("notes", ()) if isinstance(item, str)),
     )
@@ -569,12 +596,15 @@ def _synthesize_reference_note(
         harmonic_frequency = frequency * harmonic
         formant_weight = 0.0
         for center, width, amount in formants:
-            formant_weight += amount * math.exp(-0.5 * (((harmonic_frequency - center) / width) ** 2))
+            distance = (harmonic_frequency - center) / width
+            formant_weight += amount * math.exp(-0.5 * (distance**2))
         harmonic_sum += (formant_weight + 0.08) * np.sin(phase * harmonic) / harmonic
 
     envelope = _adsr_envelope(total, attack=0.06, decay=0.12, sustain=0.82, release=0.10)
     if pulse_depth > 0.0 and pulse_rate > 0.0:
-        pulse = 1.0 - (pulse_depth * 0.5) + (pulse_depth * 0.5 * np.sin(2 * math.pi * pulse_rate * time))
+        pulse = 1.0 - (pulse_depth * 0.5) + (
+            pulse_depth * 0.5 * np.sin(2 * math.pi * pulse_rate * time)
+        )
     else:
         pulse = np.ones_like(time)
     rng = np.random.default_rng(seed)
@@ -612,13 +642,6 @@ def _benchmark_shift_order() -> tuple[int, ...]:
         ordered.append(-offset)
         ordered.append(offset)
     return tuple(ordered)
-
-
-def _int_or_none(value: object) -> int | None:
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _range_center(value: tuple[int | None, int | None]) -> int | None:
