@@ -44,6 +44,7 @@ class RvcTrainingPhase(StrEnum):
     FEATURES_READY = "features_ready"
     FILELIST_READY = "filelist_ready"
     TRAIN = "train"
+    MODEL_READY = "model_ready"
     STOPPED = "stopped"
     INDEX = "index"
     INDEX_READY = "index_ready"

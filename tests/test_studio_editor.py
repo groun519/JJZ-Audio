@@ -1780,6 +1780,64 @@ class StudioEditorTests(unittest.TestCase):
         self.assertEqual(editor.media_at(4_500), (image, 2_500, clip.media))
         self.assertIsNone(editor.media_at(8_000))
 
+    def test_media_lookup_cache_is_invalidated_after_an_edit(self) -> None:
+        image = StudioSoundAsset(
+            StudioAssetRef("image", TRACK_VIDEO, "cover.png"),
+            "Cover",
+            Path("cover.png"),
+            20_000,
+            media_kind="image",
+            default_clip_duration_ms=5_000,
+        )
+        clip = StudioClip("clip-image", image.reference, 3_000, 0, 5_000)
+        editor = StudioEditor(include_sidebars=False)
+        editor.set_context(
+            StudioSession(
+                tracks=(StudioTrack("track-video", "Media", TRACK_VIDEO, clips=(clip,)),)
+            ),
+            (image,),
+        )
+        self.assertIsNotNone(editor.media_at(4_000))
+
+        moved = replace(clip, timeline_start_ms=9_000)
+        editor._apply_committed_session(
+            StudioSession(
+                tracks=(StudioTrack("track-video", "Media", TRACK_VIDEO, clips=(moved,)),)
+            )
+        )
+
+        self.assertIsNone(editor.media_at(4_000))
+        self.assertIsNotNone(editor.media_at(10_000))
+
+    def test_level_match_waveform_file_metadata_is_indexed_once(self) -> None:
+        original_ref = StudioAssetRef("output-1", TRACK_ORIGINAL_VOCAL, "vocals.wav")
+        converted_ref = StudioAssetRef("output-1", "converted_vocal", "rvc.wav")
+        original = StudioSoundAsset(original_ref, "Run / Vocal", Path("vocals.wav"), 2_000)
+        converted = StudioSoundAsset(converted_ref, "Run / RVC", Path("rvc.wav"), 2_000)
+        clip = StudioClip(
+            "clip-rvc",
+            converted_ref,
+            0,
+            0,
+            2_000,
+            effects=(StudioEffect("level", "level_match"),),
+        )
+        session = StudioSession(
+            tracks=(StudioTrack("track-rvc", "RVC", "converted_vocal", clips=(clip,)),)
+        )
+        timeline = StudioTimelineView()
+
+        with patch(
+            "jang_app.qt_app.studio_editor.waveform_cache_key",
+            side_effect=lambda path, points: (str(path), 1, 1, points),
+        ) as cache_key:
+            timeline.set_context(session, (original, converted))
+            for _ in range(20):
+                timeline._waveform_peaks_for_clip(clip)
+
+        self.assertEqual(cache_key.call_count, 2)
+        timeline.close()
+
     def test_image_media_values_update_duration_and_layout_together(self) -> None:
         image = StudioSoundAsset(
             StudioAssetRef("image", TRACK_VIDEO, "cover.png"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import stat
@@ -26,11 +27,20 @@ RVC_PROFILE_STATE_NAME = "jjzero-runtime-profile.json"
 _PRESERVED_DIRECTORIES = (
     Path("rvc/weights"),
     Path("rvc/logs"),
-    Path("rvc/runtime"),
     Path("demucs/torch/hub/checkpoints"),
 )
+_WINDOWS_RESERVED_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+}
 _REPLACE_RETRY_ATTEMPTS = 5
 _REPLACE_RETRY_DELAY_SECONDS = 0.05
+_INSTALL_SPACE_MARGIN_BYTES = 1024 * 1024
+_LOGGER = logging.getLogger(__name__)
 
 
 class RuntimeInstallationError(RuntimeError):
@@ -122,6 +132,18 @@ def runtime_packages_unpacked_size(packages: Iterable[Path]) -> int:
     return _validated_unpacked_size(_validated_archives(packages, "runtime"))
 
 
+def recover_runtime_installations(runtime_root: Path) -> tuple[Path, ...]:
+    """Restore complete runtime trees stranded between atomic swap operations."""
+    root = runtime_root.expanduser().resolve()
+    recovered: list[Path] = []
+    if _recover_runtime_tree(root, _runtime_ready):
+        recovered.append(root)
+    profile = root / "rvc" / "runtime"
+    if _recover_runtime_tree(profile, _rvc_profile_ready):
+        recovered.append(profile)
+    return tuple(recovered)
+
+
 def install_runtime_packages(
     packages: Iterable[Path],
     runtime_root: Path,
@@ -131,9 +153,17 @@ def install_runtime_packages(
 ) -> RuntimeInstallation:
     archives = _validated_archives(packages, "audio engine")
     root = runtime_root.expanduser().resolve()
+    preserve_profile_runtime = not _archives_contain_prefix(
+        archives,
+        Path("rvc/runtime"),
+    )
 
     def prepare(staging: Path) -> None:
-        _preserve_mutable_runtime_data(root, staging)
+        _preserve_mutable_runtime_data(
+            root,
+            staging,
+            preserve_profile_runtime=preserve_profile_runtime,
+        )
         _prune_profile_packaging_artifacts(staging / "rvc" / "runtime")
         repair_rvc_runtime_adapter(staging / "rvc")
         write_json_atomic(
@@ -280,8 +310,9 @@ def _install_archive_tree(
     staging = root.with_name(f".{root.name}.installing")
     backup = root.with_name(f".{root.name}.previous")
     _remove_directory(staging)
-    staging.mkdir(parents=True)
     total_size = _validated_unpacked_size(archives)
+    _require_install_space(root, total_size)
+    staging.mkdir(parents=True)
     extracted = 0
     try:
         for archive in archives:
@@ -315,11 +346,13 @@ def _validated_unpacked_size(archives: tuple[Path, ...]) -> int:
             with zipfile.ZipFile(archive) as package:
                 for member in package.infolist():
                     normalized = _normalized_member_name(member)
-                    if normalized in seen and not member.is_dir():
+                    destination_key = _windows_destination_key(normalized)
+                    if destination_key in seen and not member.is_dir():
                         raise RuntimeInstallationError(
                             f"Duplicate audio engine file: {normalized}"
                         )
-                    seen.add(normalized)
+                    if not member.is_dir():
+                        seen.add(destination_key)
                     total += member.file_size
         except zipfile.BadZipFile as exc:
             raise RuntimeInstallationError(
@@ -349,13 +382,63 @@ def _normalized_member_name(member: zipfile.ZipInfo) -> str:
     return path.as_posix()
 
 
-def _preserve_mutable_runtime_data(current: Path, staging: Path) -> None:
+def _windows_destination_key(name: str) -> str:
+    normalized: list[str] = []
+    for part in PurePosixPath(name).parts:
+        if part.endswith((" ", ".")) or any(
+            character in part for character in '<>:"|?*'
+        ):
+            raise RuntimeInstallationError(
+                f"Unsafe Windows audio engine path: {name}"
+            )
+        stem = part.split(".", 1)[0].casefold()
+        if stem in _WINDOWS_RESERVED_NAMES:
+            raise RuntimeInstallationError(
+                f"Unsafe Windows audio engine path: {name}"
+            )
+        normalized.append(part.casefold())
+    return "/".join(normalized)
+
+
+def _archives_contain_prefix(
+    archives: tuple[Path, ...],
+    prefix: Path,
+) -> bool:
+    expected = tuple(part.casefold() for part in prefix.parts)
+    for archive in archives:
+        with zipfile.ZipFile(archive) as package:
+            for member in package.infolist():
+                parts = tuple(
+                    part.casefold()
+                    for part in PurePosixPath(
+                        _normalized_member_name(member)
+                    ).parts
+                )
+                if parts[: len(expected)] == expected and not member.is_dir():
+                    return True
+    return False
+
+
+def _preserve_mutable_runtime_data(
+    current: Path,
+    staging: Path,
+    *,
+    preserve_profile_runtime: bool,
+) -> None:
     if not current.is_dir():
         return
     for relative in _PRESERVED_DIRECTORIES:
         source = current / relative
         if source.is_dir():
             shutil.copytree(source, staging / relative, dirs_exist_ok=True)
+    if preserve_profile_runtime:
+        source = current / "rvc" / "runtime"
+        if source.is_dir():
+            shutil.copytree(
+                source,
+                staging / "rvc" / "runtime",
+                dirs_exist_ok=True,
+            )
 
 
 def _swap_runtime(staging: Path, root: Path, backup: Path) -> None:
@@ -370,7 +453,54 @@ def _swap_runtime(staging: Path, root: Path, backup: Path) -> None:
         if moved_current and backup.exists() and not root.exists():
             _replace_path(backup, root)
         raise
-    _remove_directory(backup)
+    try:
+        _remove_directory(backup)
+    except OSError as exc:
+        _LOGGER.warning(
+            "Audio engine update committed but old runtime cleanup failed: %s",
+            exc,
+        )
+
+
+def _recover_runtime_tree(
+    root: Path,
+    ready: Callable[[Path], bool],
+) -> bool:
+    staging = root.with_name(f".{root.name}.installing")
+    backup = root.with_name(f".{root.name}.previous")
+    if root.exists():
+        if ready(root):
+            for obsolete in (staging, backup):
+                try:
+                    _remove_directory(obsolete)
+                except OSError:
+                    pass
+        return False
+    if not backup.is_dir() or not ready(backup):
+        return False
+    _replace_path(backup, root)
+    try:
+        _remove_directory(staging)
+    except OSError:
+        pass
+    return True
+
+
+def _require_install_space(root: Path, expanded_bytes: int) -> None:
+    probe = root.parent
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        available = max(0, int(shutil.disk_usage(probe).free))
+    except OSError:
+        return
+    margin = max(_INSTALL_SPACE_MARGIN_BYTES, expanded_bytes // 20)
+    required = expanded_bytes + margin
+    if available < required:
+        raise RuntimeInstallationError(
+            "Not enough free space to install the audio engine. "
+            f"Required: {required} bytes; available: {available} bytes."
+        )
 
 
 def _replace_path(source: Path, destination: Path) -> None:

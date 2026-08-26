@@ -7,7 +7,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
-from jang_app.qt_app.library_row import SongListRow
+from jang_app.qt_app.library_row import (
+    LIBRARY_SOURCE_BADGE_SIZE,
+    LIBRARY_SOURCE_BADGE_TEXT_BOTTOM_INSET,
+    LIBRARY_SOURCE_BADGE_VERTICAL_OFFSET,
+    SongListRow,
+)
 from jang_app.qt_app.transport_controls import TRANSPORT_BUTTON_SIZE
 from jang_app.qt_app.widgets import COMPACT_ICON_BUTTON_SIZE, DangerIconButton
 from jang_app.services.song_metadata import SongDisplayMetadata
@@ -48,15 +53,52 @@ class SongListRowTests(unittest.TestCase):
         self.assertEqual(requested.at(0)[0], "song-1")
         row.close()
 
-    def test_source_badge_uses_optically_centered_text(self) -> None:
+    def test_source_badge_uses_compact_centered_geometry(self) -> None:
         row = SongListRow(
             "song-1",
             "Song",
             SongDisplayMetadata("youtube", "YOUTUBE", "M4A", "01:00", "1.0 MB", None),
         )
 
-        self.assertEqual(row.source_badge.contentsMargins().bottom(), 3)
+        self.assertEqual(
+            row.source_badge.size().toTuple(),
+            (LIBRARY_SOURCE_BADGE_SIZE, LIBRARY_SOURCE_BADGE_SIZE),
+        )
+        self.assertEqual(
+            row.source_badge.contentsMargins().bottom(),
+            LIBRARY_SOURCE_BADGE_TEXT_BOTTOM_INSET,
+        )
+        self.assertEqual(
+            row.source_badge_slot.size().toTuple(),
+            (
+                LIBRARY_SOURCE_BADGE_SIZE,
+                LIBRARY_SOURCE_BADGE_SIZE + (LIBRARY_SOURCE_BADGE_VERTICAL_OFFSET * 2),
+            ),
+        )
+        self.assertEqual(
+            row.source_badge_slot.layout().contentsMargins().bottom(),
+            LIBRARY_SOURCE_BADGE_VERTICAL_OFFSET * 2,
+        )
         self.assertEqual(row.source_badge.alignment(), Qt.AlignmentFlag.AlignCenter)
+
+        row.resize(960, row.sizeHint().height())
+        row.work_song_reveal._animation.setDuration(0)
+        row.set_work_song_active(True)
+        row.show()
+        self.app.processEvents()
+
+        badge_bottom_y = row.source_badge.mapTo(
+            row,
+            row.source_badge.rect().bottomLeft(),
+        ).y()
+        pin_bottom_y = row.work_song_button.mapTo(
+            row,
+            row.work_song_button.rect().bottomLeft(),
+        ).y()
+        self.assertEqual(
+            badge_bottom_y,
+            pin_bottom_y - (LIBRARY_SOURCE_BADGE_VERTICAL_OFFSET - 5),
+        )
         row.close()
 
     def test_work_song_action_reveals_before_content_and_persists_when_active(self) -> None:
@@ -193,6 +235,29 @@ class SongListRowTests(unittest.TestCase):
         self.assertGreaterEqual(row.waveform.minimumWidth(), 190)
         self.assertEqual(row.preview_transport.play_button.width(), TRANSPORT_BUTTON_SIZE)
         self.assertEqual(row.preview_transport.play_button.height(), TRANSPORT_BUTTON_SIZE)
+        row.close()
+
+    def test_ctrl_click_selects_for_grouping_without_opening_preview(self) -> None:
+        row = SongListRow(
+            "song-1",
+            "Song",
+            SongDisplayMetadata("local", "LOCAL", "WAV", "01:00", "1.0 MB", None),
+        )
+        selected = QSignalSpy(row.selection_requested)
+        previewed = QSignalSpy(row.preview_requested)
+        row.resize(720, row.sizeHint().height())
+        row.show()
+        self.app.processEvents()
+
+        QTest.mouseClick(
+            row.title_label,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+
+        self.assertEqual(selected.count(), 1)
+        self.assertEqual(selected.at(0), ["song-1", True])
+        self.assertEqual(previewed.count(), 0)
         row.close()
 
     def test_inline_transport_forwards_playback_actions_for_its_song(self) -> None:

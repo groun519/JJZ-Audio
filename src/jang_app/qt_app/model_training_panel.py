@@ -678,6 +678,8 @@ class ModelTrainingPanel(QWidget):
             )
         elif phase == RvcTrainingPhase.COMPLETE:
             set_translated_text(self.stage_label, "Model and index are ready")
+        elif phase == RvcTrainingPhase.MODEL_READY:
+            set_translated_text(self.stage_label, "Model is ready; index and registration remain")
         elif phase == RvcTrainingPhase.STOPPED and can_resume:
             set_translated_text(
                 self.stage_label,
@@ -1414,6 +1416,7 @@ class ModelTrainingPanel(QWidget):
             RvcTrainingPhase.FEATURES_READY: "features",
             RvcTrainingPhase.FILELIST_READY: "features",
             RvcTrainingPhase.TRAIN: "train",
+            RvcTrainingPhase.MODEL_READY: "index",
             RvcTrainingPhase.STOPPED: "train" if self._current_epoch else "",
             RvcTrainingPhase.INDEX: "index",
             RvcTrainingPhase.FAILED: "train" if self._current_epoch else "data",
@@ -1444,6 +1447,7 @@ class ModelTrainingPanel(QWidget):
                         RvcTrainingPhase.EXTRACT: 15,
                         RvcTrainingPhase.FEATURES_READY: 25,
                         RvcTrainingPhase.FILELIST_READY: 28,
+                        RvcTrainingPhase.MODEL_READY: 95,
                         RvcTrainingPhase.INDEX: 95,
                     }.get(phase, 0)
                 )
@@ -1563,6 +1567,7 @@ def _phase_label(phase: RvcTrainingPhase) -> str:
         RvcTrainingPhase.FEATURES_READY: "Features Ready",
         RvcTrainingPhase.FILELIST_READY: "Ready to Train",
         RvcTrainingPhase.TRAIN: "Training",
+        RvcTrainingPhase.MODEL_READY: "Model Ready",
         RvcTrainingPhase.STOPPED: "Stopped",
         RvcTrainingPhase.INDEX: "Building Index",
         RvcTrainingPhase.INDEX_READY: "Index Ready",

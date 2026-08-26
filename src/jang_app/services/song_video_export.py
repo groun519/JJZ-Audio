@@ -3,12 +3,13 @@ from __future__ import annotations
 import os
 import tempfile
 import uuid
+import wave
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from jang_app.config import FFMPEG_BIN_DIR, SUPPORTED_IMAGE_EXTENSIONS
-from jang_app.services.audio_export import export_mix
+from jang_app.services.audio_export import AudioExportError, export_mix
 from jang_app.services.audio_metadata import read_audio_metadata
 from jang_app.services.app_logging import get_logger
 from jang_app.services.command import run_command
@@ -22,6 +23,7 @@ from jang_app.services.export_catalog import ExportedFile, list_exported_files
 from jang_app.services.song_export import build_song_mix_sources
 from jang_app.services.song_package import EXPORT_STAGE, SongPackage
 from jang_app.services.studio_assets import resolve_studio_asset
+from jang_app.services.studio_audio_levels import studio_source_gain
 from jang_app.services.studio_session import (
     MEDIA_FILL,
     TRACK_VIDEO,
@@ -63,6 +65,8 @@ class _VisualClip:
     duration_ms: int
     media: StudioMediaSettings
     source_audio_enabled: bool = False
+    source_audio_gain: float = 1.0
+    source_audio_pan_percent: int = 0
 
 
 def can_render_song_video(
@@ -71,8 +75,15 @@ def can_render_song_video(
     session: StudioSession,
 ) -> bool:
     """Return whether the renderer can resolve at least one local visual source."""
-    if _resolved_timeline_clips(package, session):
-        return True
+    media_track = next(
+        (track for track in session.tracks if track.role == TRACK_VIDEO),
+        None,
+    )
+    if media_track is not None:
+        try:
+            return bool(_resolved_timeline_clips(package, session))
+        except SongVideoExportError:
+            return False
     fallback = source.path.expanduser().resolve() if source.path is not None else None
     return fallback is not None and fallback.is_file()
 
@@ -108,13 +119,37 @@ def render_song_video(
     try:
         with tempfile.TemporaryDirectory(prefix="video-render-", dir=output_dir) as temporary:
             mix_path = Path(temporary) / "studio-mix.wav"
-            export_mix(
-                build_song_mix_sources(package, session),
-                mix_path,
-            )
+            resolved_timeline = _resolved_timeline_clips(package, session)
+            try:
+                mix_sources = build_song_mix_sources(
+                    package,
+                    session,
+                    allow_empty=True,
+                )
+            except AudioExportError as exc:
+                raise SongVideoExportError(str(exc)) from exc
+            if mix_sources:
+                export_mix(mix_sources, mix_path)
+                audio_duration_ms = max(1, read_audio_metadata(mix_path).duration_ms)
+            else:
+                _write_silent_mix(mix_path)
+                audio_duration_ms = 0
             if progress is not None:
                 progress(12)
-            duration_ms = max(1, read_audio_metadata(mix_path).duration_ms)
+            visual_duration_ms = max(
+                (clip.timeline_end_ms for clip, _path in resolved_timeline),
+                default=0,
+            )
+            if not resolved_timeline:
+                visual_duration_ms = _fallback_visual_duration_ms(
+                    source,
+                    audio_duration_ms,
+                )
+            duration_ms = max(audio_duration_ms, visual_duration_ms)
+            if duration_ms <= 0:
+                raise SongVideoExportError(
+                    "Add visible media or audible clips before rendering."
+                )
             visual_clips = _visual_clips(package, source, session, duration_ms)
             if not visual_clips:
                 raise SongVideoExportError("Download or add local media before rendering.")
@@ -606,6 +641,16 @@ def _visual_clips(
     output_duration_ms: int,
 ) -> tuple[_VisualClip, ...]:
     clips: list[_VisualClip] = []
+    media_track = next(
+        (track for track in session.tracks if track.role == TRACK_VIDEO),
+        None,
+    )
+    has_solo = any(track.solo and not track.muted for track in session.tracks)
+    track_audible = bool(
+        media_track is not None
+        and not media_track.muted
+        and (not has_solo or media_track.solo)
+    )
     for clip, path in _resolved_timeline_clips(package, session):
         remaining = output_duration_ms - clip.timeline_start_ms
         duration_ms = min(clip.duration_ms, remaining)
@@ -623,13 +668,22 @@ def _visual_clips(
                 (
                     clip.media.source_audio_enabled
                     and media_kind == "video"
+                    and track_audible
+                    and not clip.muted
                     and _has_audio_stream(path)
                 ),
+                studio_source_gain(
+                    media_track.volume_percent if media_track is not None else 100,
+                    clip.gain_db,
+                ),
+                media_track.pan_percent if media_track is not None else 0,
             )
         )
     if clips:
         return tuple(sorted(clips, key=lambda clip: clip.timeline_start_ms))
 
+    if media_track is not None:
+        return ()
     fallback = source.path.expanduser().resolve() if source.path is not None else None
     if fallback is None or not fallback.is_file():
         return ()
@@ -653,10 +707,18 @@ def _resolved_timeline_clips(
     if media_track is None:
         return ()
     resolved: list[tuple[StudioClip, Path]] = []
+    missing: list[str] = []
     for clip in media_track.clips:
         path = resolve_studio_asset(package, clip.asset)
         if path is not None and clip.duration_ms > 0:
             resolved.append((clip, path))
+        elif clip.duration_ms > 0:
+            missing.append(clip.asset.asset_id)
+    if missing:
+        raise SongVideoExportError(
+            "Studio video export is missing required media: "
+            + ", ".join(dict.fromkeys(missing))
+        )
     return tuple(resolved)
 
 
@@ -698,12 +760,18 @@ def _render_filter(
         for index, clip in enumerate(clips)
         if clip.source_audio_enabled
     )
-    if include_audio and audio_clips:
-        filters.append(f"[{audio_index}:a:0]anull[audio0]")
+    if include_audio:
+        filters.append(
+            f"[{audio_index}:a:0]apad=whole_dur={_seconds(duration_ms)}[audio0]"
+        )
         for mix_index, (input_index, clip) in enumerate(audio_clips, start=1):
+            left_gain, right_gain = _pan_gains(clip.source_audio_pan_percent)
             filters.append(
                 f"[{input_index}:a:0]atrim=duration={_seconds(clip.duration_ms)},"
-                f"asetpts=PTS-STARTPTS,adelay={clip.timeline_start_ms}:all=1"
+                "asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo,"
+                f"volume={clip.source_audio_gain:.6f},"
+                f"pan=stereo|c0={left_gain:.6f}*c0|c1={right_gain:.6f}*c1,"
+                f"adelay={clip.timeline_start_ms}:all=1"
                 f"[mediaaudio{mix_index}]"
             )
             filters.append(
@@ -754,7 +822,34 @@ def _render_analysis_filter(
 
 def _audio_map(clips: tuple[_VisualClip, ...], audio_index: int) -> str:
     count = sum(clip.source_audio_enabled for clip in clips)
-    return f"[audio{count}]" if count else f"{audio_index}:a:0"
+    return f"[audio{count}]"
+
+
+def _pan_gains(pan_percent: int) -> tuple[float, float]:
+    import math
+
+    pan = max(-100, min(100, int(pan_percent))) / 100.0
+    angle = (pan + 1.0) * math.pi / 4.0
+    return math.cos(angle) * math.sqrt(2.0), math.sin(angle) * math.sqrt(2.0)
+
+
+def _write_silent_mix(path: Path) -> None:
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(2)
+        output.setsampwidth(2)
+        output.setframerate(44_100)
+        output.writeframes(b"\0\0\0\0")
+
+
+def _fallback_visual_duration_ms(source: VideoSource, audio_duration_ms: int) -> int:
+    if source.path is None or not source.path.expanduser().is_file():
+        return 0
+    if source.media_kind == "image":
+        return audio_duration_ms or 5_000
+    try:
+        return max(audio_duration_ms, read_audio_metadata(source.path).duration_ms)
+    except (OSError, RuntimeError, ValueError):
+        return audio_duration_ms
 
 
 def _has_audio_stream(path: Path) -> bool:

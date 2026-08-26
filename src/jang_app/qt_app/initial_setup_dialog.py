@@ -201,7 +201,7 @@ class InitialSetupDialog(AppDialog):
             dialog_title,
             logo_path,
             theme_mode=theme_mode,
-            allow_minimize=True,
+            allow_minimize=first_run,
             allow_maximize=True,
         )
         self._paths = paths

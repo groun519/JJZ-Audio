@@ -319,6 +319,7 @@ class NavigationActionButton(FeedbackButton):
 class PrimaryNavigationBar(QFrame):
     page_requested = Signal(int)
     page_option_requested = Signal(int, str)
+    management_requested = Signal()
     settings_requested = Signal()
     work_song_changed = Signal(str)
 
@@ -351,6 +352,11 @@ class PrimaryNavigationBar(QFrame):
         self.buttons = (*self.leading_buttons, *self.workflow_buttons, self.export_button)
         self.work_song_selector = NavigationWorkSongSelector()
         self.work_song_selector.song_changed.connect(self.work_song_changed.emit)
+        self.management_button = NavigationActionButton(
+            "management",
+            "Environment & Management",
+        )
+        self.management_button.clicked.connect(self.management_requested.emit)
         self.settings_button = NavigationActionButton("settings", "Settings")
         self.settings_button.clicked.connect(self.settings_requested.emit)
 
@@ -386,6 +392,7 @@ class PrimaryNavigationBar(QFrame):
         trailing_layout.setSpacing(12)
         trailing_layout.addStretch(1)
         trailing_layout.addWidget(self.settings_divider)
+        trailing_layout.addWidget(self.management_button)
         trailing_layout.addWidget(self.settings_button)
 
         layout = QHBoxLayout(self)
@@ -493,6 +500,8 @@ class PrimaryNavigationBar(QFrame):
 
     def apply_language(self) -> None:
         self.work_song_selector.apply_language()
+        self.management_button.setAccessibleName(tr("Environment & Management"))
+        self.settings_button.setAccessibleName(tr("Settings"))
         for menu in self._page_menus.values():
             menu.apply_language()
 
@@ -503,6 +512,7 @@ class PrimaryNavigationBar(QFrame):
             button.set_theme_mode(theme_mode)
         for menu in self._page_menus.values():
             menu.set_theme_mode(theme_mode)
+        self.management_button.set_theme_mode(theme_mode)
         self.settings_button.set_theme_mode(theme_mode)
 
     def _add_button(self, label: str, page_id: int) -> NavigationItemButton:

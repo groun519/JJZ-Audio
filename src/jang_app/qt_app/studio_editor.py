@@ -172,6 +172,12 @@ class StudioTimelineView(QWidget):
         self._theme_mode = "dark"
         self._theme = theme_tokens("dark")
         self._assets: dict[str, StudioSoundAsset] = {}
+        self._asset_waveform_keys: dict[str, tuple[str, int, int, int]] = {}
+        self._original_vocal_by_output: dict[str, StudioSoundAsset] = {}
+        self._level_match_requests: dict[
+            str,
+            tuple[tuple[object, ...], Path, Path, StudioLevelMatchSettings],
+        ] = {}
         self._peaks: dict[str, list[float]] = {}
         self._pending_peak_keys: set[tuple[str, int, int, int]] = set()
         self._level_matched_peaks: dict[str, tuple[tuple[object, ...], list[float]]] = {}
@@ -226,6 +232,7 @@ class StudioTimelineView(QWidget):
         assets: tuple[StudioSoundAsset, ...],
     ) -> None:
         self._assets = {asset.asset_id: asset for asset in assets}
+        self._rebuild_asset_waveform_index()
         self.update_session(session)
         if self.isVisible():
             self._queue_waveform_request()
@@ -234,6 +241,7 @@ class StudioTimelineView(QWidget):
         """Refresh timeline state without reloading unchanged waveform data."""
         self._session = session
         self._rebuild_session_index()
+        self._rebuild_level_match_request_index()
         self._selected_clip_ids.intersection_update(self._clip_by_id)
         if self._selected_clip_id not in self._selected_clip_ids:
             self._selected_clip_id = self._ordered_clip_ids(self._selected_clip_ids)[0] if self._selected_clip_ids else ""
@@ -245,6 +253,58 @@ class StudioTimelineView(QWidget):
         self.update()
         if self.isVisible():
             self._queue_waveform_request()
+
+    def _rebuild_asset_waveform_index(self) -> None:
+        self._asset_waveform_keys = {}
+        self._original_vocal_by_output = {}
+        for asset in self._assets.values():
+            if asset.reference.role == TRACK_ORIGINAL_VOCAL:
+                self._original_vocal_by_output.setdefault(
+                    asset.reference.output_id,
+                    asset,
+                )
+            if asset.media_kind in {"video", "image"}:
+                continue
+            try:
+                self._asset_waveform_keys[asset.asset_id] = waveform_cache_key(
+                    asset.path,
+                    _WAVEFORM_POINTS,
+                )
+            except OSError:
+                continue
+
+    def _rebuild_level_match_request_index(self) -> None:
+        requests: dict[
+            str,
+            tuple[tuple[object, ...], Path, Path, StudioLevelMatchSettings],
+        ] = {}
+        for clip in self._clip_by_id.values():
+            effect = next(
+                (
+                    item
+                    for item in clip.effects
+                    if item.enabled and item.kind == STUDIO_EFFECT_LEVEL_MATCH
+                ),
+                None,
+            )
+            if effect is None:
+                continue
+            source = self._assets.get(clip.asset.asset_id)
+            reference = self._original_vocal_by_output.get(clip.asset.output_id)
+            if source is None or reference is None:
+                continue
+            source_key = self._asset_waveform_keys.get(source.asset_id)
+            reference_key = self._asset_waveform_keys.get(reference.asset_id)
+            if source_key is None or reference_key is None:
+                continue
+            key = (source_key, reference_key, effect.level_match)
+            requests[clip.clip_id] = (
+                key,
+                source.path,
+                reference.path,
+                effect.level_match,
+            )
+        self._level_match_requests = requests
 
     def _rebuild_session_index(self) -> None:
         self._clip_by_id = {}
@@ -2022,9 +2082,8 @@ class StudioTimelineView(QWidget):
             asset = self._assets.get(asset_id)
             if asset is None or asset.media_kind in {"video", "image"}:
                 continue
-            try:
-                key = waveform_cache_key(asset.path, _WAVEFORM_POINTS)
-            except OSError:
+            key = self._asset_waveform_keys.get(asset_id)
+            if key is None:
                 continue
             cached = waveform_peak_cache.amplitude(key)
             if cached is not None:
@@ -2132,35 +2191,7 @@ class StudioTimelineView(QWidget):
         self,
         clip: StudioClip,
     ) -> tuple[tuple[object, ...], Path, Path, StudioLevelMatchSettings] | None:
-        effect = next(
-            (
-                item
-                for item in clip.effects
-                if item.enabled and item.kind == STUDIO_EFFECT_LEVEL_MATCH
-            ),
-            None,
-        )
-        if effect is None:
-            return None
-        source = self._assets.get(clip.asset.asset_id)
-        reference = next(
-            (
-                asset
-                for asset in self._assets.values()
-                if asset.reference.output_id == clip.asset.output_id
-                and asset.reference.role == TRACK_ORIGINAL_VOCAL
-            ),
-            None,
-        )
-        if source is None or reference is None:
-            return None
-        try:
-            source_key = waveform_cache_key(source.path, _WAVEFORM_POINTS)
-            reference_key = waveform_cache_key(reference.path, _WAVEFORM_POINTS)
-        except OSError:
-            return None
-        key = (source_key, reference_key, effect.level_match)
-        return key, source.path, reference.path, effect.level_match
+        return self._level_match_requests.get(clip.clip_id)
 
 
 class StudioEditor(QWidget):
@@ -2179,6 +2210,13 @@ class StudioEditor(QWidget):
         self._session = StudioSession()
         self._assets: tuple[StudioSoundAsset, ...] = ()
         self._assets_by_id: dict[str, StudioSoundAsset] = {}
+        self._media_lookup_cache: tuple[
+            int,
+            int,
+            StudioSoundAsset,
+            int,
+            StudioMediaSettings,
+        ] | None = None
         self._playhead_ms = 0
         self._split_mode = False
         self._split_tool_available = False
@@ -2350,6 +2388,7 @@ class StudioEditor(QWidget):
         self._session = session
         self._assets = assets
         self._assets_by_id = {asset.asset_id: asset for asset in assets}
+        self._media_lookup_cache = None
         self.sound_pool.set_assets(assets)
         self.timeline.set_context(session, assets)
         self._sync_inspector()
@@ -2372,6 +2411,11 @@ class StudioEditor(QWidget):
         position_ms: int,
     ) -> tuple[StudioSoundAsset, int, StudioMediaSettings] | None:
         position = max(0, int(position_ms))
+        cached = self._media_lookup_cache
+        if cached is not None:
+            start_ms, end_ms, asset, source_start_ms, media = cached
+            if start_ms <= position < end_ms:
+                return asset, source_start_ms + position - start_ms, media
         track = next((item for item in self._session.tracks if item.role == TRACK_VIDEO), None)
         if track is None:
             return None
@@ -2381,8 +2425,16 @@ class StudioEditor(QWidget):
             asset = self._assets_by_id.get(clip.asset.asset_id)
             if asset is None or asset.media_kind not in {"video", "image"}:
                 continue
+            self._media_lookup_cache = (
+                clip.timeline_start_ms,
+                clip.timeline_end_ms,
+                asset,
+                clip.source_start_ms,
+                clip.media,
+            )
             source_position = clip.source_start_ms + position - clip.timeline_start_ms
             return asset, source_position, clip.media
+        self._media_lookup_cache = None
         return None
 
     def set_playhead(self, position_ms: int) -> None:
@@ -2843,6 +2895,7 @@ class StudioEditor(QWidget):
             session
         )
         self._session = session
+        self._media_lookup_cache = None
         if requires_render:
             self.timeline.set_context(session, self._assets)
         else:

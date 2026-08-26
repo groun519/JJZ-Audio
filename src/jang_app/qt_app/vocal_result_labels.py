@@ -29,9 +29,15 @@ def vocal_take_metadata(take: VocalTake | None) -> str:
     conversion = take.conversion
     model = Path(conversion.voice_model).stem or conversion.voice_model
     index = Path(conversion.index_file).stem if conversion.index_file else tr("No index")
+    input_label = (
+        f"  /  {tr('Input')} {conversion.input_source.label}"
+        if conversion.input_source is not None
+        else ""
+    )
     return (
         f"{model}  /  {tr('Pitch')} {conversion.pitch:+d}  /  {index}  /  "
-        f"{conversion.effective_device.upper()}  /  {display_result_timestamp(take.created_at)}"
+        f"{conversion.effective_device.upper()}{input_label}  /  "
+        f"{display_result_timestamp(take.created_at)}"
     )
 
 
@@ -56,6 +62,8 @@ def vocal_take_card_detail(take: VocalTake | None, source_label: str) -> str:
     source = tr(source_label)
     if take is None:
         return source
+    if take.conversion is not None and take.conversion.input_source is not None:
+        source = f"{source} / {take.conversion.input_source.label}"
     timestamp = display_compact_result_timestamp(take.created_at)
     return f"{source} / {timestamp}" if timestamp else source
 
@@ -67,7 +75,15 @@ def vocal_take_summary(take: VocalTake | None) -> str:
     if take.conversion is None:
         return f"{tr('Legacy result')}  /  {timestamp}"
     model = Path(take.conversion.voice_model).stem or take.conversion.voice_model
-    return f"{model}  /  {tr('Pitch')} {take.conversion.pitch:+d}  /  {timestamp}"
+    input_label = (
+        f"  /  {take.conversion.input_source.label}"
+        if take.conversion.input_source is not None
+        else ""
+    )
+    return (
+        f"{model}  /  {tr('Pitch')} {take.conversion.pitch:+d}"
+        f"{input_label}  /  {timestamp}"
+    )
 
 
 def separation_postprocess_label(status: str) -> str:

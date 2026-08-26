@@ -5,13 +5,24 @@ import json
 import logging
 import shutil
 import sqlite3
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.config import PROJECT_ROOT, SONG_WORKSPACE_DIR
 from jang_app.services.library_catalog import LibraryCatalog, inferred_catalog_file
-from jang_app.services.managed_files import copy_file_atomic, file_sha256, write_json_atomic
+from jang_app.services.managed_files import (
+    copy_file_atomic,
+    file_sha256,
+    managed_path_lock,
+    write_json_atomic,
+)
+from jang_app.services.managed_transaction import (
+    ManagedPathTransaction,
+    ManagedTransactionError,
+)
 from jang_app.services.tool_workspace import new_storage_key, stable_storage_key
 
 
@@ -105,6 +116,24 @@ class SongPackageStore:
     ) -> tuple[SongPackage, bool]:
         source = source.expanduser().resolve()
         content_hash = file_sha256(source)
+        with managed_path_lock(self._source_identity_path(content_hash)):
+            return self._import_audio_locked(
+                source,
+                content_hash=content_hash,
+                title=title,
+                source_type=source_type,
+                source_url=source_url,
+            )
+
+    def _import_audio_locked(
+        self,
+        source: Path,
+        *,
+        content_hash: str,
+        title: str,
+        source_type: str,
+        source_url: str,
+    ) -> tuple[SongPackage, bool]:
         display_title = title.strip() or source.stem
         existing = next(
             (item for item in self.packages(include_removed=True) if item.source_hash == content_hash),
@@ -113,50 +142,31 @@ class SongPackageStore:
         if existing is not None:
             if existing.removed:
                 if existing.source_path is None or not existing.source_path.is_file():
-                    self._create_stage_directories(existing.folder)
-                    managed_source = (
-                        existing.folder
-                        / SOURCE_STAGE
-                        / "audio"
-                        / _managed_source_name(source)
-                    )
-                    copy_file_atomic(source, managed_source)
-                    existing = replace(
+                    existing = self._attach_managed_source(
                         existing,
-                        source_path=managed_source,
-                        source_type=(
-                            source_type if source_type in {"local", "youtube"} else "local"
-                        ),
-                        source_url=source_url.strip(),
-                        source_hash=content_hash,
-                        original_name=source.name,
+                        source,
+                        source_type=source_type,
+                        source_url=source_url,
+                        content_hash=content_hash,
                         removed=False,
                     )
                 else:
                     existing = replace(existing, removed=False)
-                self._save(existing)
+                    self._save(existing)
                 return existing, True
             return existing, False
 
         song_id = f"song-{content_hash[:16]}"
         folder = self.root / stable_storage_key("s", song_id)
-        self._create_stage_directories(folder)
-        managed_source = folder / SOURCE_STAGE / "audio" / _managed_source_name(source)
-        copy_file_atomic(source, managed_source)
-        package = SongPackage(
+        package = self._import_new_audio_package(
+            source,
             song_id=song_id,
-            title=display_title,
             folder=folder,
-            source_path=managed_source,
-            source_type=source_type if source_type in {"local", "youtube"} else "local",
-            source_url=source_url.strip(),
-            source_hash=content_hash,
-            original_name=source.name,
-            outputs=(),
-            active_output_id="",
-            created_at=_now(),
+            display_title=display_title,
+            source_type=source_type,
+            source_url=source_url,
+            content_hash=content_hash,
         )
-        self._save(package)
         return package, True
 
     def create_output_recovery(self, title: str, job_dir: Path, label: str) -> SongPackage:
@@ -198,95 +208,115 @@ class SongPackageStore:
         source_type: str = "local",
         source_url: str = "",
     ) -> SongPackage:
-        package = self.require(song_id)
         source = source.expanduser().resolve()
         if not source.is_file():
             raise ValueError(f"Original audio does not exist: {source}")
-        if package.source_path is not None and package.source_path.is_file():
-            return package
-
         content_hash = file_sha256(source)
-        existing = next(
-            (
-                item
-                for item in self.packages(include_removed=True)
-                if item.song_id != song_id and item.source_hash == content_hash
-            ),
-            None,
-        )
-        if existing is not None:
-            outputs_by_id = {
-                output.output_id: output
-                for output in (*existing.outputs, *package.outputs)
-            }
-            updated = replace(
-                existing,
-                outputs=tuple(outputs_by_id.values()),
-                active_output_id=package.active_output_id or existing.active_output_id,
-                detached_output_dirs=tuple(
-                    dict.fromkeys((*existing.detached_output_dirs, *package.detached_output_dirs))
-                ),
-                removed=False,
-            )
-            self._save(updated)
-            self._save(replace(package, removed=True))
-            return updated
+        with managed_path_lock(self._source_identity_path(content_hash)):
+            with self._locked_package(song_id) as package:
+                if package.source_path is not None and package.source_path.is_file():
+                    return package
+                existing = next(
+                    (
+                        item
+                        for item in self.packages(include_removed=True)
+                        if item.song_id != song_id
+                        and item.source_hash == content_hash
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    existing_manifest = existing.folder / SONG_MANIFEST_NAME
+                    with managed_path_lock(existing_manifest):
+                        existing = self.require(
+                            existing.song_id,
+                            include_removed=True,
+                        )
+                        package = self.require(song_id)
+                        outputs_by_id = {
+                            output.output_id: output
+                            for output in (*existing.outputs, *package.outputs)
+                        }
+                        updated = replace(
+                            existing,
+                            outputs=tuple(outputs_by_id.values()),
+                            active_output_id=(
+                                package.active_output_id
+                                or existing.active_output_id
+                            ),
+                            detached_output_dirs=tuple(
+                                dict.fromkeys(
+                                    (
+                                        *existing.detached_output_dirs,
+                                        *package.detached_output_dirs,
+                                    )
+                                )
+                            ),
+                            removed=False,
+                        )
+                        self._save_package_pair(
+                            (existing, updated),
+                            (package, replace(package, removed=True)),
+                        )
+                        return updated
 
-        managed_source = (
-            package.folder
-            / SOURCE_STAGE
-            / "audio"
-            / _managed_source_name(source)
-        )
-        copy_file_atomic(source, managed_source)
-        updated = replace(
-            package,
-            source_path=managed_source,
-            source_type=source_type if source_type in {"local", "youtube"} else "local",
-            source_url=source_url.strip(),
-            source_hash=content_hash,
-            original_name=source.name,
-        )
-        self._save(updated)
-        return updated
+                return self._attach_managed_source(
+                    package,
+                    source,
+                    source_type=source_type,
+                    source_url=source_url,
+                    content_hash=content_hash,
+                )
 
     def attach_output(self, song_id: str, job_dir: Path, label: str) -> SongPackage:
-        package = self.require(song_id)
-        resolved_job = job_dir.expanduser().resolve()
-        output_id = _output_id(resolved_job)
-        previous = next((item for item in package.outputs if item.output_id == output_id), None)
-        outputs = tuple(item for item in package.outputs if item.output_id != output_id)
-        outputs = (
-            SongOutputReference(
-                output_id,
-                label,
-                resolved_job,
-                _now(),
-                previous.active_converted_path if previous is not None else None,
-            ),
-            *outputs,
-        )
-        detached = tuple(path for path in package.detached_output_dirs if path != resolved_job)
-        updated = replace(
-            package,
-            outputs=outputs,
-            active_output_id=output_id,
-            detached_output_dirs=detached,
-        )
-        self._save(updated)
-        return updated
+        with self._locked_package(song_id) as package:
+            resolved_job = job_dir.expanduser().resolve()
+            output_id = _output_id(resolved_job)
+            previous = next(
+                (item for item in package.outputs if item.output_id == output_id),
+                None,
+            )
+            outputs = tuple(
+                item for item in package.outputs if item.output_id != output_id
+            )
+            outputs = (
+                SongOutputReference(
+                    output_id,
+                    label,
+                    resolved_job,
+                    _now(),
+                    previous.active_converted_path if previous is not None else None,
+                ),
+                *outputs,
+            )
+            detached = tuple(
+                path
+                for path in package.detached_output_dirs
+                if path != resolved_job
+            )
+            updated = replace(
+                package,
+                outputs=outputs,
+                active_output_id=output_id,
+                detached_output_dirs=detached,
+            )
+            self._save(updated)
+            return updated
 
     def activate_output(self, song_id: str, job_dir: Path) -> SongPackage:
-        package = self.require(song_id)
-        resolved_job = job_dir.expanduser().resolve()
-        output = next((item for item in package.outputs if item.job_dir == resolved_job), None)
-        if output is None:
-            raise KeyError(f"Song output does not exist: {resolved_job}")
-        if package.active_output_id == output.output_id:
-            return package
-        updated = replace(package, active_output_id=output.output_id)
-        self._save(updated)
-        return updated
+        with self._locked_package(song_id) as package:
+            resolved_job = job_dir.expanduser().resolve()
+            output = next(
+                (item for item in package.outputs if item.job_dir == resolved_job),
+                None,
+            )
+            if output is None:
+                raise KeyError(f"Song output does not exist: {resolved_job}")
+            if package.active_output_id == output.output_id:
+                return package
+            updated = replace(package, active_output_id=output.output_id)
+            self._save(updated)
+            return updated
 
     def activate_converted_output(
         self,
@@ -294,47 +324,79 @@ class SongPackageStore:
         job_dir: Path,
         converted_path: Path | None,
     ) -> SongPackage:
-        package = self.require(song_id)
-        resolved_job = job_dir.expanduser().resolve()
-        resolved_converted = converted_path.expanduser().resolve() if converted_path is not None else None
-        if resolved_converted is not None and (
-            not resolved_converted.is_file() or resolved_converted.parent != resolved_job
-        ):
-            raise ValueError("Converted vocal must be a file inside its output folder")
+        with self._locked_package(song_id) as package:
+            resolved_job = job_dir.expanduser().resolve()
+            resolved_converted = (
+                converted_path.expanduser().resolve()
+                if converted_path is not None
+                else None
+            )
+            if resolved_converted is not None and (
+                not resolved_converted.is_file()
+                or resolved_converted.parent != resolved_job
+            ):
+                raise ValueError(
+                    "Converted vocal must be a file inside its output folder"
+                )
 
-        found = False
-        outputs: list[SongOutputReference] = []
-        for output in package.outputs:
-            if output.job_dir != resolved_job:
-                outputs.append(output)
-                continue
-            found = True
-            outputs.append(replace(output, active_converted_path=resolved_converted))
-        if not found:
-            raise KeyError(f"Song output does not exist: {resolved_job}")
+            found = False
+            outputs: list[SongOutputReference] = []
+            for output in package.outputs:
+                if output.job_dir != resolved_job:
+                    outputs.append(output)
+                    continue
+                found = True
+                outputs.append(
+                    replace(output, active_converted_path=resolved_converted)
+                )
+            if not found:
+                raise KeyError(f"Song output does not exist: {resolved_job}")
 
-        updated = replace(package, outputs=tuple(outputs))
-        self._save(updated)
-        return updated
+            updated = replace(package, outputs=tuple(outputs))
+            self._save(updated)
+            return updated
 
-    def detach_output(self, song_id: str, job_dir: Path) -> SongPackage:
-        package = self.require(song_id)
-        resolved_job = job_dir.expanduser().resolve()
-        outputs = tuple(item for item in package.outputs if item.job_dir != resolved_job)
-        if len(outputs) == len(package.outputs):
-            raise KeyError(f"Song output does not exist: {resolved_job}")
-        active_output_id = package.active_output_id
-        if not any(item.output_id == active_output_id for item in outputs):
-            active_output_id = outputs[0].output_id if outputs else ""
-        detached = (*package.detached_output_dirs, resolved_job)
-        updated = replace(
-            package,
-            outputs=outputs,
-            active_output_id=active_output_id,
-            detached_output_dirs=tuple(dict.fromkeys(detached)),
-        )
-        self._save(updated)
-        return updated
+    def persist_asset_state(self, package: SongPackage) -> None:
+        folder = package.folder.expanduser().resolve()
+        if folder.parent != self.root or package.song_id.strip() == "":
+            raise ValueError("Song package is outside the managed library")
+        with managed_path_lock(folder / SONG_MANIFEST_NAME):
+            self._save(package)
+
+    def detach_output(
+        self,
+        song_id: str,
+        job_dir: Path,
+        *,
+        remove_if_empty: bool = False,
+    ) -> SongPackage:
+        with self._locked_package(song_id) as package:
+            resolved_job = job_dir.expanduser().resolve()
+            outputs = tuple(
+                item for item in package.outputs if item.job_dir != resolved_job
+            )
+            if len(outputs) == len(package.outputs):
+                raise KeyError(f"Song output does not exist: {resolved_job}")
+            active_output_id = package.active_output_id
+            if not any(item.output_id == active_output_id for item in outputs):
+                active_output_id = outputs[0].output_id if outputs else ""
+            detached = (*package.detached_output_dirs, resolved_job)
+            updated = replace(
+                package,
+                outputs=outputs,
+                active_output_id=active_output_id,
+                detached_output_dirs=tuple(dict.fromkeys(detached)),
+                removed=(
+                    package.removed
+                    or (
+                        remove_if_empty
+                        and package.source_path is None
+                        and not outputs
+                    )
+                ),
+            )
+            self._save(updated)
+            return updated
 
     def vocal_separation_root(self, song_id: str) -> Path:
         package = self.require(song_id)
@@ -356,14 +418,16 @@ class SongPackageStore:
         value = title.strip()
         if not value:
             raise ValueError("Song title is required")
-        updated = replace(self.require(song_id), title=value)
-        self._save(updated)
-        return updated
+        with self._locked_package(song_id) as package:
+            updated = replace(package, title=value)
+            self._save(updated)
+            return updated
 
     def set_removed(self, song_id: str, removed: bool) -> SongPackage:
-        updated = replace(self.require(song_id, include_removed=True), removed=removed)
-        self._save(updated)
-        return updated
+        with self._locked_package(song_id, include_removed=True) as package:
+            updated = replace(package, removed=removed)
+            self._save(updated)
+            return updated
 
     def remove_managed_data(self, song_id: str) -> SongPackage:
         package = self.require(song_id, include_removed=True)
@@ -387,15 +451,166 @@ class SongPackageStore:
             removed=True,
         )
 
-        for entry in folder.iterdir():
-            if entry.name == SONG_MANIFEST_NAME:
-                continue
-            if entry.is_symlink() or entry.is_file():
-                entry.unlink()
-            elif entry.is_dir():
-                shutil.rmtree(entry)
-        self._save(tombstone, create_stages=False)
+        transaction = ManagedPathTransaction(self.root, "delete-song", song_id)
+        with managed_path_lock(manifest_path):
+            try:
+                transaction.stage(manifest_path, "manifest")
+                for entry in folder.iterdir():
+                    transaction.stage(entry, entry.name)
+                self._save(tombstone, create_stages=False)
+            except Exception as exc:
+                manifest_path.unlink(missing_ok=True)
+                self._rollback_transaction(transaction, exc)
+                self._discard_cached_manifest(manifest_path)
+                raise
+        self._commit_transaction(transaction)
         return tombstone
+
+    def _import_new_audio_package(
+        self,
+        source: Path,
+        *,
+        song_id: str,
+        folder: Path,
+        display_title: str,
+        source_type: str,
+        source_url: str,
+        content_hash: str,
+    ) -> SongPackage:
+        import_root = (
+            self.root
+            / ".jjzero-imports"
+            / f"song-import-{uuid.uuid4().hex}"
+        )
+        staged_folder = import_root / "package"
+        self._create_stage_directories(staged_folder)
+        staged_source = (
+            staged_folder
+            / SOURCE_STAGE
+            / "audio"
+            / _managed_source_name(source)
+        )
+        transaction = ManagedPathTransaction(self.root, "import-song", song_id)
+        try:
+            copy_file_atomic(source, staged_source)
+            managed_source = (
+                folder
+                / SOURCE_STAGE
+                / "audio"
+                / _managed_source_name(source)
+            )
+            package = SongPackage(
+                song_id=song_id,
+                title=display_title,
+                folder=folder,
+                source_path=managed_source,
+                source_type=(
+                    source_type
+                    if source_type in {"local", "youtube"}
+                    else "local"
+                ),
+                source_url=source_url.strip(),
+                source_hash=content_hash,
+                original_name=source.name,
+                outputs=(),
+                active_output_id="",
+                created_at=_now(),
+            )
+            manifest_path = folder / SONG_MANIFEST_NAME
+            with managed_path_lock(manifest_path):
+                transaction.stage(folder, "previous-unregistered-package")
+                transaction.promote(staged_folder, folder, "imported-package")
+                try:
+                    self._save(package)
+                except Exception as exc:
+                    self._rollback_transaction(transaction, exc)
+                    self._discard_cached_manifest(manifest_path)
+                    raise
+            self._commit_transaction(transaction)
+            return package
+        finally:
+            shutil.rmtree(import_root, ignore_errors=True)
+            try:
+                import_root.parent.rmdir()
+            except OSError:
+                pass
+
+    def _attach_managed_source(
+        self,
+        package: SongPackage,
+        source: Path,
+        *,
+        source_type: str,
+        source_url: str,
+        content_hash: str,
+        removed: bool | None = None,
+    ) -> SongPackage:
+        managed_source = (
+            package.folder
+            / SOURCE_STAGE
+            / "audio"
+            / _managed_source_name(source)
+        )
+        updated = replace(
+            package,
+            source_path=managed_source,
+            source_type=(
+                source_type if source_type in {"local", "youtube"} else "local"
+            ),
+            source_url=source_url.strip(),
+            source_hash=content_hash,
+            original_name=source.name,
+            removed=package.removed if removed is None else removed,
+        )
+        transaction = ManagedPathTransaction(
+            self.root,
+            "attach-song-source",
+            package.song_id,
+        )
+        manifest_path = package.folder / SONG_MANIFEST_NAME
+        with managed_path_lock(manifest_path):
+            try:
+                transaction.stage(manifest_path, "manifest")
+                transaction.stage(managed_source, "previous-source")
+                incoming = transaction.folder / "incoming" / managed_source.name
+                copy_file_atomic(source, incoming)
+                transaction.promote(incoming, managed_source, "new-source")
+                self._save(updated)
+            except Exception as exc:
+                manifest_path.unlink(missing_ok=True)
+                self._rollback_transaction(transaction, exc)
+                self._discard_cached_manifest(manifest_path)
+                raise
+        self._commit_transaction(transaction)
+        return updated
+
+    @staticmethod
+    def _rollback_transaction(
+        transaction: ManagedPathTransaction,
+        original_error: Exception,
+    ) -> None:
+        try:
+            transaction.rollback()
+        except ManagedTransactionError as rollback_error:
+            raise RuntimeError(
+                f"Song file rollback failed: {rollback_error}"
+            ) from original_error
+
+    @staticmethod
+    def _commit_transaction(transaction: ManagedPathTransaction) -> None:
+        try:
+            transaction.mark_committed()
+        except OSError as exc:
+            _LOGGER.warning(
+                "Could not mark song transaction %s committed: %s",
+                transaction.transaction_id,
+                exc,
+            )
+        if not transaction.purge():
+            _LOGGER.warning(
+                "Committed song transaction cleanup was deferred: %s",
+                transaction.folder,
+            )
 
     def purge_legacy_removed_data(self) -> int:
         purged = 0
@@ -432,6 +647,55 @@ class SongPackageStore:
         if package is None:
             raise KeyError(f"Song package does not exist: {song_id}")
         return package
+
+    @contextmanager
+    def _locked_package(
+        self,
+        song_id: str,
+        *,
+        include_removed: bool = False,
+    ):
+        package = self.require(song_id, include_removed=include_removed)
+        manifest_path = package.folder / SONG_MANIFEST_NAME
+        with managed_path_lock(manifest_path):
+            yield self.require(song_id, include_removed=include_removed)
+
+    def _save_package_pair(
+        self,
+        first: tuple[SongPackage, SongPackage],
+        second: tuple[SongPackage, SongPackage],
+    ) -> None:
+        transaction = ManagedPathTransaction(
+            self.root,
+            "merge-song-packages",
+            first[0].song_id,
+        )
+        originals = (first[0], second[0])
+        updates = (first[1], second[1])
+        manifests = tuple(
+            package.folder / SONG_MANIFEST_NAME for package in originals
+        )
+        try:
+            for index, manifest in enumerate(manifests):
+                transaction.stage(manifest, f"manifest-{index}")
+            for package in updates:
+                self._save(package)
+        except Exception as exc:
+            for manifest in manifests:
+                manifest.unlink(missing_ok=True)
+            self._rollback_transaction(transaction, exc)
+            for manifest in manifests:
+                self._discard_cached_manifest(manifest)
+            for package in originals:
+                try:
+                    self._catalog.upsert_song(package)
+                except (OSError, RuntimeError, sqlite3.Error):
+                    pass
+            raise
+        self._commit_transaction(transaction)
+
+    def _source_identity_path(self, content_hash: str) -> Path:
+        return self.root / ".jjzero-source-locks" / content_hash
 
     def find_by_output_job_dir(self, job_dir: Path, *, include_removed: bool = False) -> SongPackage | None:
         target = job_dir.expanduser().resolve()

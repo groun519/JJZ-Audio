@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -45,7 +45,7 @@ PLAYBACK_REMOVED = "removed"
 
 class VocalCleanupWorkspace(QWidget):
     source_changed = Signal(object)
-    preview_requested = Signal(object, int, int, str, str)
+    preview_requested = Signal(object, int, int, str, str, str)
     commit_preview_requested = Signal()
     cancel_preview_requested = Signal()
     region_remove_requested = Signal(str)
@@ -68,6 +68,7 @@ class VocalCleanupWorkspace(QWidget):
         }
         self._playback_mode = PLAYBACK_ORIGINAL
         self._selected_effect = VOCAL_CLEANUP_EFFECT_DEREVERB
+        self._editing_region_id = ""
         self._theme_mode = "white"
 
         self.source_panel = self._build_source_panel()
@@ -291,6 +292,7 @@ class VocalCleanupWorkspace(QWidget):
         selected_result_id: str = "",
     ) -> None:
         self._project = project
+        self._editing_region_id = ""
         source = project.source_path if project is not None else None
         self._duration_ms = 0
         if source is not None:
@@ -402,17 +404,7 @@ class VocalCleanupWorkspace(QWidget):
         self.tool_detail_descriptions[VOCAL_CLEANUP_EFFECT_DENOISE].setText(
             tr("Reduces steady microphone and background noise in the selected vocal range.")
         )
-        status = separation_asset_status(EFFECT_REMOVAL_RECIPE.effect_model)
-        self.tool_detail_statuses[VOCAL_CLEANUP_EFFECT_DEREVERB].setText(
-            tr(status.status_text)
-        )
-        deecho_status = separation_asset_status(VOCAL_CLEANUP_DEECHO_MODEL)
-        self.tool_detail_statuses[VOCAL_CLEANUP_EFFECT_DEECHO].setText(
-            tr(deecho_status.status_text)
-        )
-        self.tool_detail_statuses[VOCAL_CLEANUP_EFFECT_DENOISE].setText(
-            tr("Built-in processing")
-        )
+        self.refresh_asset_status()
         self.strength_title.setText(tr("Strength"))
         for key, label in (
             ("conservative", "Conservative"),
@@ -433,11 +425,25 @@ class VocalCleanupWorkspace(QWidget):
         self.transport_bar.apply_language()
         self._update_selection_label()
 
+    def refresh_asset_status(self) -> None:
+        status = separation_asset_status(EFFECT_REMOVAL_RECIPE.effect_model)
+        self.tool_detail_statuses[VOCAL_CLEANUP_EFFECT_DEREVERB].setText(
+            tr(status.status_text)
+        )
+        deecho_status = separation_asset_status(VOCAL_CLEANUP_DEECHO_MODEL)
+        self.tool_detail_statuses[VOCAL_CLEANUP_EFFECT_DEECHO].setText(
+            tr(deecho_status.status_text)
+        )
+        self.tool_detail_statuses[VOCAL_CLEANUP_EFFECT_DENOISE].setText(
+            tr("Built-in processing")
+        )
+
     def _on_source_changed(self, version: SongVocalVersion) -> None:
         self.source_changed.emit(version)
 
     def _on_selection_changed(self, start_ms: int, end_ms: int) -> None:
         self._selection = (start_ms, end_ms)
+        self._editing_region_id = ""
         self.preview_invalidated.emit()
         self.clear_pending_preview()
         self._update_selection_label()
@@ -467,9 +473,22 @@ class VocalCleanupWorkspace(QWidget):
             return
         self.waveform.set_selection(region.start_ms, region.end_ms)
         self._selection = (region.start_ms, region.end_ms)
+        self._editing_region_id = region.region_id
+        self._selected_effect = region.effect
+        with QSignalBlocker(self.tool_group):
+            self.tool_buttons[region.effect].setChecked(True)
+        self.tool_detail_stack.setCurrentIndex(
+            VOCAL_CLEANUP_EFFECTS.index(region.effect)
+        )
+        with QSignalBlocker(self.strength_group):
+            self.strength_buttons[region.strength].setChecked(True)
         self._update_selection_label()
+        self._sync_state()
 
     def _on_result_selected(self, result: VocalCleanupResult) -> None:
+        if self.preview_action.preview_available():
+            self.preview_invalidated.emit()
+            self.clear_pending_preview()
         self._preview_paths[PLAYBACK_PROCESSED] = result.path
         self._set_playback_mode(PLAYBACK_PROCESSED)
         self.result_selected.emit(result)
@@ -499,6 +518,7 @@ class VocalCleanupWorkspace(QWidget):
             end_ms,
             self._selected_effect,
             self._selected_strength(),
+            self._editing_region_id,
         )
 
     def _selected_strength(self) -> str:

@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
+from jang_app.services.app_logging import get_logger
 from jang_app.services.job_diagnostics import JobDiagnostics, classify_error
 
 
@@ -61,11 +62,22 @@ class ProcessingQueue:
     def active_count(self) -> int:
         return sum(task.is_active for task in self.tasks())
 
+    def run_if_idle(self, action: Callable[[], None]) -> bool:
+        """Run a short ownership transition atomically with task registration."""
+        with self._lock:
+            if any(task.is_active for task in self._tasks):
+                return False
+            action()
+            return True
+
     def subscribe(self, listener: QueueListener) -> None:
         with self._lock:
             if listener not in self._listeners:
                 self._listeners.append(listener)
-        listener(self.tasks())
+        try:
+            listener(self.tasks())
+        except Exception:
+            get_logger().exception("Processing queue listener failed")
 
     def unsubscribe(self, listener: QueueListener) -> None:
         with self._lock:
@@ -159,7 +171,10 @@ class ProcessingQueue:
             for index, task in enumerate(self._tasks):
                 if task.task_id != task_id or task.is_finished:
                     continue
-                self._tasks[index] = update(task)
+                updated = update(task)
+                if updated == task:
+                    break
+                self._tasks[index] = updated
                 did_update = True
                 break
         if did_update:
@@ -177,7 +192,10 @@ class ProcessingQueue:
         with self._lock:
             listeners = tuple(self._listeners)
         for listener in listeners:
-            listener(tasks)
+            try:
+                listener(tasks)
+            except Exception:
+                get_logger().exception("Processing queue listener failed")
 
 
 def _clamp_progress(progress: int) -> int:

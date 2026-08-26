@@ -26,6 +26,7 @@ class WorkConvertSession:
     ) -> None:
         self._selected_input_job_dir = selected_input_job_dir
         self._selected_converted_path = selected_converted_path
+        self._converted_selection_cleared = False
         self._versions: tuple[SongVocalVersion, ...] = ()
         self._versions_by_job_dir: dict[Path, SongVocalVersion] = {}
         self._owners_by_path: dict[Path, SongVocalVersion] = {}
@@ -47,11 +48,16 @@ class WorkConvertSession:
         current_output_job_dir: Path | None = None,
         preferred_converted_path: Path | None = None,
     ) -> WorkConvertContext:
+        previous_job_dirs = frozenset(self._versions_by_job_dir)
         self._cache_versions(versions)
         if not self._versions:
             self._selected_input_job_dir = None
             self._selected_converted_path = None
+            self._converted_selection_cleared = False
             return self.context()
+        current_job_dirs = frozenset(self._versions_by_job_dir)
+        if previous_job_dirs and previous_job_dirs.isdisjoint(current_job_dirs):
+            self._converted_selection_cleared = False
 
         selected_input = self._selected_input_job_dir
         current_output = current_output_job_dir
@@ -66,7 +72,12 @@ class WorkConvertSession:
         selected_converted = self._selected_converted_path
         if self._has_converted_path(requested_converted):
             selected_converted = requested_converted
-        elif not self._has_converted_path(selected_converted):
+            self._converted_selection_cleared = False
+        elif selected_converted is not None and not self._has_converted_path(
+            selected_converted
+        ):
+            selected_converted = None
+        if selected_converted is None and not self._converted_selection_cleared:
             selected_converted = self._default_converted_path()
         self._selected_converted_path = selected_converted
         return self.context()
@@ -83,13 +94,16 @@ class WorkConvertSession:
             self._selected_input_job_dir = None
         if clear_selected_converted:
             self._selected_converted_path = None
+            self._converted_selection_cleared = True
         return self.context()
 
     def select_converted_path(self, path: Path | None) -> WorkConvertContext:
         if self._has_converted_path(path) or not self._owners_by_path:
             self._selected_converted_path = path
+            self._converted_selection_cleared = path is None
         elif path is None:
             self._selected_converted_path = None
+            self._converted_selection_cleared = True
         return self.context()
 
     def remember_converted_owner(
@@ -108,6 +122,7 @@ class WorkConvertSession:
             if not self._has_input_job_dir(self._selected_input_job_dir):
                 self._selected_input_job_dir = version.job_dir
         self._selected_converted_path = path
+        self._converted_selection_cleared = path is None
         return self.context()
 
     def input_version(self) -> SongVocalVersion | None:

@@ -193,7 +193,7 @@ EFFECT_REMOVAL_RECIPE = SeparationRecipe(
     shifts=1,
     overlap=0.25,
     float32=True,
-    mixture_consistency=True,
+    mixture_consistency=False,
     effect_model="deverb_bs_roformer_8_256dim_8depth.ckpt",
 )
 

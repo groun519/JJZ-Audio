@@ -13,7 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.config import MODEL_WORKSPACE_DIR
-from jang_app.services.managed_files import write_json_atomic
+from jang_app.services.managed_files import managed_path_lock, write_json_atomic
+from jang_app.services.managed_transaction import (
+    ManagedPathTransaction,
+    ManagedTransactionError,
+)
 from jang_app.services.library_catalog import LibraryCatalog, inferred_catalog_file
 from jang_app.services.rvc_model_package import (
     RvcModelPackageLayout,
@@ -199,6 +203,10 @@ class RvcModelWorkspace:
         self._records_revision: tuple[int, int, int] | None | object = _CATALOG_CACHE_UNSET
 
     def records(self) -> list[RvcModelRecord]:
+        with managed_path_lock(self.catalog_path):
+            return self._records_unlocked()
+
+    def _records_unlocked(self) -> list[RvcModelRecord]:
         revision = self._catalog_revision()
         if revision == self._records_revision:
             return list(self._records_cache)
@@ -241,30 +249,42 @@ class RvcModelWorkspace:
         model_name = " ".join(name.split())[:80]
         if not model_name:
             raise RvcModelWorkspaceError("Model name is required.")
-        existing = {record.model_id: record for record in self.records()}
-        if any(record.title.casefold() == model_name.casefold() for record in existing.values()):
-            raise RvcModelWorkspaceError(f'A model named "{model_name}" already exists.')
+        with managed_path_lock(self.catalog_path):
+            existing = {
+                record.model_id: record for record in self._records_unlocked()
+            }
+            if any(
+                record.title.casefold() == model_name.casefold()
+                for record in existing.values()
+            ):
+                raise RvcModelWorkspaceError(
+                    f'A model named "{model_name}" already exists.'
+                )
 
-        model_id = _new_model_id(model_name)
-        model_dir = self.library_dir / model_id
-        model_dir.mkdir(parents=True, exist_ok=False)
-        package = RvcModelPackageLayout(model_dir, model_name)
-        package.create()
-        record = RvcModelRecord(
-            model_id=model_id,
-            name=model_name,
-            mode="created",
-            runtime_root=runtime_root.expanduser().resolve(),
-            source_folder=package.experiment_dir,
-            inference_model=None,
-            index_file=None,
-            generator_checkpoint=None,
-            discriminator_checkpoint=None,
-            created_at=datetime.now(UTC).isoformat(),
-        )
-        existing[model_id] = record
-        self._save_records(existing.values())
-        return record
+            model_id = _new_model_id(model_name)
+            model_dir = self.library_dir / model_id
+            model_dir.mkdir(parents=True, exist_ok=False)
+            package = RvcModelPackageLayout(model_dir, model_name)
+            package.create()
+            record = RvcModelRecord(
+                model_id=model_id,
+                name=model_name,
+                mode="created",
+                runtime_root=runtime_root.expanduser().resolve(),
+                source_folder=package.experiment_dir,
+                inference_model=None,
+                index_file=None,
+                generator_checkpoint=None,
+                discriminator_checkpoint=None,
+                created_at=datetime.now(UTC).isoformat(),
+            )
+            existing[model_id] = record
+            try:
+                self._save_records(existing.values())
+            except Exception:
+                shutil.rmtree(model_dir, ignore_errors=True)
+                raise
+            return record
 
     def link_folder(self, folder: Path) -> list[RvcModelRecord]:
         return self._link_discovered(self.inspect_folder(folder))
@@ -276,15 +296,23 @@ class RvcModelWorkspace:
         self,
         discovered: Sequence[DiscoveredRvcModel],
     ) -> list[RvcModelRecord]:
-        existing = {record.model_id: record for record in self.records()}
-        linked: list[RvcModelRecord] = []
-        for model in discovered:
-            model_id = _model_id("linked", model)
-            record = _record_from_discovery(model_id, "linked", model, existing.get(model_id))
-            existing[model_id] = record
-            linked.append(record)
-        self._save_records(existing.values())
-        return linked
+        with managed_path_lock(self.catalog_path):
+            existing = {
+                record.model_id: record for record in self._records_unlocked()
+            }
+            linked: list[RvcModelRecord] = []
+            for model in discovered:
+                model_id = _model_id("linked", model)
+                record = _record_from_discovery(
+                    model_id,
+                    "linked",
+                    model,
+                    existing.get(model_id),
+                )
+                existing[model_id] = record
+                linked.append(record)
+            self._save_records(existing.values())
+            return linked
 
     def import_folder(
         self,
@@ -315,55 +343,146 @@ class RvcModelWorkspace:
         include_related_files: bool,
         progress: Callable[[int], None] | None,
     ) -> list[RvcModelRecord]:
-        existing = {record.model_id: record for record in self.records()}
-        imported: list[RvcModelRecord] = []
-        package_plans: list[tuple[DiscoveredRvcModel, str, RvcModelPackageLayout, tuple]] = []
-
-        for model in discovered:
-            model_id = _model_id("managed", model)
-            model_dir = self.library_dir / model_id
-            package = RvcModelPackageLayout(model_dir, model.name)
-            experiment_source = (
-                model.runtime_root / "logs" / model.name
-                if include_related_files
-                else None
-            )
-            if experiment_source is not None and not experiment_source.is_dir():
-                experiment_source = None
-            create_rvc_package_directories(package, experiment_source)
-            weight_sources = (
-                _group_inference_weights(model.runtime_root / "weights").get(model.name, [])
-                if include_related_files
-                else ()
-            )
-            plan = build_rvc_package_plan(
-                package,
-                experiment_source=experiment_source,
-                weight_sources=weight_sources,
-                artifacts=dict(_discovery_artifact_items(model)),
-            )
-            package_plans.append((model, model_id, package, plan))
-
-        copy_rvc_package_files(
-            (item for _model, _model_id_value, _package, plan in package_plans for item in plan),
-            progress,
+        import_root = (
+            self.root
+            / ".jjzero-imports"
+            / f"model-import-{uuid.uuid4().hex}"
         )
-        for model, model_id, package, plan in package_plans:
-            managed = DiscoveredRvcModel(
-                name=model.name,
-                runtime_root=model.runtime_root,
-                source_folder=package.experiment_dir,
-                inference_model=packaged_target(plan, model.inference_model),
-                index_file=packaged_target(plan, model.index_file),
-                generator_checkpoint=packaged_target(plan, model.generator_checkpoint),
-                discriminator_checkpoint=packaged_target(plan, model.discriminator_checkpoint),
-            )
-            record = _record_from_discovery(model_id, "managed", managed, existing.get(model_id))
-            existing[model_id] = record
-            imported.append(record)
+        package_plans: list[
+            tuple[DiscoveredRvcModel, str, RvcModelPackageLayout, tuple]
+        ] = []
+        try:
+            for model in discovered:
+                model_id = _model_id("managed", model)
+                package = RvcModelPackageLayout(
+                    import_root / model_id,
+                    model.name,
+                )
+                experiment_source = (
+                    model.runtime_root / "logs" / model.name
+                    if include_related_files
+                    else None
+                )
+                if (
+                    experiment_source is not None
+                    and not experiment_source.is_dir()
+                ):
+                    experiment_source = None
+                create_rvc_package_directories(package, experiment_source)
+                weight_sources = (
+                    _group_inference_weights(
+                        model.runtime_root / "weights"
+                    ).get(model.name, [])
+                    if include_related_files
+                    else ()
+                )
+                plan = build_rvc_package_plan(
+                    package,
+                    experiment_source=experiment_source,
+                    weight_sources=weight_sources,
+                    artifacts=dict(_discovery_artifact_items(model)),
+                )
+                package_plans.append((model, model_id, package, plan))
 
-        self._save_records(existing.values())
-        return imported
+            copy_rvc_package_files(
+                (
+                    item
+                    for _model, _model_id_value, _package, plan in package_plans
+                    for item in plan
+                ),
+                progress,
+            )
+            return self._commit_imported_packages(package_plans)
+        finally:
+            shutil.rmtree(import_root, ignore_errors=True)
+            try:
+                import_root.parent.rmdir()
+            except OSError:
+                pass
+
+    def _commit_imported_packages(
+        self,
+        package_plans: list[
+            tuple[DiscoveredRvcModel, str, RvcModelPackageLayout, tuple]
+        ],
+    ) -> list[RvcModelRecord]:
+        transaction = ManagedPathTransaction(
+            self.root,
+            "import-model",
+            uuid.uuid4().hex,
+        )
+        with managed_path_lock(self.catalog_path):
+            existing = {
+                record.model_id: record for record in self._records_unlocked()
+            }
+            imported: list[RvcModelRecord] = []
+            try:
+                transaction.stage(self.catalog_path, "catalog")
+                for model, model_id, staged_package, plan in package_plans:
+                    final_model_dir = self.library_dir / model_id
+                    final_package = RvcModelPackageLayout(
+                        final_model_dir,
+                        model.name,
+                    )
+                    transaction.stage(
+                        final_model_dir,
+                        f"previous-{model_id}",
+                    )
+                    transaction.promote(
+                        staged_package.model_dir,
+                        final_model_dir,
+                        f"imported-{model_id}",
+                    )
+                    managed = DiscoveredRvcModel(
+                        name=model.name,
+                        runtime_root=model.runtime_root,
+                        source_folder=final_package.experiment_dir,
+                        inference_model=_promoted_package_path(
+                            staged_package,
+                            final_package,
+                            packaged_target(plan, model.inference_model),
+                        ),
+                        index_file=_promoted_package_path(
+                            staged_package,
+                            final_package,
+                            packaged_target(plan, model.index_file),
+                        ),
+                        generator_checkpoint=_promoted_package_path(
+                            staged_package,
+                            final_package,
+                            packaged_target(plan, model.generator_checkpoint),
+                        ),
+                        discriminator_checkpoint=_promoted_package_path(
+                            staged_package,
+                            final_package,
+                            packaged_target(plan, model.discriminator_checkpoint),
+                        ),
+                    )
+                    record = _record_from_discovery(
+                        model_id,
+                        "managed",
+                        managed,
+                        existing.get(model_id),
+                    )
+                    existing[model_id] = record
+                    imported.append(record)
+                self._save_records(existing.values())
+            except Exception as exc:
+                rollback_failures: list[str] = []
+                self.catalog_path.unlink(missing_ok=True)
+                try:
+                    transaction.rollback()
+                except ManagedTransactionError as rollback_error:
+                    rollback_failures.append(str(rollback_error))
+                self._discard_catalog_cache()
+                if rollback_failures:
+                    raise RvcModelWorkspaceError(
+                        "Model import rollback failed: "
+                        + "; ".join(rollback_failures)
+                    ) from exc
+                raise
+            _commit_transaction(transaction)
+            return imported
 
     def update_profile(
         self,
@@ -375,19 +494,16 @@ class RvcModelWorkspace:
         default_pitch: int,
         default_device: str,
     ) -> RvcModelRecord:
-        record = self._require_record(model_id)
         normalized_tags = _normalize_tags(tags)
         device = normalize_rvc_device(default_device)
-        updated = replace(
-            record,
+        return self._update_record_fields(
+            model_id,
             display_name=display_name.strip()[:80],
             tags=normalized_tags,
             notes=notes.strip()[:2000],
             default_pitch=int(default_pitch),
             default_device=device,
         )
-        self._replace_record(updated)
-        return updated
 
     def replace_artifact(
         self,
@@ -396,25 +512,81 @@ class RvcModelWorkspace:
         source: Path,
         progress: Callable[[int], None] | None = None,
     ) -> RvcModelRecord:
-        record = self._require_record(model_id)
         source_path = source.expanduser().resolve()
         _validate_replacement_artifact(artifact_name, source_path)
-        replacement = source_path
-        if record.is_managed:
-            package = RvcModelPackageLayout(self.library_dir / record.model_id, record.name)
-            plan = build_rvc_package_plan(
-                package,
-                experiment_source=None,
-                weight_sources=(),
-                artifacts={artifact_name: source_path},
-            )
-            copy_rvc_package_files(plan, progress)
-            replacement = packaged_target(plan, source_path) or source_path
-        updated = replace(record, **{artifact_name: replacement})
-        self._replace_record(updated)
-        if progress is not None and not record.is_managed:
-            progress(100)
-        return updated
+        with managed_path_lock(self.catalog_path):
+            record = self._require_record_unlocked(model_id)
+            records = {
+                current.model_id: current for current in self._records_unlocked()
+            }
+            replacement = source_path
+            transaction: ManagedPathTransaction | None = None
+            replaced_metadata: tuple[Path, ...] = ()
+            if record.is_managed:
+                package = RvcModelPackageLayout(
+                    self.library_dir / record.model_id,
+                    record.name,
+                )
+                target = package.artifact_target(artifact_name, source_path).resolve()
+                if source_path != target:
+                    transaction = ManagedPathTransaction(
+                        self.root,
+                        "replace-artifact",
+                        record.model_id,
+                    )
+                    manifest_path = package.manifest_path
+                    transaction.stage(self.catalog_path, "catalog")
+                    transaction.stage(manifest_path, "manifest")
+                    replaced_metadata = (self.catalog_path, manifest_path)
+                    previous = getattr(record, artifact_name)
+                    staged_paths: set[Path] = set()
+                    if (
+                        isinstance(previous, Path)
+                        and previous.is_file()
+                        and package.contains(previous)
+                    ):
+                        transaction.stage(previous, "previous-active")
+                        staged_paths.add(previous.resolve())
+                    if target.is_file() and target not in staged_paths:
+                        transaction.stage(target, "previous-target")
+                    plan = build_rvc_package_plan(
+                        package,
+                        experiment_source=None,
+                        weight_sources=(),
+                        artifacts={artifact_name: source_path},
+                    )
+                    incoming = transaction.folder / "incoming" / target.name
+                    staged_plan = tuple(
+                        replace(item, target=incoming)
+                        for item in plan
+                    )
+                    try:
+                        copy_rvc_package_files(staged_plan, progress)
+                        transaction.promote(
+                            incoming,
+                            target,
+                            "replacement",
+                        )
+                    except Exception:
+                        transaction.rollback()
+                        raise
+                    replacement = target
+            updated = replace(record, **{artifact_name: replacement})
+            records[updated.model_id] = updated
+            try:
+                self._save_records(records.values())
+            except Exception:
+                for path in replaced_metadata:
+                    path.unlink(missing_ok=True)
+                if transaction is not None:
+                    transaction.rollback()
+                    self._discard_catalog_cache()
+                raise
+            if transaction is not None:
+                _commit_transaction(transaction)
+            if progress is not None and not record.is_managed:
+                progress(100)
+            return updated
 
     def register_training_artifacts(
         self,
@@ -425,10 +597,6 @@ class RvcModelWorkspace:
         generator_checkpoint: Path,
         discriminator_checkpoint: Path,
     ) -> RvcModelRecord:
-        record = self._require_record(model_id)
-        if not record.is_managed:
-            raise RvcModelWorkspaceError("Training artifacts require a managed model package.")
-        package = RvcModelPackageLayout(self.library_dir / record.model_id, record.name)
         artifacts = {
             "inference_model": inference_model.expanduser().resolve(),
             "index_file": index_file.expanduser().resolve(),
@@ -437,15 +605,25 @@ class RvcModelWorkspace:
         }
         for name, path in artifacts.items():
             _validate_replacement_artifact(name, path)
-            if not package.contains(path):
-                raise RvcModelWorkspaceError("Training artifacts must remain inside the model package.")
         if _checkpoint_step(artifacts["generator_checkpoint"]) != _checkpoint_step(
             artifacts["discriminator_checkpoint"]
         ):
             raise RvcModelWorkspaceError("Training checkpoint steps do not match.")
-        updated = replace(record, **artifacts)
-        self._replace_record(updated)
-        return updated
+        with managed_path_lock(self.catalog_path):
+            record = self._require_record_unlocked(model_id)
+            if not record.is_managed:
+                raise RvcModelWorkspaceError(
+                    "Training artifacts require a managed model package."
+                )
+            package = RvcModelPackageLayout(
+                self.library_dir / record.model_id,
+                record.name,
+            )
+            if any(not package.contains(path) for path in artifacts.values()):
+                raise RvcModelWorkspaceError(
+                    "Training artifacts must remain inside the model package."
+                )
+            return self._update_record_fields(model_id, **artifacts)
 
     def portable_rvc_root(self, model_id: str) -> Path:
         record = self._require_record(model_id)
@@ -456,13 +634,10 @@ class RvcModelWorkspace:
         return package.root
 
     def replace_runtime_root(self, model_id: str, runtime_root: Path) -> RvcModelRecord:
-        record = self._require_record(model_id)
         root = runtime_root.expanduser().resolve()
         if not (root / "runtime" / "python.exe").is_file() or not (root / "infer_cli.py").is_file():
             raise RvcModelWorkspaceError("The selected folder is not a usable RVC runtime.")
-        updated = replace(record, runtime_root=root)
-        self._replace_record(updated)
-        return updated
+        return self._update_record_fields(model_id, runtime_root=root)
 
     def register_imported_managed_record(
         self,
@@ -486,9 +661,6 @@ class RvcModelWorkspace:
             raise RvcModelWorkspaceError(f"Invalid model id: {model_id}")
         if mode not in {"managed", "created"}:
             raise RvcModelWorkspaceError(f"Unsupported managed model mode: {mode}")
-        records = {record.model_id: record for record in self.records()}
-        if model_id in records:
-            raise RvcModelWorkspaceError(f"Model is already registered: {model_id}")
         model_name = " ".join(name.split())[:80]
         if not model_name:
             raise RvcModelWorkspaceError("Model name is required.")
@@ -543,64 +715,115 @@ class RvcModelWorkspace:
             default_pitch=int(default_pitch),
             default_device=normalize_rvc_device(default_device),
         )
-        records[record.model_id] = record
-        self._save_records(records.values())
-        return record
+        with managed_path_lock(self.catalog_path):
+            records = {
+                current.model_id: current for current in self._records_unlocked()
+            }
+            if model_id in records:
+                raise RvcModelWorkspaceError(
+                    f"Model is already registered: {model_id}"
+                )
+            records[record.model_id] = record
+            self._save_records(records.values())
+            return record
 
     def remove_model(self, model_id: str) -> RvcModelRecord:
         """Remove one catalog entry and every JJZero Audio-owned file for it."""
-        record = self._require_record(model_id)
-        records = {item.model_id: item for item in self.records()}
-        records.pop(model_id, None)
+        with managed_path_lock(self.catalog_path):
+            record = self._require_record_unlocked(model_id)
+            records = {
+                item.model_id: item for item in self._records_unlocked()
+            }
+            records.pop(model_id, None)
 
-        owned_directories = [(self.root / model_id, self.root)]
-        if record.is_managed:
-            owned_directories.insert(
-                0,
-                (self.library_dir / model_id, self.library_dir),
-            )
-        for directory, parent in owned_directories:
-            _require_direct_child(directory, parent)
+            owned_directories = [(self.root / model_id, self.root, "work")]
+            if record.is_managed:
+                owned_directories.insert(
+                    0,
+                    (self.library_dir / model_id, self.library_dir, "package"),
+                )
+            for directory, parent, _label in owned_directories:
+                _require_direct_child(directory, parent)
 
-        self._save_records(records.values())
-        try:
-            for directory, _parent in owned_directories:
-                if directory.is_symlink():
-                    directory.unlink()
-                elif directory.is_dir():
-                    shutil.rmtree(directory)
-                elif directory.exists():
-                    directory.unlink()
-        except OSError as exc:
-            # Restore catalog visibility if Windows denied deletion. This avoids
-            # leaving a partially removed package hidden from the user.
-            self._save_records((*records.values(), record))
-            raise RvcModelWorkspaceError(
-                f"Model files could not be deleted: {directory}"
-            ) from exc
-        return record
+            transaction = ManagedPathTransaction(self.root, "delete-model", model_id)
+            try:
+                transaction.stage(self.catalog_path, "catalog")
+                for directory, _parent, label in owned_directories:
+                    transaction.stage(directory, label)
+                self._save_records(records.values())
+            except Exception as exc:
+                self.catalog_path.unlink(missing_ok=True)
+                try:
+                    transaction.rollback()
+                except ManagedTransactionError as rollback_error:
+                    raise RvcModelWorkspaceError(str(rollback_error)) from exc
+                self._discard_catalog_cache()
+                if isinstance(exc, RvcModelWorkspaceError):
+                    raise
+                raise RvcModelWorkspaceError(
+                    f"Model files could not be staged for deletion: {exc}"
+                ) from exc
+            _commit_transaction(transaction)
+            return record
 
     def _require_record(self, model_id: str) -> RvcModelRecord:
-        record = next((item for item in self.records() if item.model_id == model_id), None)
+        with managed_path_lock(self.catalog_path):
+            return self._require_record_unlocked(model_id)
+
+    def _require_record_unlocked(self, model_id: str) -> RvcModelRecord:
+        record = next(
+            (
+                item
+                for item in self._records_unlocked()
+                if item.model_id == model_id
+            ),
+            None,
+        )
         if record is None:
             raise RvcModelWorkspaceError(f"Model is not registered: {model_id}")
         return record
 
-    def _replace_record(self, updated: RvcModelRecord) -> None:
-        records = {record.model_id: record for record in self.records()}
-        records[updated.model_id] = updated
-        self._save_records(records.values())
+    def _update_record_fields(
+        self,
+        model_id: str,
+        **changes,
+    ) -> RvcModelRecord:
+        with managed_path_lock(self.catalog_path):
+            records = {
+                record.model_id: record for record in self._records_unlocked()
+            }
+            current = records.get(model_id)
+            if current is None:
+                raise RvcModelWorkspaceError(
+                    f"Model is not registered: {model_id}"
+                )
+            updated = replace(current, **changes)
+            records[updated.model_id] = updated
+            self._save_records(records.values())
+            return updated
 
     def _save_records(self, records) -> None:
-        prepared: list[RvcModelRecord] = []
-        for record in records:
-            if record.is_managed:
-                record, _migrated = self._ensure_managed_package(record)
-            prepared.append(record)
-        self._write_catalog(prepared)
-        for record in prepared:
-            if record.is_managed:
-                _write_model_manifest(self.library_dir / record.model_id, record)
+        with managed_path_lock(self.catalog_path):
+            prepared: list[RvcModelRecord] = []
+            for record in records:
+                if record.is_managed:
+                    record, _migrated = self._ensure_managed_package(record)
+                prepared.append(record)
+            self._write_catalog(prepared)
+            for record in prepared:
+                if not record.is_managed:
+                    continue
+                try:
+                    _write_model_manifest(
+                        self.library_dir / record.model_id,
+                        record,
+                    )
+                except OSError as exc:
+                    _LOGGER.warning(
+                        "Model manifest update deferred for %s: %s",
+                        record.model_id,
+                        exc,
+                    )
 
     def _write_catalog(self, records) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -622,6 +845,10 @@ class RvcModelWorkspace:
         except OSError:
             return None
         return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+
+    def _discard_catalog_cache(self) -> None:
+        self._records_cache = ()
+        self._records_revision = _CATALOG_CACHE_UNSET
 
     def _cache_records(
         self,
@@ -916,6 +1143,35 @@ def _model_id(mode: str, model: DiscoveredRvcModel) -> str:
 def _new_model_id(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")[:32] or "model"
     return f"created-{slug}-{uuid.uuid4().hex[:8]}"
+
+
+def _commit_transaction(transaction: ManagedPathTransaction) -> None:
+    try:
+        transaction.mark_committed()
+    except OSError as exc:
+        _LOGGER.warning(
+            "Could not mark managed transaction %s committed: %s",
+            transaction.transaction_id,
+            exc,
+        )
+    if not transaction.purge():
+        _LOGGER.warning(
+            "Committed managed transaction cleanup was deferred: %s",
+            transaction.folder,
+        )
+
+
+def _promoted_package_path(
+    staged_package: RvcModelPackageLayout,
+    final_package: RvcModelPackageLayout,
+    staged_path: Path | None,
+) -> Path | None:
+    if staged_path is None:
+        return None
+    relative = staged_path.resolve().relative_to(
+        staged_package.model_dir.resolve()
+    )
+    return (final_package.model_dir / relative).resolve()
 
 
 def _record_from_discovery(

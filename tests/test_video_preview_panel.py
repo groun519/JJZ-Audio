@@ -81,6 +81,47 @@ class VideoPreviewPanelTests(unittest.TestCase):
             self.assertIs(panel.stack.currentWidget(), panel.image_widget)
             panel.close()
 
+    def test_video_loading_is_deferred_until_the_studio_preview_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            video = Path(temporary) / "video.mp4"
+            video.write_bytes(b"video")
+            panel = VideoPreviewPanel()
+
+            panel.set_source(
+                VideoSource(kind=VIDEO_KIND_FILE, path=video, original_name="video.mp4"),
+                enabled=True,
+            )
+
+            self.assertIsNone(panel._loaded_video_path)
+            panel.set_active(True)
+            self.app.processEvents()
+            self.assertEqual(panel._loaded_video_path, video.resolve())
+            panel.close()
+
+    def test_same_video_and_timeline_gap_reuse_the_loaded_media_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            video = Path(temporary) / "video.mp4"
+            video.write_bytes(b"video")
+            source = VideoSource(
+                kind=VIDEO_KIND_FILE,
+                path=video,
+                original_name="video.mp4",
+            )
+            panel = VideoPreviewPanel()
+            panel.set_source(source, enabled=True)
+            panel.set_active(True)
+            self.app.processEvents()
+            generation = panel._video_load_generation
+
+            panel.set_source(source, enabled=True)
+            panel.sync_timeline_media(None, "", 0, False)
+            panel.sync_timeline_media(video, "video", 1_000, False)
+            self.app.processEvents()
+
+            self.assertEqual(panel._loaded_video_path, video.resolve())
+            self.assertEqual(panel._video_load_generation, generation + 1)
+            panel.close()
+
     def test_timeline_media_switches_between_image_and_empty_gap(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             image = Path(temporary) / "cover.png"

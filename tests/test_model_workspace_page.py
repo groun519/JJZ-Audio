@@ -19,6 +19,7 @@ from jang_app.qt_app.model_add_dialog import (
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.theme import build_stylesheet
 from jang_app.services.clip_edit_history import REVIEW_READY
+from jang_app.services.command import CommandCancellation
 from jang_app.services.i18n import tr
 from jang_app.services.model_dataset import ModelDataset, ModelDatasetItem
 from jang_app.services.processing_queue import (
@@ -448,6 +449,23 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual(page.status_label.text(), tr("Model deleted."))
             page.close()
 
+    def test_nonselected_model_is_busy_while_its_analysis_worker_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            first = workspace.create_model("Voice One", root / "rvc")
+            second = workspace.create_model("Voice Two", root / "rvc")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            page._selected_model_id = second.model_id
+            page.analysis_panel._worker = object()
+            page.analysis_panel._worker_model_id = first.model_id
+
+            self.assertTrue(page._model_has_active_task(first.model_id))
+
+            page.analysis_panel._worker = None
+            page.analysis_panel._worker_model_id = ""
+            page.close()
+
     def test_selected_managed_model_can_request_work_share(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -659,6 +677,48 @@ class ModelWorkspacePageTests(unittest.TestCase):
             self.assertEqual(pipeline_roots, [execution_runtime.resolve()])
             self.assertIsNone(page._training_worker)
             self.assertTrue(page.add_model_button.isEnabled())
+            page.close()
+
+    def test_training_retry_registers_preserved_result_without_retraining(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = RvcModelWorkspace(root / "models")
+            record = workspace.create_model("Voice One", root / "rvc")
+            page = ModelWorkspacePage(root / "rvc", workspace)
+            dataset = ModelDataset(record.model_id, (_ready_dataset_item(root),))
+            recovered = SimpleNamespace(record=record, index=object())
+            progress: list[int] = []
+            stages: list[str] = []
+
+            with (
+                patch(
+                    "jang_app.qt_app.model_workspace.recover_existing_rvc_training_artifacts",
+                    return_value=recovered,
+                ) as recover,
+                patch(
+                    "jang_app.qt_app.model_workspace.run_rvc_training_pipeline"
+                ) as train,
+            ):
+                result = page._run_training_job(
+                    record,
+                    page._training_layout(record),
+                    dataset,
+                    RvcTrainingRunSettings(target_epoch=40),
+                    CommandCancellation(),
+                    progress.append,
+                    stages.append,
+                    lambda *_args: None,
+                    lambda *_args: None,
+                    lambda *_args: None,
+                    lambda *_args: None,
+                    lambda *_args: None,
+                )
+
+            recover.assert_called_once()
+            train.assert_not_called()
+            self.assertIs(result.finalized, recovered)
+            self.assertEqual(progress, [100])
+            self.assertEqual(stages, ["Registering Existing Model"])
             page.close()
 
     def test_training_failure_persists_recovery_diagnostics(self) -> None:

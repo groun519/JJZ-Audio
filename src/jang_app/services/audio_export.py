@@ -63,18 +63,17 @@ def render_audio_mix(sources: Sequence[AudioMixSource]) -> RenderedAudioMix:
         raise AudioExportError("Select at least one unmuted track before exporting a mix.")
 
     audio_arrays: list[tuple[int, np.ndarray]] = []
-    sample_rate: int | None = None
+    prepared_sources = tuple(
+        (source, prepare_pitch_shifted_audio(source.path, source.pitch_semitones))
+        for source in sources
+    )
+    sample_rate = max(_audio_sample_rate(path) for _source, path in prepared_sources)
     max_frames = 0
     max_channels = 0
 
-    for source in sources:
-        audio, current_sample_rate = _read_audio(
-            prepare_pitch_shifted_audio(source.path, source.pitch_semitones)
-        )
-        if sample_rate is None:
-            sample_rate = current_sample_rate
-        else:
-            audio = _resample_audio(audio, current_sample_rate, sample_rate)
+    for source, prepared_path in prepared_sources:
+        audio, current_sample_rate = _read_audio(prepared_path)
+        audio = _resample_audio(audio, current_sample_rate, sample_rate)
 
         source_start_frame = max(0, round(source.source_start_ms * sample_rate / 1000))
         source_end_frame = (
@@ -112,7 +111,7 @@ def render_audio_mix(sources: Sequence[AudioMixSource]) -> RenderedAudioMix:
     for timeline_start_frame, audio in audio_arrays:
         timeline_end_frame = timeline_start_frame + audio.shape[0]
         mix[timeline_start_frame:timeline_end_frame, :] += _match_channels(audio, max_channels)
-    return RenderedAudioMix(mix, sample_rate or 44_100)
+    return RenderedAudioMix(mix, sample_rate)
 
 
 def export_audio_files(sources: Sequence[NamedAudioPath], output_dir: Path) -> list[Path]:
@@ -142,6 +141,19 @@ def _read_audio(path: Path) -> tuple[np.ndarray, int]:
         raise AudioExportError(f"Audio file does not exist: {source}")
     audio, sample_rate = sf.read(source, always_2d=True, dtype="float32")
     return audio, sample_rate
+
+
+def _audio_sample_rate(path: Path) -> int:
+    source = path.expanduser().resolve()
+    if not source.is_file():
+        raise AudioExportError(f"Audio file does not exist: {source}")
+    try:
+        sample_rate = int(sf.info(source).samplerate)
+    except Exception as exc:
+        raise AudioExportError(f"Could not read audio file: {source}") from exc
+    if sample_rate <= 0:
+        raise AudioExportError(f"Audio file has an invalid sample rate: {source}")
+    return sample_rate
 
 
 def _read_reference_segment(

@@ -13,7 +13,16 @@ import soundfile as sf
 import jang_app.services.studio_session as studio_session
 import jang_app.services.studio_assets as studio_assets
 from jang_app.services.song_package import SongPackageStore
-from jang_app.services.studio_assets import resolve_studio_asset, studio_sound_pool
+from jang_app.services.studio_assets import (
+    missing_studio_asset_ids,
+    resolve_studio_asset,
+    studio_sound_pool,
+    sync_studio_video_track,
+)
+from jang_app.services.studio_project import (
+    StudioProjectRecoveryNotice,
+    studio_project_paths,
+)
 from jang_app.services.studio_session import (
     STUDIO_SESSION_VERSION,
     TRACK_CONVERTED_VOCAL,
@@ -21,6 +30,8 @@ from jang_app.services.studio_session import (
     TRACK_ORIGINAL_VOCAL,
     TRACK_VIDEO,
     MEDIA_FILL,
+    StudioAssetRef,
+    StudioClip,
     StudioMediaSettings,
     StudioSession,
     StudioTrack,
@@ -34,6 +45,7 @@ from jang_app.services.video_source import VideoSourceStore
 from jang_app.services.studio_timeline import (
     add_studio_clip,
     move_studio_clip,
+    remove_studio_clip,
     session_duration_ms,
     split_studio_clip,
     trim_studio_clip,
@@ -84,6 +96,28 @@ class StudioSessionTests(unittest.TestCase):
             recovered = load_studio_session(package)
 
             self.assertEqual(recovered.tracks[0].volume_percent, 137)
+
+    def test_unrecoverable_session_refreshes_assets_from_the_default_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            path = studio_session_path(package)
+            path.write_text("not-json", encoding="utf-8")
+
+            with patch(
+                "jang_app.services.studio_session.recover_studio_project_session",
+                return_value=(None, StudioProjectRecoveryNotice()),
+            ):
+                with patch(
+                    "jang_app.services.studio_session._latest_valid_history_data",
+                    return_value=None,
+                ):
+                    with patch(
+                        "jang_app.services.studio_session._refresh_studio_assets_manifest"
+                    ) as refresh:
+                        restored = load_studio_session(package)
+
+            self.assertTrue(restored.tracks)
+            refresh.assert_called_once()
 
     def test_current_reverb_effect_round_trips_and_version_four_defaults_empty(self) -> None:
         self.assertTrue(hasattr(studio_session, "StudioEffect"))
@@ -777,6 +811,114 @@ class StudioSessionTests(unittest.TestCase):
             self.assertEqual(roles.count(TRACK_ORIGINAL_VOCAL), 1)
             self.assertEqual(roles.count(TRACK_INSTRUMENTAL), 1)
             self.assertEqual(roles.count(TRACK_CONVERTED_VOCAL), 1)
+
+    def test_empty_auto_seeded_converted_track_picks_up_a_later_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            converted_path = package.active_output.job_dir / "vocals_rvc_second.wav"
+            for candidate in package.active_output.job_dir.glob("vocals_rvc_*.wav"):
+                candidate.unlink()
+
+            initial = load_studio_session(package)
+            converted = next(
+                track for track in initial.tracks if track.role == TRACK_CONVERTED_VOCAL
+            )
+            self.assertTrue(converted.auto_seeded)
+            self.assertEqual(converted.clips, ())
+            save_studio_session(package, initial)
+
+            sf.write(converted_path, np.full(16_000, 0.3, dtype=np.float32), 8_000)
+            populated = load_studio_session(package)
+            converted = next(
+                track for track in populated.tracks if track.role == TRACK_CONVERTED_VOCAL
+            )
+            self.assertEqual(converted.clips[0].asset.filename, converted_path.name)
+
+            intentionally_empty = remove_studio_clip(populated, converted.clips[0].clip_id)
+            save_studio_session(package, intentionally_empty)
+            restored = load_studio_session(package)
+            converted = next(
+                track for track in restored.tracks if track.role == TRACK_CONVERTED_VOCAL
+            )
+            self.assertFalse(converted.auto_seeded)
+            self.assertEqual(converted.clips, ())
+
+    def test_video_sync_preserves_an_edited_track_with_missing_media(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_audio_output(root)
+            source_image = root / "cover.png"
+            source_image.write_bytes(b"image")
+            VideoSourceStore().import_file(package, source_image)
+            assets = studio_sound_pool(package)
+            media_asset = next(asset for asset in assets if asset.reference.role == TRACK_VIDEO)
+            track = StudioTrack(
+                "track-video",
+                "Edited Media",
+                role=TRACK_VIDEO,
+                volume_percent=63,
+                pan_percent=-22,
+                clips=(
+                    StudioClip("present", media_asset.reference, 900, 100, 2_100),
+                    StudioClip(
+                        "missing",
+                        StudioAssetRef("missing-output", TRACK_VIDEO, "missing.mp4"),
+                        3_400,
+                        250,
+                        1_750,
+                    ),
+                ),
+            )
+            session = StudioSession(tracks=(track,))
+
+            synced = sync_studio_video_track(session, assets)
+
+            self.assertEqual(synced.tracks, (track,))
+
+    def test_failed_session_commit_does_not_replace_the_asset_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_audio_output(Path(temporary))
+            saved = load_studio_session(package)
+            save_studio_session(package, saved)
+            manifest = studio_project_paths(package).assets
+            before = manifest.read_bytes()
+            track = saved.tracks[0]
+            changed = replace(
+                saved,
+                tracks=(
+                    replace(
+                        track,
+                        clips=(
+                            *track.clips,
+                            StudioClip(
+                                "missing-audio",
+                                StudioAssetRef(
+                                    "missing-output",
+                                    TRACK_ORIGINAL_VOCAL,
+                                    "missing.wav",
+                                ),
+                                0,
+                                0,
+                                1_000,
+                            ),
+                        ),
+                        auto_seeded=False,
+                    ),
+                    *saved.tracks[1:],
+                ),
+            )
+
+            with patch(
+                "jang_app.services.studio_session.commit_studio_project_session",
+                side_effect=OSError("commit failed"),
+            ):
+                with self.assertRaises(OSError):
+                    save_studio_session(package, changed)
+
+            self.assertEqual(manifest.read_bytes(), before)
+            restored_assets = studio_sound_pool(package)
+            restored = load_studio_session(package, assets=restored_assets)
+            self.assertEqual(missing_studio_asset_ids(restored, restored_assets), ())
 
 
 def _package_with_audio_output(root: Path):

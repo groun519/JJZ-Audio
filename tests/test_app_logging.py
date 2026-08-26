@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+import json
+import sys
 import tempfile
 import unittest
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +44,49 @@ class AppLoggingTests(unittest.TestCase):
             logger.handlers = original_handlers
             logger.setLevel(original_level)
             logger.propagate = original_propagate
+
+    def test_rollover_lock_keeps_the_active_log_writable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log_file = Path(temporary) / "jang.log"
+            handler = app_logging._WindowsSafeRotatingFileHandler(
+                log_file,
+                maxBytes=1,
+                backupCount=1,
+                encoding="utf-8",
+            )
+            logger = logging.Logger("rollover-test")
+            logger.addHandler(handler)
+
+            with patch.object(
+                RotatingFileHandler,
+                "doRollover",
+                side_effect=PermissionError(13, "file is in use"),
+            ):
+                logger.info("first")
+
+            logger.info("second")
+            handler.flush()
+            handler.close()
+
+            text = log_file.read_text(encoding="utf-8")
+            self.assertIn("first", text)
+            self.assertIn("second", text)
+
+    def test_packaged_build_revision_is_read_from_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "JJZero Audio.exe"
+            revision = "a" * 40
+            (root / "build-provenance.json").write_text(
+                json.dumps({"source_revision": revision}),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "executable", str(executable)),
+            ):
+                self.assertEqual(app_logging._build_revision(), revision)
 
 
 if __name__ == "__main__":

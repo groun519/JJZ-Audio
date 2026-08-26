@@ -38,6 +38,7 @@ class RoFormerEngineTests(unittest.TestCase):
             command[command.index("--model_file_dir") + 1],
             str(roformer_engine.ROFORMER_MODEL_DIR),
         )
+        self.assertEqual(command[command.index("--normalization") + 1], "1.0")
 
     def test_frozen_command_uses_shared_ai_runtime_python(self) -> None:
         frozen_paths = replace(roformer_engine.APP_PATHS, is_frozen=True)
@@ -324,7 +325,7 @@ class RoFormerEngineTests(unittest.TestCase):
             self.assertEqual(result.vocals_path.read_bytes(), b"protected")
             self.assertEqual(result.accompaniment_path.read_bytes(), b"music")
 
-    def test_effect_recipe_falls_back_to_first_stage_vocal_when_protection_fails(self) -> None:
+    def test_effect_recipe_fails_when_vocal_protection_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "song.wav"
@@ -364,11 +365,15 @@ class RoFormerEngineTests(unittest.TestCase):
                     return_value=("applied", "test"),
                 ),
             ):
-                result = roformer_engine.RoFormerEngine().separate(
-                    SeparationRequest(source, output, EFFECT_REMOVAL_RECIPE)
-                )
+                with self.assertRaisesRegex(
+                    roformer_engine.SeparationError,
+                    "could not preserve the vocal safely",
+                ):
+                    roformer_engine.RoFormerEngine().separate(
+                        SeparationRequest(source, output, EFFECT_REMOVAL_RECIPE)
+                    )
 
-            self.assertEqual(result.vocals_path.read_bytes(), b"wet")
+            self.assertFalse((output / "vocals.wav").exists())
 
 
 if __name__ == "__main__":

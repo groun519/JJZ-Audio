@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +13,7 @@ from jang_app.services.rvc_model_workspace import (
     RvcModelWorkspaceError,
     discover_rvc_models,
 )
+from jang_app.services.managed_transaction import recover_managed_transactions
 
 
 class RvcModelWorkspaceTests(unittest.TestCase):
@@ -109,6 +112,27 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertEqual(record.status_label, "Inference Only")
             self.assertFalse(record.is_managed)
 
+    def test_concurrent_model_links_preserve_every_catalog_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            workspace_root = base / "workspace"
+            models = tuple(base / "models" / f"voice-{index}.pth" for index in range(16))
+            for model in models:
+                model.parent.mkdir(parents=True, exist_ok=True)
+                model.write_bytes(model.name.encode("utf-8"))
+
+            def link(index: int) -> None:
+                RvcModelWorkspace(workspace_root).link_inference_file(models[index])
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                tuple(executor.map(link, range(len(models))))
+
+            records = RvcModelWorkspace(workspace_root).records()
+            self.assertEqual(
+                {record.inference_model for record in records},
+                {model.resolve() for model in models},
+            )
+
     def test_import_inference_file_copies_only_pth_and_matching_index(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -198,6 +222,32 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertEqual([model.name for model in discover_rvc_models(model_dir)], ["voice-a"])
             self.assertEqual(original_bytes, {path: path.read_bytes() for path in source_files})
 
+    def test_failed_import_restores_previous_package_and_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = _build_rvc_root(base / "source")
+            workspace = RvcModelWorkspace(base / "workspace")
+            original = workspace.import_folder(source / "logs" / "voice-a")[0]
+            original_model = original.inference_model
+            self.assertIsNotNone(original_model)
+            original_model.write_bytes(b"preserve-existing-package")
+
+            with patch.object(
+                workspace,
+                "_write_catalog",
+                side_effect=OSError("catalog unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "catalog unavailable"):
+                    workspace.import_folder(source / "logs" / "voice-a")
+
+            restored = workspace.records()[0]
+            self.assertEqual(restored.model_id, original.model_id)
+            self.assertEqual(
+                restored.inference_model.read_bytes(),
+                b"preserve-existing-package",
+            )
+            self.assertFalse((workspace.root / ".jjzero-imports").exists())
+
     def test_remove_managed_model_deletes_package_and_training_work(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -215,6 +265,61 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertEqual(workspace.records(), [])
             self.assertFalse(package_dir.exists())
             self.assertFalse(work_dir.exists())
+
+    def test_remove_model_rolls_back_if_second_path_cannot_be_staged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = _build_rvc_root(base / "runtime")
+            workspace = RvcModelWorkspace(base / "workspace")
+            record = workspace.create_model("Voice One", runtime)
+            package_dir = workspace.library_dir / record.model_id
+            work_dir = workspace.root / record.model_id
+            work_dir.mkdir(parents=True)
+            marker = work_dir / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+            real_replace = os.replace
+
+            def fail_work_stage(source, target):
+                if Path(source).resolve() == work_dir.resolve():
+                    raise OSError("work directory busy")
+                return real_replace(source, target)
+
+            with patch(
+                "jang_app.services.managed_transaction.os.replace",
+                side_effect=fail_work_stage,
+            ):
+                with self.assertRaisesRegex(
+                    RvcModelWorkspaceError,
+                    "work directory busy",
+                ):
+                    workspace.remove_model(record.model_id)
+
+            self.assertTrue(package_dir.is_dir())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(workspace.records()[0].model_id, record.model_id)
+
+    def test_startup_recovery_restores_model_after_interrupted_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = _build_rvc_root(base / "runtime")
+            workspace = RvcModelWorkspace(base / "workspace")
+            record = workspace.create_model("Voice One", runtime)
+            package_dir = workspace.library_dir / record.model_id
+            work_dir = workspace.root / record.model_id
+            work_dir.mkdir(parents=True)
+            marker = work_dir / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+
+            with patch.object(workspace, "_save_records", side_effect=SystemExit):
+                with self.assertRaises(SystemExit):
+                    workspace.remove_model(record.model_id)
+
+            reports = recover_managed_transactions(workspace.root)
+            restored = RvcModelWorkspace(workspace.root).records()[0]
+            self.assertEqual(reports[0].action, "rolled_back")
+            self.assertEqual(restored.model_id, record.model_id)
+            self.assertTrue(package_dir.is_dir())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
 
     def test_remove_linked_model_keeps_external_files_and_deletes_local_work(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -276,6 +381,65 @@ class RvcModelWorkspaceTests(unittest.TestCase):
                 updated.index_file.relative_to(base / "workspace" / "library" / record.model_id).as_posix(),
                 "rvc/logs/voice-a/added_voice-a.index",
             )
+
+    def test_failed_same_name_artifact_replacement_restores_active_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = _build_rvc_root(base / "source")
+            workspace = RvcModelWorkspace(base / "workspace")
+            record = workspace.import_folder(source / "logs" / "voice-a")[0]
+            active = record.inference_model
+            self.assertIsNotNone(active)
+            previous_bytes = active.read_bytes()
+            replacement = base / "replacement" / active.name
+            replacement.parent.mkdir()
+            replacement.write_bytes(b"new-model")
+
+            with patch.object(
+                workspace,
+                "_write_catalog",
+                side_effect=OSError("catalog unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "catalog unavailable"):
+                    workspace.replace_artifact(
+                        record.model_id,
+                        "inference_model",
+                        replacement,
+                    )
+
+            restored = workspace.records()[0]
+            self.assertEqual(restored.inference_model, active)
+            self.assertEqual(active.read_bytes(), previous_bytes)
+
+    def test_failed_new_name_artifact_replacement_removes_orphan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = _build_rvc_root(base / "source")
+            workspace = RvcModelWorkspace(base / "workspace")
+            record = workspace.import_folder(source / "logs" / "voice-a")[0]
+            active = record.inference_model
+            self.assertIsNotNone(active)
+            replacement = base / "replacement" / "new-voice.pth"
+            replacement.parent.mkdir()
+            replacement.write_bytes(b"new-model")
+            orphan = active.parent / replacement.name
+
+            with patch.object(
+                workspace,
+                "_write_catalog",
+                side_effect=OSError("catalog unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "catalog unavailable"):
+                    workspace.replace_artifact(
+                        record.model_id,
+                        "inference_model",
+                        replacement,
+                    )
+
+            restored = workspace.records()[0]
+            self.assertEqual(restored.inference_model, active)
+            self.assertTrue(active.is_file())
+            self.assertFalse(orphan.exists())
 
     def test_legacy_baseline_is_copied_to_rvc_package_without_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
-from jang_app.qt_app.main_window import MainWindow
+from jang_app.qt_app.main_window import MainWindow, _vocal_input_provenance
 from jang_app.qt_app.conversion_input_pool import ConversionInputPool
 from jang_app.qt_app.vocal_version_pool import VocalVersionPool
 from jang_app.services.output_catalog import OutputSoundSet
@@ -215,6 +215,10 @@ class MainWindowConversionSourceTests(unittest.TestCase):
             self.assertIsNotNone(selected)
             self.assertEqual(selected.vocals_path, split)
             self.assertEqual(selected.job_dir, job_dir)
+            provenance = _vocal_input_provenance(job_dir, split, choice)
+            self.assertEqual(provenance.kind, "lead")
+            self.assertEqual(provenance.relative_path, "vocal_splits/run-1/lead.wav")
+            self.assertEqual(provenance.source_id, choice.choice_id)
             pool.close()
 
     def test_vocal_split_results_are_not_offered_as_conversion_inputs(self) -> None:
@@ -327,6 +331,31 @@ class MainWindowConversionSourceTests(unittest.TestCase):
             previewed,
             [(second, None)],
         )
+
+    def test_conversion_context_does_not_restore_the_browser_previous_selection(self) -> None:
+        previous = Path("output/standard/rvc.wav")
+        applied: list[Path | None] = []
+        window = SimpleNamespace(
+            conversion_result_browser=SimpleNamespace(
+                projects=lambda: (),
+                selected_path=lambda: previous,
+                converted_paths=lambda: (previous,),
+            ),
+            vocal_results_panel=SimpleNamespace(
+                set_conversion_context=lambda _version, **kwargs: applied.append(
+                    kwargs.get("selected_converted_path")
+                )
+            ),
+            page_stack=SimpleNamespace(currentIndex=lambda: -1),
+        )
+
+        MainWindow._apply_conversion_result_context(
+            window,
+            _version("standard", (previous,)),
+            selected_converted_path=None,
+        )
+
+        self.assertEqual(applied, [None])
 
     def test_rename_vocal_take_uses_selected_take_owner_job_dir(self) -> None:
         current_output = _version("standard")

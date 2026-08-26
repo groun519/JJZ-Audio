@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
 
 from jang_app.services.managed_files import (
+    atomic_output_path,
     copy_file_atomic,
     write_json_atomic,
     write_text_atomic,
@@ -784,13 +785,9 @@ def _write_checkpoint(
 ) -> None:
     paths.checkpoints.mkdir(parents=True, exist_ok=True)
     target = paths.checkpoints / f"rev-{revision:08d}.json.gz"
-    temporary = target.with_suffix(".json.gz.tmp")
-    try:
+    with atomic_output_path(target, operation="checkpoint") as temporary:
         with gzip.open(temporary, "wt", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"))
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
     checkpoints = sorted(paths.checkpoints.glob("rev-*.json.gz"), reverse=True)
     for stale in checkpoints[STUDIO_PROJECT_CHECKPOINT_LIMIT:]:
         stale.unlink(missing_ok=True)

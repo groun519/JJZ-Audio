@@ -94,6 +94,7 @@ class SeparationRecipeTests(unittest.TestCase):
                 ),
             )
             self.assertIn("->", run.recipe.summary)
+            self.assertFalse(run.recipe.mixture_consistency)
 
     def test_custom_recipe_round_trips_both_component_choices(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

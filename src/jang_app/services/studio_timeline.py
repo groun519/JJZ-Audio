@@ -408,6 +408,7 @@ def remove_studio_clip(session: StudioSession, clip_id: str) -> StudioSession:
         lambda current: replace(
             current,
             clips=tuple(candidate for candidate in current.clips if candidate.clip_id != clip_id),
+            auto_seeded=False,
         ),
     )
 
@@ -426,6 +427,11 @@ def remove_studio_clips(
                 track,
                 clips=tuple(
                     clip for clip in track.clips if clip.clip_id not in selected
+                ),
+                auto_seeded=(
+                    False
+                    if any(clip.clip_id in selected for clip in track.clips)
+                    else track.auto_seeded
                 ),
             )
             for track in session.tracks

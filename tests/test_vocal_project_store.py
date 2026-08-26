@@ -13,6 +13,7 @@ from jang_app.services.vocal_project import (
     UNASSIGNED_SPEAKER_ID,
     VOCAL_PROJECT_SCHEMA_VERSION,
     VocalConversionSettings,
+    VocalInputProvenance,
     VocalProjectValidationError,
     VocalSegment,
     VocalTake,
@@ -155,6 +156,47 @@ class VocalProjectStoreTests(unittest.TestCase):
                 0.62,
             )
             self.assertEqual(store.load(job_dir).takes[0].conversion, settings)
+
+    def test_conversion_input_provenance_round_trips_with_take(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = _job_dir(Path(temporary) / "run")
+            cleanup = _write_wave(
+                job_dir / "cleanup" / "results" / "clean-vocal.wav"
+            )
+            converted = _write_wave(job_dir / "vocals_rvc_clean.wav")
+            provenance = VocalInputProvenance(
+                kind="cleanup",
+                relative_path=cleanup.relative_to(job_dir).as_posix(),
+                source_id="cleanup:precision:result-1",
+                label="Clean vocal 1",
+            )
+            settings = VocalConversionSettings(
+                voice_model="weights/voice.pth",
+                index_file="",
+                pitch=0,
+                requested_device="gpu",
+                effective_device="cuda:0",
+                f0_method="rmvpe",
+                input_source=provenance,
+            )
+            store = VocalProjectStore()
+
+            store.register_take(job_dir, converted, conversion=settings)
+            manifest = json.loads(
+                (job_dir / VOCAL_PROJECT_MANIFEST).read_text(encoding="utf-8")
+            )
+            loaded = store.load(job_dir)
+
+            self.assertEqual(loaded.takes[0].conversion.input_source, provenance)
+            self.assertEqual(
+                manifest["takes"][0]["conversion"]["input_source"],
+                {
+                    "kind": "cleanup",
+                    "path": "cleanup/results/clean-vocal.wav",
+                    "source_id": "cleanup:precision:result-1",
+                    "label": "Clean vocal 1",
+                },
+            )
 
     def test_take_can_be_renamed_and_removed_without_touching_other_results(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

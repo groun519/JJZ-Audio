@@ -101,6 +101,14 @@ class _RecoveringDriveRequester(_DriveRequester):
         return super().__call__(request, timeout)
 
 
+class _PermissionFailingDriveRequester(_DriveRequester):
+    def __call__(self, request: Request, timeout: float) -> HttpResponse:
+        if "/permissions" in request.full_url:
+            self.requests.append(request)
+            return HttpResponse(403, {"Content-Type": "application/json"}, b"{}")
+        return super().__call__(request, timeout)
+
+
 class GoogleDriveTests(unittest.TestCase):
     def test_disabled_drive_api_is_reported_as_unavailable(self) -> None:
         def request(_request: Request, _timeout: float) -> HttpResponse:
@@ -168,6 +176,24 @@ class GoogleDriveTests(unittest.TestCase):
         self.assertEqual(result.file_id, "file-id")
         self.assertEqual(requester.uploaded, size)
         self.assertTrue(requester.interrupted)
+
+    def test_permission_failure_deletes_the_uploaded_file(self) -> None:
+        requester = _PermissionFailingDriveRequester(1_000)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "shared.zip"
+            source.write_bytes(b"payload")
+            client = GoogleDriveClient(lambda _refresh: "access-token", requester=requester)
+
+            with self.assertRaises(GoogleDriveError):
+                client.upload_shared_file(source, "models")
+
+        deletes = [
+            request
+            for request in requester.requests
+            if request.get_method() == "DELETE"
+        ]
+        self.assertEqual(len(deletes), 1)
+        self.assertTrue(deletes[0].full_url.endswith("/files/file-id"))
 
     def test_empty_file_is_rejected_before_quota_request(self) -> None:
         requester = _DriveRequester(100)

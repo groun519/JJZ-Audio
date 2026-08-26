@@ -105,7 +105,7 @@ class InspectorSection(QFrame):
         self,
         title_key: str,
         *,
-        collapsible: bool = False,
+        collapsible: bool = True,
         expanded: bool = True,
     ) -> None:
         super().__init__()
@@ -113,17 +113,19 @@ class InspectorSection(QFrame):
         self._title_key = title_key
         self.title_label = QLabel()
         self.title_label.setObjectName("StudioInspectorSectionTitle")
-        self.toggle_button: FeedbackButton | None = None
+        self.toggle_button: SvgIconButton | None = None
 
         self.header_layout = QHBoxLayout()
         self.header_layout.setContentsMargins(0, 0, 0, 0)
         self.header_layout.addWidget(self.title_label, 1)
         if collapsible:
-            self.toggle_button = FeedbackButton()
+            self.toggle_button = SvgIconButton(
+                "chevron_up" if expanded else "chevron_down",
+                size=26,
+            )
             self.toggle_button.setObjectName("StudioInspectorSectionToggle")
             self.toggle_button.setCheckable(True)
             self.toggle_button.setChecked(expanded)
-            self.toggle_button.setFixedHeight(26)
             self.toggle_button.toggled.connect(self._set_expanded)
             self.header_layout.addWidget(self.toggle_button, 0)
 
@@ -152,12 +154,24 @@ class InspectorSection(QFrame):
     def apply_language(self) -> None:
         self.title_label.setText(tr(self._title_key))
         if self.toggle_button is not None:
-            self.toggle_button.setText(tr("Hide") if self.toggle_button.isChecked() else tr("Show"))
+            set_translated_tooltip(
+                self.toggle_button,
+                "Collapse detailed settings"
+                if self.toggle_button.isChecked()
+                else "Expand detailed settings",
+            )
+
+    def set_theme_mode(self, theme_mode: str) -> None:
+        if self.toggle_button is not None:
+            self.toggle_button.set_theme_mode(theme_mode)
 
     def _set_expanded(self, expanded: bool) -> None:
         self.content.setVisible(expanded)
         if self.toggle_button is not None:
-            self.toggle_button.setText(tr("Hide") if expanded else tr("Show"))
+            self.toggle_button.set_icon_name(
+                "chevron_up" if expanded else "chevron_down"
+            )
+            self.apply_language()
 
 
 class InspectorHeader(QFrame):
@@ -183,7 +197,7 @@ class InspectorHeader(QFrame):
         text_layout.addWidget(self.meta_label)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(10, 9, 10, 9)
         layout.setSpacing(10)
         layout.addWidget(self.role_marker, 0)
         layout.addWidget(self.kind_label, 0)
@@ -213,6 +227,11 @@ class StudioInspector(QFrame):
     TRACK_PAGE = 2
     MULTI_PAGE = 3
 
+    CLIP_DETAIL_PAGE = 0
+    AUDIO_DETAIL_PAGE = 1
+    MEDIA_DETAIL_PAGE = 2
+    FX_DETAIL_PAGE = 3
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("StudioInspector")
@@ -224,6 +243,7 @@ class StudioInspector(QFrame):
         self._multi_clips: tuple[StudioClip, ...] = ()
         self._theme_mode = "white"
         self._loading = False
+        self._active_detail_key = "clip"
         self._active_effect_id = ""
         self.effect_tab_buttons: dict[str, FeedbackButton] = {}
         self.effect_editors: dict[
@@ -273,7 +293,7 @@ class StudioInspector(QFrame):
         page = QWidget()
         self.clip_header = InspectorHeader()
 
-        self.clip_section = InspectorSection("Clip")
+        self.clip_section = InspectorSection("Level & Pitch")
         self.clip_mute_button = SvgIconButton(
             "speaker",
             size=COMPACT_ICON_BUTTON_SIZE,
@@ -323,7 +343,7 @@ class StudioInspector(QFrame):
         self.pitch_spin.setToolTip(pitch_tooltip)
         self.clip_section.content_layout.addWidget(self.pitch_field)
 
-        self.time_section = InspectorSection("Time")
+        self.time_section = InspectorSection("Placement")
         self.position_label, position_field = _field_widget("Timeline Position", TimecodeSpinBox())
         self.position_spin = position_field.control
         self.position_spin.editingFinished.connect(self._emit_clip_values)
@@ -348,7 +368,7 @@ class StudioInspector(QFrame):
         source_grid.setContentsMargins(0, 0, 0, 0)
         source_grid.setHorizontalSpacing(8)
         source_grid.addWidget(in_field, 0, 0)
-        source_grid.addWidget(out_field, 1, 0)
+        source_grid.addWidget(out_field, 0, 1)
         self.source_section.content_layout.addLayout(source_grid)
 
         self.media_section = InspectorSection("Media")
@@ -413,7 +433,7 @@ class StudioInspector(QFrame):
         self.media_section.content_layout.addWidget(self.image_controls)
         self.media_section.content_layout.addWidget(self.source_audio_button)
 
-        self.fade_section = InspectorSection("Fade")
+        self.fade_section = InspectorSection("Fade", expanded=False)
         self.fade_in_label, fade_in_field = _field_widget("Fade In", TimecodeSpinBox())
         self.fade_out_label, fade_out_field = _field_widget("Fade Out", TimecodeSpinBox())
         self.fade_in_spin = fade_in_field.control
@@ -424,7 +444,7 @@ class StudioInspector(QFrame):
         fade_grid.setContentsMargins(0, 0, 0, 0)
         fade_grid.setHorizontalSpacing(8)
         fade_grid.addWidget(fade_in_field, 0, 0)
-        fade_grid.addWidget(fade_out_field, 1, 0)
+        fade_grid.addWidget(fade_out_field, 0, 1)
         self.fade_section.content_layout.addLayout(fade_grid)
 
         self.open_button = SvgIconButton("folder", size=32)
@@ -438,29 +458,96 @@ class StudioInspector(QFrame):
         properties_layout = QVBoxLayout(self.clip_properties_page)
         properties_layout.setContentsMargins(0, 0, 0, 0)
         properties_layout.setSpacing(10)
-        properties_layout.addWidget(self.clip_section)
         properties_layout.addWidget(self.time_section)
         properties_layout.addWidget(self.source_section)
-        properties_layout.addWidget(self.media_section)
         properties_layout.addWidget(self.fade_section)
         properties_layout.addLayout(actions)
         properties_layout.addStretch(1)
+
+        self.audio_properties_page = QWidget()
+        audio_layout = QVBoxLayout(self.audio_properties_page)
+        audio_layout.setContentsMargins(0, 0, 0, 0)
+        audio_layout.setSpacing(10)
+        audio_layout.addWidget(self.clip_section)
+        audio_layout.addStretch(1)
+
+        self.media_properties_page = QWidget()
+        media_layout = QVBoxLayout(self.media_properties_page)
+        media_layout.setContentsMargins(0, 0, 0, 0)
+        media_layout.setSpacing(10)
+        media_layout.addWidget(self.media_section)
+        media_layout.addStretch(1)
+
+        self.effect_chain = QFrame()
+        self.effect_chain.setObjectName("StudioInspectorEffectChain")
+        effect_chain_layout = QVBoxLayout(self.effect_chain)
+        effect_chain_layout.setContentsMargins(10, 10, 10, 10)
+        effect_chain_layout.setSpacing(7)
+        effect_chain_header = QHBoxLayout()
+        effect_chain_header.setContentsMargins(2, 0, 2, 2)
+        self.effect_chain_title = QLabel()
+        self.effect_chain_title.setObjectName("StudioInspectorSectionTitle")
+        self.effect_chain_count = QLabel()
+        self.effect_chain_count.setObjectName("StudioInspectorCount")
+        self.effect_chain_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        effect_chain_header.addWidget(self.effect_chain_title)
+        effect_chain_header.addStretch(1)
+        effect_chain_header.addWidget(self.effect_chain_count)
+        effect_chain_layout.addLayout(effect_chain_header)
+        self.effect_chain_empty = QLabel()
+        self.effect_chain_empty.setObjectName("StudioInspectorEmptyHint")
+        self.effect_chain_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.effect_chain_empty.setWordWrap(True)
+        effect_chain_layout.addWidget(self.effect_chain_empty)
+        self.effect_chain_items_layout = QVBoxLayout()
+        self.effect_chain_items_layout.setContentsMargins(0, 0, 0, 0)
+        self.effect_chain_items_layout.setSpacing(5)
+        effect_chain_layout.addLayout(self.effect_chain_items_layout)
+
+        self.effect_editor_stack = QStackedWidget()
+        self.effect_editor_stack.setObjectName("StudioInspectorEffectEditorStack")
+        self.effect_editor_empty = QLabel()
+        self.effect_editor_empty.setObjectName("StudioInspectorEmptyHint")
+        self.effect_editor_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.effect_editor_empty.setWordWrap(True)
+        self.effect_editor_stack.addWidget(self.effect_editor_empty)
+
+        self.effects_page = QWidget()
+        effects_layout = QVBoxLayout(self.effects_page)
+        effects_layout.setContentsMargins(0, 0, 0, 0)
+        effects_layout.setSpacing(10)
+        effects_layout.addWidget(self.effect_chain)
+        effects_layout.addWidget(self.effect_editor_stack, 1)
 
         self.clip_tabs = QFrame()
         self.clip_tabs.setObjectName("StudioInspectorTabs")
         self.clip_tabs_layout = QHBoxLayout(self.clip_tabs)
         self.clip_tabs_layout.setContentsMargins(3, 3, 3, 3)
         self.clip_tabs_layout.setSpacing(2)
-        self.clip_tab_button = FeedbackButton()
-        self.clip_tab_button.setObjectName("StudioInspectorTab")
-        self.clip_tab_button.setCheckable(True)
-        self.clip_tab_button.clicked.connect(lambda: self.open_effect_tab(""))
-        self.clip_tabs_layout.addWidget(self.clip_tab_button)
-        self.clip_tabs_layout.addStretch(1)
+        self.detail_tab_group = QButtonGroup(self)
+        self.detail_tab_group.setExclusive(True)
+        self.detail_tab_buttons: dict[str, FeedbackButton] = {}
+        for detail_key in ("clip", "audio", "media", "fx"):
+            button = FeedbackButton()
+            button.setObjectName("StudioInspectorTab")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, key=detail_key: self._open_detail_page(key)
+            )
+            self.detail_tab_group.addButton(button)
+            self.detail_tab_buttons[detail_key] = button
+            self.clip_tabs_layout.addWidget(button, 1)
+        self.clip_tab_button = self.detail_tab_buttons["clip"]
+        self.audio_tab_button = self.detail_tab_buttons["audio"]
+        self.media_tab_button = self.detail_tab_buttons["media"]
+        self.fx_tab_button = self.detail_tab_buttons["fx"]
 
         self.clip_detail_stack = QStackedWidget()
         self.clip_detail_stack.setObjectName("StudioInspectorDetailStack")
         self.clip_detail_stack.addWidget(self.clip_properties_page)
+        self.clip_detail_stack.addWidget(self.audio_properties_page)
+        self.clip_detail_stack.addWidget(self.media_properties_page)
+        self.clip_detail_stack.addWidget(self.effects_page)
 
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -503,7 +590,7 @@ class StudioInspector(QFrame):
         self.mix_section.content_layout.addLayout(pan_header)
         self.mix_section.content_layout.addWidget(self.pan_slider)
 
-        self.track_section = InspectorSection("Track")
+        self.track_section = InspectorSection("Track", expanded=False)
         self.track_name_label = QLabel()
         self.track_name_label.setObjectName("MutedText")
         self.track_name_edit = QLineEdit()
@@ -587,9 +674,15 @@ class StudioInspector(QFrame):
         self._multi_clips = ()
         if clip is not None and track is not None:
             if previous_clip_id != clip.clip_id:
+                self._active_detail_key = (
+                    "media"
+                    if asset is not None and asset.media_kind in {"image", "video"}
+                    else "audio"
+                )
                 self._active_effect_id = ""
             self._load_clip(track, clip, asset)
             self._sync_effect_tabs(clip)
+            self._open_detail_page(self._active_detail_key)
             self.stack.setCurrentIndex(self.CLIP_PAGE)
         elif track is not None:
             self._active_effect_id = ""
@@ -608,6 +701,7 @@ class StudioInspector(QFrame):
         self._clip = None
         self._asset = None
         self._multi_clips = clips
+        self._active_detail_key = "clip"
         self._active_effect_id = ""
         self.multi_gain_spin.setValue(0.0)
         self.multi_pitch_spin.setValue(0)
@@ -630,16 +724,38 @@ class StudioInspector(QFrame):
         self._theme_mode = theme_mode
         self.open_button.set_theme_mode(theme_mode)
         self.clip_mute_button.set_theme_mode(theme_mode)
+        for section in (
+            self.clip_section,
+            self.time_section,
+            self.source_section,
+            self.media_section,
+            self.fade_section,
+            self.mix_section,
+            self.track_section,
+            self.multi_section,
+        ):
+            section.set_theme_mode(theme_mode)
         for editor in self.effect_editors.values():
             if isinstance(
                 editor,
-                (StudioReverbEditor, StudioDelayEditor, StudioDoublerEditor),
+                (
+                    StudioReverbEditor,
+                    StudioDelayEditor,
+                    StudioDoublerEditor,
+                    StudioHardTuneEditor,
+                ),
             ):
                 editor.set_theme_mode(theme_mode)
 
     def apply_language(self) -> None:
         self.title_label.setText(tr("Inspector"))
         self.clip_tab_button.setText(tr("Clip"))
+        self.audio_tab_button.setText(tr("Audio"))
+        self.media_tab_button.setText(tr("Transform"))
+        self._refresh_effect_labels()
+        self.effect_chain_title.setText(tr("Effect Chain"))
+        self.effect_chain_empty.setText(tr("No effects on this clip"))
+        self.effect_editor_empty.setText(tr("Select an effect to edit its settings."))
         self.empty_title.setText(tr("Nothing selected"))
         self.empty_detail.setText(tr("Select a clip or track on the timeline to edit its properties."))
         self.multi_section.title_label.setText(tr("Selected Clips"))
@@ -716,13 +832,43 @@ class StudioInspector(QFrame):
     def open_effect_tab(self, effect_id: str) -> None:
         if effect_id and effect_id not in self.effect_editors:
             return
+        if not effect_id:
+            self._active_effect_id = ""
+            self._open_detail_page("clip")
+            return
         self._active_effect_id = effect_id
-        self.clip_detail_stack.setCurrentIndex(
-            0 if not effect_id else list(self.effect_editors).index(effect_id) + 1
+        self._open_detail_page("fx")
+        self.effect_editor_stack.setCurrentIndex(
+            list(self.effect_editors).index(effect_id) + 1
         )
-        self.clip_tab_button.setChecked(not effect_id)
         for current_id, button in self.effect_tab_buttons.items():
             button.setChecked(current_id == effect_id)
+
+    def _open_detail_page(self, detail_key: str) -> None:
+        page_indexes = {
+            "clip": self.CLIP_DETAIL_PAGE,
+            "audio": self.AUDIO_DETAIL_PAGE,
+            "media": self.MEDIA_DETAIL_PAGE,
+            "fx": self.FX_DETAIL_PAGE,
+        }
+        button = self.detail_tab_buttons.get(detail_key)
+        if button is None or button.isHidden() or not button.isEnabled():
+            detail_key = "clip"
+            button = self.clip_tab_button
+        self._active_detail_key = detail_key
+        self.clip_detail_stack.setCurrentIndex(page_indexes[detail_key])
+        button.setChecked(True)
+        if detail_key == "fx":
+            if self._active_effect_id not in self.effect_editors:
+                self._active_effect_id = next(iter(self.effect_editors), "")
+            if self._active_effect_id:
+                self.effect_editor_stack.setCurrentIndex(
+                    list(self.effect_editors).index(self._active_effect_id) + 1
+                )
+        for effect_id, effect_button in self.effect_tab_buttons.items():
+            effect_button.setChecked(
+                detail_key == "fx" and effect_id == self._active_effect_id
+            )
 
     def _sync_effect_tabs(self, clip: StudioClip) -> None:
         effects = {
@@ -737,29 +883,32 @@ class StudioInspector(QFrame):
                 continue
             button = self.effect_tab_buttons.pop(effect_id)
             editor = self.effect_editors.pop(effect_id)
-            self.clip_tabs_layout.removeWidget(button)
-            self.clip_detail_stack.removeWidget(editor)
+            self.effect_chain_items_layout.removeWidget(button)
+            self.effect_editor_stack.removeWidget(editor)
             button.hide()
             editor.hide()
             button.deleteLater()
             editor.deleteLater()
 
-        for effect_id, effect in effects.items():
+        for order, (effect_id, effect) in enumerate(effects.items(), start=1):
             editor = self.effect_editors.get(effect_id)
             if editor is not None:
                 editor.set_effect(effect)
                 self._sync_effect_reference(editor, effect, clip)
+                button = self.effect_tab_buttons[effect_id]
+                button.setText(self._effect_chain_label(order, effect))
+                button.setProperty("effectEnabled", effect.enabled)
+                button.style().unpolish(button)
+                button.style().polish(button)
                 continue
-            button = FeedbackButton(tr(character_effect_name(effect.kind)))
-            button.setObjectName("StudioInspectorTab")
+            button = FeedbackButton(self._effect_chain_label(order, effect))
+            button.setObjectName("StudioInspectorEffectCard")
             button.setCheckable(True)
+            button.setProperty("effectEnabled", effect.enabled)
             button.clicked.connect(
                 lambda _checked=False, effect_id=effect_id: self.open_effect_tab(effect_id)
             )
-            self.clip_tabs_layout.insertWidget(
-                max(1, self.clip_tabs_layout.count() - 1),
-                button,
-            )
+            self.effect_chain_items_layout.addWidget(button)
             editor = self._effect_editor(effect)
             self._sync_effect_reference(editor, effect, clip)
             if isinstance(
@@ -774,12 +923,42 @@ class StudioInspector(QFrame):
                 editor.set_theme_mode(self._theme_mode)
             editor.effect_changed.connect(self._forward_effect_changed)
             editor.remove_requested.connect(self._forward_effect_remove)
-            self.clip_detail_stack.addWidget(editor)
+            self.effect_editor_stack.addWidget(editor)
             self.effect_tab_buttons[effect_id] = button
             self.effect_editors[effect_id] = editor
         if self._active_effect_id not in self.effect_editors:
-            self._active_effect_id = ""
-        self.open_effect_tab(self._active_effect_id)
+            self._active_effect_id = next(iter(self.effect_editors), "")
+        self._refresh_effect_labels()
+        if not self.effect_editors and self._active_detail_key == "fx":
+            self._active_detail_key = "audio"
+        if self._active_detail_key == "fx" and self._active_effect_id:
+            self.open_effect_tab(self._active_effect_id)
+        else:
+            self.effect_editor_stack.setCurrentIndex(0)
+            for button in self.effect_tab_buttons.values():
+                button.setChecked(False)
+
+    def _refresh_effect_labels(self) -> None:
+        effects = self._clip.effects if self._clip is not None else ()
+        count = len(effects)
+        self.fx_tab_button.setText(f"{tr('FX')}  {count}")
+        self.fx_tab_button.setEnabled(count > 0)
+        self.effect_chain_count.setText(str(count))
+        self.effect_chain_empty.setVisible(count == 0)
+        self.effect_editor_empty.setText(
+            tr("No effects on this clip")
+            if count == 0
+            else tr("Select an effect to edit its settings.")
+        )
+        for order, effect in enumerate(effects, start=1):
+            button = self.effect_tab_buttons.get(effect.effect_id)
+            if button is not None:
+                button.setText(self._effect_chain_label(order, effect))
+
+    @staticmethod
+    def _effect_chain_label(order: int, effect: StudioEffect) -> str:
+        state = tr("On") if effect.enabled else tr("Bypassed")
+        return f"{order:02d}   {tr(character_effect_name(effect.kind))}   ·   {state}"
 
     @staticmethod
     def _sync_effect_reference(
@@ -824,6 +1003,13 @@ class StudioInspector(QFrame):
         if self._clip is None:
             return
         self._active_effect_id = effect.effect_id
+        button = self.effect_tab_buttons.get(effect.effect_id)
+        if button is not None:
+            order = list(self.effect_tab_buttons).index(effect.effect_id) + 1
+            button.setText(self._effect_chain_label(order, effect))
+            button.setProperty("effectEnabled", effect.enabled)
+            button.style().unpolish(button)
+            button.style().polish(button)
         self.effect_changed.emit(self._clip.clip_id, effect)
 
     def _forward_effect_remove(self, effect_id: str) -> None:
@@ -843,6 +1029,8 @@ class StudioInspector(QFrame):
         is_media = media_kind in {"video", "image"}
         is_image = media_kind == "image"
         is_video = media_kind == "video"
+        self.audio_tab_button.setVisible(not is_media)
+        self.media_tab_button.setVisible(is_media)
         self.clip_section.setVisible(not is_media)
         self.fade_section.setVisible(not is_media)
         self.source_section.setVisible(not is_image)

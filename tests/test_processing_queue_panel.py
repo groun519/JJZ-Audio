@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
@@ -12,6 +14,7 @@ from jang_app.qt_app.processing_queue_panel import (
     ProcessingTaskRow,
 )
 from jang_app.qt_app.window_lifecycle import WindowLifecycleGuard
+from jang_app.services.job_diagnostics import JobDiagnostics
 from jang_app.services.i18n import tr
 from jang_app.services.processing_queue import ProcessingQueue
 
@@ -72,18 +75,34 @@ class ProcessingTaskRowTests(unittest.TestCase):
         self.assertNotIn("(0)", button.toolTip())
         host.close()
 
-    def test_queue_panel_uses_owned_tool_window_above_native_video(self) -> None:
+    def test_activity_center_is_an_owned_tool_popover(self) -> None:
         host = QWidget()
         panel = ProcessingQueuePanel(ProcessingQueue(), parent=host)
 
         self.assertTrue(panel.isWindow())
         self.assertTrue(panel.windowFlags() & Qt.WindowType.Tool)
         self.assertTrue(panel.windowFlags() & Qt.WindowType.FramelessWindowHint)
-        self.assertTrue(panel.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating))
         self.assertTrue(WindowLifecycleGuard.is_expected_window(panel))
 
         panel.close()
         host.close()
+
+    def test_activity_center_restores_recent_jobs_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics = JobDiagnostics(Path(temporary), session_id="activity-test")
+            queue = ProcessingQueue(diagnostics=diagnostics)
+            task_id = queue.start("Train Model", "voice")
+            queue.fail(task_id, "CUDA out of memory")
+
+            restored = ProcessingQueue(
+                diagnostics=JobDiagnostics(Path(temporary), session_id="next-session")
+            )
+            panel = ProcessingQueuePanel(restored)
+
+            self.assertIn(task_id, panel._recent_task_ids)
+            self.assertTrue(panel.has_tasks())
+
+        panel.close()
 
 
 if __name__ == "__main__":

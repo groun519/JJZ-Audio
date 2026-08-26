@@ -119,6 +119,7 @@ class StudioSoundPool(QFrame):
         self._theme_mode = "white"
         self._list_mode = False
         self._selected_role = _ALL_ROLES
+        self._layout_state: tuple[tuple[str, ...], int, bool] | None = None
 
         self.title_label = QLabel()
         self.title_label.setObjectName("SectionTitle")
@@ -218,6 +219,7 @@ class StudioSoundPool(QFrame):
             return
         previous_cards = self._cards
         self._assets = assets
+        self._layout_state = None
         self._take_layout_items()
         next_cards: dict[str, StudioSoundCard] = {}
         for asset in assets:
@@ -269,6 +271,7 @@ class StudioSoundPool(QFrame):
         self.empty_label.setText(tr("No sounds match the current filter."))
         for card in self._cards.values():
             card.apply_language()
+        self._layout_state = None
         self._rebuild_layout()
 
     def visible_asset_ids(self) -> tuple[str, ...]:
@@ -287,11 +290,13 @@ class StudioSoundPool(QFrame):
         self.list_button.setChecked(enabled)
         for card in self._cards.values():
             card.set_list_mode(enabled)
+        self._layout_state = None
         self._rebuild_layout()
 
     def _set_role_filter(self, role: str) -> None:
         self._selected_role = role if role in self.role_buttons else _ALL_ROLES
         self.role_buttons[self._selected_role].setChecked(True)
+        self._layout_state = None
         self._rebuild_layout()
 
     def _select_asset(self, asset_id: str) -> None:
@@ -333,9 +338,17 @@ class StudioSoundPool(QFrame):
         return max(1, min(4, (available + _GRID_SPACING) // (_GRID_CARD_MIN_WIDTH + _GRID_SPACING)))
 
     def _rebuild_layout(self) -> None:
-        self._take_layout_items()
         visible = self._visible_cards()
         columns = self._column_count()
+        layout_state = (
+            tuple(card.asset.asset_id for card in visible),
+            columns,
+            self._list_mode,
+        )
+        if layout_state == self._layout_state:
+            return
+        self._layout_state = layout_state
+        self._take_layout_items()
         for index, card in enumerate(visible):
             card.set_list_mode(self._list_mode)
             card.setVisible(True)

@@ -115,6 +115,7 @@ class RvcTrainingPipelineTests(unittest.TestCase):
                 all(boundary in progress for boundary in (5, 15, 25, 28, 32, 95, 100))
             )
             self.assertTrue(result.completed)
+            self.assertEqual(result.state.phase, RvcTrainingPhase.INDEX_READY)
 
     def test_changed_dataset_rebuilds_each_dependent_stage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -207,7 +208,7 @@ def _complete_training(model_id, layout) -> RvcTrainingRunResult:
     state = store.save(
         replace(
             store.load(),
-            phase=RvcTrainingPhase.COMPLETE,
+            phase=RvcTrainingPhase.MODEL_READY,
             current_epoch=20,
             target_epoch=20,
         )

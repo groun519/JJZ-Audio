@@ -18,16 +18,28 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from jang_app.config import LOG_DIR
+from jang_app.services.managed_files import atomic_output_path, write_json_atomic
 from jang_app.services.text_tail import text_tail
 from jang_app.version import __version__
 
 
 SESSION_ID = uuid4().hex[:12]
 _CURRENT_TASK_ID: ContextVar[str] = ContextVar("diagnostic_task_id", default="-")
-_SENSITIVE_OPTION = re.compile(r"(?:token|password|passwd|cookie|secret|authorization|api[-_]?key)", re.I)
+_SENSITIVE_KEY = (
+    r"(?:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|"
+    r"token|password|passwd|cookie|secret|authorization|api[-_]?key)"
+)
+_SENSITIVE_OPTION = re.compile(_SENSITIVE_KEY, re.I)
 _URL = re.compile(r"https?://[^\s'\"<>]+", re.I)
 _SENSITIVE_ASSIGNMENT = re.compile(
-    r"(?i)\b(token|password|passwd|cookie|secret|authorization|api[-_]?key)\s*([=:])\s*([^\s,;]+)"
+    rf"(?i)(?P<key>['\"]?{_SENSITIVE_KEY}['\"]?)"
+    r"(?P<separator>\s*[:=]\s*)"
+    r"(?:(?P<quote>['\"])(?P<quoted>[^'\"\r\n]*)(?P=quote)|"
+    r"(?P<bare>[^\s,;}\]]+))"
+)
+_BEARER_CREDENTIAL = re.compile(
+    r"(?i)(\bauthorization\b\s*[:=]\s*['\"]?bearer\s+)"
+    r"([^\s,;}\]\"']+)"
 )
 _STRUCTURED_DIAGNOSTIC_CODE = re.compile(
     r"JJZERO_DIAGNOSTIC_CODE=(?P<code>[A-Z0-9_]+)"
@@ -48,6 +60,26 @@ _STRUCTURED_DIAGNOSTICS = {
 class ErrorClassification:
     code: str
     summary: str
+
+
+@dataclass(frozen=True)
+class JobDiagnosticRecord:
+    task_id: str
+    title: str
+    detail: str
+    status: str
+    progress: int
+    started_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None
+    diagnostic_code: str
+    diagnostic_summary: str
+    error: str
+    app_version: str
+    session_id: str
+    path: Path
+    environment: dict[str, object]
+    metadata: dict[str, object]
 
 
 def current_task_id() -> str:
@@ -178,8 +210,20 @@ def classify_error(error: str) -> ErrorClassification:
 def redact_text(value: object) -> str:
     text = str(value)
     text = _URL.sub(lambda match: _redact_url(match.group(0)), text)
-    text = _SENSITIVE_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{match.group(2)}<redacted>", text)
+    text = _BEARER_CREDENTIAL.sub(
+        lambda match: f"{match.group(1)}<redacted>",
+        text,
+    )
+    text = _SENSITIVE_ASSIGNMENT.sub(_redact_assignment, text)
     return text
+
+
+def _redact_assignment(match: re.Match[str]) -> str:
+    quote = match.group("quote") or ""
+    return (
+        f"{match.group('key')}{match.group('separator')}"
+        f"{quote}<redacted>{quote}"
+    )
 
 
 def redact_command(args: Sequence[object]) -> list[str]:
@@ -347,6 +391,39 @@ class JobDiagnostics:
         safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", task_id) or "unknown"
         return self.root / safe_id
 
+    def records(self, *, limit: int | None = None) -> tuple[JobDiagnosticRecord, ...]:
+        """Return persisted job summaries, newest first."""
+        records: list[JobDiagnosticRecord] = []
+        try:
+            paths = tuple(self.root.iterdir())
+        except OSError:
+            return ()
+        for path in paths:
+            if not path.is_dir():
+                continue
+            record = _record_from_summary(path, _read_json(path / "summary.json"))
+            if record is not None:
+                records.append(record)
+        records.sort(key=lambda record: record.updated_at, reverse=True)
+        if limit is not None:
+            records = records[: max(0, int(limit))]
+        return tuple(records)
+
+    def record(self, task_id: str) -> JobDiagnosticRecord | None:
+        path = self.job_path(task_id)
+        return _record_from_summary(path, self._load_summary(task_id))
+
+    def read_command_log(
+        self,
+        task_id: str,
+        *,
+        max_lines: int = 800,
+    ) -> str:
+        return _read_text_tail(
+            self.job_path(task_id) / "command.log",
+            max_lines=max(1, int(max_lines)),
+        )
+
     def build_report(self, task_id: str, error_tail_lines: int = 40) -> str:
         summary = self._load_summary(task_id)
         if not summary:
@@ -395,28 +472,23 @@ class JobDiagnostics:
         if not folder.is_dir():
             return None
         archive = folder / f"JJZero-Training-Diagnostics-{folder.name}.zip"
-        temporary = archive.with_suffix(".zip.tmp")
         try:
-            with zipfile.ZipFile(
-                temporary,
-                "w",
-                compression=zipfile.ZIP_DEFLATED,
-                compresslevel=6,
-            ) as package:
-                package.writestr("report.txt", self.build_report(task_id))
-                for source in sorted(folder.rglob("*")):
-                    if not source.is_file() or source in {archive, temporary}:
-                        continue
-                    if source.suffix.casefold() in {".zip", ".tmp"}:
-                        continue
-                    package.write(source, source.relative_to(folder).as_posix())
-            os.replace(temporary, archive)
+            with atomic_output_path(archive, operation="diagnostics") as temporary:
+                with zipfile.ZipFile(
+                    temporary,
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                    compresslevel=6,
+                ) as package:
+                    package.writestr("report.txt", self.build_report(task_id))
+                    for source in sorted(folder.rglob("*")):
+                        if not source.is_file() or source in {archive, temporary}:
+                            continue
+                        if source.suffix.casefold() in {".zip", ".tmp"}:
+                            continue
+                        package.write(source, source.relative_to(folder).as_posix())
             return archive
         except (OSError, zipfile.BadZipFile):
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
             return None
 
     def _prepare_root(self) -> None:
@@ -604,6 +676,52 @@ def _parse_time(value: object) -> datetime:
         return datetime.fromtimestamp(0, UTC)
 
 
+def _parse_optional_time(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    parsed = _parse_time(value)
+    return parsed if parsed.timestamp() > 0 else None
+
+
+def _record_from_summary(
+    path: Path,
+    summary: dict[str, object] | None,
+) -> JobDiagnosticRecord | None:
+    if not summary:
+        return None
+    task_id = str(summary.get("task_id") or path.name).strip()
+    title = str(summary.get("title") or "").strip()
+    if not task_id or not title:
+        return None
+    environment = summary.get("environment")
+    metadata = summary.get("metadata")
+    return JobDiagnosticRecord(
+        task_id=task_id,
+        title=title,
+        detail=str(summary.get("detail") or "").strip(),
+        status=str(summary.get("status") or "").strip(),
+        progress=max(0, min(100, _safe_int(summary.get("progress")))),
+        started_at=_parse_time(summary.get("started_at")),
+        updated_at=_parse_time(summary.get("updated_at") or summary.get("started_at")),
+        finished_at=_parse_optional_time(summary.get("finished_at")),
+        diagnostic_code=str(summary.get("diagnostic_code") or "").strip(),
+        diagnostic_summary=str(summary.get("diagnostic_summary") or "").strip(),
+        error=str(summary.get("error") or "").strip(),
+        app_version=str(summary.get("app_version") or "").strip(),
+        session_id=str(summary.get("session_id") or "").strip(),
+        path=path,
+        environment=dict(environment) if isinstance(environment, dict) else {},
+        metadata=dict(metadata) if isinstance(metadata, dict) else {},
+    )
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _read_json(path: Path) -> dict[str, object] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -613,7 +731,4 @@ def _read_json(path: Path) -> dict[str, object] | None:
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    temporary.replace(path)
+    write_json_atomic(path, value)

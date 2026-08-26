@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from math import floor
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
+    QApplication,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -27,6 +28,11 @@ from jang_app.qt_app.widgets import (
 )
 from jang_app.services.i18n import tr
 from jang_app.services.song_metadata import SongDisplayMetadata
+
+
+LIBRARY_SOURCE_BADGE_SIZE = 44
+LIBRARY_SOURCE_BADGE_TEXT_BOTTOM_INSET = 2
+LIBRARY_SOURCE_BADGE_VERTICAL_OFFSET = 7
 
 
 class WorkSongRevealButton(SvgIconButton):
@@ -136,6 +142,8 @@ class SongListRow(QWidget):
     preview_play_toggled = Signal(str)
     preview_seek_requested = Signal(str, int)
     preview_height_changed = Signal(str)
+    selection_requested = Signal(str, bool)
+    drag_requested = Signal(str)
 
     def __init__(
         self,
@@ -154,6 +162,9 @@ class SongListRow(QWidget):
         self._is_hovered = False
         self._is_work_song = False
         self._preview_expanded = False
+        self._press_position: QPoint | None = None
+        self._extended_selection_press = False
+        self._drag_started = False
         self.setMouseTracking(True)
 
         self.source_badge = QLabel()
@@ -161,8 +172,31 @@ class SongListRow(QWidget):
         self.source_badge.setObjectName("SourceBadge")
         self.source_badge.setProperty("sourceType", metadata.source_type)
         self.source_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.source_badge.setContentsMargins(0, 0, 0, 3)
-        self.source_badge.setFixedSize(52, 52)
+        self.source_badge.setContentsMargins(
+            0,
+            0,
+            0,
+            LIBRARY_SOURCE_BADGE_TEXT_BOTTOM_INSET,
+        )
+        self.source_badge.setFixedSize(
+            LIBRARY_SOURCE_BADGE_SIZE,
+            LIBRARY_SOURCE_BADGE_SIZE,
+        )
+        self.source_badge_slot = QWidget()
+        self.source_badge_slot.setObjectName("SourceBadgeSlot")
+        self.source_badge_slot.setFixedSize(
+            LIBRARY_SOURCE_BADGE_SIZE,
+            LIBRARY_SOURCE_BADGE_SIZE + (LIBRARY_SOURCE_BADGE_VERTICAL_OFFSET * 2),
+        )
+        source_badge_layout = QVBoxLayout(self.source_badge_slot)
+        source_badge_layout.setContentsMargins(
+            0,
+            0,
+            0,
+            LIBRARY_SOURCE_BADGE_VERTICAL_OFFSET * 2,
+        )
+        source_badge_layout.setSpacing(0)
+        source_badge_layout.addWidget(self.source_badge)
 
         self.title_label = OverflowTitleLabel(title)
 
@@ -242,7 +276,7 @@ class SongListRow(QWidget):
         identity_layout.setContentsMargins(0, 0, 0, 0)
         identity_layout.setSpacing(14)
         identity_layout.addWidget(self.work_song_reveal, 0)
-        identity_layout.addWidget(self.source_badge, 0)
+        identity_layout.addWidget(self.source_badge_slot, 0)
         identity_layout.addLayout(text_layout, 1)
 
         self.body_container = QWidget()
@@ -358,8 +392,39 @@ class SongListRow(QWidget):
             self._sync_action_visibility()
         super().leaveEvent(event)
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+    def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and not self._is_editing:
+            self._press_position = event.position().toPoint()
+            self._extended_selection_press = bool(
+                event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            )
+            self._drag_started = False
+            self.selection_requested.emit(self._item_id, self._extended_selection_press)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if (
+            self._press_position is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and not self._drag_started
+            and (event.position().toPoint() - self._press_position).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            self._drag_started = True
+            self.drag_requested.emit(self._item_id)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        should_preview = (
+            event.button() == Qt.MouseButton.LeftButton
+            and not self._is_editing
+            and not self._drag_started
+            and not self._extended_selection_press
+        )
+        self._press_position = None
+        self._extended_selection_press = False
+        self._drag_started = False
+        if should_preview:
             self.preview_requested.emit(self._item_id)
         super().mouseReleaseEvent(event)
 

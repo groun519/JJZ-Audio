@@ -4,6 +4,7 @@ import faulthandler
 import logging
 import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TextIO
@@ -16,6 +17,30 @@ from jang_app.version import __version__
 LOGGER_NAME = "jang_app"
 _exception_logging_installed = False
 _crash_stream: TextIO | None = None
+_ROLLOVER_RETRY_SECONDS = 60.0
+
+
+class _WindowsSafeRotatingFileHandler(RotatingFileHandler):
+    """Keep logging when another Windows process temporarily owns a backup file."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._rollover_retry_after = 0.0
+
+    def shouldRollover(self, record: logging.LogRecord) -> bool:  # noqa: N802
+        if time.monotonic() < self._rollover_retry_after:
+            return False
+        return super().shouldRollover(record)
+
+    def doRollover(self) -> None:  # noqa: N802
+        try:
+            super().doRollover()
+        except OSError:
+            # Windows cannot rename jang.log while an older app/test process still
+            # has it open. Continue appending and retry rotation after a cooldown.
+            self._rollover_retry_after = time.monotonic() + _ROLLOVER_RETRY_SECONDS
+            if self.stream is None and not self.delay:
+                self.stream = self._open()
 
 
 class _DiagnosticContextFilter(logging.Filter):
@@ -29,7 +54,7 @@ def get_logger() -> logging.Logger:
     logger = logging.getLogger(LOGGER_NAME)
     if not logger.handlers:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(
+        handler = _WindowsSafeRotatingFileHandler(
             LOG_FILE,
             maxBytes=5_000_000,
             backupCount=3,
@@ -46,13 +71,28 @@ def get_logger() -> logging.Logger:
         logger.setLevel(logging.INFO)
         logger.propagate = False
         logger.info(
-            "Application session started | version=%s | mode=%s | python=%s | executable=%s",
+            "Application session started | version=%s | revision=%s | mode=%s | python=%s | executable=%s",
             __version__,
+            _build_revision(),
             "packaged" if getattr(sys, "frozen", False) else "source",
             sys.version.split()[0],
             Path(sys.executable).resolve(),
         )
     return logger
+
+
+def _build_revision() -> str:
+    if not getattr(sys, "frozen", False):
+        return "source"
+    marker = Path(sys.executable).resolve().parent / "build-provenance.json"
+    try:
+        import json
+
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return "unknown"
+    revision = data.get("source_revision") if isinstance(data, dict) else None
+    return str(revision) if isinstance(revision, str) and revision else "unknown"
 
 
 def install_exception_logging() -> None:

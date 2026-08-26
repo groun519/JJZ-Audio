@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -68,6 +69,7 @@ class VocalCleanupPreview:
     end_ms: int
     effect: str
     strength: str
+    replace_region_id: str
     processed_segment_path: Path
     removed_segment_path: Path
     preview_path: Path
@@ -83,11 +85,19 @@ def preview_vocal_cleanup(
     end_ms: int,
     effect: str = VOCAL_CLEANUP_EFFECT_DEREVERB,
     strength: str = "standard",
+    replace_region_id: str = "",
     progress_callback: ProgressCallback | None = None,
 ) -> VocalCleanupPreview:
     source = _require_audio(source_path)
     _validate_request(start_ms, end_ms, effect, strength)
-    _ensure_no_overlap(existing_regions, start_ms, end_ms)
+    retained_regions = tuple(
+        region for region in existing_regions if region.region_id != replace_region_id
+    )
+    if replace_region_id and len(retained_regions) == len(existing_regions):
+        raise VocalCleanupError(
+            "The cleanup region changed before this preview was created."
+        )
+    _ensure_no_overlap(retained_regions, start_ms, end_ms)
     preview_id = f"preview-{uuid4().hex[:12]}"
     preview_root = job_dir.expanduser().resolve() / "cleanup" / ".preview" / preview_id
     preview_root.mkdir(parents=True, exist_ok=False)
@@ -123,7 +133,7 @@ def preview_vocal_cleanup(
         removed_preview_path = preview_root / "removed.wav"
         _compose_audio(
             source,
-            (*existing_regions, pending),
+            (*retained_regions, pending),
             preview_path,
             removed_preview_path,
             progress_callback=_scaled_progress(progress_callback, 82, 100),
@@ -138,6 +148,7 @@ def preview_vocal_cleanup(
         end_ms=end_ms,
         effect=effect,
         strength=strength,
+        replace_region_id=replace_region_id,
         processed_segment_path=processed_segment,
         removed_segment_path=removed_segment,
         preview_path=preview_path,
@@ -390,6 +401,25 @@ def _render_deecho_segment(
         except SeparationError as exc:
             raise VocalCleanupError(str(exc)) from exc
         no_echo_audio, no_echo_rate = _read_audio(no_echo_path)
+        no_echo_audio = _match_audio_format(
+            no_echo_audio,
+            no_echo_rate,
+            source_rate,
+            padded_audio.shape[1],
+            len(padded_audio),
+        )
+        aligned_no_echo_path = workspace.root / "no-echo-aligned.wav"
+        sf.write(aligned_no_echo_path, no_echo_audio, source_rate, subtype="FLOAT")
+        protected_path = workspace.root / "protected.wav"
+        try:
+            protect_effect_removed_vocals(
+                staged_source,
+                aligned_no_echo_path,
+                protected_path,
+            )
+        except VocalEffectProtectionError as exc:
+            raise VocalCleanupError(str(exc)) from exc
+        no_echo_audio, no_echo_rate = _read_audio(protected_path)
 
     no_echo_audio = _match_audio_format(
         no_echo_audio,
@@ -439,6 +469,7 @@ def _compose_audio(
             sample_rate,
             source.shape[1],
             frames,
+            strict_frames=True,
         )
         weights = _region_weights(frames, sample_rate)[:, None]
         original = source[start:end]
@@ -468,6 +499,8 @@ def _read_audio(path: Path) -> tuple[np.ndarray, int]:
         )
     except (OSError, RuntimeError) as exc:
         raise VocalCleanupError(f"Could not read vocal audio: {path}") from exc
+    if not np.isfinite(audio).all():
+        raise VocalCleanupError(f"Vocal audio contains invalid samples: {path}")
     return audio, int(sample_rate)
 
 
@@ -477,6 +510,8 @@ def _match_audio_format(
     target_rate: int,
     target_channels: int,
     target_frames: int,
+    *,
+    strict_frames: bool = False,
 ) -> np.ndarray:
     if source_rate != target_rate:
         try:
@@ -494,12 +529,22 @@ def _match_audio_format(
             audio = np.mean(audio, axis=1, keepdims=True)
         else:
             audio = audio[:, :target_channels]
-    return _match_frame_count(audio, target_frames)
+    return _match_frame_count(audio, target_frames, strict=strict_frames)
 
 
-def _match_frame_count(audio: np.ndarray, frames: int) -> np.ndarray:
+def _match_frame_count(
+    audio: np.ndarray,
+    frames: int,
+    *,
+    strict: bool = False,
+) -> np.ndarray:
     if len(audio) == frames:
         return audio
+    tolerance = max(4, math.ceil(frames * 0.002))
+    if strict and abs(len(audio) - frames) > tolerance:
+        raise VocalCleanupError(
+            "A cleanup segment does not match its selected range. Create it again."
+        )
     if len(audio) > frames:
         return audio[:frames]
     padding = np.zeros((frames - len(audio), audio.shape[1]), dtype=audio.dtype)

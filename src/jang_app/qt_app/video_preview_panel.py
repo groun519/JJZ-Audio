@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Protocol
 
-from PySide6.QtCore import QEvent, QUrl, Qt, Signal
-from PySide6.QtGui import QPainter, QPixmap, QResizeEvent
+from PySide6.QtCore import QEvent, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QPainter, QPixmap, QResizeEvent
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -25,6 +26,7 @@ from jang_app.qt_app.localization import (
     set_translated_tooltip,
 )
 from jang_app.qt_app.widgets import DangerIconButton, FileDropCard, ScrollSafeComboBox, SvgIconButton
+from jang_app.services.app_logging import get_logger
 from jang_app.services.i18n import tr
 from jang_app.services.studio_session import MEDIA_FILL, StudioMediaSettings
 from jang_app.services.video_source import VideoSource
@@ -79,6 +81,13 @@ class VideoPreviewPanel(QFrame):
         self._running = False
         self._preview_path: Path | None = None
         self._preview_kind = ""
+        self._loaded_video_path: Path | None = None
+        self._scheduled_video_path: Path | None = None
+        self._video_load_generation = 0
+        self._video_load_started_at = 0.0
+        self._pending_video_position_ms = 0
+        self._pending_video_playing = False
+        self._logger = get_logger()
 
         self.title_label = QLabel("Media")
         self.title_label.setObjectName("SectionTitle")
@@ -205,6 +214,7 @@ class VideoPreviewPanel(QFrame):
         self.media_player.setAudioOutput(self.audio_output)
         self.media_player.setVideoOutput(self.video_widget)
         self.media_player.errorOccurred.connect(self._on_media_error)
+        self.media_player.mediaStatusChanged.connect(self._on_media_status_changed)
         self.synchronizer = VideoPlaybackSynchronizer(self.media_player)
         self.set_source(VideoSource(), enabled=False)
 
@@ -221,10 +231,14 @@ class VideoPreviewPanel(QFrame):
         original_song_url: str = "",
         saved_sources: tuple[VideoSource, ...] = (),
     ) -> None:
-        self.media_player.stop()
-        self.media_player.setSource(QUrl())
-        self._preview_path = None
-        self._preview_kind = ""
+        next_path = _resolved_local_source_path(source)
+        next_kind = source.media_kind if next_path is not None else ""
+        keep_preview = self._preview_path == next_path and self._preview_kind == next_kind
+        if not keep_preview:
+            self.synchronizer.sync(self.media_player.position(), False)
+            self._preview_path = None
+            self._preview_kind = ""
+            self._cancel_scheduled_video_load()
         self._source = source
         self._enabled = enabled
         self._original_song_url = original_song_url.strip()
@@ -247,9 +261,8 @@ class VideoPreviewPanel(QFrame):
             self.clear_button.setVisible(not source.inherited)
             self.download_button.setVisible(source.kind == "youtube" and source.path is None)
 
-        if self.has_local_source:
-            path = source.path.expanduser().resolve()
-            self._activate_preview_path(path, source.media_kind)
+        if next_path is not None:
+            self._activate_preview_path(next_path, source.media_kind)
             self.edit_button.show()
         else:
             self.stack.setCurrentWidget(self.source_editor)
@@ -300,12 +313,17 @@ class VideoPreviewPanel(QFrame):
         self._active = bool(active)
         if not self._active:
             self.synchronizer.sync(self.media_player.position(), False)
+            self._cancel_scheduled_video_load()
+        elif self._preview_path is not None and self._preview_kind == "video":
+            self._schedule_video_load(self._preview_path)
 
     def sync_playback(self, position_ms: int, is_playing: bool) -> None:
         if not self._active or not self.has_local_source or self._source.media_kind != "video":
             return
+        self._pending_video_position_ms = max(0, int(position_ms))
+        self._pending_video_playing = bool(is_playing)
         self._activate_preview_path(self._source.path, "video")
-        self.synchronizer.sync(position_ms, is_playing)
+        self._sync_loaded_video_playback()
 
     def sync_timeline_media(
         self,
@@ -317,22 +335,43 @@ class VideoPreviewPanel(QFrame):
     ) -> None:
         if not self._active:
             return
-        if path is None or not path.is_file():
+        if path is None:
             self.synchronizer.sync(self.media_player.position(), False)
-            self.media_player.setSource(QUrl())
             self._preview_path = None
             self._preview_kind = ""
+            self._cancel_scheduled_video_load()
+            self._pending_video_playing = False
             self.audio_output.setMuted(True)
             self.image_widget.clear_source()
             self.stack.setCurrentWidget(self.image_widget)
             return
-        resolved = path.expanduser().resolve()
+        uses_active_preview = self._preview_path is not None and path == self._preview_path
+        resolved = self._preview_path if uses_active_preview else path.expanduser().resolve()
+        if not uses_active_preview and not resolved.is_file():
+            self.synchronizer.sync(self.media_player.position(), False)
+            self._preview_path = None
+            self._preview_kind = ""
+            self._cancel_scheduled_video_load()
+            self._pending_video_playing = False
+            self.audio_output.setMuted(True)
+            self.image_widget.clear_source()
+            self.stack.setCurrentWidget(self.image_widget)
+            return
+        self._pending_video_position_ms = max(0, int(source_position_ms))
+        self._pending_video_playing = bool(is_playing and media_kind == "video")
         self._activate_preview_path(resolved, media_kind, settings)
         if media_kind == "video":
-            self.synchronizer.sync(source_position_ms, is_playing)
+            self._sync_loaded_video_playback()
 
     def stop(self) -> None:
         self.media_player.stop()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self._cancel_scheduled_video_load()
+        self.media_player.stop()
+        self.media_player.setSource(QUrl())
+        self._loaded_video_path = None
+        super().closeEvent(event)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         for button in (
@@ -428,6 +467,34 @@ class VideoPreviewPanel(QFrame):
     def _on_media_error(self, _error, error_text: str) -> None:
         if error_text:
             self.source_label.setToolTip(error_text)
+            self._logger.warning(
+                "Studio video preview failed | path=%s | error=%s",
+                self._loaded_video_path,
+                error_text,
+            )
+
+    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if status not in {
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+            QMediaPlayer.MediaStatus.InvalidMedia,
+        }:
+            return
+        if self._video_load_started_at:
+            elapsed_ms = (time.perf_counter() - self._video_load_started_at) * 1000
+            self._logger.info(
+                "Studio video preview status | status=%s | elapsed_ms=%.1f | path=%s",
+                status.name,
+                elapsed_ms,
+                self._loaded_video_path,
+            )
+            if status != QMediaPlayer.MediaStatus.LoadedMedia:
+                self._video_load_started_at = 0.0
+        if status in {
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        }:
+            self._sync_loaded_video_playback()
 
     def _activate_preview_path(
         self,
@@ -443,18 +510,66 @@ class VideoPreviewPanel(QFrame):
         if self._preview_path == resolved and self._preview_kind == media_kind:
             if media_kind == "image":
                 self.image_widget.set_media_settings(media_settings)
+            elif self._active:
+                self._schedule_video_load(resolved)
             return
-        self.media_player.stop()
-        self.media_player.setSource(QUrl())
+        self.synchronizer.sync(self.media_player.position(), False)
         self._preview_path = resolved
         self._preview_kind = media_kind
         if media_kind == "image":
+            self._cancel_scheduled_video_load()
             self.image_widget.set_path(resolved)
             self.image_widget.set_media_settings(media_settings)
             self.stack.setCurrentWidget(self.image_widget)
             return
-        self.media_player.setSource(QUrl.fromLocalFile(str(resolved)))
         self.stack.setCurrentWidget(self.video_widget)
+        if self._active:
+            self._schedule_video_load(resolved)
+
+    def _schedule_video_load(self, path: Path) -> None:
+        if self._loaded_video_path == path or self._scheduled_video_path == path:
+            return
+        self._video_load_generation += 1
+        generation = self._video_load_generation
+        self._scheduled_video_path = path
+        # Let the Studio page paint before Windows initializes the media backend.
+        QTimer.singleShot(0, lambda: self._load_scheduled_video(path, generation))
+
+    def _cancel_scheduled_video_load(self) -> None:
+        self._video_load_generation += 1
+        self._scheduled_video_path = None
+
+    def _load_scheduled_video(self, path: Path, generation: int) -> None:
+        if (
+            generation != self._video_load_generation
+            or not self._active
+            or self._preview_kind != "video"
+            or self._preview_path != path
+        ):
+            return
+        self._scheduled_video_path = None
+        if self._loaded_video_path == path:
+            self._sync_loaded_video_playback()
+            return
+        self.media_player.stop()
+        self._loaded_video_path = path
+        self._video_load_started_at = time.perf_counter()
+        self._logger.info("Studio video preview loading | path=%s", path)
+        self.media_player.setSource(QUrl.fromLocalFile(str(path)))
+        self._sync_loaded_video_playback()
+
+    def _sync_loaded_video_playback(self) -> None:
+        if (
+            not self._active
+            or self._preview_kind != "video"
+            or self._preview_path is None
+            or self._loaded_video_path != self._preview_path
+        ):
+            return
+        self.synchronizer.sync(
+            self._pending_video_position_ms,
+            self._pending_video_playing,
+        )
 
 
 class _ImageCanvas(QLabel):
@@ -610,3 +725,10 @@ def _source_badge(source: VideoSource) -> str:
 
 def _source_type(source: VideoSource) -> str:
     return "youtube" if source.kind == "youtube" else "local"
+
+
+def _resolved_local_source_path(source: VideoSource) -> Path | None:
+    path = source.path
+    if path is None or not path.is_file():
+        return None
+    return path.expanduser().resolve()

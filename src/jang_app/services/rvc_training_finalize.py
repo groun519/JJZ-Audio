@@ -10,7 +10,12 @@ from jang_app.services.command import CommandResult, run_command
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_model_workspace import RvcModelRecord, RvcModelWorkspace
-from jang_app.services.rvc_training_index import RvcTrainingIndexResult, load_rvc_training_index
+from jang_app.services.rvc_training_index import (
+    RvcTrainingIndexError,
+    RvcTrainingIndexResult,
+    build_rvc_training_index,
+    load_rvc_training_index,
+)
 from jang_app.services.rvc_training_state import RvcTrainingPhase, RvcTrainingStateStore
 
 
@@ -32,6 +37,48 @@ class RvcTrainingFinalizeResult:
     record: RvcModelRecord
     inspection: RvcInferenceModelInspection
     index: RvcTrainingIndexResult
+
+
+def recover_existing_rvc_training_artifacts(
+    workspace: RvcModelWorkspace,
+    model_id: str,
+    layout: RvcModelPackageLayout,
+    runtime_root: Path,
+    *,
+    command_runner: Callable[..., CommandResult] = run_command,
+) -> RvcTrainingFinalizeResult | None:
+    """Register a preserved model before starting another expensive training run."""
+    state = RvcTrainingStateStore(model_id, layout).refresh_checkpoint_pair()
+    model = layout.weights_dir / f"{layout.rvc_name}.pth"
+    recoverable_phases = {
+        RvcTrainingPhase.MODEL_READY,
+        RvcTrainingPhase.INDEX,
+        RvcTrainingPhase.INDEX_READY,
+        RvcTrainingPhase.COMPLETE,
+        RvcTrainingPhase.FAILED,
+    }
+    reached_target_before_interruption = (
+        state.phase in {RvcTrainingPhase.TRAIN, RvcTrainingPhase.STOPPED}
+        and state.current_epoch >= state.target_epoch
+    )
+    if (
+        (state.phase not in recoverable_phases and not reached_target_before_interruption)
+        or not state.can_resume
+        or not model.is_file()
+        or model.stat().st_size == 0
+    ):
+        return None
+    try:
+        load_rvc_training_index(model_id, layout)
+    except RvcTrainingIndexError:
+        build_rvc_training_index(model_id, layout, runtime_root)
+    return finalize_rvc_training_artifacts(
+        workspace,
+        model_id,
+        layout,
+        runtime_root,
+        command_runner=command_runner,
+    )
 
 
 def inspect_rvc_inference_model(

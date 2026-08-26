@@ -8,7 +8,12 @@ from unittest.mock import patch
 import numpy as np
 import soundfile as sf
 
-from jang_app.services.audio_export import AudioMixSource, export_audio_file, export_mix
+from jang_app.services.audio_export import (
+    AudioMixSource,
+    export_audio_file,
+    export_mix,
+    render_audio_mix,
+)
 from jang_app.services.audio_mix_processing import process_mix_source
 from jang_app.services.studio_character_fx_presets import character_effect_chain
 from jang_app.services.studio_session import (
@@ -84,6 +89,24 @@ class AudioExportTests(unittest.TestCase):
             self.assertEqual(sample_rate, 8_000)
             self.assertGreater(len(rendered), len(impulse))
             self.assertGreater(float(np.max(np.abs(rendered[len(impulse) :]))), 0.0)
+
+    def test_mixed_sample_rate_uses_the_highest_input_rate_independent_of_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            low = root / "low.wav"
+            high = root / "high.wav"
+            sf.write(low, np.zeros(2_205, dtype=np.float32), 22_050)
+            sf.write(high, np.zeros(4_800, dtype=np.float32), 48_000)
+
+            low_first = render_audio_mix(
+                (AudioMixSource("Low", low), AudioMixSource("High", high))
+            )
+            high_first = render_audio_mix(
+                (AudioMixSource("High", high), AudioMixSource("Low", low))
+            )
+
+            self.assertEqual(low_first.sample_rate, 48_000)
+            self.assertEqual(high_first.sample_rate, 48_000)
 
     def test_mix_processing_applies_fades_and_constant_power_pan(self) -> None:
         source = np.ones((1_000, 1), dtype=np.float32)

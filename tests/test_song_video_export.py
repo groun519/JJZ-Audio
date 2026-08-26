@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from jang_app.services.song_package import SongPackageStore
 from jang_app.services.song_video_export import (
     SongVideoExportError,
     _VisualClip,
+    _visual_clips,
     _render_analysis_filter,
     _render_command,
     _select_content_adaptive_settings,
@@ -83,6 +85,40 @@ class SongVideoExportTests(unittest.TestCase):
 
             self.assertFalse(can_render_song_video(package, VideoSource(), session))
 
+    def test_one_missing_timeline_visual_rejects_the_whole_render(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_output(root)
+            image = root / "cover.png"
+            image.write_bytes(b"image")
+            VideoSourceStore().import_file(package, image)
+            media_asset = next(
+                asset for asset in studio_sound_pool(package)
+                if asset.reference.role == TRACK_VIDEO
+            )
+            missing = StudioAssetRef("missing", TRACK_VIDEO, "missing.png")
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "media",
+                        "Media",
+                        TRACK_VIDEO,
+                        clips=(
+                            StudioClip("present", media_asset.reference, 0, 0, 2_000),
+                            StudioClip("missing", missing, 2_000, 0, 2_000),
+                        ),
+                    ),
+                ),
+            )
+
+            self.assertFalse(can_render_song_video(package, VideoSource(), session))
+            with patch(
+                "jang_app.services.song_video_export.require_executable",
+                return_value="ffmpeg",
+            ):
+                with self.assertRaisesRegex(SongVideoExportError, missing.asset_id):
+                    render_song_video(package, VideoSource(), session)
+
     def test_render_command_applies_image_layout_and_video_source_audio(self) -> None:
         image = _VisualClip(
             Path("cover.png"),
@@ -105,6 +141,8 @@ class SongVideoExportTests(unittest.TestCase):
             4_000,
             StudioMediaSettings(source_audio_enabled=True),
             source_audio_enabled=True,
+            source_audio_gain=0.5,
+            source_audio_pan_percent=100,
         )
 
         command = _render_command(
@@ -120,8 +158,73 @@ class SongVideoExportTests(unittest.TestCase):
         self.assertIn("x='(W-w)/2+192.000'", filter_graph)
         self.assertIn("y='(H-h)/2+-54.000'", filter_graph)
         self.assertIn("adelay=6000:all=1", filter_graph)
+        self.assertIn("volume=0.500000", filter_graph)
+        self.assertIn("pan=stereo|c0=0.000000*c0|c1=1.414214*c1", filter_graph)
         self.assertIn("amix=inputs=2", filter_graph)
         self.assertIn("[audio1]", command)
+
+    def test_media_track_mix_state_controls_only_its_source_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_output(root)
+            video = root / "source.mp4"
+            video.write_bytes(b"video")
+            VideoSourceStore().import_file(package, video)
+            media_asset = next(
+                asset for asset in studio_sound_pool(package)
+                if asset.reference.role == TRACK_VIDEO
+            )
+            clip = StudioClip(
+                "media",
+                media_asset.reference,
+                0,
+                0,
+                1_000,
+                media=StudioMediaSettings(source_audio_enabled=True),
+            )
+            track = StudioTrack(
+                "media",
+                "Media",
+                TRACK_VIDEO,
+                volume_percent=50,
+                pan_percent=70,
+                clips=(clip,),
+            )
+
+            with patch("jang_app.services.song_video_export._has_audio_stream", return_value=True):
+                audible = _visual_clips(
+                    package,
+                    VideoSource(),
+                    StudioSession(tracks=(track,)),
+                    1_000,
+                )[0]
+                muted = _visual_clips(
+                    package,
+                    VideoSource(),
+                    StudioSession(tracks=(replace(track, muted=True),)),
+                    1_000,
+                )[0]
+                masked_by_solo = _visual_clips(
+                    package,
+                    VideoSource(),
+                    StudioSession(
+                        tracks=(
+                            track,
+                            StudioTrack(
+                                "solo-audio",
+                                "Solo Audio",
+                                solo=True,
+                            ),
+                        ),
+                    ),
+                    1_000,
+                )[0]
+
+            self.assertTrue(audible.source_audio_enabled)
+            self.assertEqual(audible.source_audio_gain, 0.5)
+            self.assertEqual(audible.source_audio_pan_percent, 70)
+            self.assertFalse(muted.source_audio_enabled)
+            self.assertFalse(masked_by_solo.source_audio_enabled)
 
     def test_render_command_applies_custom_resolution_frame_rate_and_quality(self) -> None:
         image = _VisualClip(
@@ -305,9 +408,100 @@ class SongVideoExportTests(unittest.TestCase):
             self.assertNotIn("-ss", command)
             self.assertEqual(command[command.index("-t") + 1], "1.000")
             self.assertIn("[visual1]", command)
-            self.assertIn("1:a:0", command)
+            self.assertIn("[audio0]", command)
+            self.assertNotIn("1:a:0", command)
             self.assertEqual(progress[-1], 100)
             self.assertEqual(list_song_video_exports(package)[0].path, rendered)
+
+    def test_visual_timeline_extends_beyond_the_audio_mix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_output(root)
+            image = root / "cover.png"
+            image.write_bytes(b"image")
+            VideoSourceStore().import_file(package, image)
+            assets = studio_sound_pool(package)
+            media_asset = next(asset for asset in assets if asset.reference.role == TRACK_VIDEO)
+            vocal_asset = next(
+                asset for asset in assets if asset.reference.role != TRACK_VIDEO
+            )
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "media",
+                        "Media",
+                        TRACK_VIDEO,
+                        clips=(StudioClip("media", media_asset.reference, 0, 0, 3_000),),
+                    ),
+                    StudioTrack(
+                        "audio",
+                        "Audio",
+                        role=vocal_asset.reference.role,
+                        clips=(StudioClip("audio", vocal_asset.reference, 0, 0, 1_000),),
+                    ),
+                ),
+            )
+            captured: dict[str, list[str]] = {}
+
+            def fake_export(_sources, output: Path, **_options) -> Path:
+                sf.write(output, np.zeros(16_000, dtype=np.float32), 16_000)
+                return output
+
+            def fake_command(args, **_options):
+                captured["command"] = list(args)
+                Path(args[-1]).write_bytes(b"rendered")
+                return CommandResult(args, 0, "", "")
+
+            with patch("jang_app.services.song_video_export.require_executable", return_value="ffmpeg"):
+                with patch("jang_app.services.song_video_export.export_mix", side_effect=fake_export):
+                    with patch("jang_app.services.song_video_export.run_command", side_effect=fake_command):
+                        render_song_video(package, VideoSource(), session)
+
+            command = captured["command"]
+            self.assertEqual(command[command.index("-t") + 1], "3.000")
+            graph = command[command.index("-filter_complex") + 1]
+            self.assertIn("apad=whole_dur=3.000", graph)
+
+    def test_media_only_timeline_renders_with_generated_silence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = _package_with_output(root)
+            image = root / "cover.png"
+            image.write_bytes(b"image")
+            VideoSourceStore().import_file(package, image)
+            media_asset = next(
+                asset for asset in studio_sound_pool(package)
+                if asset.reference.role == TRACK_VIDEO
+            )
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "media",
+                        "Media",
+                        TRACK_VIDEO,
+                        muted=True,
+                        clips=(StudioClip("media", media_asset.reference, 0, 0, 5_000),),
+                    ),
+                ),
+            )
+            captured: dict[str, list[str]] = {}
+
+            def fake_command(args, **_options):
+                captured["command"] = list(args)
+                Path(args[-1]).write_bytes(b"rendered")
+                return CommandResult(args, 0, "", "")
+
+            self.assertTrue(can_render_song_video(package, VideoSource(), session))
+            with patch("jang_app.services.song_video_export.require_executable", return_value="ffmpeg"):
+                with patch("jang_app.services.song_video_export.export_mix") as export_mix:
+                    with patch("jang_app.services.song_video_export.run_command", side_effect=fake_command):
+                        rendered = render_song_video(package, VideoSource(), session)
+
+            export_mix.assert_not_called()
+            self.assertTrue(rendered.is_file())
+            command = captured["command"]
+            self.assertEqual(command[command.index("-t") + 1], "5.000")
+            self.assertIn("[audio0]", command)
 
     def test_image_source_is_looped_and_composited_into_the_video(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

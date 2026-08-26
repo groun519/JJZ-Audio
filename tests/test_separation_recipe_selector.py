@@ -117,6 +117,15 @@ class SeparationRecipeSelectorTests(unittest.TestCase):
         )
         selector.close()
 
+    def test_installed_unverified_model_has_verification_status(self) -> None:
+        def status(model: str) -> SeparationAssetStatus:
+            return SeparationAssetStatus(model, False, 0, 1, 0, 1)
+
+        selector = SeparationRecipeSelector(asset_status_resolver=status)
+
+        self.assertEqual(selector.asset_status_label.text(), "설치된 모델 확인 필요")
+        selector.close()
+
 
 def _asset_status(model: str) -> SeparationAssetStatus:
     if model == FAST_RECIPE.model:

@@ -40,7 +40,7 @@ class LibraryCatalogTests(unittest.TestCase):
             try:
                 self.assertEqual(
                     connection.execute("PRAGMA user_version").fetchone()[0],
-                    1,
+                    2,
                 )
                 self.assertEqual(
                     connection.execute("SELECT title FROM songs").fetchone()[0],

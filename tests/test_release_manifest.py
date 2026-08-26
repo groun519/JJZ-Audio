@@ -17,10 +17,16 @@ class ReleaseManifestTests(unittest.TestCase):
             installer = release / "JJZero-Audio-0.1.0-Setup.exe"
             installer.write_bytes(b"installer")
 
-            manifest = create_release_manifest(release, "0.1.0")
+            revision = "a" * 40
+            manifest = create_release_manifest(
+                release,
+                "0.1.0",
+                source_revision=revision,
+            )
 
             data = json.loads(manifest.read_text(encoding="utf-8"))
             self.assertEqual(data["version"], "0.1.0")
+            self.assertEqual(data["source_revision"], revision)
             application = data["components"][0]
             self.assertEqual(application["id"], "application")
             self.assertEqual(application["artifacts"][0]["name"], installer.name)
@@ -544,12 +550,14 @@ class ReleaseManifestTests(unittest.TestCase):
                 release,
                 "0.1.0",
                 signing_publisher="JJZero Software",
+                signing_certificate_sha256="c" * 64,
             )
 
             data = json.loads(manifest.read_text(encoding="utf-8"))
             signing = data["components"][0]["artifacts"][0]["authenticode"]
             self.assertTrue(signing["required"])
             self.assertEqual(signing["publisher"], "JJZero Software")
+            self.assertEqual(signing["certificate_sha256"], "c" * 64)
 
 
 if __name__ == "__main__":

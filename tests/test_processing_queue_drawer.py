@@ -12,6 +12,7 @@ class _VisibilityTarget:
         self.checked = False
         self.has_tasks_value = has_tasks
         self.language_updates = 0
+        self.history_refreshes = 0
 
     def show(self) -> None:
         self.visible = True
@@ -28,17 +29,18 @@ class _VisibilityTarget:
     def apply_language(self) -> None:
         self.language_updates += 1
 
+    def refresh_history(self) -> None:
+        self.history_refreshes += 1
+
 
 class ProcessingQueueDrawerTests(unittest.TestCase):
-    def test_opening_queue_drawer_closes_log_drawer(self) -> None:
+    def test_opening_activity_popover_refreshes_persisted_history(self) -> None:
         panel = _VisibilityTarget()
         button = _VisibilityTarget()
-        log_drawer = _VisibilityTarget(visible=True)
         positions: list[bool] = []
         window = SimpleNamespace(
             processing_queue_panel=panel,
             processing_queue_button=button,
-            log_drawer=log_drawer,
             _processing_queue_drawer_open=False,
             _position_processing_queue=lambda: positions.append(True),
         )
@@ -48,7 +50,7 @@ class ProcessingQueueDrawerTests(unittest.TestCase):
         self.assertTrue(window._processing_queue_drawer_open)
         self.assertTrue(panel.visible)
         self.assertTrue(button.checked)
-        self.assertFalse(log_drawer.visible)
+        self.assertEqual(panel.history_refreshes, 1)
         self.assertEqual(positions, [True])
 
     def test_queue_drawer_opens_without_tasks(self) -> None:
@@ -58,7 +60,6 @@ class ProcessingQueueDrawerTests(unittest.TestCase):
         window = SimpleNamespace(
             processing_queue_panel=panel,
             processing_queue_button=button,
-            log_drawer=_VisibilityTarget(),
             _processing_queue_drawer_open=False,
             _position_processing_queue=lambda: positions.append(True),
         )
@@ -88,6 +89,33 @@ class ProcessingQueueDrawerTests(unittest.TestCase):
         self.assertFalse(panel.visible)
         self.assertFalse(button.checked)
         self.assertEqual(positions, [True])
+
+    def test_activity_job_opens_the_diagnostics_window(self) -> None:
+        window = SimpleNamespace(
+            toast_stack=SimpleNamespace(dismiss_all=lambda: dismissed.append(True)),
+            diagnostics_window=SimpleNamespace(
+                show_diagnostics=lambda task_id: selected.append(task_id)
+            ),
+            _close_processing_queue_drawer=lambda: closed.append(True),
+        )
+        dismissed: list[bool] = []
+        closed: list[bool] = []
+        selected: list[str] = []
+
+        MainWindow._open_diagnostics_window(window, "task-1")
+
+        self.assertEqual(selected, ["task-1"])
+        self.assertEqual((dismissed, closed), ([True], [True]))
+
+    def test_close_diagnostics_closes_the_window(self) -> None:
+        closed: list[bool] = []
+        window = SimpleNamespace(
+            diagnostics_window=SimpleNamespace(close=lambda: closed.append(True)),
+        )
+
+        MainWindow._close_diagnostics_window(window)
+
+        self.assertEqual(closed, [True])
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ class AudioDenoiseTests(unittest.TestCase):
                 graph,
             )
             self.assertIn("atrim=start=0.500,asetpts=PTS-STARTPTS[out]", graph)
+            self.assertEqual(captured[captured.index("-c:a") + 1], "pcm_f32le")
             self.assertEqual(progress[0], 0)
             self.assertEqual(progress[-1], 100)
 

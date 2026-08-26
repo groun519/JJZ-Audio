@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import struct
@@ -32,6 +33,24 @@ def main() -> int:
     if missing:
         for path in missing:
             print(f"Missing distribution file: {path}", file=sys.stderr)
+        return 1
+    try:
+        provenance = json.loads(
+            (distribution / "build-provenance.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        print("Build provenance is missing or invalid.", file=sys.stderr)
+        return 1
+    revision = provenance.get("source_revision") if isinstance(provenance, dict) else ""
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("schema_version") != 1
+        or provenance.get("product") != "JJZero Audio"
+        or provenance.get("source_dirty") is not False
+        or not isinstance(revision, str)
+        or len(revision) not in {40, 64}
+    ):
+        print("Build provenance is incomplete or dirty.", file=sys.stderr)
         return 1
 
     if not arguments.app_only:
@@ -83,6 +102,9 @@ def main() -> int:
         if "Startup timing" not in log_text:
             print(f"Packaged startup timing was not logged: {log_file}", file=sys.stderr)
             return 1
+        if f"revision={revision}" not in log_text:
+            print(f"Packaged build revision was not logged: {log_file}", file=sys.stderr)
+            return 1
         initialized_paths = (
             temporary_root / "local-data" / "settings" / "storage.json",
             temporary_root / "local-data" / "settings" / "initial_setup.json",
@@ -102,6 +124,7 @@ def required_application_files(distribution: Path) -> tuple[Path, ...]:
     root = distribution.expanduser().resolve()
     return (
         root / EXECUTABLE_NAME,
+        root / "build-provenance.json",
         root / "_internal" / "jang_app" / "assets" / "jjzero_logo.svg",
         root / "_internal" / "jang_app" / "rvc_tools" / "rvc_artifact_worker.py",
         root / "_internal" / "jang_app" / "rvc_tools" / "jjzero_device.py",

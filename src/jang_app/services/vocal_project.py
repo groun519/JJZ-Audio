@@ -44,6 +44,14 @@ class VocalTake:
 
 
 @dataclass(frozen=True)
+class VocalInputProvenance:
+    kind: str
+    relative_path: str
+    source_id: str
+    label: str
+
+
+@dataclass(frozen=True)
 class VocalConversionSettings:
     voice_model: str
     index_file: str
@@ -52,6 +60,7 @@ class VocalConversionSettings:
     effective_device: str
     f0_method: str
     inference: RvcInferenceSettings = field(default_factory=RvcInferenceSettings)
+    input_source: VocalInputProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -167,3 +176,18 @@ def _validate_conversion(take_id: str, conversion: VocalConversionSettings) -> N
     ):
         if not value.strip():
             raise VocalProjectValidationError(f"Conversion {label} is required: {take_id}")
+    source = conversion.input_source
+    if source is not None:
+        if not source.kind.strip() or not source.source_id.strip() or not source.label.strip():
+            raise VocalProjectValidationError(
+                f"Conversion input provenance is incomplete: {take_id}"
+            )
+        relative = Path(source.relative_path)
+        if (
+            not source.relative_path.strip()
+            or relative.is_absolute()
+            or ".." in relative.parts
+        ):
+            raise VocalProjectValidationError(
+                f"Conversion input provenance path is invalid: {take_id}"
+            )

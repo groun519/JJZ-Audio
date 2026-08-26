@@ -20,6 +20,34 @@ from jang_app.services.update_cache import UPDATE_CLEANUP_MARKER
 
 
 class MainWindowUpdateCheckTests(unittest.TestCase):
+    def test_combined_update_stages_runtime_for_the_new_app_before_installer_launch(
+        self,
+    ) -> None:
+        plan = _runtime_update_plan(application_required=True)
+        downloaded = (Path("setup.exe"), Path("runtime.zip"))
+        window = SimpleNamespace(
+            _downloaded_update_plan=plan,
+            _downloaded_update=downloaded,
+            _update_dialog=None,
+            _launch_downloaded_installer_or_restart=Mock(),
+        )
+
+        with (
+            patch.object(
+                main_window,
+                "APP_PATHS",
+                SimpleNamespace(cache_dir=Path("cache")),
+            ),
+            patch.object(
+                main_window,
+                "stage_pending_component_update",
+            ) as stage,
+        ):
+            MainWindow._install_downloaded_update(window)
+
+        stage.assert_called_once_with(Path("cache"), plan, downloaded)
+        window._launch_downloaded_installer_or_restart.assert_called_once_with()
+
     def test_runtime_only_completion_discards_the_whole_update_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "cache"
@@ -53,7 +81,10 @@ class MainWindowUpdateCheckTests(unittest.TestCase):
             installer = update / "setup.exe"
             installer.parent.mkdir(parents=True)
             installer.write_bytes(b"installer")
-            plan = _runtime_update_plan(application_required=True)
+            plan = _runtime_update_plan(
+                application_required=True,
+                runtime_required=False,
+            )
             window = SimpleNamespace(
                 _downloaded_update=(installer,),
                 _downloaded_update_plan=plan,
@@ -71,12 +102,27 @@ class MainWindowUpdateCheckTests(unittest.TestCase):
                 ),
                 patch.object(main_window.QApplication, "instance", return_value=application),
                 patch.object(main_window, "close_app_mutex", return_value=True) as close_mutex,
-                patch.object(main_window, "start_detached_command", return_value=True),
+                patch.object(
+                    main_window,
+                    "start_detached_command",
+                    return_value=True,
+                ) as launch,
                 patch.object(main_window.QApplication, "quit"),
             ):
                 MainWindow._launch_downloaded_installer_or_restart(window)
 
             self.assertTrue((update / UPDATE_CLEANUP_MARKER).is_file())
+            launch.assert_called_once_with(
+                (
+                    str(installer),
+                    "/SILENT",
+                    "/SUPPRESSMSGBOXES",
+                    "/NORESTART",
+                    "/CLOSEAPPLICATIONS",
+                    "/JJZEROUPDATE",
+                ),
+                cwd=installer.parent,
+            )
             close_mutex.assert_called_once_with(123)
             self.assertIsNone(application._jjzero_mutex_handle)
 
@@ -120,6 +166,9 @@ class MainWindowUpdateCheckTests(unittest.TestCase):
             3,
             hashlib.sha256(b"app").hexdigest(),
             "https://example.test/app.exe",
+            True,
+            "JJZero Software",
+            certificate_sha256="c" * 64,
         )
         release = ReleaseManifest(
             "99.0.0",
@@ -155,14 +204,107 @@ class MainWindowUpdateCheckTests(unittest.TestCase):
         self.assertEqual(outcome.etag, '"etag"')
         self.assertEqual(progress, [10, 100])
 
+    def test_new_manifest_replaces_an_already_visible_update(self) -> None:
+        old = _runtime_update_plan(application_required=True)
+        new_release = ReleaseManifest(
+            "0.3.2",
+            (
+                ReleaseComponent(
+                    "application",
+                    "0.3.2",
+                    "installer",
+                    old.release.application.artifacts,
+                ),
+            ),
+        )
+        new = UpdatePlan(
+            new_release,
+            application_required=True,
+            runtime_required=False,
+        )
+        host = SimpleNamespace(
+            _update_manifest_etag="old",
+            _update_manifest_last_modified="old",
+            _available_update_plan=old,
+            _apply_release_feature_policy=Mock(),
+            update_status_button=Mock(),
+            _position_update_status=Mock(),
+        )
 
-def _runtime_update_plan(*, application_required: bool) -> UpdatePlan:
+        MainWindow._apply_update_check_outcome(
+            host,
+            main_window.UpdateCheckOutcome(new, '"new"', "new-date"),
+        )
+
+        self.assertIs(host._available_update_plan, new)
+        host.update_status_button.set_available.assert_called_once_with(
+            "0.3.2",
+            runtime_only=False,
+        )
+
+    def test_corrected_manifest_can_clear_a_visible_update(self) -> None:
+        old = _runtime_update_plan(application_required=True)
+        current = UpdatePlan(
+            old.release,
+            application_required=False,
+            runtime_required=False,
+        )
+        host = SimpleNamespace(
+            _update_manifest_etag="old",
+            _update_manifest_last_modified="old",
+            _available_update_plan=old,
+            _apply_release_feature_policy=Mock(),
+            update_status_button=Mock(),
+            _position_update_status=Mock(),
+        )
+
+        MainWindow._apply_update_check_outcome(
+            host,
+            main_window.UpdateCheckOutcome(current, '"fixed"', "fixed-date"),
+        )
+
+        self.assertIsNone(host._available_update_plan)
+        host.update_status_button.hide.assert_called_once_with()
+
+    def test_not_modified_check_keeps_the_visible_update(self) -> None:
+        old = _runtime_update_plan(application_required=True)
+        host = SimpleNamespace(
+            _update_manifest_etag="old",
+            _update_manifest_last_modified="old",
+            _available_update_plan=old,
+            _apply_release_feature_policy=Mock(),
+            update_status_button=Mock(),
+            _position_update_status=Mock(),
+        )
+
+        MainWindow._apply_update_check_outcome(
+            host,
+            main_window.UpdateCheckOutcome(
+                None,
+                '"same"',
+                "same-date",
+                not_modified=True,
+            ),
+        )
+
+        self.assertIs(host._available_update_plan, old)
+        host.update_status_button.hide.assert_not_called()
+
+
+def _runtime_update_plan(
+    *,
+    application_required: bool,
+    runtime_required: bool = True,
+) -> UpdatePlan:
     app_version = "0.3.1" if application_required else "0.3.0"
     app = ReleaseArtifact(
         "setup.exe",
         1,
         hashlib.sha256(b"installer").hexdigest(),
         "https://example.test/setup.exe",
+        True,
+        "JJZero Software",
+        certificate_sha256="c" * 64,
     )
     runtime = ReleaseArtifact(
         "runtime.zip",
@@ -180,7 +322,7 @@ def _runtime_update_plan(*, application_required: bool) -> UpdatePlan:
     return UpdatePlan(
         release,
         application_required=application_required,
-        runtime_required=True,
+        runtime_required=runtime_required,
     )
 
 

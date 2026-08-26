@@ -53,7 +53,8 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExecutable}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExecutable}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExecutable}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExecutable}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent; Check: ShouldOfferInteractiveLaunch
+Filename: "{app}\{#AppExecutable}"; Flags: nowait skipifdoesntexist; Check: ShouldRelaunchAfterInternalUpdate
 
 [Code]
 const
@@ -65,6 +66,7 @@ var
   RuntimePreservationPrepared: Boolean;
   PreservedRuntimeData: Boolean;
   PreservedRuntimePath: String;
+  PreservedExternalStorage: Boolean;
 
 function HasCommandLineSwitch(const SwitchName: String): Boolean;
 var
@@ -84,7 +86,8 @@ end;
 function InitializeSetup(): Boolean;
 begin
   Result := True;
-  if CheckForMutexes('{#AppMutexName}') and (not HasCommandLineSwitch('/RUN')) then
+  if CheckForMutexes('{#AppMutexName}') and
+     (not HasCommandLineSwitch('/JJZEROUPDATE')) then
   begin
     if not WizardSilent then
       MsgBox(
@@ -94,6 +97,16 @@ begin
       );
     Result := False;
   end;
+end;
+
+function ShouldOfferInteractiveLaunch: Boolean;
+begin
+  Result := not HasCommandLineSwitch('/JJZEROUPDATE');
+end;
+
+function ShouldRelaunchAfterInternalUpdate: Boolean;
+begin
+  Result := HasCommandLineSwitch('/JJZEROUPDATE');
 end;
 
 function RuntimeDataRoot: String;
@@ -319,6 +332,7 @@ var
   AppRuntimeRoot: String;
   ConfiguredRuntimeRoot: String;
   ConfiguredCacheRoot: String;
+  DefaultCacheRoot: String;
 begin
   if RuntimePreservationPrepared then
     Exit;
@@ -330,15 +344,21 @@ begin
   ConfiguredRuntimeRoot := ReadStoragePath('runtime_root');
   if ConfiguredRuntimeRoot = '' then
     ConfiguredRuntimeRoot := AppRuntimeRoot;
-  RemoveRuntimeRoot(ConfiguredRuntimeRoot);
+  RemoveRuntimeRoot(AppRuntimeRoot);
   if not SamePath(AppRuntimeRoot, ConfiguredRuntimeRoot) then
-    RemoveRuntimeRoot(AppRuntimeRoot);
+    PreservedExternalStorage := True;
 
   ConfiguredCacheRoot := ReadStoragePath('cache_root');
+  DefaultCacheRoot := AddBackslash(RuntimeDataRoot) + 'cache';
   if ConfiguredCacheRoot = '' then
-    ConfiguredCacheRoot := AddBackslash(RuntimeDataRoot) + 'cache';
-  if DirExists(ConfiguredCacheRoot) and IsSafeGeneratedRoot(ConfiguredCacheRoot) then
-    ManagedCacheCanBeDeleted := DelTree(ConfiguredCacheRoot, True, True, True);
+    ConfiguredCacheRoot := DefaultCacheRoot;
+  if SamePath(ConfiguredCacheRoot, DefaultCacheRoot) then
+  begin
+    if DirExists(ConfiguredCacheRoot) and IsSafeGeneratedRoot(ConfiguredCacheRoot) then
+      ManagedCacheCanBeDeleted := DelTree(ConfiguredCacheRoot, True, True, True);
+  end
+  else
+    PreservedExternalStorage := True;
 end;
 
 function InitializeUninstall: Boolean;
@@ -359,6 +379,7 @@ begin
   RuntimePreservationPrepared := False;
   PreservedRuntimeData := False;
   PreservedRuntimePath := '';
+  PreservedExternalStorage := False;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -372,6 +393,11 @@ begin
       MsgBox(
         'Some generated audio engine or cache files could not be removed. No song, model, or exported data was deleted.',
         mbError,
+        MB_OK)
+    else if PreservedExternalStorage and (not UninstallSilent) then
+      MsgBox(
+        'JJZero Audio was removed. Custom Audio Engine and Cache folders were kept to protect files outside the application.',
+        mbInformation,
         MB_OK)
     else if PreservedRuntimeData and (not UninstallSilent) then
       MsgBox(

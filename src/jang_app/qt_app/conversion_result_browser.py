@@ -55,6 +55,7 @@ class ConversionResultBrowser(SoundPoolList):
         *,
         projects: dict[Path, VocalProject] | None = None,
         preferred_path: Path | None = None,
+        select_default: bool = True,
     ) -> None:
         previous = self._selected_converted_path
         self._versions = versions
@@ -83,11 +84,11 @@ class ConversionResultBrowser(SoundPoolList):
             requested
             if requested in valid_paths
             else previous
-            if previous in valid_paths
+            if select_default and previous in valid_paths
             else active
-            if active is not None
+            if select_default and active is not None
             else _resolved(paths[0])
-            if paths
+            if select_default and paths
             else None
         )
         self._rebuild_cards()

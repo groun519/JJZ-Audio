@@ -154,11 +154,11 @@ class RoFormerEngine:
                         protected_vocals,
                     )
                 except VocalEffectProtectionError as exc:
-                    logger.warning(
-                        "Vocal protection skipped; preserving the first-stage vocal: %s",
-                        exc,
-                    )
-                    protection_detail = f"vocal protection skipped: {exc}"
+                    logger.error("Vocal protection failed: %s", exc)
+                    raise SeparationError(
+                        "Effect removal could not preserve the vocal safely: "
+                        f"{exc}"
+                    ) from exc
                 else:
                     logger.info("Vocal protection complete: %s", protection_report.detail)
                     protection_detail = protection_report.detail
@@ -229,6 +229,8 @@ def build_roformer_command(
         "WAV",
         "--sample_rate",
         "44100",
+        "--normalization",
+        "1.0",
         "--mdxc_segment_size",
         "256",
         "--mdxc_overlap",

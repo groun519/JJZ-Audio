@@ -83,7 +83,10 @@ class RvcTrainingPipelineResult:
 
     @property
     def completed(self) -> bool:
-        return self.state.phase == RvcTrainingPhase.COMPLETE
+        return self.state.phase in {
+            RvcTrainingPhase.INDEX_READY,
+            RvcTrainingPhase.COMPLETE,
+        }
 
 
 _StageResult = TypeVar("_StageResult")
@@ -242,7 +245,7 @@ def run_rvc_training_pipeline(
             executed,
             token,
         )
-        complete_state = state_store.update_phase(RvcTrainingPhase.COMPLETE)
+        complete_state = state_store.update_phase(RvcTrainingPhase.INDEX_READY)
         _set_progress(progress, 100)
         return RvcTrainingPipelineResult(
             state=complete_state,

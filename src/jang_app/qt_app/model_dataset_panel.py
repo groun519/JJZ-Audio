@@ -22,7 +22,7 @@ from jang_app.config import SUPPORTED_AUDIO_EXTENSIONS
 from jang_app.qt_app.model_clip_editor import ModelClipEditor
 from jang_app.qt_app.localization import apply_widget_language, set_translated_text, set_translated_tooltip
 from jang_app.qt_app.widgets import DangerIconButton, SvgIconButton, attach_list_item_widget
-from jang_app.qt_app.workers import TaskCallable, TaskWorker
+from jang_app.qt_app.workers import TaskWorker
 from jang_app.services.audio_metadata import format_duration
 from jang_app.services.audio_denoise import render_denoise_preview
 from jang_app.services.clip_edit_history import REVIEW_READY, TRAINING_MODE_CLIPS
@@ -41,6 +41,8 @@ class ModelDatasetPanel(QWidget):
         self._model_id = ""
         self._dataset = ModelDataset("")
         self._worker: TaskWorker | None = None
+        self._worker_model_id = ""
+        self._operation_generation = 0
         self._worker_success: Callable[[object], None] | None = None
         self._worker_tool = ""
         self._externally_locked = False
@@ -205,11 +207,17 @@ class ModelDatasetPanel(QWidget):
         return column
 
     def set_model(self, model_id: str | None) -> None:
+        self._operation_generation += 1
+        next_model_id = model_id or ""
+        if self._worker is not None and self._worker_model_id != next_model_id:
+            self.progress_bar.hide()
+            if self._worker_tool:
+                self.clip_editor.set_tool_processing(self._worker_tool, False)
         self._cancel_deferred_render()
         self._pending_open_request = None
         self.clip_editor.stop_preview()
         self._set_editor_visible(False)
-        self._model_id = model_id or ""
+        self._model_id = next_model_id
         if not self._model_id:
             self._dataset = ModelDataset("")
             self._set_status("")
@@ -223,10 +231,11 @@ class ModelDatasetPanel(QWidget):
             self._dataset = ModelDataset(self._model_id)
             self._set_status(f"Load failed: {_last_error_line(exc)}")
         self._render()
-        self._set_enabled(not self._externally_locked)
+        self._set_enabled(not self._externally_locked and self._worker is None)
 
     def prepare_model(self, model_id: str) -> None:
         """Switch models without reading its potentially large manifest on the UI thread."""
+        self._operation_generation += 1
         self._cancel_deferred_render()
         self._pending_open_request = None
         self.clip_editor.stop_preview()
@@ -302,14 +311,14 @@ class ModelDatasetPanel(QWidget):
         if not self._model_id or self._worker is not None or not paths:
             return
         self._start_worker(
-            lambda progress: self._store.add_sources(self._model_id, paths, progress),
+            lambda model_id, progress: self._store.add_sources(model_id, paths, progress),
             "Adding source audio",
             lambda result: self._apply_worker_dataset(result, status="Source audio added"),
         )
 
     def _start_worker(
         self,
-        task: TaskCallable,
+        task: Callable[[str, Callable[[int], None]], object],
         status: str,
         on_success: Callable[[object], None],
         *,
@@ -317,23 +326,51 @@ class ModelDatasetPanel(QWidget):
     ) -> None:
         if self._worker is not None:
             return
+        model_id = self._model_id
+        self._operation_generation += 1
+        generation = self._operation_generation
         self._set_busy(True)
         self.progress_bar.setValue(0)
         self._set_status(status)
-        worker = TaskWorker(task)
+        worker = TaskWorker(lambda progress: task(model_id, progress))
         worker.setParent(self)
         self._worker_tool = tool
         if tool:
             self.clip_editor.set_tool_processing(tool, True, 0)
-        worker.progress_changed.connect(self._on_worker_progress)
-        worker.succeeded.connect(self._on_worker_succeeded)
-        worker.failed.connect(self._on_worker_failed)
-        worker.finished.connect(self._on_worker_finished)
+        worker.progress_changed.connect(
+            lambda value: self._on_worker_progress(model_id, generation, value)
+        )
+        worker.succeeded.connect(
+            lambda result: self._on_worker_succeeded(model_id, generation, result)
+        )
+        worker.failed.connect(
+            lambda error: self._on_worker_failed(model_id, generation, error)
+        )
+        worker.finished.connect(
+            lambda: self._on_worker_finished(worker, model_id, generation)
+        )
         self._worker_success = on_success
         self._worker = worker
+        self._worker_model_id = model_id
         worker.start()
 
-    def _on_worker_progress(self, value: int) -> None:
+    @property
+    def active_model_id(self) -> str:
+        return self._worker_model_id if self._worker is not None else ""
+
+    def cancel_and_wait(self, timeout_ms: int = 5000) -> bool:
+        worker = self._worker
+        if worker is None:
+            return True
+        self._operation_generation += 1
+        return worker.cancel_and_wait(timeout_ms)
+
+    def _owns_operation(self, model_id: str, generation: int) -> bool:
+        return model_id == self._model_id and generation == self._operation_generation
+
+    def _on_worker_progress(self, model_id: str, generation: int, value: int) -> None:
+        if not self._owns_operation(model_id, generation):
+            return
         self.progress_bar.setValue(value)
         if self._worker_tool:
             self.clip_editor.set_tool_progress(self._worker_tool, value)
@@ -349,24 +386,32 @@ class ModelDatasetPanel(QWidget):
         if selected:
             self.add_files(tuple(Path(path) for path in selected))
 
-    def _on_worker_succeeded(self, result: object) -> None:
-        if self._worker_success is not None:
+    def _on_worker_succeeded(self, model_id: str, generation: int, result: object) -> None:
+        if self._owns_operation(model_id, generation) and self._worker_success is not None:
             self._worker_success(result)
 
-    def _on_worker_failed(self, traceback_text: str) -> None:
-        self._set_status(f"Operation failed: {_last_error_line(traceback_text)}")
+    def _on_worker_failed(self, model_id: str, generation: int, traceback_text: str) -> None:
+        if self._owns_operation(model_id, generation):
+            self._set_status(f"Operation failed: {_last_error_line(traceback_text)}")
 
-    def _on_worker_finished(self) -> None:
-        worker = self._worker
+    def _on_worker_finished(
+        self,
+        worker: TaskWorker,
+        model_id: str,
+        generation: int,
+    ) -> None:
+        if self._worker is not worker:
+            worker.deleteLater()
+            return
         worker_tool = self._worker_tool
         self._worker = None
+        self._worker_model_id = ""
         self._worker_success = None
         self._worker_tool = ""
-        if worker_tool:
+        if worker_tool and self._owns_operation(model_id, generation):
             self.clip_editor.set_tool_processing(worker_tool, False)
         self._set_busy(False)
-        if worker is not None:
-            worker.deleteLater()
+        worker.deleteLater()
 
     def _select_sources(self) -> None:
         self._apply_dataset_change(self._store.select_items, _selected_item_ids(self.source_list))
@@ -394,7 +439,9 @@ class ModelDatasetPanel(QWidget):
         if item is None or self._worker is not None:
             return
         self._start_worker(
-            lambda progress: self._store.add_clip(self._model_id, item.item_id, start_ms, end_ms, progress),
+            lambda model_id, progress: self._store.add_clip(
+                model_id, item.item_id, start_ms, end_ms, progress
+            ),
             "Rendering clip",
             lambda result: self._apply_worker_dataset(result, selected_training_id=item.item_id, status="Clip added"),
         )
@@ -405,8 +452,8 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: self._store.update_clip(
-                self._model_id,
+            lambda model_id, progress: self._store.update_clip(
+                model_id,
                 item.item_id,
                 clip_id,
                 start_ms,
@@ -427,8 +474,8 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: self._store.split_clip(
-                self._model_id,
+            lambda model_id, progress: self._store.split_clip(
+                model_id,
                 item.item_id,
                 clip_id,
                 position_ms,
@@ -454,9 +501,9 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: _build_review_queue(
+            lambda model_id, progress: _build_review_queue(
                 self._store,
-                self._model_id,
+                model_id,
                 item.item_id,
                 item.active_audio_path,
                 threshold_db,
@@ -483,7 +530,7 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: render_denoise_preview(
+            lambda _model_id, progress: render_denoise_preview(
                 item.working_path,
                 strength,
                 sample_start_ms,
@@ -518,8 +565,8 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: self._store.apply_denoise(
-                self._model_id,
+            lambda model_id, progress: self._store.apply_denoise(
+                model_id,
                 item.item_id,
                 strength,
                 sample_start_ms,
@@ -545,8 +592,8 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: self._store.remove_denoise(
-                self._model_id,
+            lambda model_id, progress: self._store.remove_denoise(
+                model_id,
                 item.item_id,
                 progress,
             ),
@@ -559,7 +606,7 @@ class ModelDatasetPanel(QWidget):
         )
 
     def _show_review_queue(self, result: object, item_id: str) -> None:
-        if not isinstance(result, ModelDataset):
+        if not isinstance(result, ModelDataset) or result.model_id != self._model_id:
             return
         item = next((candidate for candidate in result.items if candidate.item_id == item_id), None)
         count = len(item.segment_candidates) if item is not None else 0
@@ -573,8 +620,8 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: self._store.accept_segment_candidate(
-                self._model_id,
+            lambda model_id, progress: self._store.accept_segment_candidate(
+                model_id,
                 item.item_id,
                 candidate_id,
                 start_ms,
@@ -631,7 +678,7 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: self._store.undo_edit(self._model_id, item.item_id, progress),
+            lambda model_id, progress: self._store.undo_edit(model_id, item.item_id, progress),
             "Undoing edit",
             lambda result: self._apply_worker_dataset(
                 result,
@@ -646,7 +693,7 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: self._store.redo_edit(self._model_id, item.item_id, progress),
+            lambda model_id, progress: self._store.redo_edit(model_id, item.item_id, progress),
             "Redoing edit",
             lambda result: self._apply_worker_dataset(
                 result,
@@ -687,7 +734,7 @@ class ModelDatasetPanel(QWidget):
             return
         self.clip_editor.stop_preview()
         self._start_worker(
-            lambda progress: self._store.reset_item(self._model_id, item.item_id, progress),
+            lambda model_id, progress: self._store.reset_item(model_id, item.item_id, progress),
             "Restoring original",
             lambda result: self._apply_worker_dataset(
                 result,

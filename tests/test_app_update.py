@@ -74,7 +74,7 @@ class AppUpdateTests(unittest.TestCase):
                         "id": "application",
                         "version": "0.3.0",
                         "install_mode": "installer",
-                        "artifacts": [_artifact("app.exe", payload)],
+                        "artifacts": [_signed_artifact("app.exe", payload)],
                     },
                     {
                         "id": "ai-runtime",
@@ -428,6 +428,50 @@ class AppUpdateTests(unittest.TestCase):
         self.assertTrue(plan.rvc_profile_required)
         self.assertEqual([item.name for item in plan.artifacts], ["cu128.zip"])
 
+    def test_stale_manifest_does_not_downgrade_runtime_or_profile(self) -> None:
+        artifact = lambda name: ReleaseArtifact(
+            name,
+            1,
+            "a" * 64,
+            f"https://example.test/{name}",
+        )
+        release = ReleaseManifest(
+            "0.3.0",
+            (
+                ReleaseComponent(
+                    "application",
+                    "0.3.0",
+                    "installer",
+                    (artifact("app.exe"),),
+                ),
+                ReleaseComponent(
+                    "ai-runtime",
+                    "3",
+                    "extract",
+                    (artifact("runtime.zip"),),
+                ),
+                ReleaseComponent(
+                    "rvc-runtime-cu128",
+                    "1",
+                    "extract",
+                    (artifact("cu128.zip"),),
+                ),
+            ),
+        )
+
+        plan = create_update_plan(
+            release,
+            current_version="0.3.10",
+            runtime_version="4",
+            desired_rvc_profile="cu128",
+            installed_rvc_profile="cu128",
+            installed_rvc_profile_version="2",
+            installed_rvc_preferred_profile="cu128",
+            installed_rvc_preferred_version="2",
+        )
+
+        self.assertFalse(plan.required)
+
     def test_failed_rocm_version_is_quarantined_until_a_new_profile_version(self) -> None:
         release = _amd_release()
 
@@ -583,6 +627,7 @@ class AppUpdateTests(unittest.TestCase):
         application["authenticode"] = {
             "required": True,
             "publisher": "JJZero",
+            "certificate_sha256": "c" * 64,
         }
         release = parse_release_manifest(
             {
@@ -604,6 +649,23 @@ class AppUpdateTests(unittest.TestCase):
         artifact = release.application.artifacts[0]
         self.assertTrue(artifact.signature_required)
         self.assertEqual(artifact.publisher, "JJZero")
+        self.assertEqual(artifact.certificate_sha256, "c" * 64)
+
+    def test_application_update_rejects_unpinned_installer(self) -> None:
+        release = ReleaseManifest(
+            "0.3.0",
+            (
+                ReleaseComponent(
+                    "application",
+                    "0.3.0",
+                    "installer",
+                    (ReleaseArtifact("app.exe", 1, "a" * 64, "https://example/app"),),
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(UpdateError, "pinned Authenticode"):
+            create_update_plan(release, current_version="0.2.0")
 
     def test_conditional_manifest_check_reuses_http_cache_validators(self) -> None:
         payload = json.dumps(
@@ -670,7 +732,13 @@ class AppUpdateTests(unittest.TestCase):
         def opener(request: Request, timeout: float) -> _Response:
             requests.append(request)
             self.assertGreater(timeout, 0)
-            return _Response(payload[8:], status=206)
+            return _Response(
+                payload[8:],
+                status=206,
+                headers={
+                    "Content-Range": f"bytes 8-{len(payload) - 1}/{len(payload)}"
+                },
+            )
 
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary)
@@ -705,20 +773,231 @@ class AppUpdateTests(unittest.TestCase):
                 download_artifact(artifact, destination, opener=opener)
             self.assertFalse((destination / "app.exe.part").exists())
 
+    def test_complete_partial_is_promoted_without_network_access(self) -> None:
+        payload = b"complete payload"
+        artifact = ReleaseArtifact(
+            "app.exe",
+            len(payload),
+            hashlib.sha256(payload).hexdigest(),
+            "https://example.test/app.exe",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            (destination / "app.exe.part").write_bytes(payload)
+
+            result = download_artifact(
+                artifact,
+                destination,
+                opener=lambda *_args: self.fail("network must not be opened"),
+            )
+
+            self.assertEqual(result.read_bytes(), payload)
+            self.assertFalse((destination / "app.exe.part").exists())
+
+    def test_wrong_resume_range_retries_from_zero_without_appending(self) -> None:
+        payload = b"verified update payload"
+        artifact = ReleaseArtifact(
+            "app.exe",
+            len(payload),
+            hashlib.sha256(payload).hexdigest(),
+            "https://example.test/app.exe",
+        )
+        requests: list[Request] = []
+
+        def opener(request: Request, _timeout: float) -> _Response:
+            requests.append(request)
+            if len(requests) == 1:
+                return _Response(
+                    payload,
+                    status=206,
+                    headers={
+                        "Content-Range": f"bytes 0-{len(payload) - 1}/{len(payload)}"
+                    },
+                )
+            return _Response(payload, status=200)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            (destination / "app.exe.part").write_bytes(payload[:8])
+
+            result = download_artifact(artifact, destination, opener=opener)
+
+            self.assertEqual(result.read_bytes(), payload)
+            self.assertEqual(requests[0].get_header("Range"), "bytes=8-")
+            self.assertIsNone(requests[1].get_header("Range"))
+
+    def test_invalid_range_preserves_existing_partial_until_fresh_response(self) -> None:
+        payload = b"verified update payload"
+        artifact = ReleaseArtifact(
+            "app.exe",
+            len(payload),
+            hashlib.sha256(payload).hexdigest(),
+            "https://example.test/app.exe",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            partial = destination / "app.exe.part"
+            prefix = payload[:8]
+            partial.write_bytes(prefix)
+            calls = 0
+
+            def opener(_request: Request, _timeout: float) -> _Response:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return _Response(
+                        payload,
+                        status=206,
+                        headers={
+                            "Content-Range": f"bytes 0-{len(payload) - 1}/{len(payload)}"
+                        },
+                    )
+                self.assertEqual(partial.read_bytes(), prefix)
+                raise OSError("offline")
+
+            with self.assertRaises(UpdateError):
+                download_artifact(artifact, destination, opener=opener)
+
+            self.assertEqual(partial.read_bytes(), prefix)
+
+    def test_download_rejects_bytes_beyond_declared_size(self) -> None:
+        artifact = ReleaseArtifact(
+            "app.exe",
+            4,
+            hashlib.sha256(b"good").hexdigest(),
+            "https://example.test/app.exe",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            with self.assertRaisesRegex(UpdateError, "declared size"):
+                download_artifact(
+                    artifact,
+                    destination,
+                    opener=lambda *_args: _Response(b"good-overflow"),
+                )
+
+    def test_manifest_rejects_cross_component_artifact_name_collision(self) -> None:
+        artifact = _artifact("shared.zip", b"one")
+        data = {
+            "schema_version": 2,
+            "product": "JJZero Audio",
+            "version": "0.3.0",
+            "components": [
+                {
+                    "id": "application",
+                    "version": "0.3.0",
+                    "install_mode": "installer",
+                    "artifacts": [artifact],
+                },
+                {
+                    "id": "ai-runtime",
+                    "version": "2",
+                    "install_mode": "extract",
+                    "artifacts": [{**artifact, "sha256": "b" * 64}],
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(UpdateError, "unique across components"):
+            parse_release_manifest(data, "https://example.test/latest.json")
+
+    def test_manifest_rejects_application_version_mismatch(self) -> None:
+        data = {
+            "schema_version": 2,
+            "product": "JJZero Audio",
+            "version": "0.3.0",
+            "components": [
+                {
+                    "id": "application",
+                    "version": "0.2.0",
+                    "install_mode": "installer",
+                    "artifacts": [_artifact("app.exe", b"app")],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(UpdateError, "does not match"):
+            parse_release_manifest(data, "https://example.test/latest.json")
+
+    def test_manifest_validates_optional_source_revision(self) -> None:
+        data = {
+            "schema_version": 2,
+            "product": "JJZero Audio",
+            "version": "0.3.0",
+            "source_revision": "A" * 40,
+            "components": [
+                {
+                    "id": "application",
+                    "version": "0.3.0",
+                    "install_mode": "installer",
+                    "artifacts": [_artifact("app.exe", b"app")],
+                }
+            ],
+        }
+
+        release = parse_release_manifest(data, "https://example.test/latest.json")
+        self.assertEqual(release.source_revision, "a" * 40)
+        data["source_revision"] = "not-a-revision"
+        with self.assertRaisesRegex(UpdateError, "source revision"):
+            parse_release_manifest(data, "https://example.test/latest.json")
+
     def test_authenticode_requires_valid_expected_publisher(self) -> None:
+        certificate_sha256 = "c" * 64
         completed = CommandResult(
             [],
             0,
-            stdout='{"Status":"Valid","Subject":"CN=JJZero Software"}',
+            stdout=(
+                '{"Status":"Valid","Subject":"CN=JJZero Software",'
+                f'"SimpleName":"JJZero Software","CertificateSha256":"{certificate_sha256}"}}'
+            ),
             stderr="",
         )
         with patch("jang_app.services.app_update.run_command", return_value=completed):
             self.assertTrue(
-                verify_authenticode_signature(Path("installer.exe"), "JJZero Software")
+                verify_authenticode_signature(
+                    Path("installer.exe"),
+                    "JJZero Software",
+                    certificate_sha256,
+                )
             )
             self.assertFalse(
                 verify_authenticode_signature(Path("installer.exe"), "Different Publisher")
             )
+            self.assertFalse(
+                verify_authenticode_signature(
+                    Path("installer.exe"),
+                    "JJZero Software",
+                    "d" * 64,
+                )
+            )
+
+    def test_authenticode_rejects_subjects_that_only_contain_the_publisher(self) -> None:
+        for subject in (
+            "CN=Not JJZero Software Malware LLC",
+            "CN=JJZero Software Support Scam",
+        ):
+            completed = CommandResult(
+                [],
+                0,
+                stdout=json.dumps(
+                    {
+                        "Status": "Valid",
+                        "Subject": subject,
+                        "SimpleName": subject.removeprefix("CN="),
+                    }
+                ),
+                stderr="",
+            )
+            with patch(
+                "jang_app.services.app_update.run_command",
+                return_value=completed,
+            ):
+                self.assertFalse(
+                    verify_authenticode_signature(
+                        Path("installer.exe"),
+                        "JJZero Software",
+                    )
+                )
 
 
 def _artifact(name: str, data: bytes) -> dict[str, object]:
@@ -727,6 +1006,16 @@ def _artifact(name: str, data: bytes) -> dict[str, object]:
         "size": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
     }
+
+
+def _signed_artifact(name: str, data: bytes) -> dict[str, object]:
+    artifact = _artifact(name, data)
+    artifact["authenticode"] = {
+        "required": True,
+        "publisher": "JJZero Software",
+        "certificate_sha256": "c" * 64,
+    }
+    return artifact
 
 
 def _amd_release(*, include_rocm: bool = True) -> ReleaseManifest:

@@ -56,6 +56,30 @@ class InitialSetupDialogTests(unittest.TestCase):
             self.assertTrue((media / "Runtime").is_dir())
             dialog.close()
 
+    def test_settings_hides_minimize_but_first_run_keeps_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _paths(root)
+            settings = InitialSetupDialog(
+                paths,
+                root / "logo.svg",
+                first_run=False,
+                diagnostics_worker_type=_ReadyWorker,
+                storage_worker_type=_ReadyStorageWorker,
+            )
+            first_run = InitialSetupDialog(
+                paths,
+                root / "logo.svg",
+                first_run=True,
+                diagnostics_worker_type=_ReadyWorker,
+                storage_worker_type=_ReadyStorageWorker,
+            )
+
+            self.assertTrue(settings.title_bar.minimize_button.isHidden())
+            self.assertFalse(first_run.title_bar.minimize_button.isHidden())
+            settings.close()
+            first_run.close()
+
     def test_existing_v1_setup_upgrades_layout_and_requests_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

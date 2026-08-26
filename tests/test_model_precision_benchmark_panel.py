@@ -138,6 +138,33 @@ class ModelPrecisionBenchmarkPanelTests(unittest.TestCase):
             )
             panel.close()
 
+    def test_stale_progress_and_failure_do_not_replace_new_model_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            first = _record(root, runtime, "model-a")
+            second = _record(root, runtime, "model-b")
+            panel = ModelPrecisionBenchmarkPanel(root, runtime)
+            panel.set_model(first)
+            generation = panel._operation_generation
+            panel.set_model(second)
+            expected_status = panel.status_label.text()
+            expected_progress = panel.progress_bar.value()
+
+            panel._handle_progress_changed("model-a", generation, 73)
+            panel._handle_stage_changed("model-a", generation, "old stage")
+            panel._benchmark_failed(
+                "model-a",
+                "Model A",
+                generation,
+                "RuntimeError: old failure",
+            )
+
+            self.assertEqual(panel.progress_bar.value(), expected_progress)
+            self.assertEqual(panel.status_label.text(), expected_status)
+            panel.close()
+
 
 def _benchmark_report() -> ModelPrecisionBenchmark:
     points = tuple(
@@ -181,5 +208,20 @@ def _benchmark_report() -> ModelPrecisionBenchmark:
     )
 
 
+def _record(root: Path, runtime: Path, model_id: str) -> RvcModelRecord:
+    inference = root / f"{model_id}.pth"
+    inference.write_bytes(b"checkpoint")
+    return RvcModelRecord(
+        model_id=model_id,
+        name=model_id,
+        mode="linked",
+        runtime_root=runtime,
+        source_folder=root,
+        inference_model=inference,
+        index_file=None,
+        generator_checkpoint=None,
+        discriminator_checkpoint=None,
+        created_at="2026-08-13T00:00:00+00:00",
+    )
 if __name__ == "__main__":
     unittest.main()

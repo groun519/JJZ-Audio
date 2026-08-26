@@ -19,6 +19,7 @@ $installerScript = Join-Path $projectRoot "packaging\JJZeroAudio.iss"
 $versionScript = Join-Path $projectRoot "scripts\release_version.py"
 $releaseDir = Join-Path $projectRoot "release"
 $signScript = Join-Path $projectRoot "scripts\sign_windows_artifact.ps1"
+$provenancePath = Join-Path $distribution "build-provenance.json"
 $version = (& $python $versionScript "print").Trim()
 if ($LASTEXITCODE -ne 0 -or -not $version) {
     throw "Release version lookup failed with exit code $LASTEXITCODE"
@@ -32,6 +33,24 @@ if (-not $SkipAppBuild) {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $distribution "JJZero Audio.exe") -PathType Leaf)) {
     throw "Application distribution was not found: $distribution"
+}
+if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) {
+    throw "Application build provenance was not found: $provenancePath"
+}
+$provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
+$sourceRevision = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-f]{40,64}$') {
+    throw "Could not determine the current source revision."
+}
+if ($provenance.schema_version -ne 1 -or
+    $provenance.product -ne "JJZero Audio" -or
+    [string]$provenance.version -ne $version -or
+    [string]$provenance.source_revision -ne $sourceRevision -or
+    $provenance.source_dirty -ne $false) {
+    throw "Application distribution does not match the clean current source revision. Rebuild it."
+}
+if (git status --porcelain --untracked-files=all) {
+    throw "Commit all source changes before building a release installer."
 }
 $signingConfigured = [bool]($CertificateThumbprint -or $CertificatePath)
 if ($RequireCodeSigning -and -not $signingConfigured) {
@@ -75,11 +94,33 @@ if ($signingConfigured) {
     if ($LASTEXITCODE -ne 0) {
         throw "Installer signing failed with exit code $LASTEXITCODE"
     }
+    $signature = Get-AuthenticodeSignature -LiteralPath $installer
+    if ($signature.Status -ne "Valid" -or -not $signature.SignerCertificate) {
+        throw "Installer signature is not valid after signing."
+    }
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $signingCertificateSha256 = (($sha256.ComputeHash(
+            $signature.SignerCertificate.RawData
+        ) | ForEach-Object { $_.ToString("x2") }) -join "")
+    }
+    finally {
+        $sha256.Dispose()
+    }
 }
 
-$manifestArguments = @("scripts\create_release_manifest.py", $releaseDir, $version)
+$manifestArguments = @(
+    "scripts\create_release_manifest.py",
+    $releaseDir,
+    $version,
+    "--source-revision",
+    $sourceRevision
+)
 if ($signingConfigured) {
-    $manifestArguments += @("--signing-publisher", $SigningPublisher)
+    $manifestArguments += @(
+        "--signing-publisher", $SigningPublisher,
+        "--signing-certificate-sha256", $signingCertificateSha256
+    )
 }
 if ($RuntimeReleaseTag) {
     $manifestArguments += @("--runtime-release-tag", $RuntimeReleaseTag)

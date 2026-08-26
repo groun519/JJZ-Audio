@@ -15,6 +15,7 @@ from jang_app.services.job_diagnostics import (
     get_job_diagnostics,
     redact_text,
 )
+from jang_app.services.managed_files import write_json_atomic
 from jang_app.version import __version__
 
 
@@ -214,13 +215,7 @@ class RvcTrainingDiagnostics:
 
     def _write_json(self, path: Path, value: Mapping[str, object]) -> None:
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(path.suffix + ".tmp")
-            temporary.write_text(
-                json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            os.replace(temporary, path)
+            write_json_atomic(path, value)
         except OSError:
             return
 

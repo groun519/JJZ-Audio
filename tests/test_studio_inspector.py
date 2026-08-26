@@ -75,6 +75,14 @@ class StudioInspectorTests(unittest.TestCase):
 
             inspector.set_selection(track, clip, asset)
             self.assertEqual(inspector.stack.currentIndex(), inspector.CLIP_PAGE)
+            self.assertEqual(
+                inspector.clip_detail_stack.currentIndex(),
+                inspector.AUDIO_DETAIL_PAGE,
+            )
+            self.assertTrue(inspector.audio_tab_button.isChecked())
+            self.assertFalse(inspector.audio_tab_button.isHidden())
+            self.assertTrue(inspector.media_tab_button.isHidden())
+            self.assertFalse(inspector.fx_tab_button.isEnabled())
             self.assertEqual(inspector.duration_value.text(), "00:02.000")
             self.assertEqual(inspector.gain_spin.value(), -2.5)
             self.assertEqual(inspector.pitch_spin.value(), 7)
@@ -142,7 +150,13 @@ class StudioInspectorTests(unittest.TestCase):
 
         self.assertEqual(inspector.effect_tab_ids(), (effect.effect_id,))
         inspector.open_effect_tab(effect.effect_id)
-        self.assertEqual(inspector.clip_detail_stack.currentIndex(), 1)
+        self.assertEqual(
+            inspector.clip_detail_stack.currentIndex(),
+            inspector.FX_DETAIL_PAGE,
+        )
+        self.assertEqual(inspector.effect_editor_stack.currentIndex(), 1)
+        self.assertTrue(inspector.fx_tab_button.isChecked())
+        self.assertIn(tr("Reverb"), inspector.effect_tab_buttons[effect.effect_id].text())
         editor = inspector.effect_editors[effect.effect_id]
         editor.controls["dry_wet_percent"].setValue(44)
         editor._emit_changed()
@@ -255,6 +269,13 @@ class StudioInspectorTests(unittest.TestCase):
 
         inspector.set_selection(track, image_clip, image_asset)
 
+        self.assertEqual(
+            inspector.clip_detail_stack.currentIndex(),
+            inspector.MEDIA_DETAIL_PAGE,
+        )
+        self.assertTrue(inspector.media_tab_button.isChecked())
+        self.assertTrue(inspector.audio_tab_button.isHidden())
+        self.assertFalse(inspector.media_tab_button.isHidden())
         self.assertTrue(inspector.media_section.isVisibleTo(inspector))
         self.assertTrue(inspector.image_controls.isVisibleTo(inspector))
         self.assertFalse(inspector.source_audio_button.isVisibleTo(inspector))
@@ -283,6 +304,7 @@ class StudioInspectorTests(unittest.TestCase):
 
         self.assertFalse(inspector.image_controls.isVisibleTo(inspector))
         self.assertTrue(inspector.source_audio_button.isVisibleTo(inspector))
+        inspector._open_detail_page("clip")
         self.assertTrue(inspector.source_section.isVisibleTo(inspector))
         self.assertTrue(inspector.source_section.content.isVisibleTo(inspector))
         inspector.source_audio_button.click()
@@ -304,12 +326,19 @@ class StudioInspectorTests(unittest.TestCase):
 
         inspector.set_selection(track, first_clip, None)
         inspector.open_effect_tab(effect.effect_id)
-        self.assertEqual(inspector.clip_detail_stack.currentIndex(), 1)
+        self.assertEqual(
+            inspector.clip_detail_stack.currentIndex(),
+            inspector.FX_DETAIL_PAGE,
+        )
 
         inspector.set_selection(track, second_clip, None)
 
-        self.assertEqual(inspector.clip_detail_stack.currentIndex(), 0)
-        self.assertTrue(inspector.clip_tab_button.isChecked())
+        self.assertEqual(
+            inspector.clip_detail_stack.currentIndex(),
+            inspector.AUDIO_DETAIL_PAGE,
+        )
+        self.assertTrue(inspector.audio_tab_button.isChecked())
+        self.assertFalse(any(button.isChecked() for button in inspector.effect_tab_buttons.values()))
         inspector.close()
 
     def test_repeated_effect_refresh_reuses_the_existing_tab_and_editor(self) -> None:
@@ -339,8 +368,10 @@ class StudioInspectorTests(unittest.TestCase):
 
         self.assertIs(inspector.effect_tab_buttons[effect.effect_id], button)
         self.assertIs(inspector.effect_editors[effect.effect_id], editor)
-        self.assertEqual(inspector.clip_tabs_layout.count(), 3)
-        self.assertEqual(inspector.clip_detail_stack.count(), 2)
+        self.assertEqual(inspector.clip_tabs_layout.count(), 4)
+        self.assertEqual(inspector.effect_chain_items_layout.count(), 1)
+        self.assertEqual(inspector.clip_detail_stack.count(), 4)
+        self.assertEqual(inspector.effect_editor_stack.count(), 2)
         self.assertEqual(editor.controls["dry_wet_percent"].value(), 61)
 
         editor._emit_changed()

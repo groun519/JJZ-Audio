@@ -5,18 +5,21 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from jang_app.services.command import (
     CommandCancellation,
+    active_command_count,
     hidden_subprocess_kwargs,
     run_binary_command,
     run_cancellable_command,
     run_command,
     start_detached_command,
+    terminate_all_commands,
 )
 from jang_app.services.job_diagnostics import JobDiagnostics, diagnostic_task
 
@@ -39,11 +42,14 @@ class CancellableCommandTests(unittest.TestCase):
             pythonw = runtime / "pythonw.exe"
             python.write_bytes(b"python")
             pythonw.write_bytes(b"pythonw")
-            completed = subprocess.CompletedProcess((), 0, "ready", "")
+            process = MagicMock()
+            process.communicate.return_value = ("ready", "")
+            process.returncode = 0
+            process.poll.return_value = 0
 
             with patch(
-                "jang_app.services.command.subprocess.run",
-                return_value=completed,
+                "jang_app.services.command.subprocess.Popen",
+                return_value=process,
             ) as runner:
                 result = run_command([str(python), "-c", "print('ready')"])
 
@@ -52,11 +58,14 @@ class CancellableCommandTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows-only process visibility behavior")
     def test_binary_runner_uses_the_same_hidden_window_policy(self) -> None:
-        completed = subprocess.CompletedProcess((), 0, b"audio", b"")
+        process = MagicMock()
+        process.communicate.return_value = (b"audio", b"")
+        process.returncode = 0
+        process.poll.return_value = 0
 
         with patch(
-            "jang_app.services.command.subprocess.run",
-            return_value=completed,
+            "jang_app.services.command.subprocess.Popen",
+            return_value=process,
         ) as runner:
             result = run_binary_command(["ffmpeg.exe", "-version"])
 
@@ -67,7 +76,7 @@ class CancellableCommandTests(unittest.TestCase):
 
     def test_operational_launch_failures_are_closed_by_command_owner(self) -> None:
         with patch(
-            "jang_app.services.command.subprocess.run",
+            "jang_app.services.command.subprocess.Popen",
             side_effect=OSError("launch failed"),
         ):
             result = run_command(["missing-tool"], timeout_seconds=1)
@@ -119,7 +128,12 @@ class CancellableCommandTests(unittest.TestCase):
         started = time.monotonic()
 
         result = run_cancellable_command(
-            [sys.executable, "-u", "-c", "import time; print('ready'); time.sleep(30)"],
+            [
+                sys.executable,
+                "-u",
+                "-c",
+                "import sys,time; sys.stdout.write('ready\\r'); sys.stdout.flush(); time.sleep(30)",
+            ],
             output_callback=lambda _line: cancellation.request_cancel(),
             cancellation=cancellation,
         )
@@ -144,6 +158,28 @@ class CancellableCommandTests(unittest.TestCase):
             events = (job_path / "events.jsonl").read_text(encoding="utf-8")
             self.assertIn('"event": "command_started"', events)
             self.assertIn('"event": "command_finished"', events)
+
+    def test_global_shutdown_terminates_an_ordinary_command(self) -> None:
+        results = []
+        worker = threading.Thread(
+            target=lambda: results.append(
+                run_command([sys.executable, "-c", "import time; time.sleep(30)"])
+            )
+        )
+        started = time.monotonic()
+        worker.start()
+        for _ in range(100):
+            if active_command_count():
+                break
+            time.sleep(0.01)
+
+        terminate_all_commands()
+        worker.join(8)
+
+        self.assertFalse(worker.is_alive())
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(active_command_count(), 0)
+        self.assertTrue(results)
 
 
 if __name__ == "__main__":

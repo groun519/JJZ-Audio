@@ -54,6 +54,15 @@ class ModelPrecisionBenchmarkWorker(QThread):
     def set_diagnostic_task_id(self, task_id: str) -> None:
         self._diagnostic_task_id = task_id
 
+    def request_cancel(self) -> None:
+        self.requestInterruption()
+
+    def cancel_and_wait(self, timeout_ms: int = 5000) -> bool:
+        self.request_cancel()
+        if not self.isRunning():
+            return True
+        return self.wait(max(0, int(timeout_ms)))
+
     def run(self) -> None:
         with diagnostic_task(self._diagnostic_task_id):
             try:
@@ -87,6 +96,7 @@ class ModelPrecisionBenchmarkPanel(QWidget):
         self._progress_detail_text = ""
         self._active_model_id = ""
         self._active_model_title = ""
+        self._operation_generation = 0
         self._theme_mode = "white"
         self._narrow_layout = False
         self._build_ui()
@@ -353,7 +363,13 @@ class ModelPrecisionBenchmarkPanel(QWidget):
             )
 
     def set_model(self, record: RvcModelRecord | None) -> None:
+        self._operation_generation += 1
         self._record = record
+        if self._worker is not None and (
+            record is None or record.model_id != self._active_model_id
+        ):
+            self.progress_bar.hide()
+            self.progress_detail.hide()
         self._report = (
             load_cached_model_precision_benchmark(self._workspace_root, record)
             if record is not None and record.can_convert
@@ -403,13 +419,29 @@ class ModelPrecisionBenchmarkPanel(QWidget):
                 execution_runtime_root=self._execution_runtime_root,
             )
         )
+        self._operation_generation += 1
+        generation = self._operation_generation
+        model_id = record.model_id
+        model_title = record.title
         worker.setParent(self)
-        worker.progress_changed.connect(self._handle_progress_changed)
-        worker.stage_changed.connect(self._handle_stage_changed)
-        worker.detail_changed.connect(self._handle_detail_changed)
-        worker.succeeded.connect(self._benchmark_succeeded)
-        worker.failed.connect(self._benchmark_failed)
-        worker.finished.connect(self._benchmark_finished)
+        worker.progress_changed.connect(
+            lambda value: self._handle_progress_changed(model_id, generation, value)
+        )
+        worker.stage_changed.connect(
+            lambda stage: self._handle_stage_changed(model_id, generation, stage)
+        )
+        worker.detail_changed.connect(
+            lambda detail: self._handle_detail_changed(model_id, generation, detail)
+        )
+        worker.succeeded.connect(
+            lambda result: self._benchmark_succeeded(model_id, generation, result)
+        )
+        worker.failed.connect(
+            lambda error: self._benchmark_failed(model_id, model_title, generation, error)
+        )
+        worker.finished.connect(
+            lambda: self._benchmark_finished(worker, model_id, model_title, generation)
+        )
         self._worker = worker
         self._progress_stage_text = tr("Preparing precise evaluation...")
         self._progress_detail_text = ""
@@ -426,41 +458,66 @@ class ModelPrecisionBenchmarkPanel(QWidget):
         self._emit_benchmark_progress(0)
         worker.start()
 
-    def _benchmark_succeeded(self, result: object) -> None:
+    @property
+    def active_model_id(self) -> str:
+        return self._active_model_id if self._worker is not None else ""
+
+    def cancel_and_wait(self, timeout_ms: int = 5000) -> bool:
+        worker = self._worker
+        if worker is None:
+            return True
+        self._operation_generation += 1
+        return worker.cancel_and_wait(timeout_ms)
+
+    def _owns_ui(self, model_id: str, generation: int) -> bool:
+        return (
+            generation == self._operation_generation
+            and self._record is not None
+            and self._record.model_id == model_id
+        )
+
+    def _benchmark_succeeded(self, model_id: str, generation: int, result: object) -> None:
         if not isinstance(result, ModelPrecisionBenchmark):
             return
-        model_id = self._active_model_id or result.model_id
         model_title = self._active_model_title or (
             self._record.title if self._record is not None else result.model_id
         )
         self.benchmark_completed.emit(model_id, model_title)
-        if self._record is None or result.model_id != self._record.model_id:
+        if not self._owns_ui(model_id, generation) or result.model_id != model_id:
             return
         self._report = result
         self._render()
         self._set_status("Precise evaluation completed.")
 
-    def _benchmark_failed(self, traceback_text: str) -> None:
-        self._render()
-        self._set_status(f"Evaluation failed: {_format_benchmark_error(traceback_text)}")
-        if self._report is None:
-            self.headline_label.setText(tr("The evaluation could not be completed."))
-        model_id = self._active_model_id or (
-            self._record.model_id if self._record is not None else ""
-        )
-        model_title = self._active_model_title or (
-            self._record.title if self._record is not None else ""
-        )
+    def _benchmark_failed(
+        self,
+        model_id: str,
+        model_title: str,
+        generation: int,
+        traceback_text: str,
+    ) -> None:
+        if self._owns_ui(model_id, generation):
+            self._render()
+            self._set_status(f"Evaluation failed: {_format_benchmark_error(traceback_text)}")
+            if self._report is None:
+                self.headline_label.setText(tr("The evaluation could not be completed."))
         if model_id:
             self.benchmark_failed_reported.emit(model_id, model_title, traceback_text)
 
-    def _benchmark_finished(self) -> None:
-        worker = self._worker
-        model_id = self._active_model_id
-        model_title = self._active_model_title
+    def _benchmark_finished(
+        self,
+        worker: ModelPrecisionBenchmarkWorker,
+        model_id: str,
+        model_title: str,
+        generation: int,
+    ) -> None:
+        if self._worker is not worker:
+            worker.deleteLater()
+            return
         self._worker = None
-        self.progress_bar.hide()
-        self.progress_detail.hide()
+        if self._owns_ui(model_id, generation):
+            self.progress_bar.hide()
+            self.progress_detail.hide()
         self.run_button.setEnabled(
             self._record is not None
             and self._record.can_convert
@@ -470,18 +527,20 @@ class ModelPrecisionBenchmarkPanel(QWidget):
         self._active_model_title = ""
         if model_id:
             self.benchmark_finished_reported.emit(model_id, model_title)
-        if worker is not None:
-            worker.deleteLater()
+        worker.deleteLater()
 
     def assign_diagnostic_task_id(self, task_id: str) -> None:
         if self._worker is not None:
             self._worker.set_diagnostic_task_id(task_id)
 
-    def _handle_progress_changed(self, value: int) -> None:
-        self.progress_bar.setValue(value)
+    def _handle_progress_changed(self, model_id: str, generation: int, value: int) -> None:
+        if self._owns_ui(model_id, generation):
+            self.progress_bar.setValue(value)
         self._emit_benchmark_progress(value)
 
-    def _handle_stage_changed(self, stage: str) -> None:
+    def _handle_stage_changed(self, model_id: str, generation: int, stage: str) -> None:
+        if not self._owns_ui(model_id, generation):
+            return
         if stage == "complete":
             self._progress_stage_text = tr("Precise evaluation completed.")
             self._set_status("Precise evaluation completed.")
@@ -494,7 +553,9 @@ class ModelPrecisionBenchmarkPanel(QWidget):
         )
         self._emit_benchmark_progress(self.progress_bar.value())
 
-    def _handle_detail_changed(self, detail: str) -> None:
+    def _handle_detail_changed(self, model_id: str, generation: int, detail: str) -> None:
+        if not self._owns_ui(model_id, generation):
+            return
         self._progress_detail_text = detail
         self.progress_detail.setText(detail)
         self._emit_benchmark_progress(self.progress_bar.value())

@@ -405,18 +405,19 @@ def _stylesheet(
         }}
 
         QFrame#StudioInspectorHeader {{
-            background: transparent;
-            border: 0;
-            min-height: 42px;
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+            min-height: 52px;
         }}
 
         QLabel#StudioInspectorKind {{
             min-height: 22px;
             max-height: 22px;
             padding: 0 7px;
-            color: {muted};
-            background: {raised};
-            border: 1px solid {border};
+            color: {text};
+            background: {surface};
+            border: 1px solid {button_border};
             border-radius: 7px;
             font-size: 9px;
             font-weight: 900;
@@ -438,24 +439,6 @@ def _stylesheet(
             color: {text};
             font-size: 12px;
             font-weight: 850;
-        }}
-
-        QPushButton#StudioInspectorSectionToggle {{
-            min-height: 26px;
-            max-height: 26px;
-            padding: 0 9px;
-            color: {muted};
-            background: transparent;
-            border: 1px solid {border};
-            border-radius: 8px;
-            font-size: 10px;
-            font-weight: 800;
-        }}
-
-        QPushButton#StudioInspectorSectionToggle:hover {{
-            color: {text};
-            background: {hover};
-            border-color: {focus};
         }}
 
         QLabel#StudioInspectorReadOnlyValue {{
@@ -484,18 +467,18 @@ def _stylesheet(
         QFrame#StudioInspectorTabs {{
             background: {raised};
             border: 1px solid {border};
-            border-radius: 11px;
+            border-radius: 12px;
         }}
 
         QPushButton#StudioInspectorTab {{
-            min-height: 28px;
-            max-height: 28px;
-            padding: 0 11px;
+            min-height: 34px;
+            max-height: 34px;
+            padding: 0 8px;
             color: {muted};
             background: transparent;
             border: 1px solid transparent;
-            border-radius: 8px;
-            font-size: 10px;
+            border-radius: 9px;
+            font-size: 11px;
             font-weight: 850;
         }}
 
@@ -508,14 +491,72 @@ def _stylesheet(
         QPushButton#StudioInspectorTab:checked {{
             color: {text};
             background: {surface};
-            border-color: {button_border};
+            border-color: {focus};
         }}
 
         QStackedWidget#StudioInspectorDetailStack,
+        QStackedWidget#StudioInspectorEffectEditorStack,
         QWidget#StudioReverbEditor,
         QWidget#StudioCharacterEffectEditor {{
             background: transparent;
             border: 0;
+        }}
+
+        QFrame#StudioInspectorEffectChain {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QLabel#StudioInspectorCount {{
+            min-width: 22px;
+            min-height: 20px;
+            max-height: 20px;
+            color: {muted};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 7px;
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
+        QLabel#StudioInspectorEmptyHint {{
+            min-height: 42px;
+            padding: 8px;
+            color: {faint};
+            background: transparent;
+            border: 0;
+            font-size: 10px;
+        }}
+
+        QPushButton#StudioInspectorEffectCard {{
+            min-height: 38px;
+            max-height: 38px;
+            padding: 0 11px;
+            color: {muted};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 9px;
+            text-align: left;
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QPushButton#StudioInspectorEffectCard:hover,
+        QPushButton#StudioInspectorEffectCard[pointerState="hover"] {{
+            color: {text};
+            background: {hover};
+            border-color: {focus};
+        }}
+
+        QPushButton#StudioInspectorEffectCard:checked {{
+            color: {text};
+            background: {hover};
+            border-color: {accent};
+        }}
+
+        QPushButton#StudioInspectorEffectCard[effectEnabled="false"] {{
+            color: {faint};
         }}
 
         QFrame#StudioReverbSection,
@@ -1665,6 +1706,54 @@ def _stylesheet(
         QProgressBar#TrainingProgress::chunk, QProgressBar#TrainingStageProgress::chunk {{
             background: {accent};
             border-radius: 4px;
+        }}
+
+        QFrame#LibraryImportTarget {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QFrame#LibraryGroupPanel {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 16px;
+        }}
+
+        QLabel#LibraryGroupTitle {{
+            color: {text};
+            font-size: 15px;
+            font-weight: 900;
+        }}
+
+        QTreeWidget#LibraryGroupTree {{
+            color: {text};
+            background: transparent;
+            border: 0;
+            outline: 0;
+            show-decoration-selected: 0;
+            font-size: 12px;
+            font-weight: 700;
+        }}
+
+        QTreeWidget#LibraryGroupTree::branch:selected {{
+            background: transparent;
+        }}
+
+        QTreeWidget#LibraryGroupTree::item {{
+            min-height: 34px;
+            padding: 2px 5px;
+            margin: 2px 0;
+            border: 0;
+        }}
+
+        QTreeWidget#LibraryGroupTree::item:hover {{
+            background: {hover};
+        }}
+
+        QTreeWidget#LibraryGroupTree::item:selected {{
+            color: {text};
+            background: {selection};
         }}
 
         QWidget#SongListRow {{
@@ -3058,6 +3147,13 @@ def _stylesheet(
             font-weight: 900;
         }}
 
+        QLabel#ProcessingQueueSectionLabel {{
+            min-height: 20px;
+            color: {muted};
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
         QLabel#ProcessingQueueActivity {{
             color: {muted};
             background: {raised};
@@ -3240,151 +3336,466 @@ def _stylesheet(
             background: transparent;
         }}
 
-        QFrame#LogDrawer {{
-            background: {surface};
-            border: 1px solid {border};
-            border-radius: 16px;
-        }}
-
-        QWidget#LogDrawerPage {{
+        QFrame#DiagnosticsPage,
+        QWidget#DiagnosticsJobsPage,
+        QStackedWidget#DiagnosticsPageStack,
+        QStackedWidget#DiagnosticsDetailStack {{
             background: transparent;
             border: 0;
         }}
 
-        QLabel#LogDrawerTitle {{
+        QFrame#DiagnosticsHeader,
+        QFrame#DiagnosticsHistoryPanel,
+        QFrame#DiagnosticsDetailPanel,
+        QFrame#DiagnosticsLogPage,
+        QFrame#DiagnosticsSystemPage {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 14px;
+        }}
+
+        QLabel#DiagnosticsTitle {{
             color: {text};
-            font-size: 17px;
+            font-size: 19px;
             font-weight: 900;
         }}
 
-        QPushButton#LogDrawerIconButton {{
-            min-width: 30px;
-            max-width: 30px;
-            min-height: 30px;
-            max-height: 30px;
-            padding: 0;
-            border: 0;
-            background: transparent;
-        }}
-
-        QPushButton#LogDrawerTaskFolderButton {{
-            min-width: 32px;
-            max-width: 32px;
-            min-height: 32px;
-            max-height: 32px;
-            padding: 0;
-            background: {raised};
-            border: 1px solid {border};
-            border-radius: 9px;
-        }}
-
-        QPushButton#LogDrawerTaskFolderButton:hover {{
-            background: {hover};
-        }}
-
-        QPushButton#LogDrawerActionButton {{
-            min-height: 32px;
-            max-height: 32px;
-            padding: 0 14px;
-            color: {text};
-            background: {raised};
-            border: 1px solid {border};
-            border-radius: 9px;
-            font-size: 10px;
-            font-weight: 800;
-        }}
-
-        QPushButton#LogDrawerActionButton:hover {{
-            background: {hover};
-        }}
-
-        QPushButton#LogDrawerActionButton:pressed {{
-            background: {pressed};
-        }}
-
-        QPushButton#LogDrawerActionButton:disabled,
-        QPushButton#LogDrawerTaskFolderButton:disabled {{
-            color: {faint};
-            background: transparent;
-            border-color: {border};
-        }}
-
-        QLabel#LogDrawerDiagnosticStatus {{
+        QLabel#DiagnosticsDescription,
+        QLabel#DiagnosticsMutedText,
+        QLabel#DiagnosticsActionStatus {{
             color: {muted};
-            font-size: 9px;
+            font-size: 10px;
             font-weight: 700;
         }}
 
-        QListWidget#LogActivityList {{
-            background: transparent;
-            border: 0;
-            outline: 0;
+        QLabel#DiagnosticsSectionTitle,
+        QLabel#DiagnosticsDetailTitle {{
+            color: {text};
+            font-size: 14px;
+            font-weight: 900;
         }}
 
-        QListWidget#LogActivityList::item,
-        QListWidget#LogActivityList::item:hover,
-        QListWidget#LogActivityList::item:selected {{
-            background: transparent;
-            margin: 3px 0;
-        }}
-
-        QWidget#ActivityTaskRow {{
+        QPushButton#DiagnosticsIconButton {{
+            min-width: 34px;
+            max-width: 34px;
+            min-height: 34px;
+            max-height: 34px;
+            padding: 0;
             background: {raised};
             border: 1px solid {border};
             border-radius: 10px;
         }}
 
-        QWidget#ActivityTaskRow:hover {{
+        QFrame#DiagnosticsTabs {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 12px;
+        }}
+
+        QPushButton#DiagnosticsTab,
+        QPushButton#DiagnosticsDetailTab {{
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0 14px;
+            color: {muted};
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
+        QPushButton#DiagnosticsTab:hover,
+        QPushButton#DiagnosticsDetailTab:hover {{
+            color: {text};
             background: {hover};
         }}
 
-        QWidget#ActivityTaskRow[selected="true"] {{
+        QPushButton#DiagnosticsTab:checked,
+        QPushButton#DiagnosticsDetailTab:checked {{
+            color: {text};
+            background: {raised};
+            border-color: {button_border};
+        }}
+
+        QFrame#DiagnosticsDetailTabs {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QPushButton#DiagnosticsHeaderButton,
+        QPushButton#DiagnosticsActionButton,
+        QPushButton#DiagnosticsPrimaryButton {{
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0 12px;
+            color: {text};
+            background: {raised};
+            border: 1px solid {button_border};
+            border-radius: 9px;
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
+        QPushButton#DiagnosticsHeaderButton:hover,
+        QPushButton#DiagnosticsActionButton:hover {{
+            background: {hover};
+            border-color: {focus};
+        }}
+
+        QPushButton#DiagnosticsPrimaryButton {{
+            color: {accent_text};
+            background: {accent};
+            border-color: {accent};
+        }}
+
+        QPushButton#DiagnosticsActionButton:disabled,
+        QPushButton#DiagnosticsPrimaryButton:disabled {{
+            color: {faint};
+            background: {raised};
+            border-color: {border};
+        }}
+
+        QLineEdit#DiagnosticsSearch,
+        QComboBox#DiagnosticsFilter {{
+            min-height: 32px;
+            max-height: 32px;
+            color: {text};
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 9px;
+            padding: 0 9px;
+        }}
+
+        QLineEdit#DiagnosticsSearch:focus,
+        QComboBox#DiagnosticsFilter:focus {{
+            border-color: {focus};
+        }}
+
+        QListWidget#DiagnosticsHistoryList {{
+            background: transparent;
+            border: 0;
+            outline: 0;
+        }}
+
+        QListWidget#DiagnosticsHistoryList::item,
+        QListWidget#DiagnosticsHistoryList::item:hover,
+        QListWidget#DiagnosticsHistoryList::item:selected {{
+            background: transparent;
+            margin: 3px 0;
+        }}
+
+        QWidget#DiagnosticHistoryRow {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QWidget#DiagnosticHistoryRow:hover {{
+            background: {hover};
+            border-color: {focus};
+        }}
+
+        QWidget#DiagnosticHistoryRow[selected="true"] {{
             background: {selection};
             border-color: {tab_active_border};
         }}
 
-        QLabel#ActivityTaskTitle {{
+        QLabel#DiagnosticHistoryTitle {{
             color: {text};
             font-size: 11px;
             font-weight: 900;
         }}
 
-        QLabel#ActivityTaskMeta, QLabel#LogPathLabel {{
+        QLabel#DiagnosticsStatusPill {{
+            min-width: 58px;
+            padding: 3px 8px;
             color: {muted};
-            font-size: 9px;
-            font-weight: 700;
-        }}
-
-        QLabel#ActivityTaskStatus {{
-            color: {muted};
-            background: {surface};
+            background: {raised};
             border: 1px solid {border};
             border-radius: 8px;
-            padding: 2px 7px;
             font-size: 9px;
             font-weight: 900;
         }}
 
-        QLabel#ActivityTaskStatus[status="completed"] {{
+        QLabel#DiagnosticsStatusPill[status="completed"] {{
             color: {tab_active_text};
             background: {tab_active};
             border-color: {tab_active_border};
         }}
 
-        QLabel#ActivityTaskStatus[status="failed"] {{
-            color: #c93d3d;
+        QLabel#DiagnosticsStatusPill[status="failed"] {{
+            color: #e06b66;
+            background: transparent;
             border-color: #c93d3d;
         }}
 
-        QPlainTextEdit#LogDetailText, QPlainTextEdit#ApplicationLogText {{
-            background: {raised};
+        QLabel#DiagnosticsStatusPill[status="cancelled"] {{
+            color: {muted};
+            border-color: {muted};
+        }}
+
+        QLabel#DiagnosticsEmpty {{
+            color: {muted};
+            font-size: 11px;
+            font-weight: 700;
+        }}
+
+        QPlainTextEdit#DiagnosticsSummaryText,
+        QPlainTextEdit#DiagnosticsLogText {{
             color: {text};
+            background: {raised};
             border: 1px solid {border};
             border-radius: 11px;
-            padding: 10px;
+            padding: 11px;
             selection-background-color: {selection};
             font-family: "Cascadia Mono", "Consolas";
             font-size: 10px;
+        }}
+
+        QFrame#DiagnosticsSystemCard {{
+            min-height: 96px;
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 11px;
+        }}
+
+        QFrame#DiagnosticsSystemCard[status="failed"] {{
+            border-color: #c93d3d;
+        }}
+
+        QFrame#DiagnosticsSystemCard[status="warning"] {{
+            border-color: #b4872f;
+        }}
+
+        QLabel#DiagnosticsSystemValue {{
+            color: {text};
+            font-size: 11px;
+            font-weight: 850;
+        }}
+
+        QSplitter#DiagnosticsSplitter::handle {{
+            width: 6px;
+            background: transparent;
+        }}
+
+        QSplitter#DiagnosticsSplitter::handle:hover {{
+            background: {hover};
+        }}
+
+        QFrame#EnvironmentManagementBody,
+        QStackedWidget#EnvironmentPageStack,
+        QFrame#EnvironmentContentPage,
+        QScrollArea#EnvironmentScroll,
+        QScrollArea#EnvironmentScroll > QWidget > QWidget {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QFrame#EnvironmentPageHeader,
+        QFrame#EnvironmentActionBar {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 14px;
+        }}
+
+        QFrame#DiagnosticsNavigation {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 14px;
+        }}
+
+        QFrame#DiagnosticsNavigation[compact="false"] {{
+            min-width: 202px;
+            max-width: 202px;
+        }}
+
+        QFrame#DiagnosticsNavigation[compact="true"] {{
+            min-width: 62px;
+            max-width: 62px;
+        }}
+
+        QPushButton#EnvironmentNavigationButton {{
+            color: transparent;
+            background: transparent;
+            border: 0;
+            padding: 0;
+        }}
+
+        QLabel#EnvironmentPageTitle {{
+            color: {text};
+            font-size: 18px;
+            font-weight: 900;
+        }}
+
+        QLabel#EnvironmentPageDescription {{
+            color: {muted};
+            font-size: 10px;
+            font-weight: 700;
+        }}
+
+        QLabel#EnvironmentStatusPill {{
+            min-width: 68px;
+            padding: 4px 9px;
+            color: {muted};
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 9px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+
+        QLabel#EnvironmentStatusPill[status="completed"] {{
+            color: #6cc49a;
+            border-color: #427b62;
+        }}
+
+        QLabel#EnvironmentStatusPill[status="warning"] {{
+            color: #d8ad58;
+            border-color: #8b6c2e;
+        }}
+
+        QLabel#EnvironmentStatusPill[status="failed"] {{
+            color: #e06b66;
+            border-color: #c93d3d;
+        }}
+
+        QFrame#EnvironmentHeroCard,
+        QFrame#EnvironmentInfoCard {{
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 14px;
+        }}
+
+        QFrame#EnvironmentHeroCard {{
+            background: {raised};
+            border-color: {button_border};
+        }}
+
+        QLabel#EnvironmentHeroTitle {{
+            color: {text};
+            font-size: 17px;
+            font-weight: 900;
+        }}
+
+        QLabel#EnvironmentCardTitle {{
+            color: {text};
+            font-size: 12px;
+            font-weight: 900;
+        }}
+
+        QFrame#EnvironmentInformationRow {{
+            background: transparent;
+            border: 0;
+        }}
+
+        QLabel#EnvironmentInformationLabel {{
+            min-width: 104px;
+            color: {muted};
+            font-size: 10px;
+            font-weight: 800;
+        }}
+
+        QLabel#EnvironmentInformationValue {{
+            color: {text};
+            font-size: 10px;
+            font-weight: 750;
+        }}
+
+        QFrame#EnvironmentStatusRow {{
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 10px;
+        }}
+
+        QFrame#EnvironmentStatusRow[status="failed"] {{
+            border-color: #8f3a38;
+        }}
+
+        QFrame#EnvironmentStatusRow[status="warning"],
+        QFrame#EnvironmentStatusRow[status="safe"] {{
+            border-color: #80642e;
+        }}
+
+        QFrame#EnvironmentStatusRow[status="info"] {{
+            border-color: #4c6986;
+        }}
+
+        QLabel#EnvironmentCheckIndicator {{
+            min-width: 28px;
+            max-width: 28px;
+            min-height: 24px;
+            max-height: 24px;
+            color: {muted};
+            background: {surface};
+            border: 1px solid {border};
+            border-radius: 8px;
+            font-size: 8px;
+            font-weight: 900;
+        }}
+
+        QLabel#EnvironmentCheckIndicator[status="completed"] {{
+            color: #6cc49a;
+            border-color: #427b62;
+        }}
+
+        QLabel#EnvironmentCheckIndicator[status="warning"],
+        QLabel#EnvironmentCheckIndicator[status="safe"] {{
+            color: #d8ad58;
+            border-color: #8b6c2e;
+        }}
+
+        QLabel#EnvironmentCheckIndicator[status="info"] {{
+            color: #83a9d1;
+            border-color: #4c6986;
+        }}
+
+        QLabel#EnvironmentCheckIndicator[status="failed"] {{
+            color: #e06b66;
+            border-color: #c93d3d;
+        }}
+
+        QProgressBar#EnvironmentUsageBar,
+        QProgressBar#EnvironmentStorageBar,
+        QProgressBar#EnvironmentScanProgress {{
+            min-height: 8px;
+            max-height: 8px;
+            background: {background};
+            border: 0;
+            border-radius: 4px;
+        }}
+
+        QProgressBar#EnvironmentUsageBar::chunk,
+        QProgressBar#EnvironmentStorageBar::chunk,
+        QProgressBar#EnvironmentScanProgress::chunk {{
+            background: {accent};
+            border-radius: 4px;
+        }}
+
+        QProgressBar#EnvironmentStorageBar[storageState="warning"]::chunk {{
+            background: #c6963d;
+        }}
+
+        QProgressBar#EnvironmentStorageBar[storageState="danger"]::chunk {{
+            background: #c9534f;
+        }}
+
+        QPushButton#DiagnosticsToggleButton {{
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0 12px;
+            color: {muted};
+            background: {raised};
+            border: 1px solid {border};
+            border-radius: 9px;
+            font-size: 10px;
+            font-weight: 850;
+        }}
+
+        QPushButton#DiagnosticsToggleButton:checked {{
+            color: {tab_active_text};
+            background: {tab_active};
+            border-color: {tab_active_border};
         }}
 
         QLabel#TransportTime {{

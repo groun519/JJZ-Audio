@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from jang_app.config import DEMUCS_RUNTIME_DIR, ROFORMER_MODEL_DIR
+from jang_app.services.managed_files import (
+    file_sha256,
+    managed_path_lock,
+    write_json_atomic,
+)
 from jang_app.services.separation_recipe import SeparationRecipe
 
 
 _CHECKPOINT_BYTES = 84_141_911
+_ROFORMER_INTEGRITY_FILE = ".jjzero-model-integrity.json"
 _DEMUCS_MODEL_FILES = {
     "htdemucs": ("955717e8-8726e21a.th",),
     "htdemucs_ft": (
@@ -145,11 +152,14 @@ class SeparationAssetStatus:
     present_files: int
     required_files: int
     missing_bytes: int
+    verification_required_files: int = 0
 
     @property
     def status_text(self) -> str:
         if self.ready:
             return "Model ready"
+        if self.verification_required_files:
+            return "Installed model verification required"
         return f"First use downloads about {format_byte_size(self.missing_bytes)}"
 
 
@@ -167,12 +177,18 @@ def separation_asset_status(
         present = tuple(
             item.filename
             for item in roformer_assets.files
-            if (model_root / item.filename).is_file()
+            if roformer_model_file_ready(model_root / item.filename, item)
+        )
+        verification_required = sum(
+            1
+            for item in roformer_assets.files
+            if _roformer_model_file_present(model_root / item.filename, item)
+            and not roformer_model_file_ready(model_root / item.filename, item)
         )
         missing_bytes = sum(
             item.size
             for item in roformer_assets.files
-            if not (model_root / item.filename).is_file()
+            if not _roformer_model_file_present(model_root / item.filename, item)
         )
         return SeparationAssetStatus(
             model=model,
@@ -180,6 +196,7 @@ def separation_asset_status(
             present_files=len(present),
             required_files=len(roformer_assets.files),
             missing_bytes=missing_bytes,
+            verification_required_files=verification_required,
         )
     files = _DEMUCS_MODEL_FILES.get(model, ())
     demucs_root = (runtime_root or DEMUCS_RUNTIME_DIR).expanduser().resolve()
@@ -203,6 +220,73 @@ def roformer_model_assets(model: str) -> RoFormerModelAssets | None:
     return _ROFORMER_MODEL_ASSETS.get(model)
 
 
+def roformer_model_file_ready(path: Path, asset: RoFormerModelFile) -> bool:
+    candidate = path.expanduser().resolve()
+    try:
+        stat = candidate.stat()
+    except OSError:
+        return False
+    if not candidate.is_file() or stat.st_size != asset.size:
+        return False
+    record = _load_integrity_records(candidate.parent).get(candidate.name)
+    return bool(
+        isinstance(record, Mapping)
+        and record.get("size") == stat.st_size
+        and record.get("modified_ns") == stat.st_mtime_ns
+        and record.get("sha256") == asset.sha256.casefold()
+    )
+
+
+def verify_roformer_model_file(path: Path, asset: RoFormerModelFile) -> bool:
+    candidate = path.expanduser().resolve()
+    try:
+        return (
+            candidate.is_file()
+            and candidate.stat().st_size == asset.size
+            and file_sha256(candidate).casefold() == asset.sha256.casefold()
+        )
+    except OSError:
+        return False
+
+
+def record_roformer_model_files_verified(
+    model_root: Path,
+    assets: Iterable[RoFormerModelFile],
+) -> None:
+    root = model_root.expanduser().resolve()
+    target = root / _ROFORMER_INTEGRITY_FILE
+    with managed_path_lock(target):
+        records = _load_integrity_records(root)
+        for asset in assets:
+            candidate = root / asset.filename
+            stat = candidate.stat()
+            records[asset.filename] = {
+                "size": stat.st_size,
+                "modified_ns": stat.st_mtime_ns,
+                "sha256": asset.sha256.casefold(),
+            }
+        write_json_atomic(target, {"schema": 1, "files": records})
+
+
+def _roformer_model_file_present(path: Path, asset: RoFormerModelFile) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size == asset.size
+    except OSError:
+        return False
+
+
+def _load_integrity_records(model_root: Path) -> dict[str, object]:
+    target = model_root / _ROFORMER_INTEGRITY_FILE
+    try:
+        loaded = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(loaded, Mapping) or loaded.get("schema") != 1:
+        return {}
+    files = loaded.get("files")
+    return dict(files) if isinstance(files, Mapping) else {}
+
+
 def separation_recipe_asset_status(
     recipe: SeparationRecipe,
     runtime_root: Path | None = None,
@@ -224,6 +308,9 @@ def combine_separation_asset_status(
         present_files=sum(status.present_files for status in values),
         required_files=sum(status.required_files for status in values),
         missing_bytes=sum(status.missing_bytes for status in values),
+        verification_required_files=sum(
+            status.verification_required_files for status in values
+        ),
     )
 
 

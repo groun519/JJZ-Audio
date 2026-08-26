@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtCore import QEvent, QObject
 from PySide6.QtTest import QSignalSpy
@@ -137,6 +138,15 @@ class StudioSoundPoolTests(unittest.TestCase):
         self.assertEqual(pool._cards, cards)
         self.assertIs(pool._cards[assets[0].asset_id], cards[assets[0].asset_id])
         self.assertTrue(pool._cards[assets[0].asset_id].property("selected"))
+
+    def test_unchanged_layout_does_not_reparent_every_card(self) -> None:
+        pool = StudioSoundPool()
+        pool.set_assets(_assets())
+
+        with patch.object(pool, "_take_layout_items") as take_items:
+            pool._rebuild_layout()
+
+        take_items.assert_not_called()
 
     def test_changed_asset_replaces_only_its_card(self) -> None:
         pool = StudioSoundPool()

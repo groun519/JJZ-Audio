@@ -53,6 +53,9 @@ class ModelDatasetAnalysisPanel(QWidget):
         self._model_id = ""
         self._report: ModelDatasetAnalysis | None = None
         self._worker: TaskWorker | None = None
+        self._worker_model_id = ""
+        self._operation_generation = 0
+        self._worker_generation = 0
         self._stale = False
         self._theme_mode = "white"
         self._build_ui()
@@ -173,7 +176,10 @@ class ModelDatasetAnalysisPanel(QWidget):
         layout.addWidget(scroll)
 
     def set_model(self, model_id: str | None) -> None:
+        self._operation_generation += 1
         self._model_id = model_id or ""
+        if self._worker is not None and self._worker_model_id != self._model_id:
+            self.progress_bar.hide()
         self._report = (
             load_cached_model_dataset_analysis(self._store, self._model_id)
             if self._model_id
@@ -211,6 +217,8 @@ class ModelDatasetAnalysisPanel(QWidget):
         if not self._model_id or self._worker is not None:
             return
         model_id = self._model_id
+        self._operation_generation += 1
+        generation = self._operation_generation
         worker = TaskWorker(
             lambda progress: analyze_model_dataset(
                 self._store,
@@ -219,19 +227,56 @@ class ModelDatasetAnalysisPanel(QWidget):
             )
         )
         worker.setParent(self)
-        worker.progress_changed.connect(self.progress_bar.setValue)
-        worker.succeeded.connect(self._analysis_succeeded)
-        worker.failed.connect(self._analysis_failed)
-        worker.finished.connect(self._analysis_finished)
+        worker.progress_changed.connect(
+            lambda value: self._analysis_progressed(model_id, generation, value)
+        )
+        worker.succeeded.connect(
+            lambda result: self._analysis_succeeded(model_id, generation, result)
+        )
+        worker.failed.connect(
+            lambda error: self._analysis_failed(model_id, generation, error)
+        )
+        worker.finished.connect(
+            lambda: self._analysis_finished(worker, model_id, generation)
+        )
         self._worker = worker
+        self._worker_model_id = model_id
+        self._worker_generation = generation
         self.progress_bar.setValue(0)
         self.progress_bar.show()
         self.analyze_button.setEnabled(False)
         self._set_status("Analyzing training material...")
         worker.start()
 
-    def _analysis_succeeded(self, result: object) -> None:
-        if not isinstance(result, ModelDatasetAnalysis) or result.model_id != self._model_id:
+    @property
+    def active_model_id(self) -> str:
+        return self._worker_model_id if self._worker is not None else ""
+
+    def cancel_and_wait(self, timeout_ms: int = 5000) -> bool:
+        worker = self._worker
+        if worker is None:
+            return True
+        self._operation_generation += 1
+        return worker.cancel_and_wait(timeout_ms)
+
+    def _owns_operation(self, model_id: str, generation: int) -> bool:
+        return model_id == self._model_id and generation == self._operation_generation
+
+    def _analysis_progressed(self, model_id: str, generation: int, value: int) -> None:
+        if self._owns_operation(model_id, generation):
+            self.progress_bar.setValue(value)
+
+    def _analysis_succeeded(
+        self,
+        model_id: str,
+        generation: int,
+        result: object,
+    ) -> None:
+        if (
+            not self._owns_operation(model_id, generation)
+            or not isinstance(result, ModelDatasetAnalysis)
+            or result.model_id != model_id
+        ):
             return
         self._report = result
         self._stale = False
@@ -242,16 +287,26 @@ class ModelDatasetAnalysisPanel(QWidget):
             cached=result.cached_asset_count,
         )
 
-    def _analysis_failed(self, traceback_text: str) -> None:
-        self._set_status(f"Analysis failed: {_last_error_line(traceback_text)}")
+    def _analysis_failed(self, model_id: str, generation: int, traceback_text: str) -> None:
+        if self._owns_operation(model_id, generation):
+            self._set_status(f"Analysis failed: {_last_error_line(traceback_text)}")
 
-    def _analysis_finished(self) -> None:
-        worker = self._worker
-        self._worker = None
-        self.progress_bar.hide()
-        self.analyze_button.setEnabled(bool(self._model_id))
-        if worker is not None:
+    def _analysis_finished(
+        self,
+        worker: TaskWorker,
+        model_id: str,
+        generation: int,
+    ) -> None:
+        if self._worker is not worker:
             worker.deleteLater()
+            return
+        self._worker = None
+        self._worker_model_id = ""
+        self._worker_generation = 0
+        if self._owns_operation(model_id, generation):
+            self.progress_bar.hide()
+            self.analyze_button.setEnabled(bool(self._model_id))
+        worker.deleteLater()
 
     def _render(self) -> None:
         report = self._report

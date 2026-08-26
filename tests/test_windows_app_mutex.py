@@ -4,7 +4,12 @@ import os
 import unittest
 from pathlib import Path
 
-from jang_app.services.windows_app_mutex import APP_MUTEX_NAME, close_app_mutex, create_app_mutex
+from jang_app.services.windows_app_mutex import (
+    APP_MUTEX_NAME,
+    acquire_app_mutex,
+    close_app_mutex,
+    create_app_mutex,
+)
 
 
 class WindowsAppMutexTests(unittest.TestCase):
@@ -16,7 +21,13 @@ class WindowsAppMutexTests(unittest.TestCase):
         self.assertIn(f'#define AppMutexName "{APP_MUTEX_NAME}"', installer_script)
         self.assertNotIn("AppMutex={#AppMutexName}", installer_script)
         self.assertIn("CheckForMutexes('{#AppMutexName}')", installer_script)
-        self.assertIn("HasCommandLineSwitch('/RUN')", installer_script)
+        self.assertIn("HasCommandLineSwitch('/JJZEROUPDATE')", installer_script)
+        self.assertIn("ShouldRelaunchAfterInternalUpdate", installer_script)
+        self.assertIn("Flags: nowait skipifdoesntexist", installer_script)
+        self.assertNotIn("HasCommandLineSwitch('/RUN')", installer_script)
+        self.assertNotIn("RemoveRuntimeRoot(ConfiguredRuntimeRoot)", installer_script)
+        self.assertIn("SamePath(ConfiguredCacheRoot, DefaultCacheRoot)", installer_script)
+        self.assertIn("PreservedExternalStorage := True", installer_script)
         self.assertIn("function InitializeUninstall: Boolean;", installer_script)
 
     @unittest.skipUnless(os.name == "nt", "Windows mutex is only available on Windows")
@@ -26,3 +37,16 @@ class WindowsAppMutexTests(unittest.TestCase):
         self.assertGreater(handle, 0)
 
         self.assertTrue(close_app_mutex(handle))
+
+    @unittest.skipUnless(os.name == "nt", "Windows mutex is only available on Windows")
+    def test_second_acquisition_reports_an_existing_instance(self) -> None:
+        first = acquire_app_mutex()
+        try:
+            second = acquire_app_mutex()
+
+            self.assertFalse(first.already_running)
+            self.assertIsNotNone(first.handle)
+            self.assertTrue(second.already_running)
+            self.assertIsNone(second.handle)
+        finally:
+            close_app_mutex(first.handle)

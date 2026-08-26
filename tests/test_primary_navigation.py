@@ -26,10 +26,12 @@ class PrimaryNavigationBarTests(unittest.TestCase):
             ("Export", 5),
         )
         requested = QSignalSpy(navigation.page_requested)
+        management_requested = QSignalSpy(navigation.management_requested)
         settings_requested = QSignalSpy(navigation.settings_requested)
         work_song_changed = QSignalSpy(navigation.work_song_changed)
 
         navigation.workflow_buttons[1].click()
+        navigation.management_button.click()
         navigation.settings_button.click()
         navigation.set_work_songs((("song-1", "Song One"),), "")
         navigation.work_song_selector.select_song("song-1", emit=True)
@@ -44,6 +46,7 @@ class PrimaryNavigationBarTests(unittest.TestCase):
         self.assertEqual(navigation.data_divider.height(), 20)
         self.assertEqual(navigation.export_divider.width(), 1)
         self.assertEqual(settings_requested.count(), 1)
+        self.assertEqual(management_requested.count(), 1)
         self.assertEqual(work_song_changed.at(0)[0], "song-1")
         self.assertEqual(
             (
@@ -52,8 +55,17 @@ class PrimaryNavigationBarTests(unittest.TestCase):
             ),
             (344, 50),
         )
+        self.assertIsInstance(navigation.management_button, NavigationActionButton)
+        self.assertEqual(
+            (
+                navigation.management_button.width(),
+                navigation.management_button.height(),
+            ),
+            (38, 38),
+        )
         self.assertIsInstance(navigation.settings_button, NavigationActionButton)
         self.assertEqual((navigation.settings_button.width(), navigation.settings_button.height()), (38, 38))
+        self.assertNotIn(navigation.management_button, navigation.buttons)
         self.assertNotIn(navigation.settings_button, navigation.buttons)
         self.assertEqual(navigation.button_group.checkedId(), 3)
         navigation.set_current_page(0)

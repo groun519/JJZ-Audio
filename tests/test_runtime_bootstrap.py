@@ -21,7 +21,10 @@ from jang_app.services.runtime_bootstrap import (
     provision_ai_runtime_offline,
     provision_update_runtime_components,
 )
-from jang_app.services.runtime_installation import RuntimeInstallation
+from jang_app.services.runtime_installation import (
+    RuntimeInstallation,
+    RuntimeInstallationError,
+)
 
 
 class RuntimeBootstrapTests(unittest.TestCase):
@@ -80,6 +83,55 @@ class RuntimeBootstrapTests(unittest.TestCase):
             self.assertEqual(activity[0].stage, RuntimeProvisionStage.PREPARING)
             self.assertEqual(activity[-1].stage, RuntimeProvisionStage.VERIFYING)
             self.assertFalse((paths.cache_dir / "runtime" / release.version).exists())
+
+    def test_runtime_download_is_blocked_before_network_when_space_is_insufficient(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = discover_app_paths(
+                root / "src" / "jang_app",
+                environ={"LOCALAPPDATA": str(root / "data")},
+                frozen=True,
+                executable=root / "app" / "JJZero Audio.exe",
+            )
+            paths = replace(paths, runtime_root=root / "app" / "runtime")
+            application = ReleaseArtifact(
+                "app.exe",
+                1,
+                "a" * 64,
+                "https://example/app.exe",
+            )
+            runtime = ReleaseArtifact(
+                "runtime.zip",
+                4 * 1024**3,
+                "b" * 64,
+                "https://example/runtime.zip",
+                unpacked_size=7 * 1024**3,
+            )
+            release = ReleaseManifest(
+                "0.3.0",
+                (
+                    ReleaseComponent("application", "0.3.0", "installer", (application,)),
+                    ReleaseComponent("ai-runtime", "4", "extract", (runtime,)),
+                ),
+            )
+
+            with (
+                patch(
+                    "jang_app.services.runtime_bootstrap.fetch_release_manifest",
+                    return_value=release,
+                ),
+                patch(
+                    "jang_app.services.runtime_bootstrap.shutil.disk_usage",
+                    return_value=type("Usage", (), {"free": 2 * 1024**3})(),
+                ),
+                patch(
+                    "jang_app.services.runtime_bootstrap.download_artifact"
+                ) as download,
+                self.assertRaisesRegex(RuntimeInstallationError, "free space"),
+            ):
+                provision_ai_runtime(paths)
+
+            download.assert_not_called()
 
     def test_blackwell_install_adds_cu128_profile_after_base_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

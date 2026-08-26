@@ -27,16 +27,17 @@ class VocalCleanupResultPool(SoundPoolList):
         results: tuple[VocalCleanupResult, ...],
         selected_id: str = "",
     ) -> VocalCleanupResult | None:
-        self._results = tuple(result for result in results if result.path.is_file())
+        self._results = tuple(results)
         self._results_by_id = {result.result_id: result for result in self._results}
+        available_ids = tuple(
+            result.result_id for result in self._results if result.path.is_file()
+        )
         self._selected_id = (
             selected_id
-            if selected_id in self._results_by_id
+            if selected_id in available_ids
             else self._selected_id
-            if self._selected_id in self._results_by_id
-            else self._results[0].result_id
-            if self._results
-            else ""
+            if self._selected_id in available_ids
+            else next(iter(available_ids), "")
         )
         self._rebuild()
         return self.selected_result()
@@ -53,6 +54,7 @@ class VocalCleanupResultPool(SoundPoolList):
         self.set_cards(cards, self._selected_id)
 
     def _build_card(self, result: VocalCleanupResult) -> SoundPoolItemCard:
+        missing = not result.path.is_file()
         try:
             duration_ms = read_audio_metadata(result.path).duration_ms
         except Exception:
@@ -62,12 +64,13 @@ class VocalCleanupResultPool(SoundPoolList):
             role="original_vocal",
             path=result.path,
             title=_result_label(result),
-            badge=tr("Clean"),
-            detail=result.path.name,
+            badge=tr("Missing") if missing else tr("Clean"),
+            detail=tr("File missing - remove this entry") if missing else result.path.name,
             duration_ms=duration_ms,
             object_name="VocalVersionCard",
         )
         card.set_list_mode(True)
+        card.setProperty("missing", missing)
         card.set_theme_mode(self._theme_mode)
         remove_button = DangerIconButton(size=28)
         remove_button.setToolTip(tr("Delete cleaned vocal"))
@@ -79,7 +82,7 @@ class VocalCleanupResultPool(SoundPoolList):
 
     def _select_result(self, result_id: str) -> None:
         result = self._results_by_id.get(result_id)
-        if result is None:
+        if result is None or not result.path.is_file():
             return
         self._selected_id = result_id
         self.set_selected(result_id)

@@ -172,7 +172,11 @@ class RvcTrainingRunResult:
 
     @property
     def completed(self) -> bool:
-        return self.state.phase == RvcTrainingPhase.COMPLETE
+        return self.state.phase in {
+            RvcTrainingPhase.MODEL_READY,
+            RvcTrainingPhase.INDEX_READY,
+            RvcTrainingPhase.COMPLETE,
+        }
 
 
 TrainingCommandRunner = Callable[..., CommandResult]
@@ -490,6 +494,8 @@ def train_rvc_model(
                     )
         refreshed = state_store.refresh_checkpoint_pair()
         if resume_load_error:
+            _quarantine_failed_checkpoint_pair(layout, refreshed.checkpoint_step)
+            state_store.refresh_checkpoint_pair()
             raise RvcTrainingRunError(
                 "RVC could not restore the saved training checkpoint: "
                 f"{resume_load_error}"
@@ -518,7 +524,7 @@ def train_rvc_model(
             detail = result.output or f"trainer exited with code {result.returncode}"
             raise RvcTrainingRunError(f"RVC training did not produce a complete model: {detail}")
         state_store.record_epoch(settings.target_epoch)
-        completed = state_store.update_phase(RvcTrainingPhase.COMPLETE)
+        completed = state_store.update_phase(RvcTrainingPhase.MODEL_READY)
         if training_diagnostics is not None and active_attempt is not None:
             training_diagnostics.finish_attempt(
                 active_attempt,
@@ -707,14 +713,63 @@ def _keep_latest_checkpoint_pair(
         target = generators if match.group("kind").casefold() == "g" else discriminators
         target[int(match.group("step"))] = path
     shared_steps = generators.keys() & discriminators.keys()
-    keep_step = (
-        preferred_step
-        if preferred_step is not None and preferred_step in shared_steps
-        else max(shared_steps) if shared_steps else None
-    )
+    if preferred_step is None or preferred_step not in shared_steps:
+        keep_steps = set(shared_steps)
+    else:
+        ordered_steps = sorted(shared_steps, reverse=True)
+        ordered_steps.remove(preferred_step)
+        ordered_steps.insert(0, preferred_step)
+        keep_steps = set(ordered_steps[:2])
     for step, path in (*generators.items(), *discriminators.items()):
-        if step != keep_step:
+        if step not in keep_steps:
             path.unlink(missing_ok=True)
+
+
+def _quarantine_failed_checkpoint_pair(
+    layout: RvcModelPackageLayout,
+    failed_step: int,
+) -> Path | None:
+    if failed_step <= 0:
+        return None
+    pairs = _checkpoint_pairs(layout)
+    if failed_step not in pairs or not any(step != failed_step for step in pairs):
+        return None
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    archive = (
+        layout.model_dir
+        / "training"
+        / "history"
+        / f"rejected-{failed_step}-{stamp}-{uuid.uuid4().hex[:8]}"
+    )
+    archive.mkdir(parents=True, exist_ok=False)
+    moved: list[Path] = []
+    try:
+        for path in pairs[failed_step]:
+            target = archive / path.name
+            shutil.move(str(path), str(target))
+            moved.append(target)
+    except Exception:
+        for target in reversed(moved):
+            shutil.move(str(target), str(layout.experiment_dir / target.name))
+        if archive.is_dir() and not tuple(archive.iterdir()):
+            archive.rmdir()
+        raise
+    return archive
+
+
+def _checkpoint_pairs(layout: RvcModelPackageLayout) -> dict[int, tuple[Path, Path]]:
+    generators: dict[int, Path] = {}
+    discriminators: dict[int, Path] = {}
+    for path in layout.experiment_dir.glob("*.pth"):
+        match = _CHECKPOINT_PATTERN.fullmatch(path.name) if path.is_file() else None
+        if match is None:
+            continue
+        target = generators if match.group("kind").casefold() == "g" else discriminators
+        target[int(match.group("step"))] = path
+    return {
+        step: (generators[step], discriminators[step])
+        for step in generators.keys() & discriminators.keys()
+    }
 
 
 def _backup_final_model(final_model: Path, layout: RvcModelPackageLayout) -> Path | None:

@@ -77,6 +77,7 @@ class RvcTrainingRunTests(unittest.TestCase):
             self.assertEqual(environment["RVC_CUDA_GRAPH"], "0")
             self.assertTrue((layout.root / "configs" / "40k.json").is_file())
             self.assertTrue(result.completed)
+            self.assertEqual(result.state.phase, RvcTrainingPhase.MODEL_READY)
             self.assertEqual(result.inference_model, layout.weights_dir / "voice.pth")
             self.assertEqual(result.state.current_epoch, 20)
             self.assertEqual(progress[-1], 100)
@@ -492,7 +493,7 @@ class RvcTrainingRunTests(unittest.TestCase):
 
             self.assertTrue(result.resumed)
             self.assertEqual(result.state.checkpoint_step, 200)
-            self.assertFalse((layout.experiment_dir / "G_100.pth").exists())
+            self.assertTrue((layout.experiment_dir / "G_100.pth").exists())
 
     def test_resume_checkpoint_load_failure_cannot_fall_back_to_new_training(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -525,6 +526,43 @@ class RvcTrainingRunTests(unittest.TestCase):
             state = RvcTrainingStateStore(model_id, layout).load()
             self.assertEqual(state.phase, RvcTrainingPhase.FAILED)
             self.assertTrue(state.can_resume)
+
+    def test_corrupt_latest_resume_pair_is_quarantined_without_deleting_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_id, layout, runtime = _training_setup(Path(temporary))
+            _checkpoint_pair(layout, 100)
+            _checkpoint_pair(layout, 200)
+            RvcTrainingStateStore(model_id, layout).refresh_checkpoint_pair()
+
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                self.assertTrue((layout.experiment_dir / "G_100.pth").is_file())
+                self.assertTrue((layout.experiment_dir / "G_200.pth").is_file())
+                output_callback(
+                    "JJZERO_CHECKPOINT_LOAD_FAILED "
+                    "file=G_200.pth type=RuntimeError detail=invalid checkpoint"
+                )
+                return CommandResult(args, 1, "", "load failed", cancelled=True)
+
+            with self.assertRaisesRegex(
+                RvcTrainingRunError,
+                "could not restore the saved training checkpoint",
+            ):
+                train_rvc_model(
+                    model_id,
+                    layout,
+                    runtime,
+                    RvcTrainingRunSettings(target_epoch=30),
+                    command_runner=runner,
+                    runtime_inspector=_ready_runtime,
+                )
+
+            state = RvcTrainingStateStore(model_id, layout).load()
+            self.assertEqual(state.checkpoint_step, 100)
+            self.assertTrue(state.can_resume)
+            self.assertTrue((layout.experiment_dir / "G_100.pth").is_file())
+            rejected = layout.model_dir / "training" / "history"
+            self.assertEqual(len(tuple(rejected.rglob("G_200.pth"))), 1)
+            self.assertEqual(len(tuple(rejected.rglob("D_200.pth"))), 1)
 
     def test_incomplete_checkpoint_is_removed_before_training(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

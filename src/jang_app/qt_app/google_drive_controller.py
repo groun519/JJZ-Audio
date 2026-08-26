@@ -65,6 +65,12 @@ class _DriveShareTarget:
     is_model_work: bool = False
 
 
+@dataclass(frozen=True)
+class _DriveShareOutcome:
+    result: GoogleDriveShareResult
+    quota: GoogleDriveQuota | None
+
+
 class GoogleDriveController(QObject):
     account_changed = Signal(object)
     quota_changed = Signal(object)
@@ -319,15 +325,6 @@ class GoogleDriveController(QObject):
         if service is None:
             self.account_unavailable.emit(self._unavailable_reason())
             return
-        existing = self._existing_share(service, target)
-        if existing is not None:
-            QApplication.clipboard().setText(existing.share_link)
-            self.share_succeeded.emit(target.target_id, existing.share_link)
-            return
-        preflight_error = self._preflight_share_error(service, target)
-        if preflight_error:
-            self._report_share_failure(target, preflight_error)
-            return
         self.share_started.emit(target.target_id)
         if service.account is None:
             self._pending_shares[target.target_id] = target
@@ -448,15 +445,9 @@ class GoogleDriveController(QObject):
         self._quota = quota if isinstance(quota, GoogleDriveQuota) else None
         self.account_changed.emit(account)
         self.quota_changed.emit(self._quota)
-        service = self._get_service()
         pending = tuple(self._pending_shares.values())
         self._pending_shares.clear()
         for target in pending:
-            if service is not None:
-                preflight_error = self._preflight_share_error(service, target)
-                if preflight_error:
-                    self._report_share_failure(target, preflight_error)
-                    continue
             self._start_share(target)
         pending_deletes = tuple(self._pending_deletes.values())
         self._pending_deletes.clear()
@@ -497,34 +488,48 @@ class GoogleDriveController(QObject):
         cancellation = Event()
         self._active_shares[target.target_id] = cancellation
 
-        def share(progress: Callable[[int], None]) -> GoogleDriveShareResult:
+        def share(progress: Callable[[int], None]) -> _DriveShareOutcome:
+            if cancellation.is_set():
+                raise GoogleDriveCancelled("Google Drive operation was cancelled.")
+            existing = self._existing_share(service, target)
+            if existing is not None:
+                progress(100)
+                return _DriveShareOutcome(existing, self._quota)
+            progress(3)
+            preflight_error, quota = self._share_preflight(service, target)
+            if preflight_error:
+                raise RuntimeError(preflight_error)
+            progress(8)
             source = target.source
-            upload_start = 0
+            upload_start = 8
             if target.model is not None:
                 if target.is_model_work:
                     package = create_model_work_share_package(
                         self._model_workspace,
                         target.model,
                         self._paths.cache_dir / "model_work_shares" / target.model.model_id,
-                        progress=lambda value: progress(value * 30 // 100),
+                        progress=lambda value: progress(8 + value * 27 // 100),
                         cancelled=cancellation.is_set,
                     )
                 else:
                     package = create_model_share_package(
                         target.model,
                         self._paths.cache_dir / "model_shares" / target.model.model_id,
-                        progress=lambda value: progress(value * 30 // 100),
+                        progress=lambda value: progress(8 + value * 27 // 100),
                         cancelled=cancellation.is_set,
                     )
                 source = package.path
-                upload_start = 30
-            return service.share_file(
-                source,
-                target.category,
-                progress=lambda value: progress(
-                    upload_start + value * (100 - upload_start) // 100
+                upload_start = 35
+            return _DriveShareOutcome(
+                service.share_file(
+                    source,
+                    target.category,
+                    progress=lambda value: progress(
+                        upload_start + value * (100 - upload_start) // 100
+                    ),
+                    cancelled=cancellation.is_set,
                 ),
-                cancelled=cancellation.is_set,
+                quota,
             )
 
         worker = TaskWorker(share)
@@ -580,12 +585,15 @@ class GoogleDriveController(QObject):
     def _on_share_succeeded(self, target: _DriveShareTarget, result: object) -> None:
         if self._active_shares.pop(target.target_id, None) is None:
             return
-        if not isinstance(result, GoogleDriveShareResult):
+        if not isinstance(result, _DriveShareOutcome):
             self.share_failed.emit(target.target_id, "Google Drive returned no share link.")
             return
-        QApplication.clipboard().setText(result.share_link)
+        if result.quota is not None:
+            self._quota = result.quota
+            self.quota_changed.emit(result.quota)
+        QApplication.clipboard().setText(result.result.share_link)
         self.share_progress.emit(target.target_id, 100)
-        self.share_succeeded.emit(target.target_id, result.share_link)
+        self.share_succeeded.emit(target.target_id, result.result.share_link)
 
     def _on_share_failed(self, target: _DriveShareTarget, error: str) -> None:
         if self._active_shares.pop(target.target_id, None) is None:
@@ -657,32 +665,30 @@ class GoogleDriveController(QObject):
         for target_id in target_ids:
             self.share_failed.emit(target_id, reason)
 
-    def _preflight_share_error(
+    def _share_preflight(
         self,
         service: GoogleDriveShareService,
         target: _DriveShareTarget,
-    ) -> str:
+    ) -> tuple[str, GoogleDriveQuota | None]:
         try:
             quota = self._quota
             if quota is None and service.account is not None:
                 if not hasattr(service, "quota"):
-                    return ""
+                    return "", None
                 quota = service.quota()
-                self._quota = quota
-                self.quota_changed.emit(self._quota)
             available_bytes = getattr(quota, "available_bytes", None) if quota is not None else None
             if quota is None or available_bytes is None:
-                return ""
+                return "", quota
             required_bytes = self._estimated_share_size_bytes(target)
         except (
             OSError,
             ModelSharePackageError,
             ModelWorkSharePackageError,
         ) as exc:
-            return _last_error_line(str(exc))
+            return _last_error_line(str(exc)), None
         if required_bytes <= 0 or available_bytes is None or available_bytes >= required_bytes:
-            return ""
-        return _share_storage_message(target, required_bytes, available_bytes)
+            return "", quota
+        return _share_storage_message(target, required_bytes, available_bytes), quota
 
     def _estimated_share_size_bytes(self, target: _DriveShareTarget) -> int:
         if target.model is None:

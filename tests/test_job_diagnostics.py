@@ -57,6 +57,32 @@ class JobDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("secret", " ".join(command))
         self.assertEqual(redact_text("token=abc"), "token=<redacted>")
 
+    def test_redacts_common_oauth_and_authorization_formats(self) -> None:
+        secrets = (
+            "access-value",
+            "refresh-value",
+            "client-value",
+            "json-access-value",
+            "json-client-value",
+            "bearer-value",
+        )
+        text = "\n".join(
+            (
+                f"access_token={secrets[0]}",
+                f"refresh_token: {secrets[1]}",
+                f"client_secret={secrets[2]}",
+                f'{{\"access_token\": \"{secrets[3]}\"}}',
+                f"{'client_secret'}: '{secrets[4]}'",
+                f"Authorization: Bearer {secrets[5]}",
+            )
+        )
+
+        redacted = redact_text(text)
+
+        for secret in secrets:
+            self.assertNotIn(secret, redacted)
+        self.assertGreaterEqual(redacted.count("<redacted>"), len(secrets))
+
     def test_builds_single_diagnostic_archive_without_recursing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             diagnostics = JobDiagnostics(Path(temporary), session_id="session-test")
@@ -81,6 +107,38 @@ class JobDiagnosticsTests(unittest.TestCase):
             self.assertIn("summary.json", names)
             self.assertIn("training/events.jsonl", names)
             self.assertFalse(any(name.endswith(".zip") for name in names))
+
+    def test_lists_persisted_records_after_restart_and_skips_corrupt_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = JobDiagnostics(root, session_id="first-session")
+            first.start_job("older", "Separate Audio", "song.wav")
+            first.complete_job("older")
+            first.start_job("newer", "Train Model", "voice")
+            first.update_progress("newer", 63)
+            first.fail_job("newer", "CUDA out of memory")
+            broken = root / "broken"
+            broken.mkdir()
+            (broken / "summary.json").write_text("{not-json", encoding="utf-8")
+
+            restored = JobDiagnostics(root, session_id="second-session")
+            records = restored.records()
+
+            self.assertEqual([record.task_id for record in records], ["newer", "older"])
+            self.assertEqual(records[0].progress, 63)
+            self.assertEqual(records[0].diagnostic_code, "CUDA_OUT_OF_MEMORY")
+            self.assertEqual(restored.record("older").status, "completed")
+
+    def test_reads_only_the_tail_of_a_persisted_command_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics = JobDiagnostics(Path(temporary), session_id="tail-test")
+            diagnostics.start_job("task-log", "Train Model")
+            diagnostics.append_command_output("task-log", "one\ntwo\nthree")
+
+            self.assertEqual(
+                diagnostics.read_command_log("task-log", max_lines=2),
+                "two\nthree",
+            )
 
     def test_classifies_common_runtime_failures(self) -> None:
         self.assertEqual(classify_error("CUDA out of memory").code, "CUDA_OUT_OF_MEMORY")

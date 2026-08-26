@@ -421,13 +421,13 @@ def _install_imported_package(
         shutil.rmtree(target_model_dir, ignore_errors=True)
         raise
     try:
+        ModelDatasetStore(workspace.root).load(model_id)
         record = _register_imported_record(
             workspace,
             target_model_dir,
             model_payload,
             runtime_root=runtime_root,
         )
-        ModelDatasetStore(workspace.root).load(model_id)
         return record
     except Exception:
         shutil.rmtree(target_model_dir, ignore_errors=True)

@@ -4,8 +4,10 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from jang_app.services.model_dataset import ModelDatasetStore
+from jang_app.services.model_dataset import ModelDatasetError, ModelDatasetStore
 from jang_app.services.model_work_share_package import (
     create_model_work_share_package,
     import_model_work_share_package,
@@ -26,11 +28,12 @@ class ModelWorkSharePackageTests(unittest.TestCase):
             dataset = store.add_sources(record.model_id, (source_audio,))
             dataset = store.select_items(record.model_id, (dataset.items[0].item_id,))
 
-            package = create_model_work_share_package(
-                workspace,
-                record,
-                root / "packages",
-            )
+            with _ample_disk_space():
+                package = create_model_work_share_package(
+                    workspace,
+                    record,
+                    root / "packages",
+                )
 
             imported_workspace = RvcModelWorkspace(root / "imported_workspace")
             imported = import_model_work_share_package(package.path, imported_workspace)
@@ -47,6 +50,49 @@ class ModelWorkSharePackageTests(unittest.TestCase):
                 source_audio.name,
             )
 
+    def test_failed_dataset_validation_does_not_register_ghost_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = RvcModelWorkspace(root / "workspace")
+            record = workspace.create_model("Voice One", root / "runtime")
+            source_audio = root / "voice.wav"
+            _write_test_wav(source_audio)
+            store = ModelDatasetStore(workspace.root)
+            dataset = store.add_sources(record.model_id, (source_audio,))
+            store.select_items(record.model_id, (dataset.items[0].item_id,))
+            with _ample_disk_space():
+                package = create_model_work_share_package(
+                    workspace,
+                    record,
+                    root / "packages",
+                )
+            imported_workspace = RvcModelWorkspace(root / "imported_workspace")
+
+            with patch.object(
+                ModelDatasetStore,
+                "load",
+                side_effect=ModelDatasetError("invalid dataset"),
+            ):
+                with self.assertRaisesRegex(ModelDatasetError, "invalid dataset"):
+                    import_model_work_share_package(
+                        package.path,
+                        imported_workspace,
+                    )
+
+            self.assertEqual(imported_workspace.records(), [])
+            self.assertFalse(
+                (imported_workspace.library_dir / record.model_id).exists()
+            )
+            self.assertFalse(
+                (ModelDatasetStore(imported_workspace.root).root / record.model_id).exists()
+            )
+
+            imported = import_model_work_share_package(
+                package.path,
+                imported_workspace,
+            )
+            self.assertEqual(imported.record.model_id, record.model_id)
+
 
 def _write_test_wav(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,6 +101,13 @@ def _write_test_wav(path: Path) -> None:
         wav_file.setsampwidth(2)
         wav_file.setframerate(16000)
         wav_file.writeframes(b"\x00\x00" * 16000)
+
+
+def _ample_disk_space():
+    return patch(
+        "jang_app.services.model_work_share_package.shutil.disk_usage",
+        return_value=SimpleNamespace(free=10 * 1024**3),
+    )
 
 
 if __name__ == "__main__":

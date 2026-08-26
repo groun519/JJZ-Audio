@@ -316,6 +316,38 @@ class SongExportTests(unittest.TestCase):
 
             self.assertEqual([source.path.name for source in sources], ["vocals.wav"])
 
+    def test_timeline_export_rejects_a_partial_mix_when_audio_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = _package_with_output(Path(temporary))
+            output_id = package.active_output.output_id
+            missing = StudioAssetRef(
+                "missing-output",
+                TRACK_ORIGINAL_VOCAL,
+                "missing.wav",
+            )
+            session = StudioSession(
+                tracks=(
+                    StudioTrack(
+                        "track-vocal",
+                        "Original Vocal",
+                        role=TRACK_ORIGINAL_VOCAL,
+                        clips=(
+                            StudioClip(
+                                "present",
+                                StudioAssetRef(output_id, TRACK_ORIGINAL_VOCAL),
+                                0,
+                                0,
+                                1_000,
+                            ),
+                            StudioClip("missing", missing, 1_000, 0, 1_000),
+                        ),
+                    ),
+                ),
+            )
+
+            with self.assertRaisesRegex(AudioExportError, missing.asset_id):
+                build_song_mix_sources(package, session)
+
 
 def _package_with_output(root: Path):
     source = root / "source.wav"

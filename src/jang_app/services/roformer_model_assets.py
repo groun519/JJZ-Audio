@@ -6,8 +6,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jang_app.services.app_update import ReleaseArtifact, UpdateError, download_artifact
-from jang_app.services.managed_files import write_json_atomic, write_text_atomic
-from jang_app.services.separation_assets import RoFormerModelAssets, roformer_model_assets
+from jang_app.services.managed_files import (
+    managed_path_lock,
+    write_json_atomic,
+    write_text_atomic,
+)
+from jang_app.services.separation_assets import (
+    RoFormerModelAssets,
+    record_roformer_model_files_verified,
+    roformer_model_assets,
+    roformer_model_file_ready,
+    verify_roformer_model_file,
+)
 
 
 ProgressCallback = Callable[[int], None]
@@ -38,7 +48,8 @@ def prepare_roformer_model_assets(
     pending = tuple(
         item
         for item in assets.files
-        if not _file_has_size(root / item.filename, item.size)
+        if not roformer_model_file_ready(root / item.filename, item)
+        and not verify_roformer_model_file(root / item.filename, item)
     )
     total = sum(item.size for item in pending)
     completed = 0
@@ -66,6 +77,7 @@ def prepare_roformer_model_assets(
         ) from exc
 
     runtime_config = _prepare_runtime_config(root, assets)
+    record_roformer_model_files_verified(root, assets.files)
     registry = _update_model_registry(root, assets)
     _report(progress, 100)
     prepared_files = [root / item.filename for item in assets.files]
@@ -106,17 +118,18 @@ def _prepare_runtime_config(root: Path, assets: RoFormerModelAssets) -> Path | N
 
 def _update_model_registry(root: Path, assets: RoFormerModelAssets) -> Path:
     target = root / MODEL_REGISTRY_FILE
-    data = _load_registry(target)
-    downloads = data.setdefault(assets.registry_group, {})
-    if not isinstance(downloads, dict):
-        downloads = {}
-        data[assets.registry_group] = downloads
-    downloads[assets.registry_name] = (
-        assets.model
-        if assets.registry_group == "vr_download_list"
-        else {assets.model: assets.config}
-    )
-    write_json_atomic(target, data)
+    with managed_path_lock(target):
+        data = _load_registry(target)
+        downloads = data.setdefault(assets.registry_group, {})
+        if not isinstance(downloads, dict):
+            downloads = {}
+            data[assets.registry_group] = downloads
+        downloads[assets.registry_name] = (
+            assets.model
+            if assets.registry_group == "vr_download_list"
+            else {assets.model: assets.config}
+        )
+        write_json_atomic(target, data)
     return target
 
 
@@ -138,13 +151,6 @@ def _load_registry(path: Path) -> dict[str, object]:
         if not isinstance(data.get(key), dict):
             data[key] = {}
     return data
-
-
-def _file_has_size(path: Path, expected_size: int) -> bool:
-    try:
-        return path.is_file() and path.stat().st_size == expected_size
-    except OSError:
-        return False
 
 
 def _report(progress: ProgressCallback | None, value: int) -> None:

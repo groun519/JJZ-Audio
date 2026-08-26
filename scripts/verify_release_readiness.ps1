@@ -1,7 +1,4 @@
-param(
-    [switch]$AllowUnsigned,
-    [switch]$SkipTests
-)
+param([switch]$SkipTests)
 
 $ErrorActionPreference = "Stop"
 
@@ -25,6 +22,18 @@ try {
     }
 
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $headRevision = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
+    $provenancePath = Join-Path $distribution "build-provenance.json"
+    if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) {
+        throw "Application build provenance is missing: $provenancePath"
+    }
+    $provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
+    if ([string]$manifest.source_revision -ne $headRevision -or
+        [string]$provenance.source_revision -ne $headRevision -or
+        [string]$provenance.version -ne [string]$manifest.version -or
+        $provenance.source_dirty -ne $false) {
+        throw "Release artifacts do not match the clean current source revision."
+    }
     $componentIds = @($manifest.components | Select-Object -ExpandProperty id)
     foreach ($requiredProfile in @("cu128", "directml", "rocm-win")) {
         $componentId = "rvc-runtime-$requiredProfile"
@@ -34,23 +43,44 @@ try {
     }
     $application = $manifest.components | Where-Object { $_.id -eq "application" }
     $installer = $application.artifacts | Select-Object -First 1
-    if (-not $AllowUnsigned -and -not $installer.authenticode.required) {
+    if (-not $installer.authenticode.required) {
         throw "Public releases require Authenticode metadata. Rebuild with -RequireCodeSigning."
     }
 
-    if (-not $AllowUnsigned) {
-        $publisher = [string]$installer.authenticode.publisher
-        foreach ($path in @(
-            (Join-Path $distribution "JJZero Audio.exe"),
-            (Join-Path $releaseDir $installer.name)
+    $publisher = [string]$installer.authenticode.publisher
+    $expectedCertificateSha256 = [string]$installer.authenticode.certificate_sha256
+    if ($expectedCertificateSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "Application certificate SHA-256 is missing from the manifest."
+    }
+    foreach ($path in @(
+        (Join-Path $distribution "JJZero Audio.exe"),
+        (Join-Path $releaseDir $installer.name)
+    )) {
+        $signature = Get-AuthenticodeSignature -LiteralPath $path
+        if ($signature.Status -ne "Valid") {
+            throw "Invalid Authenticode signature: $path ($($signature.Status))"
+        }
+        $subject = [string]$signature.SignerCertificate.Subject
+        $simpleName = [string]$signature.SignerCertificate.GetNameInfo("SimpleName", $false)
+        if (-not [String]::Equals($subject, $publisher, [StringComparison]::OrdinalIgnoreCase) -and
+            -not [String]::Equals($simpleName, $publisher, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Unexpected Authenticode publisher: $path"
+        }
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $actualCertificateSha256 = (($sha256.ComputeHash(
+                $signature.SignerCertificate.RawData
+            ) | ForEach-Object { $_.ToString("x2") }) -join "")
+        }
+        finally {
+            $sha256.Dispose()
+        }
+        if (-not [String]::Equals(
+            $actualCertificateSha256,
+            $expectedCertificateSha256,
+            [StringComparison]::OrdinalIgnoreCase
         )) {
-            $signature = Get-AuthenticodeSignature -LiteralPath $path
-            if ($signature.Status -ne "Valid") {
-                throw "Invalid Authenticode signature: $path ($($signature.Status))"
-            }
-            if (-not $signature.SignerCertificate.Subject.Contains($publisher)) {
-                throw "Unexpected Authenticode publisher: $path"
-            }
+            throw "Unexpected Authenticode certificate: $path"
         }
     }
 }

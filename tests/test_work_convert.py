@@ -85,6 +85,58 @@ class WorkConvertSessionTests(unittest.TestCase):
         self.assertIsNone(context.selected_converted_path)
         self.assertIs(context.result_version, version)
 
+    def test_refresh_preserves_an_explicitly_cleared_converted_selection(self) -> None:
+        converted = (Path("output/maximum/rvc.wav"),)
+        version = _version("maximum", converted, active=converted[0])
+        session = WorkConvertSession()
+        session.refresh((version,), current_output_job_dir=version.job_dir)
+        session.select_input_job_dir(
+            version.job_dir,
+            clear_selected_converted=True,
+        )
+
+        context = session.refresh(
+            (version,),
+            current_output_job_dir=version.job_dir,
+        )
+
+        self.assertIsNone(context.selected_converted_path)
+        self.assertIs(context.result_version, version)
+
+    def test_adding_a_result_does_not_restore_a_cleared_conversion(self) -> None:
+        converted = (Path("output/maximum/rvc.wav"),)
+        maximum = _version("maximum", converted, active=converted[0])
+        precision = _version("precision")
+        session = WorkConvertSession()
+        session.refresh((maximum,), current_output_job_dir=maximum.job_dir)
+        session.select_input_job_dir(
+            maximum.job_dir,
+            clear_selected_converted=True,
+        )
+
+        context = session.refresh(
+            (maximum, precision),
+            current_output_job_dir=precision.job_dir,
+        )
+
+        self.assertIsNone(context.selected_converted_path)
+
+    def test_switching_to_another_song_can_select_its_active_conversion(self) -> None:
+        first_path = Path("output/first/rvc.wav")
+        second_path = Path("output/second/rvc.wav")
+        first = _version("first", (first_path,), active=first_path)
+        second = _version("second", (second_path,), active=second_path)
+        session = WorkConvertSession()
+        session.refresh((first,), current_output_job_dir=first.job_dir)
+        session.select_input_job_dir(
+            first.job_dir,
+            clear_selected_converted=True,
+        )
+
+        context = session.refresh((second,), current_output_job_dir=second.job_dir)
+
+        self.assertEqual(context.selected_converted_path, second_path)
+
     def test_job_dir_for_converted_path_prefers_owner_over_fallback(self) -> None:
         standard = _version("standard")
         converted = Path("output/maximum/rvc.wav")

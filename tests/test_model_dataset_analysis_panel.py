@@ -179,6 +179,19 @@ class ModelDatasetAnalysisPanelTests(unittest.TestCase):
         finally:
             self.app.removeEventFilter(probe)
 
+    def test_stale_failure_does_not_replace_new_model_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            panel = ModelDatasetAnalysisPanel(ModelDatasetStore(Path(temporary)))
+            panel.set_model("model-a")
+            generation = panel._operation_generation
+            panel.set_model("model-b")
+            expected = panel.status_label.text()
+
+            panel._analysis_failed("model-a", generation, "RuntimeError: old failure")
+
+            self.assertEqual(panel.status_label.text(), expected)
+            panel.close()
+
 
 def _tone(path: Path) -> Path:
     sample_rate = 16_000

@@ -9,9 +9,11 @@ from jang_app.services.app_paths import AppPaths
 from jang_app.services.data_migrations import run_data_migrations
 from jang_app.services.initial_setup import persist_storage_layout, promote_storage_layout
 from jang_app.services.managed_files import copy_file_atomic, write_json_atomic
+from jang_app.services.managed_transaction import recover_workspace_transactions
 from jang_app.services.rvc_runtime_repair import repair_rvc_runtime_adapter
 from jang_app.services.storage_migration import recover_storage_migrations
 from jang_app.services.update_cache import cleanup_completed_updates
+from jang_app.services.update_transaction import apply_pending_component_updates
 from jang_app.version import __version__
 
 
@@ -46,6 +48,30 @@ def prepare_app_environment(paths: AppPaths | None = None) -> AppBootstrapResult
         paths.output_root / "separations",
     ):
         directory.mkdir(parents=True, exist_ok=True)
+
+    applied_updates = apply_pending_component_updates(paths)
+    if applied_updates:
+        _LOGGER.info(
+            "Pending runtime component update committed | count=%s | version=%s",
+            len(applied_updates),
+            __version__,
+        )
+
+    transaction_recovery = recover_workspace_transactions(paths.workspace_root)
+    failed_recoveries = tuple(
+        report for report in transaction_recovery if report.action == "failed"
+    )
+    if failed_recoveries:
+        _LOGGER.error(
+            "Managed transaction recovery incomplete | recovered=%s | failed=%s",
+            len(transaction_recovery) - len(failed_recoveries),
+            len(failed_recoveries),
+        )
+    elif transaction_recovery:
+        _LOGGER.warning(
+            "Recovered interrupted managed transactions: %s",
+            len(transaction_recovery),
+        )
 
     _cleanup_update_cache(paths)
 

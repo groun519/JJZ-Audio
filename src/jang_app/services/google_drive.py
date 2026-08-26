@@ -118,6 +118,30 @@ class GoogleDriveClient:
         progress: Callable[[int], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> GoogleDriveFile:
+        uploaded = self.upload_file(
+            source,
+            category,
+            progress=progress,
+            cancelled=cancelled,
+        )
+        try:
+            return self.publish_file(uploaded.file_id)
+        except BaseException:
+            try:
+                self.delete_file(uploaded.file_id)
+            except Exception:
+                pass
+            raise
+
+    def upload_file(
+        self,
+        source: Path,
+        category: str,
+        *,
+        progress: Callable[[int], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        uploaded: Callable[[GoogleDriveFile], None] | None = None,
+    ) -> GoogleDriveFile:
         source = source.expanduser().resolve()
         if not source.is_file():
             raise GoogleDriveError(f"File not found: {source}")
@@ -132,8 +156,23 @@ class GoogleDriveClient:
         root_id = self._ensure_folder(DRIVE_ROOT_FOLDER, "root")
         parent_id = self._ensure_folder(category_name, root_id)
         file = self._resumable_upload(source, parent_id, progress, cancelled)
-        self._create_public_reader_permission(file.file_id)
-        return self._get_file(file.file_id)
+        if uploaded is not None:
+            try:
+                uploaded(file)
+            except BaseException:
+                try:
+                    self.delete_file(file.file_id)
+                except Exception:
+                    pass
+                raise
+        return file
+
+    def publish_file(self, file_id: str) -> GoogleDriveFile:
+        normalized_id = file_id.strip()
+        if not normalized_id:
+            raise GoogleDriveError("Google Drive file ID is missing.")
+        self._create_public_reader_permission(normalized_id)
+        return self._get_file(normalized_id)
 
     def delete_file(self, file_id: str) -> None:
         normalized_id = file_id.strip()

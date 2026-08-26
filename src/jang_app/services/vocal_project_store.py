@@ -17,6 +17,7 @@ from jang_app.services.vocal_project import (
     UNASSIGNED_SPEAKER_ID,
     VOCAL_PROJECT_SCHEMA_VERSION,
     VocalConversionSettings,
+    VocalInputProvenance,
     VocalProject,
     VocalProjectValidationError,
     VocalSegment,
@@ -419,6 +420,18 @@ def _conversion_to_data(conversion: VocalConversionSettings) -> dict[str, object
         "requested_device": conversion.requested_device,
         "effective_device": conversion.effective_device,
         "f0_method": conversion.f0_method,
+        **(
+            {
+                "input_source": {
+                    "kind": conversion.input_source.kind,
+                    "path": conversion.input_source.relative_path,
+                    "source_id": conversion.input_source.source_id,
+                    "label": conversion.input_source.label,
+                }
+            }
+            if conversion.input_source is not None
+            else {}
+        ),
         "inference": {
             "index_rate": conversion.inference.index_rate,
             "filter_radius": conversion.inference.filter_radius,
@@ -432,6 +445,16 @@ def _conversion_from_data(value: object) -> VocalConversionSettings | None:
     if value is None:
         return None
     data = _mapping(value, "take conversion")
+    source_data = data.get("input_source")
+    input_source = None
+    if source_data is not None:
+        source = _mapping(source_data, "conversion input source")
+        input_source = VocalInputProvenance(
+            kind=_text(source.get("kind"), "conversion input kind"),
+            relative_path=_text(source.get("path"), "conversion input path"),
+            source_id=_text(source.get("source_id"), "conversion input ID"),
+            label=_text(source.get("label"), "conversion input label"),
+        )
     return VocalConversionSettings(
         voice_model=_text(data.get("voice_model"), "conversion model"),
         index_file=_optional_text(data.get("index_file"), "conversion index"),
@@ -440,6 +463,7 @@ def _conversion_from_data(value: object) -> VocalConversionSettings | None:
         effective_device=_text(data.get("effective_device"), "conversion effective device"),
         f0_method=_text(data.get("f0_method"), "conversion F0 method"),
         inference=rvc_inference_settings_from_data(data.get("inference")),
+        input_source=input_source,
     )
 
 

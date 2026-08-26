@@ -53,10 +53,11 @@ The referenced release must contain every runtime component required by the gene
 
 ## Local Verification Build
 
-Unsigned artifacts are acceptable for local verification only:
+Unsigned artifacts can be inspected locally, but they cannot pass the public release
+gate or be offered by automatic update:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1 -AllowUnsigned
+.venv\Scripts\python.exe scripts\verify_distribution.py "dist\JJZero Audio"
 ```
 
 Public build requirements and publishing steps are documented in [Releasing](RELEASING.md).

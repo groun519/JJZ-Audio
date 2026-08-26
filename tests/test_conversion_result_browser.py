@@ -77,6 +77,22 @@ class ConversionResultBrowserTests(unittest.TestCase):
         self.assertEqual(panel.count_label.text(), "0")
         panel.close()
 
+    def test_refresh_can_keep_the_rvc_pool_without_an_active_selection(self) -> None:
+        converted = Path("converted.wav")
+        version = _version("maximum", (converted,), converted)
+        panel = ConversionResultBrowser()
+        panel.set_result(version)
+
+        panel.set_versions(
+            (version,),
+            preferred_path=None,
+            select_default=False,
+        )
+
+        self.assertIsNone(panel.selected_path())
+        self.assertFalse(panel.cards[converted.resolve()].property("selected"))
+        panel.close()
+
     def test_pool_header_uses_section_title_style(self) -> None:
         panel = ConversionResultBrowser()
 

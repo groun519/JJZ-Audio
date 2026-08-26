@@ -46,6 +46,7 @@ class VocalCleanupProject:
     source_fingerprint: str
     regions: tuple[VocalCleanupRegion, ...] = ()
     results: tuple[VocalCleanupResult, ...] = ()
+    next_result_number: int = 1
 
     def region(self, region_id: str) -> VocalCleanupRegion | None:
         return next((item for item in self.regions if item.region_id == region_id), None)

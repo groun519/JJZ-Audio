@@ -9,9 +9,14 @@ import numpy as np
 import soundfile as sf
 
 from jang_app.services.audio_export import AudioMixSource
-from jang_app.services.studio_realtime_audio import prepare_studio_playback_audio
+from jang_app.services.audio_mix_processing import process_mix_source
+from jang_app.services.studio_realtime_audio import (
+    prepare_studio_playback_audio,
+    read_playback_audio,
+)
 from jang_app.services.studio_session import (
     StudioDelaySettings,
+    StudioDistortionSettings,
     StudioEffect,
     StudioLevelMatchSettings,
     StudioReverbSettings,
@@ -62,10 +67,44 @@ class StudioRealtimeAudioTests(unittest.TestCase):
 
             prepared = prepare_studio_playback_audio((source,))
 
-            self.assertEqual(prepared.tracks[0].shape[0], 13_230)
-            self.assertTrue(np.allclose(prepared.tracks[0][:4_410], 0.0))
-            self.assertEqual(prepared.effect_chains, ((effect,),))
-            self.assertGreater(prepared.duration_ms, 1_000)
+            source_audio = np.ones((8_820, 2), dtype=np.float32) * 0.25
+            expected = process_mix_source(
+                source_audio,
+                44_100,
+                effects=(effect,),
+            )
+
+            self.assertEqual(prepared.tracks[0].shape, expected.shape)
+            self.assertTrue(np.allclose(prepared.tracks[0], expected, atol=1e-5))
+            self.assertEqual(prepared.track_start_frames, (4_410,))
+            self.assertGreater(prepared.track_effect_end_frames[0], 13_230)
+            self.assertEqual(prepared.effect_chains, ((),))
+            self.assertGreater(prepared.duration_ms, 700)
+
+    def test_split_clips_share_one_decoded_source_without_leading_zero_padding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "voice.wav"
+            sf.write(path, np.ones((44_100, 2), dtype=np.float32) * 0.25, 44_100)
+            sources = tuple(
+                AudioMixSource(
+                    f"Clip {index}",
+                    path,
+                    timeline_start_ms=index * 200,
+                    source_start_ms=index * 100,
+                    source_end_ms=(index + 1) * 100,
+                )
+                for index in range(8)
+            )
+
+            with patch(
+                "jang_app.services.studio_realtime_audio.read_playback_audio",
+                wraps=read_playback_audio,
+            ) as read_audio:
+                prepared = prepare_studio_playback_audio(sources)
+
+            self.assertEqual(read_audio.call_count, 1)
+            self.assertEqual(prepared.track_start_frames, tuple(index * 8_820 for index in range(8)))
+            self.assertTrue(all(track.shape[0] == 4_410 for track in prepared.tracks))
 
     def test_level_match_is_baked_into_preview_and_removed_from_live_chain(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -92,7 +131,7 @@ class StudioRealtimeAudioTests(unittest.TestCase):
             self.assertAlmostEqual(float(np.mean(prepared.tracks[0])), 0.4, places=2)
             self.assertEqual(prepared.effect_chains, ((),))
 
-    def test_delay_stays_live_and_extends_the_preview_duration(self) -> None:
+    def test_delay_is_baked_and_extends_the_preview_duration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "voice.wav"
             sf.write(path, np.ones((44_100, 2), dtype=np.float32) * 0.25, 44_100)
@@ -110,8 +149,56 @@ class StudioRealtimeAudioTests(unittest.TestCase):
 
             prepared = prepare_studio_playback_audio((source,))
 
-            self.assertEqual(prepared.effect_chains, ((effect,),))
+            self.assertEqual(prepared.effect_chains, ((),))
             self.assertGreater(prepared.duration_ms, 2_000)
+
+    def test_preview_matches_export_volume_and_effect_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "voice.wav"
+            frames = np.arange(44_100, dtype=np.float32)
+            signal = (0.35 * np.sin(frames * 2 * np.pi * 220 / 44_100))[:, None]
+            stereo = np.repeat(signal, 2, axis=1)
+            sf.write(path, stereo, 44_100)
+            distortion = StudioEffect(
+                "fx-distortion",
+                "distortion",
+                distortion=StudioDistortionSettings(70, 65),
+            )
+            reverb = StudioEffect(
+                "fx-reverb",
+                "reverb",
+                reverb=StudioReverbSettings(decay_ms=300, dry_wet_percent=45),
+            )
+            decoded = read_playback_audio(path)
+            prepared_tracks = []
+            expected_tracks = []
+            for effects in ((distortion, reverb), (reverb, distortion)):
+                source = AudioMixSource(
+                    "Vocal",
+                    path,
+                    volume=0.4,
+                    source_end_ms=1_000,
+                    effects=effects,
+                )
+                prepared = prepare_studio_playback_audio((source,))
+                expected = process_mix_source(
+                    decoded,
+                    44_100,
+                    volume=0.4,
+                    effects=effects,
+                )
+                prepared_tracks.append(prepared.tracks[0])
+                expected_tracks.append(expected)
+                self.assertTrue(np.allclose(prepared.tracks[0], expected, atol=1e-5))
+                self.assertEqual(prepared.effect_chains, ((),))
+
+            common = min(track.shape[0] for track in prepared_tracks)
+            self.assertGreater(
+                float(np.mean(np.abs(
+                    prepared_tracks[0][:common] - prepared_tracks[1][:common]
+                ))),
+                1e-5,
+            )
 
 
 if __name__ == "__main__":

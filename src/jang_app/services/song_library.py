@@ -38,7 +38,11 @@ from jang_app.services.song_export import (
     render_studio_preview,
     song_audio_export_dir,
 )
-from jang_app.services.studio_assets import StudioSoundAsset, studio_sound_pool
+from jang_app.services.studio_assets import (
+    StudioSoundAsset,
+    missing_studio_asset_ids,
+    studio_sound_pool,
+)
 from jang_app.services.studio_project import (
     StudioProjectRecoveryNotice,
     StudioProjectRevision,
@@ -47,7 +51,6 @@ from jang_app.services.studio_project import (
     load_studio_project_view_state,
     save_studio_project_view_state,
     restore_studio_project_revision,
-    studio_project_missing_asset_ids,
     studio_project_revisions,
 )
 from jang_app.services.studio_session import (
@@ -293,10 +296,11 @@ class SongLibrary:
     def studio_workspace(self, item_id: str) -> StudioWorkspaceSnapshot:
         package = self._store.require(item_id)
         assets = studio_sound_pool(package)
+        session = load_package_studio_session(package, assets=assets)
         return StudioWorkspaceSnapshot(
-            load_package_studio_session(package, assets=assets),
+            session,
             assets,
-            studio_project_missing_asset_ids(package),
+            missing_studio_asset_ids(session, assets),
         )
 
     def studio_mix_sources(

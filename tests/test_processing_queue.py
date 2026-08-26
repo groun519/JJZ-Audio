@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.job_diagnostics import JobDiagnostics
 from jang_app.services.processing_queue import (
@@ -80,6 +81,41 @@ class ProcessingQueueTests(unittest.TestCase):
 
         self.assertEqual(snapshots, [(0, 0), (1, 1), (1, 1), (1, 0)])
 
+    def test_unchanged_progress_and_detail_do_not_notify_or_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics = JobDiagnostics(Path(temporary), session_id="queue-test")
+            queue = ProcessingQueue(diagnostics=diagnostics)
+            snapshots: list[tuple[object, ...]] = []
+            queue.subscribe(snapshots.append)
+            task_id = queue.start("Train Model", "Training", progress=32)
+
+            with (
+                patch.object(diagnostics, "update_progress") as update_progress,
+                patch.object(diagnostics, "update_detail") as update_detail,
+            ):
+                queue.update_progress(task_id, 32)
+                queue.update_detail(task_id, "Training")
+
+            self.assertEqual(len(snapshots), 2)
+            update_progress.assert_not_called()
+            update_detail.assert_not_called()
+
+    def test_listener_failure_does_not_escape_or_block_other_listeners(self) -> None:
+        queue = ProcessingQueue()
+        snapshots: list[tuple[object, ...]] = []
+
+        def failing_listener(_tasks: tuple[object, ...]) -> None:
+            raise RuntimeError("dead UI listener")
+
+        with patch("jang_app.services.processing_queue.get_logger") as logger:
+            queue.subscribe(failing_listener)
+            queue.subscribe(snapshots.append)
+            task_id = queue.start("Download")
+
+        self.assertEqual(queue.tasks()[0].task_id, task_id)
+        self.assertEqual(len(snapshots), 2)
+        self.assertGreaterEqual(logger.return_value.exception.call_count, 2)
+
     def test_connects_failure_to_job_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             diagnostics = JobDiagnostics(Path(temporary), session_id="queue-test")
@@ -92,6 +128,18 @@ class ProcessingQueueTests(unittest.TestCase):
             self.assertEqual(task.diagnostic_code, "CUDA_OUT_OF_MEMORY")
             self.assertEqual(task.diagnostic_path, Path(temporary) / task_id)
             self.assertTrue((task.diagnostic_path / "summary.json").is_file())
+
+    def test_idle_action_is_atomic_with_task_registration(self) -> None:
+        queue = ProcessingQueue()
+        actions: list[str] = []
+
+        self.assertTrue(queue.run_if_idle(lambda: actions.append("idle")))
+        task_id = queue.start("Convert Vocal")
+        self.assertFalse(queue.run_if_idle(lambda: actions.append("unsafe")))
+        queue.complete(task_id)
+        self.assertTrue(queue.run_if_idle(lambda: actions.append("idle-again")))
+
+        self.assertEqual(actions, ["idle", "idle-again"])
 
 
 if __name__ == "__main__":

@@ -193,13 +193,21 @@ class GoogleDriveControllerTests(unittest.TestCase):
             source = root / "mix.wav"
             source.write_bytes(b"audio" * 256)
             workers: list[object] = []
+
+            def run_worker(worker, on_success, on_failed, _action, **_kwargs):
+                workers.append(worker)
+                try:
+                    on_success(worker._task(worker.progress_changed.emit))
+                except Exception as exc:
+                    on_failed(str(exc))
+
             parent = QWidget()
             controller = GoogleDriveController(
                 parent,
                 paths=SimpleNamespace(cache_dir=root / "cache"),
                 oauth_asset=root / "oauth.json",
                 model_workspace=RvcModelWorkspace(root / "models"),
-                run_worker=lambda worker, *_args, **_kwargs: workers.append(worker),
+                run_worker=run_worker,
                 model_status=lambda _message: None,
                 models_imported=lambda _records: None,
                 logger=logging.getLogger("test.google-drive"),
@@ -218,8 +226,8 @@ class GoogleDriveControllerTests(unittest.TestCase):
 
             controller.open_export_share(source)
 
-            self.assertEqual(workers, [])
-            self.assertEqual(started.count(), 0)
+            self.assertEqual(len(workers), 1)
+            self.assertEqual(started.count(), 1)
             self.assertEqual(failed.count(), 1)
             self.assertEqual(failed.at(0)[0], drive_share_target_id(source))
             self.assertIn("용량", failed.at(0)[1])
@@ -285,7 +293,7 @@ class GoogleDriveControllerTests(unittest.TestCase):
             self.assertEqual(controller._active_shares, {})
             parent.close()
 
-    def test_existing_export_share_copies_without_creating_worker(self) -> None:
+    def test_existing_export_share_is_resolved_in_worker_and_copies_link(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "mix.wav"
@@ -308,7 +316,10 @@ class GoogleDriveControllerTests(unittest.TestCase):
                 paths=SimpleNamespace(cache_dir=root / "cache"),
                 oauth_asset=root / "oauth.json",
                 model_workspace=RvcModelWorkspace(root / "models"),
-                run_worker=lambda worker, *_args, **_kwargs: workers.append(worker),
+                run_worker=lambda worker, on_success, on_failed, _action, **_kwargs: (
+                    workers.append(worker),
+                    on_success(worker._task(worker.progress_changed.emit)),
+                ),
                 model_status=lambda _message: None,
                 models_imported=lambda _records: None,
                 logger=logging.getLogger("test.google-drive"),
@@ -324,13 +335,13 @@ class GoogleDriveControllerTests(unittest.TestCase):
 
             controller.open_export_share(source)
 
-            self.assertEqual(workers, [])
-            self.assertEqual(started.count(), 0)
+            self.assertEqual(len(workers), 1)
+            self.assertEqual(started.count(), 1)
             self.assertEqual(succeeded.at(0), [drive_share_target_id(source), link])
             self.assertEqual(QApplication.clipboard().text(), link)
             parent.close()
 
-    def test_existing_model_share_skips_packaging_and_worker(self) -> None:
+    def test_existing_model_share_skips_packaging_inside_worker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             model = root / "voice.pth"
@@ -360,7 +371,10 @@ class GoogleDriveControllerTests(unittest.TestCase):
                 paths=SimpleNamespace(cache_dir=cache_dir),
                 oauth_asset=root / "oauth.json",
                 model_workspace=workspace,
-                run_worker=lambda worker, *_args, **_kwargs: workers.append(worker),
+                run_worker=lambda worker, on_success, on_failed, _action, **_kwargs: (
+                    workers.append(worker),
+                    on_success(worker._task(worker.progress_changed.emit)),
+                ),
                 model_status=lambda _message: None,
                 models_imported=lambda _records: None,
                 logger=logging.getLogger("test.google-drive"),
@@ -377,9 +391,60 @@ class GoogleDriveControllerTests(unittest.TestCase):
 
             controller.open_model_share(model_record)
 
-            self.assertEqual(workers, [])
-            self.assertEqual(started.count(), 0)
+            self.assertEqual(len(workers), 1)
+            self.assertEqual(started.count(), 1)
             self.assertEqual(QApplication.clipboard().text(), link)
+            parent.close()
+
+    def test_share_quota_preflight_is_deferred_to_the_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "mix.wav"
+            source.write_bytes(b"audio")
+            quota_calls: list[bool] = []
+            workers: list[object] = []
+            record = DriveShareRecord(
+                source_path=str(source.resolve()),
+                source_size=source.stat().st_size,
+                source_modified_ns=source.stat().st_mtime_ns,
+                category="exports",
+                file_id="deferred",
+                file_name=source.name,
+                share_link="https://drive.google.com/file/d/deferred/view",
+                shared_at="2026-08-07T00:00:00+00:00",
+            )
+            parent = QWidget()
+            controller = GoogleDriveController(
+                parent,
+                paths=SimpleNamespace(cache_dir=root / "cache"),
+                oauth_asset=root / "oauth.json",
+                model_workspace=RvcModelWorkspace(root / "models"),
+                run_worker=lambda worker, *_args, **_kwargs: workers.append(worker),
+                model_status=lambda _message: None,
+                models_imported=lambda _records: None,
+                logger=logging.getLogger("test.google-drive"),
+            )
+            controller._service = SimpleNamespace(
+                account=SimpleNamespace(email="user@example.com"),
+                existing_share=lambda _source, _category: None,
+                quota=lambda: quota_calls.append(True) or GoogleDriveQuota(
+                    limit_bytes=100,
+                    usage_bytes=0,
+                    drive_usage_bytes=0,
+                ),
+                share_file=lambda _source, _category, **kwargs: _share_result(
+                    kwargs["progress"], record
+                ),
+            )
+            started = QSignalSpy(controller.share_started)
+
+            controller.open_export_share(source)
+
+            self.assertEqual(started.count(), 1)
+            self.assertEqual(len(workers), 1)
+            self.assertEqual(quota_calls, [])
+            workers[0]._task(workers[0].progress_changed.emit)
+            self.assertEqual(quota_calls, [True])
             parent.close()
 
     def test_delete_export_share_runs_remote_delete_and_emits_deleted_state(self) -> None:

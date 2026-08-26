@@ -25,8 +25,8 @@ if TYPE_CHECKING:
     from jang_app.services.studio_assets import StudioSoundAsset
 
 
-STUDIO_SESSION_VERSION = 11
-STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10}
+STUDIO_SESSION_VERSION = 12
+STUDIO_SESSION_PREVIOUS_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
 STUDIO_SESSION_LEGACY_VERSION = 1
 STUDIO_SESSION_NAME = "session.json"
 STUDIO_SESSION_HISTORY_DIR = ".history"
@@ -231,6 +231,7 @@ class StudioTrack:
     pan_percent: int = 0
     collapsed: bool = False
     clips: tuple[StudioClip, ...] = ()
+    auto_seeded: bool = False
 
     @property
     def state(self) -> StudioTrackState:
@@ -267,7 +268,11 @@ def load_studio_session(
     assets = _studio_assets(package, assets)
     path = studio_session_path(package)
     if not path.is_file():
-        return _session_with_default_tracks(package, StudioSession(), assets)
+        return _finalize_loaded_session(
+            package,
+            _session_with_default_tracks(package, StudioSession(), assets),
+            assets,
+        )
     data = _read_session_data(path, package.song_id)
     data, project_recovery = recover_studio_project_session(package, data)
     if project_recovery.recovered:
@@ -285,25 +290,45 @@ def load_studio_session(
                 package.song_id,
             )
     if data is None:
-        return _session_with_default_tracks(package, StudioSession(), assets)
+        return _finalize_loaded_session(
+            package,
+            _session_with_default_tracks(package, StudioSession(), assets),
+            assets,
+        )
 
     version = data.get("version")
     if version == STUDIO_SESSION_LEGACY_VERSION:
         legacy = _legacy_session_from_data(data)
-        return _session_with_default_tracks(package, legacy, assets)
+        return _finalize_loaded_session(
+            package,
+            _session_with_default_tracks(package, legacy, assets),
+            assets,
+        )
     if version not in (*STUDIO_SESSION_PREVIOUS_VERSIONS, STUDIO_SESSION_VERSION):
-        return _session_with_default_tracks(package, StudioSession(), assets)
+        return _finalize_loaded_session(
+            package,
+            _session_with_default_tracks(package, StudioSession(), assets),
+            assets,
+        )
 
     tracks = _tracks_from_data(data.get("tracks"))
     if not tracks:
-        return _session_with_default_tracks(
+        return _finalize_loaded_session(
             package,
-            StudioSession(updated_at=str(data.get("updated_at", ""))),
+            _session_with_default_tracks(
+                package,
+                StudioSession(updated_at=str(data.get("updated_at", ""))),
+                assets,
+            ),
             assets,
         )
-    return _session_with_required_tracks(
+    return _finalize_loaded_session(
         package,
-        _session_from_tracks(tracks, updated_at=str(data.get("updated_at", ""))),
+        _session_with_required_tracks(
+            package,
+            _session_from_tracks(tracks, updated_at=str(data.get("updated_at", ""))),
+            assets,
+        ),
         assets,
     )
 
@@ -323,13 +348,15 @@ def save_studio_session(
         "updated_at": normalized.updated_at,
         "tracks": [_track_to_data(track) for track in normalized.tracks],
     }
-    save_studio_project_assets(package, resolved_assets, payload)
     previous = _read_session_data(path, package.song_id) if path.is_file() else None
     if previous is not None and previous.get("tracks") == payload["tracks"]:
+        _refresh_studio_assets_manifest(package, resolved_assets, payload)
         return path
     if previous is not None:
         _archive_session_data(package, previous)
-    return commit_studio_project_session(package, payload)
+    committed = commit_studio_project_session(package, payload)
+    _refresh_studio_assets_manifest(package, resolved_assets, payload)
+    return committed
 
 
 def studio_session_path(package: SongPackage) -> Path:
@@ -427,16 +454,32 @@ def _session_with_required_tracks(
     if not default_tracks:
         return _with_video_track(package, session, assets)
 
-    existing_roles = {track.role for track in session.tracks}
+    defaults_by_role = {track.role: track for track in default_tracks}
+    reconciled = tuple(
+        replace(track, clips=defaults_by_role[track.role].clips)
+        if (
+            track.role in defaults_by_role
+            and track.auto_seeded
+            and not track.clips
+            and defaults_by_role[track.role].clips
+        )
+        else track
+        for track in session.tracks
+    )
+    existing_roles = {track.role for track in reconciled}
     missing_tracks = tuple(
         track for track in default_tracks if track.role not in existing_roles
     )
     if not missing_tracks:
-        return _with_video_track(package, session, assets)
+        return _with_video_track(
+            package,
+            _session_from_tracks(reconciled, updated_at=session.updated_at),
+            assets,
+        )
     return _with_video_track(
         package,
         _session_from_tracks(
-            (*session.tracks, *missing_tracks),
+            (*reconciled, *missing_tracks),
             updated_at=session.updated_at,
         ),
         assets,
@@ -533,6 +576,16 @@ def _track_from_data(value: object, seen_clip_ids: set[str]) -> StudioTrack | No
         pan_percent=_pan_percent(value.get("pan_percent")),
         collapsed=value.get("collapsed") is True,
         clips=tuple(sorted(clips, key=lambda clip: (clip.timeline_start_ms, clip.clip_id))),
+        auto_seeded=(
+            value.get("auto_seeded") is True
+            if isinstance(value.get("auto_seeded"), bool)
+            else role in {
+                TRACK_ORIGINAL_VOCAL,
+                TRACK_INSTRUMENTAL,
+                TRACK_CONVERTED_VOCAL,
+            }
+            and track_id == f"track-{role.replace('_', '-')}"
+        ),
     )
 
 
@@ -593,6 +646,7 @@ def _normalize_track(track: StudioTrack) -> StudioTrack:
         pan_percent=_pan_percent(track.pan_percent),
         collapsed=bool(track.collapsed),
         clips=tuple(sorted(clips, key=lambda clip: (clip.timeline_start_ms, clip.clip_id))),
+        auto_seeded=bool(track.auto_seeded),
     )
 
 
@@ -633,8 +687,39 @@ def _track_to_data(track: StudioTrack) -> dict[str, object]:
         "volume_percent": track.volume_percent,
         "pan_percent": track.pan_percent,
         "collapsed": track.collapsed,
+        "auto_seeded": track.auto_seeded,
         "clips": [_clip_to_data(clip) for clip in track.clips],
     }
+
+
+def _finalize_loaded_session(
+    package: SongPackage,
+    session: StudioSession,
+    assets: tuple[StudioSoundAsset, ...],
+) -> StudioSession:
+    payload = {
+        "version": STUDIO_SESSION_VERSION,
+        "song_id": package.song_id,
+        "updated_at": session.updated_at,
+        "tracks": [_track_to_data(track) for track in session.tracks],
+    }
+    _refresh_studio_assets_manifest(package, assets, payload)
+    return session
+
+
+def _refresh_studio_assets_manifest(
+    package: SongPackage,
+    assets: tuple[StudioSoundAsset, ...],
+    payload: dict[str, object],
+) -> None:
+    try:
+        save_studio_project_assets(package, assets, payload)
+    except OSError as exc:
+        logging.getLogger("jang_app").warning(
+            "Studio asset cache refresh deferred | song=%s | error=%s",
+            package.song_id,
+            exc,
+        )
 
 
 def _clip_to_data(clip: StudioClip) -> dict[str, object]:

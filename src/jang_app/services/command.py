@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import codecs
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,6 +43,33 @@ class BinaryCommandResult:
     @property
     def output(self) -> bytes:
         return self.stderr or self.stdout
+
+
+_ACTIVE_PROCESS_LOCK = RLock()
+_ACTIVE_PROCESSES: set[subprocess.Popen] = set()
+_STREAMING_TAIL_LIMIT = 256 * 1024
+
+
+def active_command_count() -> int:
+    with _ACTIVE_PROCESS_LOCK:
+        return sum(process.poll() is None for process in _ACTIVE_PROCESSES)
+
+
+def terminate_all_commands() -> None:
+    with _ACTIVE_PROCESS_LOCK:
+        processes = tuple(_ACTIVE_PROCESSES)
+    for process in processes:
+        _terminate_process_tree(process)
+
+
+def _track_process(process: subprocess.Popen) -> None:
+    with _ACTIVE_PROCESS_LOCK:
+        _ACTIVE_PROCESSES.add(process)
+
+
+def _untrack_process(process: subprocess.Popen) -> None:
+    with _ACTIVE_PROCESS_LOCK:
+        _ACTIVE_PROCESSES.discard(process)
 
 
 class CommandCancellation:
@@ -117,29 +146,37 @@ def run_command(
         if output_callback is not None:
             result = _run_streaming_command(command_args, cwd, env, callback)
         else:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command_args,
                 cwd=str(cwd) if cwd else None,
                 env=dict(env) if env is not None else None,
-                check=False,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout_seconds,
-                **hidden_subprocess_kwargs(),
+                **hidden_subprocess_kwargs(new_process_group=True),
             )
+            _track_process(process)
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                _terminate_process_tree(process)
+                process.communicate()
+                raise
+            finally:
+                _untrack_process(process)
             result = CommandResult(
                 args=command_args,
-                returncode=completed.returncode,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
+                returncode=process.returncode,
+                stdout=stdout,
+                stderr=stderr,
             )
             if recorder is not None and task_id != "-":
-                if completed.stdout:
-                    recorder.append_command_output(task_id, completed.stdout)
-                if completed.stderr:
-                    recorder.append_command_output(task_id, completed.stderr)
+                if stdout:
+                    recorder.append_command_output(task_id, stdout)
+                if stderr:
+                    recorder.append_command_output(task_id, stderr)
     except (OSError, subprocess.TimeoutExpired) as exc:
         result = CommandResult(
             args=command_args,
@@ -177,21 +214,28 @@ def run_binary_command(
     logger = get_logger()
     logger.info("Running binary command: %s", " ".join(redact_command(command_args)))
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command_args,
             cwd=str(cwd) if cwd else None,
             env=dict(env) if env is not None else None,
-            check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
-            **hidden_subprocess_kwargs(),
+            **hidden_subprocess_kwargs(new_process_group=True),
         )
+        _track_process(process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+            process.communicate()
+            raise
+        finally:
+            _untrack_process(process)
         result = BinaryCommandResult(
             args=command_args,
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            returncode=process.returncode,
+            stdout=stdout,
+            stderr=stderr,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         result = BinaryCommandResult(
@@ -240,6 +284,7 @@ def run_cancellable_command(
         _finish_diagnostic_command(task_id, recorder, command_id, started, None, error=str(exc))
         raise
     token._attach(process)
+    _track_process(process)
     try:
         output = _read_streaming_output(process, callback)
         returncode = process.wait()
@@ -250,6 +295,7 @@ def run_cancellable_command(
         raise
     finally:
         token._detach(process)
+        _untrack_process(process)
     logger.info("Cancellable command exited with code %s", returncode)
     result = CommandResult(
         args=command_args,
@@ -337,11 +383,18 @@ def _run_streaming_command(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        **hidden_subprocess_kwargs(),
+        **hidden_subprocess_kwargs(new_process_group=True),
     )
-
-    output = _read_streaming_output(process, output_callback)
-    returncode = process.wait()
+    _track_process(process)
+    try:
+        output = _read_streaming_output(process, output_callback)
+        returncode = process.wait()
+    except Exception:
+        _terminate_process_tree(process)
+        process.wait()
+        raise
+    finally:
+        _untrack_process(process)
     logger.info("Command exited with code %s", returncode)
     return CommandResult(args=args, returncode=returncode, stdout="", stderr=output)
 
@@ -350,31 +403,33 @@ def _read_streaming_output(
     process: subprocess.Popen[str],
     output_callback: Callable[[str], None] | None,
 ) -> str:
-    output_parts: list[str] = []
-    segment_parts: list[str] = []
+    output_tail = ""
+    segment = ""
     if process.stdout is not None:
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
         try:
             while True:
-                char = process.stdout.read(1)
-                if char == "":
+                raw = os.read(process.stdout.fileno(), 4096)
+                if not raw:
                     break
-                output_parts.append(char)
-                if char in "\r\n":
-                    _emit_output_segment(segment_parts, output_callback)
-                else:
-                    segment_parts.append(char)
+                chunk = decoder.decode(raw)
+                output_tail = (output_tail + chunk)[-_STREAMING_TAIL_LIMIT:]
+                parts = re.split(r"[\r\n]", segment + chunk)
+                segment = parts.pop()
+                for part in parts:
+                    _emit_output_segment(part, output_callback)
+            final_chunk = decoder.decode(b"", final=True)
+            if final_chunk:
+                output_tail = (output_tail + final_chunk)[-_STREAMING_TAIL_LIMIT:]
+                segment += final_chunk
         finally:
             process.stdout.close()
-    _emit_output_segment(segment_parts, output_callback)
-    return "".join(output_parts)
+    _emit_output_segment(segment, output_callback)
+    return output_tail
 
 
-def _emit_output_segment(
-    segment_parts: list[str],
-    output_callback: Callable[[str], None] | None,
-) -> None:
-    segment = "".join(segment_parts).strip()
-    segment_parts.clear()
+def _emit_output_segment(segment: str, output_callback: Callable[[str], None] | None) -> None:
+    segment = segment.strip()
     if segment and output_callback is not None:
         output_callback(segment)
 

@@ -62,6 +62,14 @@ try {
     Set-Content -LiteralPath (Join-Path $runtimeRoot "rvc\logs\train.log") -Value "log"
     Set-Content -LiteralPath (Join-Path $runtimeRoot "generated.bin") -Value "runtime"
     Set-Content -LiteralPath (Join-Path $cacheRoot "package.zip") -Value "cache"
+    $runtimeSentinel = Join-Path $runtimeRoot "unrelated\project.txt"
+    $cacheSentinel = Join-Path $cacheRoot "unrelated\download.txt"
+    New-Item -ItemType Directory -Path @(
+        (Split-Path -Parent $runtimeSentinel),
+        (Split-Path -Parent $cacheSentinel)
+    ) -Force | Out-Null
+    Set-Content -LiteralPath $runtimeSentinel -Value "user-runtime-file"
+    Set-Content -LiteralPath $cacheSentinel -Value "user-cache-file"
 
     $layout = @{
         version = 3
@@ -91,11 +99,11 @@ try {
         throw "Uninstaller failed with exit code $($uninstall.ExitCode)."
     }
 
-    if (Test-Path -LiteralPath $runtimeRoot) {
-        throw "Configured audio engine remained after uninstall: $runtimeRoot"
+    if (-not (Test-Path -LiteralPath $runtimeSentinel)) {
+        throw "Unrelated file was removed from the custom audio engine: $runtimeSentinel"
     }
-    if (Test-Path -LiteralPath $cacheRoot) {
-        throw "Configured cache remained after uninstall: $cacheRoot"
+    if (-not (Test-Path -LiteralPath $cacheSentinel)) {
+        throw "Unrelated file was removed from the custom cache: $cacheSentinel"
     }
     if (-not (Test-Path -LiteralPath (Join-Path $workspaceRoot "song.txt"))) {
         throw "Data was removed during uninstall."
@@ -103,15 +111,12 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $outputRoot "mix.wav"))) {
         throw "Output was removed during uninstall."
     }
-    $preserved = @(
-        Get-ChildItem -LiteralPath (Join-Path $dataRoot "preserved-runtime") -Recurse -File
-    )
-    if (-not ($preserved.Name -contains "voice.pth") -or
-        -not ($preserved.Name -contains "train.log")) {
-        throw "RVC weights or logs were not preserved during uninstall."
+    if (-not (Test-Path -LiteralPath (Join-Path $runtimeRoot "rvc\weights\voice.pth")) -or
+        -not (Test-Path -LiteralPath (Join-Path $runtimeRoot "rvc\logs\train.log"))) {
+        throw "Custom RVC weights or logs were removed during uninstall."
     }
 
-    Write-Output "Verified v3 external Runtime/Cache uninstall cleanup: $installer"
+    Write-Output "Verified external Runtime/Cache retention during uninstall: $installer"
 }
 finally {
     Remove-Item -LiteralPath $uninstallRegistryPsPath -Recurse -Force -ErrorAction SilentlyContinue

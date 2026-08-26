@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,6 +16,9 @@ from jang_app.services.google_oauth import (
     load_google_oauth_config,
 )
 from jang_app.services.windows_credentials import CredentialStore, WindowsCredentialStore
+
+
+_LOGGER = logging.getLogger("jang_app")
 
 
 @dataclass(frozen=True)
@@ -79,19 +83,31 @@ class GoogleDriveShareService:
         force_upload: bool = False,
     ) -> GoogleDriveShareResult:
         source = source.expanduser().resolve()
+        client = self._client()
+        self._retry_pending_remote_deletes(client)
         if not force_upload:
             existing = self.existing_share(source, category)
             if existing is not None:
                 if progress is not None:
                     progress(100)
                 return existing
-        remote = self._client().upload_shared_file(
+        uploaded = client.upload_file(
             source,
             category,
             progress=progress,
             cancelled=cancelled,
+            uploaded=lambda remote: self._catalog.remember_pending_remote(
+                remote,
+                "uncommitted upload",
+            ),
         )
-        record = self._catalog.record(source, category, remote)
+        try:
+            remote = client.publish_file(uploaded.file_id)
+            record = self._catalog.record(source, category, remote)
+        except BaseException:
+            self._rollback_uploaded_file(client, uploaded.file_id)
+            raise
+        self._retry_pending_remote_deletes(client)
         return GoogleDriveShareResult(record, reused=False)
 
     def delete_share(
@@ -101,12 +117,14 @@ class GoogleDriveShareService:
         *,
         progress: Callable[[int], None] | None = None,
     ) -> bool:
-        existing = self.existing_share(source, category)
-        if existing is None:
+        client = self._client()
+        self._retry_pending_remote_deletes(client)
+        record = self._catalog.find_target(source, category)
+        if record is None:
             return False
         if progress is not None:
             progress(20)
-        self._client().delete_file(existing.record.file_id)
+        client.delete_file(record.file_id)
         if progress is not None:
             progress(85)
         removed = self._catalog.remove(source, category)
@@ -116,6 +134,49 @@ class GoogleDriveShareService:
 
     def move_shared_source(self, source: Path, target: Path, category: str) -> bool:
         return self._catalog.move_source(source, target, category)
+
+    def _rollback_uploaded_file(
+        self,
+        client: GoogleDriveClient,
+        file_id: str,
+    ) -> None:
+        try:
+            client.delete_file(file_id)
+        except Exception as exc:
+            _LOGGER.warning(
+                "Google Drive upload rollback deferred | file_id=%s | error=%s",
+                file_id,
+                exc,
+            )
+            return
+        try:
+            self._catalog.forget_pending_remote(file_id)
+        except OSError as exc:
+            _LOGGER.warning(
+                "Google Drive cleanup journal update deferred | file_id=%s | error=%s",
+                file_id,
+                exc,
+            )
+
+    def _retry_pending_remote_deletes(self, client: GoogleDriveClient) -> None:
+        try:
+            pending = self._catalog.pending_remote_deletes()
+        except OSError as exc:
+            _LOGGER.warning("Google Drive cleanup journal unavailable: %s", exc)
+            return
+        for item in pending:
+            try:
+                if self._catalog.has_file_id(item.file_id):
+                    self._catalog.forget_pending_remote(item.file_id)
+                    continue
+                client.delete_file(item.file_id)
+                self._catalog.forget_pending_remote(item.file_id)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Google Drive remote cleanup deferred | file_id=%s | error=%s",
+                    item.file_id,
+                    exc,
+                )
 
     def _client(self) -> GoogleDriveClient:
         return GoogleDriveClient(

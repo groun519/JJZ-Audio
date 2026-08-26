@@ -77,6 +77,7 @@ from jang_app.services.rvc_training_activity import describe_rvc_training_activi
 from jang_app.services.rvc_training_finalize import (
     RvcTrainingFinalizeResult,
     finalize_rvc_training_artifacts,
+    recover_existing_rvc_training_artifacts,
 )
 from jang_app.services.rvc_training_dataset import RvcTrainingDatasetError
 from jang_app.services.rvc_training_pipeline import (
@@ -912,10 +913,8 @@ class ModelWorkspacePage(QWidget):
             return True
         if model_id in self._share_progress_by_id:
             return True
-        if self._selected_model_id != model_id:
-            return False
         return any(
-            getattr(panel, "_worker", None) is not None
+            getattr(panel, "active_model_id", "") == model_id
             for panel in (self.dataset_panel, self.analysis_panel, self.evaluation_panel)
         )
 
@@ -1288,6 +1287,13 @@ class ModelWorkspacePage(QWidget):
             self._training_telemetry_worker = None
         if self._dataset_load_worker is not None:
             self._dataset_load_worker.wait()
+        for panel in (self.dataset_panel, self.analysis_panel, self.evaluation_panel):
+            if not panel.cancel_and_wait(5000):
+                logging.getLogger("jang_app").warning(
+                    "Model panel worker did not stop before shutdown | panel=%s model=%s",
+                    type(panel).__name__,
+                    getattr(panel, "active_model_id", ""),
+                )
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.stop_preview()
@@ -1460,6 +1466,25 @@ class ModelWorkspacePage(QWidget):
             detail = describe_rvc_training_activity(line)
             if detail:
                 activity(detail)
+
+        recovered = recover_existing_rvc_training_artifacts(
+            self._workspace,
+            record.model_id,
+            layout,
+            self._execution_runtime_root,
+        )
+        if recovered is not None:
+            stage("Registering Existing Model")
+            progress(100)
+            state = RvcTrainingStateStore(record.model_id, layout).load()
+            pipeline = RvcTrainingPipelineResult(
+                state=state,
+                dataset_fingerprint=state.dataset_fingerprint,
+                executed_stages=(),
+                training=None,
+                index=recovered.index,
+            )
+            return _ModelTrainingJobResult(pipeline, recovered)
 
         pipeline = run_rvc_training_pipeline(
             record.model_id,

@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.app_bootstrap import prepare_app_environment
 from jang_app.services.app_paths import discover_app_paths
@@ -12,6 +13,26 @@ from jang_app.version import __version__
 
 
 class AppBootstrapTests(unittest.TestCase):
+    def test_pending_component_failure_blocks_startup_instead_of_using_old_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "source" / "src" / "jang_app"
+            package.mkdir(parents=True)
+            paths = discover_app_paths(
+                package,
+                environ={"JJZERO_DATA_ROOT": str(root / "data")},
+                frozen=False,
+                source_root=root / "source",
+            )
+            with (
+                patch(
+                    "jang_app.services.app_bootstrap.apply_pending_component_updates",
+                    side_effect=RuntimeError("runtime activation failed"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "runtime activation failed"),
+            ):
+                prepare_app_environment(paths)
+
     def test_bootstrap_cleans_completed_updates_and_preserves_partial_downloads(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

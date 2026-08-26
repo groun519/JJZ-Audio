@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from jang_app.services.song_package import SongPackage
 
 
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
 
 
 class LibraryCatalog:
@@ -219,8 +219,35 @@ def _migrate_v0_to_v1(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE song_groups (
+            group_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL,
+            parent_group_id TEXT REFERENCES song_groups(group_id) ON DELETE CASCADE,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX song_groups_sibling_name_idx
+            ON song_groups(COALESCE(parent_group_id, ''), normalized_name);
+        CREATE INDEX song_groups_parent_idx ON song_groups(parent_group_id, position);
+
+        CREATE TABLE song_group_memberships (
+            song_id TEXT PRIMARY KEY,
+            group_id TEXT NOT NULL REFERENCES song_groups(group_id) ON DELETE CASCADE
+        );
+        CREATE INDEX song_group_memberships_group_idx
+            ON song_group_memberships(group_id);
+        """
+    )
+
+
 _MIGRATIONS = {
     0: _migrate_v0_to_v1,
+    1: _migrate_v1_to_v2,
 }
 
 _SONG_UPSERT = """

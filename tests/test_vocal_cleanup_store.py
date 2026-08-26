@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -269,6 +271,8 @@ class VocalCleanupStoreTests(unittest.TestCase):
             list((self.root / "tool-workspaces" / "vocaldeecho").glob("j_*")),
             [],
         )
+        processed_audio, _ = sf.read(processed, always_2d=True)
+        self.assertGreater(float(np.max(np.abs(processed_audio))), 0.05)
 
     def test_render_keeps_length_channels_and_unselected_audio(self) -> None:
         project = self.store.load(self.job_dir, self.source)
@@ -298,6 +302,226 @@ class VocalCleanupStoreTests(unittest.TestCase):
         np.testing.assert_allclose(rendered[:17_000], source_audio[:17_000], atol=1e-6)
         np.testing.assert_allclose(rendered[32_000:], source_audio[32_000:], atol=1e-6)
         self.assertGreater(float(np.max(np.abs(rendered[20_000:29_000] - source_audio[20_000:29_000]))), 0.1)
+
+    def test_region_replacement_preserves_committed_audio_when_save_fails(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        processed, removed = self._preview_segments("original", 13_230)
+        project = self.store.import_preview(
+            self.job_dir,
+            project,
+            start_ms=100,
+            end_ms=400,
+            effect="dereverb",
+            strength="standard",
+            processed_segment_path=processed,
+            removed_segment_path=removed,
+        )
+        original = project.regions[0]
+        replacement_processed, replacement_removed = self._preview_segments(
+            "replacement",
+            13_230,
+        )
+
+        with patch(
+            "jang_app.services.vocal_cleanup_store.write_json_atomic",
+            side_effect=PermissionError("manifest locked"),
+        ):
+            with self.assertRaises(PermissionError):
+                self.store.import_preview(
+                    self.job_dir,
+                    project,
+                    start_ms=100,
+                    end_ms=400,
+                    effect="denoise",
+                    strength="strong",
+                    processed_segment_path=replacement_processed,
+                    removed_segment_path=replacement_removed,
+                    replace_region_id=original.region_id,
+                )
+
+        restored = self.store.load(self.job_dir, self.source)
+        self.assertEqual(restored.regions, project.regions)
+        self.assertTrue(original.processed_segment_path.is_file())
+        self.assertTrue(original.removed_segment_path.is_file())
+
+    def test_concurrent_results_merge_and_keep_monotonic_labels(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        paths = []
+        for index in range(2):
+            path = self.job_dir / "cleanup" / "results" / f"result-{index}.wav"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            sf.write(path, np.zeros((44_100, 2), dtype=np.float32), 44_100)
+            paths.append(path)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            tuple(
+                executor.map(
+                    lambda path: self.store.register_result(
+                        self.job_dir,
+                        project,
+                        path,
+                    ),
+                    paths,
+                )
+            )
+
+        restored = self.store.load(self.job_dir, self.source)
+        self.assertEqual(len(restored.results), 2)
+        self.assertEqual(
+            {result.label for result in restored.results},
+            {"Clean vocal 1", "Clean vocal 2"},
+        )
+        restored = self.store.remove_result(
+            self.job_dir,
+            restored,
+            restored.results[0].result_id,
+        )
+        third = self.job_dir / "cleanup" / "results" / "result-3.wav"
+        sf.write(third, np.zeros((44_100, 2), dtype=np.float32), 44_100)
+        restored = self.store.register_result(self.job_dir, restored, third)
+        self.assertEqual(restored.results[0].label, "Clean vocal 3")
+
+    def test_stale_render_does_not_overwrite_newer_cleanup_regions(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        first_processed, first_removed = self._preview_segments("first-region", 13_230)
+        captured = self.store.import_preview(
+            self.job_dir,
+            project,
+            start_ms=0,
+            end_ms=300,
+            effect="dereverb",
+            strength="standard",
+            processed_segment_path=first_processed,
+            removed_segment_path=first_removed,
+        )
+        second_processed, second_removed = self._preview_segments("second-region", 13_230)
+        self.store.import_preview(
+            self.job_dir,
+            captured,
+            start_ms=700,
+            end_ms=1_000,
+            effect="denoise",
+            strength="standard",
+            processed_segment_path=second_processed,
+            removed_segment_path=second_removed,
+        )
+        stale_result = self.store.create_result_path(self.job_dir)
+        sf.write(stale_result, np.zeros((44_100, 2), dtype=np.float32), 44_100)
+
+        with self.assertRaisesRegex(VocalCleanupStoreError, "regions changed"):
+            self.store.register_result(self.job_dir, captured, stale_result)
+
+        restored = self.store.load(self.job_dir, self.source)
+        self.assertEqual(len(restored.regions), 2)
+        self.assertEqual(restored.results, ())
+
+    def test_committed_result_removal_does_not_fail_when_purge_is_deferred(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        result_path = self.store.create_result_path(self.job_dir)
+        sf.write(result_path, np.zeros((44_100, 2), dtype=np.float32), 44_100)
+        project = self.store.register_result(self.job_dir, project, result_path)
+
+        with patch(
+            "jang_app.services.vocal_cleanup_store.ManagedPathTransaction.purge",
+            return_value=False,
+        ):
+            removed = self.store.remove_result(
+                self.job_dir,
+                project,
+                project.results[0].result_id,
+            )
+
+        self.assertEqual(removed.results, ())
+        self.assertEqual(self.store.load(self.job_dir, self.source).results, ())
+
+    def test_missing_result_remains_visible_to_store_and_can_be_removed(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        result_path = self.store.create_result_path(self.job_dir)
+        sf.write(result_path, np.zeros((44_100, 2), dtype=np.float32), 44_100)
+        project = self.store.register_result(self.job_dir, project, result_path)
+        result_id = project.results[0].result_id
+        result_path.unlink()
+
+        damaged = self.store.load(self.job_dir, self.source)
+        self.assertEqual(len(damaged.results), 1)
+        repaired = self.store.remove_result(self.job_dir, damaged, result_id)
+        self.assertEqual(repaired.results, ())
+
+    def test_source_timestamp_change_keeps_cleanup_project(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        processed, removed = self._preview_segments("touch", 13_230)
+        project = self.store.import_preview(
+            self.job_dir,
+            project,
+            start_ms=100,
+            end_ms=400,
+            effect="dereverb",
+            strength="standard",
+            processed_segment_path=processed,
+            removed_segment_path=removed,
+        )
+        stat = self.source.stat()
+        os.utime(
+            self.source,
+            ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
+        )
+
+        restored = self.store.load(self.job_dir, self.source)
+        self.assertEqual(restored.regions, project.regions)
+
+    def test_true_source_change_is_reported_instead_of_hiding_project(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        processed, removed = self._preview_segments("changed", 13_230)
+        self.store.import_preview(
+            self.job_dir,
+            project,
+            start_ms=100,
+            end_ms=400,
+            effect="dereverb",
+            strength="standard",
+            processed_segment_path=processed,
+            removed_segment_path=removed,
+        )
+        sf.write(
+            self.source,
+            np.ones((44_100, 2), dtype=np.float32) * 0.2,
+            44_100,
+            subtype="FLOAT",
+        )
+
+        with self.assertRaisesRegex(VocalCleanupStoreError, "source vocal changed"):
+            self.store.load(self.job_dir, self.source)
+
+    def test_malformed_or_non_finite_preview_segment_is_rejected(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        short, removed = self._preview_segments("short", 100)
+        with self.assertRaisesRegex(VocalCleanupStoreError, "duration"):
+            self.store.import_preview(
+                self.job_dir,
+                project,
+                start_ms=100,
+                end_ms=400,
+                effect="dereverb",
+                strength="standard",
+                processed_segment_path=short,
+                removed_segment_path=removed,
+            )
+
+        invalid, removed = self._preview_segments("invalid", 13_230)
+        samples = np.zeros((13_230, 2), dtype=np.float32)
+        samples[100, 0] = np.nan
+        sf.write(invalid, samples, 44_100, subtype="FLOAT")
+        with self.assertRaisesRegex(VocalCleanupStoreError, "invalid audio samples"):
+            self.store.import_preview(
+                self.job_dir,
+                project,
+                start_ms=100,
+                end_ms=400,
+                effect="dereverb",
+                strength="standard",
+                processed_segment_path=invalid,
+                removed_segment_path=removed,
+            )
 
     def _preview_segments(self, prefix: str, frames: int) -> tuple[Path, Path]:
         processed = self.root / f"{prefix}-processed.wav"

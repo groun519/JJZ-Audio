@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from jang_app.services.app_paths import AppPaths
@@ -19,7 +19,6 @@ from jang_app.services.system_diagnostics import SystemDiagnostics
 
 HARDWARE_DIAGNOSTICS_SCHEMA_VERSION = 1
 HARDWARE_DIAGNOSTICS_FILE_NAME = "hardware_diagnostics.json"
-HARDWARE_RECHECK_INTERVAL = timedelta(days=7)
 
 
 def hardware_diagnostics_file(paths: AppPaths) -> Path:
@@ -91,13 +90,13 @@ def hardware_diagnostics_required(
         return True
     if not isinstance(data, dict) or data.get("schema_version") != HARDWARE_DIAGNOSTICS_SCHEMA_VERSION:
         return True
+    if data.get("ready") is not True:
+        return True
     installed = installed_rvc_runtime_profile(paths.runtime_root / "rvc")
     if data.get("installed_profile") != (installed.profile if installed is not None else ""):
         return True
     if data.get("installed_profile_version") != (installed.version if installed is not None else ""):
         return True
-    if selection is None and _checked_recently(data.get("checked_at")):
-        return False
     expected = _signature(paths, selection or detect_rvc_hardware())
     return not isinstance(data, dict) or any(
         data.get(key) != value for key, value in expected.items()
@@ -187,15 +186,3 @@ def _nonnegative_int(value: object) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
-
-
-def _checked_recently(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        checked = datetime.fromisoformat(value)
-    except ValueError:
-        return False
-    if checked.tzinfo is None:
-        checked = checked.replace(tzinfo=UTC)
-    return datetime.now(UTC) - checked.astimezone(UTC) < HARDWARE_RECHECK_INTERVAL

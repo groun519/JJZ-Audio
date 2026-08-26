@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -90,6 +91,7 @@ def provision_ai_runtime(
     )
     artifacts = plan.runtime_artifacts
     cache = paths.cache_dir / "runtime" / release.version
+    _require_runtime_provision_space(artifacts, cache, paths.runtime_root)
     packages = _download_runtime_artifacts(artifacts, cache, progress, activity)
     installations = provision_update_runtime_components(
         plan,
@@ -554,3 +556,40 @@ def _runtime_unpacked_size(packages: tuple[Path, ...]) -> int:
     except (OSError, RuntimeInstallationError):
         # Size reporting is telemetry; package validation still happens in the installer.
         return 0
+
+
+def _require_runtime_provision_space(
+    artifacts: tuple[ReleaseArtifact, ...],
+    cache: Path,
+    runtime_root: Path,
+) -> None:
+    download_bytes = sum(artifact.size for artifact in artifacts)
+    expanded_bytes = sum(artifact.unpacked_size for artifact in artifacts)
+    requirements: dict[Path, int] = {}
+    cache_disk = _disk_anchor(cache)
+    runtime_disk = _disk_anchor(runtime_root)
+    requirements[cache_disk] = download_bytes
+    if expanded_bytes:
+        requirements[runtime_disk] = (
+            requirements.get(runtime_disk, 0) + expanded_bytes
+        )
+    for disk, required_without_margin in requirements.items():
+        margin = max(1024 * 1024, required_without_margin // 20)
+        required = required_without_margin + margin
+        try:
+            available = max(0, int(shutil.disk_usage(disk).free))
+        except OSError:
+            continue
+        if available < required:
+            raise RuntimeInstallationError(
+                "Not enough free space to download and install the audio engine. "
+                f"Required: {required} bytes; available: {available} bytes "
+                f"on {disk}."
+            )
+
+
+def _disk_anchor(path: Path) -> Path:
+    current = path.expanduser().resolve()
+    while not current.exists() and current.parent != current:
+        current = current.parent
+    return Path(current.anchor) if current.anchor else current

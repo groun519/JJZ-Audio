@@ -14,6 +14,7 @@ from jang_app.services.runtime_installation import (
     install_runtime_packages,
     installed_rvc_runtime_profile,
     installed_runtime_version,
+    recover_runtime_installations,
 )
 from jang_app.services.rvc_runtime_repair import bundled_device_adapter
 from jang_app.services.rvc_training_runtime import required_rvc_training_paths
@@ -168,6 +169,24 @@ class RuntimeInstallationTests(unittest.TestCase):
             self.assertFalse(cache.exists())
             self.assertFalse(source_map.exists())
 
+    def test_embedded_runtime_upgrade_replaces_old_executables(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            old_package = root / "old.zip"
+            new_package = root / "new.zip"
+            _write_runtime_package(old_package, python=b"old-runtime")
+            _write_runtime_package(new_package, python=b"new-runtime")
+
+            install_runtime_packages((old_package,), runtime, "1")
+            install_runtime_packages((new_package,), runtime, "2")
+
+            self.assertEqual(installed_runtime_version(runtime), "2")
+            self.assertEqual(
+                (runtime / "rvc" / "runtime" / "python.exe").read_bytes(),
+                b"new-runtime",
+            )
+
     def test_failed_profile_activation_preserves_the_current_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -202,6 +221,97 @@ class RuntimeInstallationTests(unittest.TestCase):
                 install_runtime_packages((package,), root / "runtime", "1")
             self.assertFalse((root / "outside.txt").exists())
 
+    def test_rejects_windows_equivalent_archive_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "collision.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("Lib/Torch/config.py", b"first")
+                archive.writestr("lib/torch/CONFIG.py", b"second")
+
+            with self.assertRaisesRegex(RuntimeInstallationError, "Duplicate"):
+                install_runtime_packages((package,), root / "runtime", "1")
+
+    def test_rejects_windows_alias_and_reserved_archive_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("runtime/file. ", "runtime/CON.txt"):
+                package = root / f"unsafe-{len(name)}.zip"
+                with zipfile.ZipFile(package, "w") as archive:
+                    archive.writestr(name, b"bad")
+                with self.assertRaisesRegex(
+                    RuntimeInstallationError,
+                    "Unsafe Windows",
+                ):
+                    install_runtime_packages((package,), root / "runtime", "1")
+
+    def test_post_commit_backup_cleanup_failure_keeps_successful_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            old_package = root / "old.zip"
+            new_package = root / "new.zip"
+            _write_runtime_package(old_package, python=b"old")
+            _write_runtime_package(new_package, python=b"new")
+            install_runtime_packages((old_package,), runtime, "1")
+            real_remove = __import__(
+                "jang_app.services.runtime_installation",
+                fromlist=["_remove_directory"],
+            )._remove_directory
+            backup_calls = 0
+
+            def remove_with_locked_backup(path: Path) -> None:
+                nonlocal backup_calls
+                if Path(path).name == ".runtime.previous":
+                    backup_calls += 1
+                    if backup_calls == 2:
+                        raise PermissionError("backup locked")
+                real_remove(path)
+
+            with patch(
+                "jang_app.services.runtime_installation._remove_directory",
+                side_effect=remove_with_locked_backup,
+            ):
+                result = install_runtime_packages((new_package,), runtime, "2")
+
+            self.assertEqual(result.version, "2")
+            self.assertEqual(
+                (runtime / "rvc" / "runtime" / "python.exe").read_bytes(),
+                b"new",
+            )
+            self.assertTrue((root / ".runtime.previous").is_dir())
+
+    def test_recovers_complete_previous_runtime_when_live_root_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            package = root / "runtime.zip"
+            _write_runtime_package(package, python=b"recoverable")
+            install_runtime_packages((package,), runtime, "1")
+            backup = root / ".runtime.previous"
+            os.replace(runtime, backup)
+
+            recovered = recover_runtime_installations(runtime)
+
+            self.assertEqual(recovered, (runtime.resolve(),))
+            self.assertEqual(installed_runtime_version(runtime), "1")
+            self.assertFalse(backup.exists())
+
+    def test_rejects_install_when_expanded_runtime_exceeds_free_space(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "runtime.zip"
+            _write_runtime_package(package)
+
+            with (
+                patch(
+                    "jang_app.services.runtime_installation.shutil.disk_usage",
+                    return_value=type("Usage", (), {"free": 0})(),
+                ),
+                self.assertRaisesRegex(RuntimeInstallationError, "free space"),
+            ):
+                install_runtime_packages((package,), root / "runtime", "1")
+
 
 def _write_runtime_package(
     path: Path,
@@ -209,6 +319,7 @@ def _write_runtime_package(
     include_adapter: bool = True,
     include_runtime: bool = True,
     include_precision_separation: bool = True,
+    python: bytes = b"python",
 ) -> None:
     files = {
         "ffmpeg/bin/ffmpeg.exe": b"ffmpeg",
@@ -221,7 +332,7 @@ def _write_runtime_package(
     if include_runtime:
         files.update(
             {
-                "rvc/runtime/python.exe": b"python",
+                "rvc/runtime/python.exe": python,
                 "rvc/runtime/python3.dll": b"dll",
                 "rvc/runtime/Lib/site-packages/torch/__init__.py": b"torch",
                 "rvc/runtime/Lib/site-packages/torchaudio/__init__.py": b"torchaudio",
@@ -240,7 +351,8 @@ def _write_runtime_package(
         training_paths = tuple(
             required for required in training_paths if required != Path("lib/jjzero_device.py")
         )
-    files.update({f"rvc/{required.as_posix()}": b"training" for required in training_paths})
+    for required in training_paths:
+        files.setdefault(f"rvc/{required.as_posix()}", b"training")
     with zipfile.ZipFile(path, "w") as archive:
         for name, data in files.items():
             archive.writestr(name, data)

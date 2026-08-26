@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 import wave
 from pathlib import Path
@@ -199,6 +200,36 @@ class ModelDatasetPanelTests(unittest.TestCase):
 
             self.assertEqual(panel.training_list.currentRow(), 29)
             self.assertFalse(panel.clip_editor.isHidden())
+            panel.close()
+
+    def test_inflight_worker_keeps_its_model_and_cannot_replace_new_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ModelDatasetStore(root / "workspace")
+            panel = ModelDatasetPanel(store)
+            started = threading.Event()
+            release = threading.Event()
+            called_model_ids: list[str] = []
+
+            def held_add(model_id, _paths, _progress):
+                called_model_ids.append(model_id)
+                started.set()
+                release.wait(5)
+                return ModelDataset(model_id)
+
+            panel.set_model("model-a")
+            with patch.object(store, "add_sources", side_effect=held_add):
+                panel.add_files((root / "voice.wav",))
+                self.assertTrue(started.wait(2))
+                panel.set_model("model-b")
+                release.set()
+                self.assertTrue(panel._worker.wait(5000))
+                self.app.processEvents()
+                self.app.processEvents()
+
+            self.assertEqual(called_model_ids, ["model-a"])
+            self.assertEqual(panel._model_id, "model-b")
+            self.assertEqual(panel._dataset.model_id, "model-b")
             panel.close()
 
 

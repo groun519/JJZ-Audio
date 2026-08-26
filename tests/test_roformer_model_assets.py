@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from jang_app.services.roformer_model_assets import prepare_roformer_model_assets
+from jang_app.services.roformer_model_assets import (
+    _update_model_registry,
+    prepare_roformer_model_assets,
+)
 from jang_app.services.separation_assets import RoFormerModelAssets, RoFormerModelFile
 
 
@@ -204,6 +209,71 @@ class RoFormerModelAssetTests(unittest.TestCase):
         self.assertEqual(
             registry["vr_download_list"]["Test De-Echo"],
             "deecho.pth",
+        )
+
+    def test_preparation_replaces_same_size_corrupt_model(self) -> None:
+        good = b"GOOD"
+        assets = RoFormerModelAssets(
+            model="test.ckpt",
+            config="",
+            registry_name="Test",
+            files=(
+                RoFormerModelFile(
+                    "test.ckpt",
+                    len(good),
+                    hashlib.sha256(good).hexdigest(),
+                    "https://example/test.ckpt",
+                ),
+            ),
+            managed_download=True,
+        )
+        downloads = []
+
+        def download(artifact, destination, **_kwargs):
+            downloads.append(artifact.name)
+            target = destination / artifact.name
+            target.write_bytes(good)
+            return target
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch(
+                "jang_app.services.roformer_model_assets.roformer_model_assets",
+                return_value=assets,
+            ),
+            patch(
+                "jang_app.services.roformer_model_assets.download_artifact",
+                side_effect=download,
+            ),
+        ):
+            root = Path(temporary)
+            (root / "test.ckpt").write_bytes(b"BADD")
+            prepare_roformer_model_assets(assets.model, root)
+            self.assertEqual((root / "test.ckpt").read_bytes(), good)
+
+        self.assertEqual(downloads, ["test.ckpt"])
+
+    def test_concurrent_registry_updates_preserve_every_model(self) -> None:
+        assets = tuple(
+            RoFormerModelAssets(
+                model=f"model-{index}.ckpt",
+                config=f"model-{index}.yaml",
+                registry_name=f"Model {index}",
+                files=(),
+            )
+            for index in range(12)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                tuple(executor.map(lambda item: _update_model_registry(root, item), assets))
+            registry = json.loads(
+                (root / "download_checks.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            set(registry["roformer_download_list"]),
+            {item.registry_name for item in assets},
         )
 
 

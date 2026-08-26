@@ -4,11 +4,13 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.song_asset_removal import SongAssetRemovalError
 from jang_app.services.song_assets import STAGE_EXPORT, STAGE_SOURCE, STAGE_STUDIO, STAGE_VOCAL
 from jang_app.services.song_library import SongLibrary
 from jang_app.services.song_package import SongPackageStore
+from jang_app.services.managed_transaction import recover_managed_transactions
 from jang_app.services.video_source import VideoSourceStore
 
 
@@ -28,6 +30,42 @@ class SongAssetRemovalTests(unittest.TestCase):
             self.assertEqual(store.require(song.id).outputs, ())
             self.assertEqual(result.removed_output_dir, job_dir.resolve())
             self.assertFalse(result.detached_only)
+
+    def test_failed_vocal_metadata_update_restores_managed_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            library, store, song = _library_with_song(Path(temporary))
+            package = store.require(song.id)
+            job_dir = (
+                package.folder
+                / "02_vocal"
+                / "separations"
+                / "run-1"
+                / "htdemucs"
+                / "source"
+            )
+            _write_output(job_dir)
+            library.register_output(song.id, job_dir, "Run 1")
+            vocal = library.asset_details(song.id).assets_for(STAGE_VOCAL)[0]
+
+            with patch.object(
+                store,
+                "persist_asset_state",
+                side_effect=OSError("manifest unavailable"),
+            ):
+                with self.assertRaisesRegex(
+                    SongAssetRemovalError,
+                    "manifest unavailable",
+                ):
+                    library.remove_asset(song.id, vocal.path)
+
+            self.assertTrue((job_dir / "vocals.wav").is_file())
+            self.assertEqual(
+                SongPackageStore(store.root, Path(temporary))
+                .require(song.id)
+                .outputs[0]
+                .job_dir,
+                job_dir.resolve(),
+            )
 
     def test_bulk_removal_deduplicates_assets_from_the_same_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -51,6 +89,52 @@ class SongAssetRemovalTests(unittest.TestCase):
             self.assertFalse(converted.exists())
             self.assertFalse(extra.exists())
             self.assertEqual(store.require(song.id).outputs, ())
+
+    def test_bulk_failure_rolls_back_files_and_all_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library, store, song = _library_with_song(root)
+            package = store.require(song.id)
+            job_dir = (
+                package.folder
+                / "02_vocal"
+                / "separations"
+                / "run-1"
+                / "htdemucs"
+                / "source"
+            )
+            _write_output(job_dir)
+            library.register_output(song.id, job_dir, "Run 1")
+            source_video = root / "video.mp4"
+            source_video.write_bytes(b"video")
+            video = library.set_video_file(song.id, source_video)
+            details = library.asset_details(song.id)
+            vocal = details.assets_for(STAGE_VOCAL)[0]
+            video_asset = next(
+                asset
+                for asset in details.assets_for(STAGE_SOURCE)
+                if asset.role == "Source Media"
+            )
+
+            with patch.object(
+                library._asset_removal._video_sources,
+                "clear",
+                side_effect=OSError("video state unavailable"),
+            ):
+                with self.assertRaisesRegex(
+                    SongAssetRemovalError,
+                    "video state unavailable",
+                ):
+                    library.remove_assets(
+                        song.id,
+                        (vocal.path, video_asset.path),
+                    )
+
+            restored = SongPackageStore(store.root, root).require(song.id)
+            self.assertEqual(restored.outputs[0].job_dir, job_dir.resolve())
+            self.assertTrue((job_dir / "vocals.wav").is_file())
+            self.assertEqual(video.path.read_bytes(), b"video")
+            self.assertEqual(VideoSourceStore().load(restored).path, video.path)
 
     def test_detaches_linked_separation_without_deleting_external_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -154,6 +238,61 @@ class SongAssetRemovalTests(unittest.TestCase):
             self.assertFalse(exported.exists())
             self.assertFalse(VideoSourceStore().load(package).is_configured)
             self.assertTrue(package.source_path.is_file())
+
+    def test_failed_video_metadata_clear_restores_managed_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library, store, song = _library_with_song(root)
+            package = store.require(song.id)
+            source_video = root / "video.mp4"
+            source_video.write_bytes(b"video")
+            video = library.set_video_file(song.id, source_video)
+            video_asset = next(
+                asset
+                for asset in library.asset_details(song.id).assets_for(STAGE_SOURCE)
+                if asset.role == "Source Media"
+            )
+
+            with patch.object(
+                library._asset_removal._video_sources,
+                "clear",
+                side_effect=OSError("video state unavailable"),
+            ):
+                with self.assertRaisesRegex(
+                    SongAssetRemovalError,
+                    "video state unavailable",
+                ):
+                    library.remove_asset(song.id, video_asset.path)
+
+            self.assertEqual(video.path.read_bytes(), b"video")
+            self.assertEqual(VideoSourceStore().load(package).path, video.path)
+
+    def test_startup_recovery_restores_video_after_interrupted_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library, store, song = _library_with_song(root)
+            package = store.require(song.id)
+            source_video = root / "video.mp4"
+            source_video.write_bytes(b"video")
+            video = library.set_video_file(song.id, source_video)
+            video_asset = next(
+                asset
+                for asset in library.asset_details(song.id).assets_for(STAGE_SOURCE)
+                if asset.role == "Source Media"
+            )
+
+            with patch.object(
+                library._asset_removal,
+                "_commit_transaction",
+                side_effect=SystemExit,
+            ):
+                with self.assertRaises(SystemExit):
+                    library.remove_asset(song.id, video_asset.path)
+
+            reports = recover_managed_transactions(package.folder)
+            self.assertEqual(reports[0].action, "rolled_back")
+            self.assertEqual(video.path.read_bytes(), b"video")
+            self.assertEqual(VideoSourceStore().load(package).path, video.path)
 
     def test_removes_studio_session_without_touching_song_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

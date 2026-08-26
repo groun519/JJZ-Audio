@@ -243,7 +243,7 @@ try {
         "/SUPPRESSMSGBOXES",
         "/NORESTART",
         "/CLOSEAPPLICATIONS",
-        "/RUN",
+        "/JJZEROUPDATE",
         "/DIR=`"$installDir`"",
         "/LOG=`"$logPath`""
     )
@@ -397,11 +397,11 @@ if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne "preserve-user-data") {
 }
 Assert-PreservedFiles $immutableSourceFiles "uninstall"
 Assert-PreservedFiles $managedUserHashes "uninstall"
-if (Test-Path -LiteralPath (Join-Path $managedStorageRoot "Runtime")) {
-    throw "Configured audio engine remained after uninstall: $managedStorageRoot"
+if (-not (Test-Path -LiteralPath (Join-Path $managedStorageRoot "Runtime"))) {
+    throw "External audio engine was removed during uninstall: $managedStorageRoot"
 }
-if (Test-Path -LiteralPath (Join-Path $managedStorageRoot "Cache")) {
-    throw "Configured cache remained after uninstall: $managedStorageRoot"
+if (-not (Test-Path -LiteralPath (Join-Path $managedStorageRoot "Cache"))) {
+    throw "External cache was removed during uninstall: $managedStorageRoot"
 }
 
     Write-Output "Verified installer upgrade $baselineVersion -> $targetVersion and uninstall: $installer"

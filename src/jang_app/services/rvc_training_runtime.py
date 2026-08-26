@@ -67,12 +67,13 @@ _REQUIRED_PATHS = (
 )
 
 _RUNTIME_PROBE = (
-    "import json, torch; "
+    "import json, platform, torch; "
     "cpu_tensor=torch.arange(256, dtype=torch.float32).reshape(16, 16); "
     "cpu_ready=bool(torch.isfinite(cpu_tensor @ cpu_tensor.T).all().item()); "
     "available=torch.cuda.is_available(); count=torch.cuda.device_count(); "
     "print(json.dumps({'cpu_ready': cpu_ready, 'available': available, 'device_count': count, "
-    "'torch_version': torch.__version__, 'cuda_version': torch.version.cuda or '', "
+    "'python_version': platform.python_version(), 'torch_version': torch.__version__, "
+    "'cuda_version': torch.version.cuda or '', "
     "'hip_version': getattr(torch.version, 'hip', '') or '', "
     "'device_capability': list(torch.cuda.get_device_capability(0)) if available and count else [], "
     "'cuda_arch_list': list(torch.cuda.get_arch_list())}))"
@@ -92,6 +93,7 @@ class RvcTrainingRuntimeInspection:
     cpu_ready: bool | None = None
     backend: RvcComputeBackend = RvcComputeBackend.CPU
     hip_version: str = ""
+    python_version: str = ""
 
     @property
     def assets_ready(self) -> bool:
@@ -168,6 +170,7 @@ def inspect_rvc_training_runtime(
         if available and device_count == 0:
             raise ValueError("CUDA was reported available without a device")
         torch_version = str(data.get("torch_version", "")).strip()
+        python_version = str(data.get("python_version", "")).strip()
         cuda_version = str(data.get("cuda_version", "")).strip()
         device_capability = parse_cuda_capability(data.get("device_capability"))
         cuda_arch_list = parse_cuda_arch_list(data.get("cuda_arch_list"))
@@ -205,6 +208,7 @@ def inspect_rvc_training_runtime(
         cpu_ready=raw_cpu_ready,
         backend=backend,
         hip_version=hip_version,
+        python_version=python_version,
     )
 
 

@@ -24,6 +24,8 @@ def main() -> int:
     parser.add_argument("release_dir", type=Path)
     parser.add_argument("version")
     parser.add_argument("--signing-publisher", default="")
+    parser.add_argument("--signing-certificate-sha256", default="")
+    parser.add_argument("--source-revision", default="")
     parser.add_argument("--runtime-release-tag", default="")
     parser.add_argument("--runtime-manifest", type=Path)
     arguments = parser.parse_args()
@@ -31,6 +33,8 @@ def main() -> int:
         arguments.release_dir,
         arguments.version,
         signing_publisher=arguments.signing_publisher,
+        signing_certificate_sha256=arguments.signing_certificate_sha256,
+        source_revision=arguments.source_revision,
         runtime_release_tag=arguments.runtime_release_tag,
         runtime_manifest_path=arguments.runtime_manifest,
     )
@@ -43,6 +47,8 @@ def create_release_manifest(
     version: str,
     runtime_version: str = AI_RUNTIME_VERSION,
     signing_publisher: str = "",
+    signing_certificate_sha256: str = "",
+    source_revision: str = "",
     runtime_release_tag: str = "",
     runtime_manifest_path: Path | None = None,
 ) -> Path:
@@ -66,7 +72,11 @@ def create_release_manifest(
             "version": version,
             "install_mode": "installer",
             "artifacts": [
-                _artifact_data(path, signing_publisher=signing_publisher)
+                _artifact_data(
+                    path,
+                    signing_publisher=signing_publisher,
+                    signing_certificate_sha256=signing_certificate_sha256,
+                )
                 for path in artifacts
             ],
         }
@@ -143,6 +153,11 @@ def create_release_manifest(
         "disabled_features": [],
         "components": components,
     }
+    revision = source_revision.strip().lower()
+    if revision:
+        if re.fullmatch(r"[0-9a-f]{40,64}", revision) is None:
+            raise ValueError("Invalid source revision.")
+        data["source_revision"] = revision
     manifest = resolved_release / MANIFEST_NAME
     manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return manifest
@@ -261,16 +276,29 @@ def _validated_remote_artifact(data: object) -> dict[str, object]:
     return artifact
 
 
-def _artifact_data(path: Path, *, signing_publisher: str = "") -> dict[str, object]:
+def _artifact_data(
+    path: Path,
+    *,
+    signing_publisher: str = "",
+    signing_certificate_sha256: str = "",
+) -> dict[str, object]:
     data: dict[str, object] = {
         "name": path.name,
         "size": path.stat().st_size,
         "sha256": _sha256(path),
     }
+    if bool(signing_publisher) != bool(signing_certificate_sha256):
+        raise ValueError(
+            "Signing publisher and certificate SHA-256 must be provided together."
+        )
     if signing_publisher:
+        certificate_sha256 = signing_certificate_sha256.strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", certificate_sha256) is None:
+            raise ValueError("Invalid signing certificate SHA-256.")
         data["authenticode"] = {
             "required": True,
             "publisher": signing_publisher,
+            "certificate_sha256": certificate_sha256,
         }
     return data
 

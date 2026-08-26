@@ -327,6 +327,9 @@ class SeparationRecipeSelector(QWidget):
         if status.ready:
             availability = "ready"
             status_text = tr("Model ready")
+        elif status.verification_required_files:
+            availability = "download"
+            status_text = tr("Installed model verification required")
         else:
             availability = "download"
             status_text = tr(

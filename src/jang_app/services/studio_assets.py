@@ -96,16 +96,7 @@ def sync_studio_video_track(
     video_tracks = tuple(track for track in session.tracks if track.role == TRACK_VIDEO)
     audio_tracks = tuple(track for track in session.tracks if track.role != TRACK_VIDEO)
     existing = video_tracks[0] if video_tracks else None
-    available_references = {
-        asset.reference
-        for asset in assets
-        if asset.media_kind in {"video", "image"} and asset.duration_ms > 0
-    }
-    if (
-        existing is not None
-        and existing.clips
-        and all(clip.asset in available_references for clip in existing.clips)
-    ):
+    if existing is not None:
         return replace(session, tracks=(existing, *audio_tracks))
     if active_asset is None or active_asset.duration_ms <= 0:
         return session if not video_tracks else replace(session, tracks=audio_tracks)
@@ -166,9 +157,29 @@ def build_default_studio_tracks(
                 volume_percent=state.volume_percent,
                 pan_percent=state.pan_percent,
                 clips=clips,
+                auto_seeded=True,
             )
         )
     return tuple(tracks)
+
+
+def missing_studio_asset_ids(
+    session: StudioSession,
+    assets: tuple[StudioSoundAsset, ...],
+) -> tuple[str, ...]:
+    available = {
+        asset.reference
+        for asset in assets
+        if asset.path.expanduser().is_file()
+    }
+    return tuple(
+        dict.fromkeys(
+            clip.asset.asset_id
+            for track in session.tracks
+            for clip in track.clips
+            if clip.asset not in available
+        )
+    )
 
 
 def _assets_for_output(output: SongOutputReference) -> list[StudioSoundAsset]:

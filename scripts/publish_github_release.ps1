@@ -1,6 +1,5 @@
 param(
     [switch]$Draft,
-    [switch]$AllowUnsigned,
     [switch]$SkipTests
 )
 
@@ -20,7 +19,7 @@ try {
     if (git status --porcelain) {
         throw "Commit all source changes before publishing a release."
     }
-    & $readinessScript -AllowUnsigned:$AllowUnsigned -SkipTests:$SkipTests
+    & $readinessScript -SkipTests:$SkipTests
     if ($LASTEXITCODE -ne 0) {
         throw "Release readiness verification failed with exit code $LASTEXITCODE"
     }
@@ -32,6 +31,10 @@ try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $version = [string]$manifest.version
     $tag = "v$version"
+    $headRevision = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
+    if ([string]$manifest.source_revision -ne $headRevision) {
+        throw "Release manifest source revision does not match HEAD."
+    }
     $assets = @($manifestPath)
     $remoteAssets = @{}
     foreach ($component in $manifest.components) {
@@ -51,6 +54,7 @@ try {
                 $remoteAssets[$remoteTag] += [PSCustomObject]@{
                     Name = [Uri]::UnescapeDataString($Matches.asset)
                     Size = [Int64]$artifact.size
+                    Sha256 = ([string]$artifact.sha256).ToLowerInvariant()
                 }
             }
         }
@@ -78,11 +82,19 @@ try {
             if (-not $published) {
                 throw "Reused release asset is missing or has the wrong size: $remoteTag/$($expected.Name)"
             }
+            $publishedDigest = ([string]$published.digest).ToLowerInvariant()
+            if ($publishedDigest -ne "sha256:$($expected.Sha256)") {
+                throw "Reused release asset digest does not match: $remoteTag/$($expected.Name)"
+            }
         }
     }
 
-    git rev-parse --verify --quiet "refs/tags/$tag" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    $existingTag = [string](& git rev-list -n 1 $tag 2>$null)
+    $existingTag = $existingTag.Trim().ToLowerInvariant()
+    if ($existingTag -and $existingTag -ne $headRevision) {
+        throw "Existing release tag $tag does not point to current HEAD."
+    }
+    if (-not $existingTag) {
         git tag -a $tag -m "JJZero Audio $version"
         if ($LASTEXITCODE -ne 0) {
             throw "Could not create release tag: $tag"

@@ -65,7 +65,9 @@ Require valid Authenticode metadata and signatures for a public release:
 powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1
 ```
 
-Use `-AllowUnsigned` only for local verification builds. Readiness verification checks the test suite, distribution contents, component manifest, required acceleration profiles, artifact hashes, and signatures.
+There is no unsigned public-release bypass. Readiness verification checks the test
+suite, distribution contents, component manifest, required acceleration profiles,
+artifact hashes, source provenance, and the pinned signing-certificate SHA-256.
 
 ## Publish
 

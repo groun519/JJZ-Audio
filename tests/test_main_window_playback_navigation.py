@@ -330,7 +330,9 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         calls: list[tuple[str, int | None]] = []
         window = SimpleNamespace(
             page_stack=_PageStack(PAGE_STUDIO),
-            studio_session_autosave=SimpleNamespace(flush=lambda: calls.append(("flush", None))),
+            _flush_studio_or_block=lambda _action: (
+                calls.append(("flush", None)) or True
+            ),
             model_workspace_page=SimpleNamespace(stop_preview=lambda: calls.append(("model", None))),
             primary_navigation=SimpleNamespace(
                 set_current_page=lambda index: calls.append(("navigation", index))
@@ -348,6 +350,21 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
 
         self.assertNotIn(("suspend", None), calls)
         self.assertIn(("queue-force", PAGE_SEPARATION), calls)
+
+    def test_navigation_stays_in_studio_when_project_save_fails(self) -> None:
+        calls: list[tuple[str, int | None]] = []
+        window = SimpleNamespace(
+            page_stack=_PageStack(PAGE_STUDIO),
+            _flush_studio_or_block=lambda _action: False,
+            primary_navigation=SimpleNamespace(
+                set_current_page=lambda index: calls.append(("navigation", index))
+            ),
+        )
+
+        MainWindow._navigate_to_page(window, PAGE_SEPARATION)
+
+        self.assertEqual(window.page_stack.currentIndex(), PAGE_STUDIO)
+        self.assertEqual(calls, [("navigation", PAGE_STUDIO)])
 
     def test_navigation_rejects_workflow_page_without_a_work_song(self) -> None:
         calls: list[int] = []
@@ -568,6 +585,79 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
             calls,
             [("restore", PAGE_SEPARATION), ("prepare", PAGE_STUDIO)],
         )
+
+    def test_studio_prewarm_prepares_audio_before_the_first_play_request(self) -> None:
+        queued: list[tuple[str, object, tuple[object, ...]]] = []
+        song = SimpleNamespace(id="song-1")
+        session = object()
+        sources = (object(), object())
+        queue = PlaybackQueue(
+            context="output",
+            source_id="studio:song-1",
+            title="Studio",
+            paths=(),
+            volumes=(),
+            duration_ms=90_000,
+            scope=WorkspacePlaybackScope.STUDIO.value,
+        )
+        window = SimpleNamespace(
+            page_stack=_PageStack(PAGE_STUDIO),
+            player=SimpleNamespace(
+                is_playing=lambda: False,
+                has_prepared_audio=lambda: False,
+            ),
+            current_work_item=song,
+            current_song=None,
+            current_playback_queue=queue,
+            _studio_playback_sources=sources,
+            _logger=SimpleNamespace(info=lambda *_args: None),
+            studio_editor=SimpleNamespace(session=lambda: session),
+            _sync_playback_queue_for_page=lambda *_args, **_kwargs: None,
+            _queue_studio_playback_prepare=lambda song_id, value, value_sources: queued.append(
+                (song_id, value, value_sources)
+            ),
+        )
+
+        MainWindow._prewarm_studio_playback(window)
+
+        self.assertEqual(queued, [("song-1", session, sources)])
+
+    def test_studio_prewarm_rebuilds_sources_missing_from_a_restored_queue(self) -> None:
+        song = SimpleNamespace(id="song-1")
+        sources = (object(),)
+        queue = PlaybackQueue(
+            context="output",
+            source_id="studio:song-1",
+            title="Studio",
+            paths=(),
+            volumes=(),
+            duration_ms=90_000,
+            scope=WorkspacePlaybackScope.STUDIO.value,
+        )
+        queued: list[tuple[object, ...]] = []
+        window = SimpleNamespace(
+            page_stack=_PageStack(PAGE_STUDIO),
+            player=SimpleNamespace(
+                is_playing=lambda: False,
+                has_prepared_audio=lambda: False,
+            ),
+            current_work_item=song,
+            current_song=None,
+            current_playback_queue=queue,
+            _studio_playback_sources=(),
+            _logger=SimpleNamespace(info=lambda *_args: None),
+            studio_editor=SimpleNamespace(session=lambda: "session"),
+            _queue_studio_playback_prepare=lambda *args: queued.append(args),
+        )
+
+        def rebuild(*_args, **_kwargs) -> None:
+            window._studio_playback_sources = sources
+
+        window._sync_playback_queue_for_page = rebuild
+
+        MainWindow._prewarm_studio_playback(window)
+
+        self.assertEqual(queued, [("song-1", "session", sources)])
 
     def test_studio_timeline_state_is_restored_for_the_same_work_song(self) -> None:
         restored_playheads: list[int] = []
@@ -1329,7 +1419,7 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
             [("song-1", session, assets), ("song-1", session, assets)],
         )
 
-    def test_reverb_change_updates_the_live_chain_without_restarting_playback(self) -> None:
+    def test_reverb_change_queues_exact_background_preview_render(self) -> None:
         from dataclasses import replace
 
         from jang_app.services.studio_session import (
@@ -1360,6 +1450,7 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
             scope="studio",
         )
         calls: list[tuple[str, object]] = []
+        prepares: list[tuple[object, ...]] = []
         mix_track = SimpleNamespace(set_mix_state=lambda **_kwargs: None)
         window = SimpleNamespace(
             _is_loading_studio_session=False,
@@ -1398,19 +1489,19 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
                 duration_ms=12_000,
                 scope="studio",
             ),
-            _queue_studio_playback_prepare=lambda *_args: self.fail(
-                "effect settings must not rebuild the playback buffer"
-            ),
+            _queue_studio_playback_prepare=lambda *args: prepares.append(args),
             _refresh_playback_ui=lambda **_kwargs: None,
             _update_output_playheads=lambda _position, _duration: None,
         )
 
         MainWindow._on_studio_editor_session_changed(window, StudioSession(), False)
 
-        self.assertFalse(window._studio_playback_queue_dirty)
+        self.assertTrue(window._studio_playback_queue_dirty)
         self.assertEqual(window._playback_position_ms, 4_500)
-        self.assertEqual(calls[0], ("effects", ((new_effect,),)))
-        self.assertEqual(calls[1], ("volumes", (1.0,)))
+        self.assertEqual(calls, [])
+        self.assertEqual(len(prepares), 1)
+        self.assertEqual(prepares[0][0], "song-1")
+        self.assertEqual(prepares[0][2], (new_source,))
 
     def test_prepared_studio_buffer_reloads_at_the_live_playback_position(self) -> None:
         from jang_app.services.studio_session import StudioSession
@@ -1478,6 +1569,72 @@ class MainWindowPlaybackNavigationTests(unittest.TestCase):
         self.assertEqual(window._playback_position_ms, 4_250)
         self.assertFalse(window._studio_playback_queue_dirty)
         self.assertEqual(calls, [("status", ""), ("replace", 12_500)])
+
+    def test_first_studio_play_starts_after_background_prepare_finishes(self) -> None:
+        from jang_app.services.studio_session import StudioSession
+
+        session = StudioSession()
+        sources = (AudioMixSource("Vocal", Path("vocal.wav")),)
+        queue = PlaybackQueue(
+            context="output",
+            source_id="studio:song-1",
+            title="Studio Mix",
+            paths=(Path("vocal.wav"),),
+            volumes=(1.0,),
+            duration_ms=0,
+            scope="studio",
+        )
+        calls: list[tuple[str, object]] = []
+        window = SimpleNamespace(
+            current_song=SimpleNamespace(id="song-1"),
+            current_work_item=None,
+            current_playback_queue=queue,
+            studio_editor=SimpleNamespace(
+                session=lambda: session,
+                set_status=lambda status: calls.append(("status", status)),
+            ),
+            player=SimpleNamespace(
+                is_playing=lambda: False,
+                set_prepared=lambda prepared, _volumes: calls.append(
+                    ("prepared", prepared.duration_ms)
+                )
+                or True,
+            ),
+            _playback_position_ms=0,
+            _studio_playback_queue_dirty=True,
+            _studio_playback_sources=(),
+            _studio_playback_autostart=("song-1", 2_500),
+            _studio_playback_queue=lambda song_id, _session, resolved_sources: PlaybackQueue(
+                context="output",
+                source_id=f"studio:{song_id}",
+                title="Studio Mix",
+                paths=tuple(source.path for source in resolved_sources),
+                volumes=tuple(source.volume for source in resolved_sources),
+                duration_ms=0,
+                scope="studio",
+            ),
+            _play_current_queue=lambda position: calls.append(("play", position)),
+            _refresh_playback_ui=lambda **_kwargs: None,
+            _update_output_playheads=lambda _position, _duration: None,
+        )
+
+        applied = MainWindow._apply_studio_playback_prepare(
+            window,
+            "song-1",
+            session,
+            sources,
+            PreparedPlaybackAudio(
+                (np.zeros((220_500, 2), dtype=np.float32),),
+                220_500,
+            ),
+        )
+
+        self.assertTrue(applied)
+        self.assertIsNone(window._studio_playback_autostart)
+        self.assertEqual(
+            calls,
+            [("status", ""), ("prepared", 5_000), ("play", 2_500)],
+        )
 
     def test_dirty_studio_queue_rebuilds_when_playback_resumes(self) -> None:
         queue = PlaybackQueue(

@@ -57,10 +57,12 @@ def build_song_mix_sources(
     package: SongPackage,
     session: StudioSession,
     assets: tuple[StudioSoundAsset, ...] | None = None,
+    *,
+    allow_empty: bool = False,
 ) -> tuple[AudioMixSource, ...]:
     if session.tracks:
         sources = _timeline_mix_sources(package, session, assets)
-        if not sources:
+        if not sources and not allow_empty:
             raise AudioExportError("Add at least one audible clip to the Studio timeline.")
         return sources
 
@@ -86,7 +88,7 @@ def build_song_mix_sources(
         for label, path, state in candidates
         if path is not None and not state.muted
     )
-    if not sources:
+    if not sources and not allow_empty:
         raise AudioExportError("Select at least one unmuted track before exporting a mix.")
     return sources
 
@@ -125,13 +127,14 @@ def _timeline_mix_sources(
     assets: tuple[StudioSoundAsset, ...] | None,
 ) -> tuple[AudioMixSource, ...]:
     audio_tracks = tuple(track for track in session.tracks if track.role != TRACK_VIDEO)
-    has_solo = any(track.solo and not track.muted for track in audio_tracks)
+    has_solo = any(track.solo and not track.muted for track in session.tracks)
     asset_paths = (
         None
         if assets is None
         else {asset.reference: asset.path for asset in assets}
     )
     sources: list[AudioMixSource] = []
+    missing: list[str] = []
     for track in audio_tracks:
         if track.muted or (has_solo and not track.solo):
             continue
@@ -140,6 +143,7 @@ def _timeline_mix_sources(
                 continue
             path = _mix_asset_path(package, clip.asset, asset_paths)
             if path is None:
+                missing.append(clip.asset.asset_id)
                 continue
             reference_path = None
             if (
@@ -154,6 +158,13 @@ def _timeline_mix_sources(
                     StudioAssetRef(clip.asset.output_id, TRACK_ORIGINAL_VOCAL),
                     asset_paths,
                 )
+                if reference_path is None:
+                    missing.append(
+                        StudioAssetRef(
+                            clip.asset.output_id,
+                            TRACK_ORIGINAL_VOCAL,
+                        ).asset_id
+                    )
             sources.append(
                 AudioMixSource(
                     label=f"{track.name} / {clip.clip_id}",
@@ -170,6 +181,11 @@ def _timeline_mix_sources(
                     pitch_semitones=clip.pitch_semitones,
                 )
             )
+    if missing:
+        raise AudioExportError(
+            "Studio export is missing required audio: "
+            + ", ".join(dict.fromkeys(missing))
+        )
     return tuple(sources)
 
 
@@ -179,5 +195,10 @@ def _mix_asset_path(
     asset_paths: dict[StudioAssetRef, Path] | None,
 ) -> Path | None:
     if asset_paths is not None:
-        return asset_paths.get(reference)
+        candidate = asset_paths.get(reference)
+        return (
+            candidate.expanduser().resolve()
+            if candidate is not None and candidate.expanduser().is_file()
+            else None
+        )
     return resolve_studio_asset(package, reference)

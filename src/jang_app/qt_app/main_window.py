@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import traceback
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
-from PySide6.QtGui import QActionGroup, QIcon
+from PySide6.QtCore import QEvent, QMimeData, QPoint, Qt, QTimer
+from PySide6.QtGui import QActionGroup, QDrag, QIcon
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QAbstractSpinBox,
     QComboBox,
     QApplication,
@@ -70,11 +73,13 @@ from jang_app.qt_app.collapsible_card_header import CollapsibleCardHeader
 from jang_app.qt_app.conversion_pitch_guide import ConversionPitchGuide
 from jang_app.qt_app.conversion_result_browser import ConversionResultBrowser
 from jang_app.qt_app.conversion_input_pool import ConversionInputPool
+from jang_app.qt_app.diagnostics_page import DiagnosticsWindow
 from jang_app.qt_app.export_page import ExportPage
 from jang_app.qt_app.google_account_button import GoogleAccountButton
 from jang_app.qt_app.google_drive_controller import GoogleDriveController
 from jang_app.qt_app.initial_setup_dialog import InitialSetupDialog
 from jang_app.qt_app.library_details_panel import LibraryDetailsPanel
+from jang_app.qt_app.library_group_panel import LibraryGroupPanel
 from jang_app.qt_app.library_row import SongListRow
 from jang_app.qt_app.localization import (
     apply_widget_language,
@@ -82,7 +87,6 @@ from jang_app.qt_app.localization import (
     set_translated_text,
     set_translated_tooltip,
 )
-from jang_app.qt_app.log_drawer import LogDrawer
 from jang_app.qt_app.model_workspace import ModelWorkspacePage
 from jang_app.qt_app.processing_queue_panel import ProcessingQueueButton, ProcessingQueuePanel
 from jang_app.qt_app.primary_navigation import PrimaryNavigationBar
@@ -148,7 +152,7 @@ from jang_app.services.audio_player import (
 )
 from jang_app.services.video_export_settings import VideoExportSettings
 from jang_app.services.audio_preview import prepare_preview_audio
-from jang_app.services.command import start_detached_command
+from jang_app.services.command import start_detached_command, terminate_all_commands
 from jang_app.services.conversion_pitch_recommendation import (
     PitchRangeProfile,
     PitchRecommendationResult,
@@ -163,6 +167,12 @@ from jang_app.services.file_browser import open_in_file_browser
 from jang_app.services.i18n import LANGUAGE_ENGLISH, LANGUAGE_KOREAN, set_language, tr
 from jang_app.services.windows_app_mutex import close_app_mutex, create_app_mutex
 from jang_app.services.job_diagnostics import get_job_diagnostics
+from jang_app.services.library_groups import (
+    ALL_SONGS_GROUP_ID,
+    UNGROUPED_SONGS_GROUP_ID,
+    LibraryGroupError,
+    LibraryGroupStore,
+)
 from jang_app.services.model_dataset import ModelDatasetStore
 from jang_app.services.model_dataset_analysis import load_cached_model_dataset_analysis
 from jang_app.services.model_precision_benchmark import load_cached_model_precision_benchmark
@@ -229,8 +239,13 @@ from jang_app.services.update_cache import (
     discard_completed_update,
     mark_update_cleanup_ready,
 )
+from jang_app.services.update_transaction import stage_pending_component_update
 from jang_app.services.video_source import VideoSource
-from jang_app.services.vocal_project import VocalConversionSettings, VocalProject
+from jang_app.services.vocal_project import (
+    VocalConversionSettings,
+    VocalInputProvenance,
+    VocalProject,
+)
 from jang_app.services.vocal_project_store import VocalProjectStore
 from jang_app.services.vocal_input import (
     VocalInputChoice,
@@ -282,6 +297,8 @@ class MainWindow(QMainWindow):
         self._workspace_shortcut_filter_installed = False
         set_language(settings.language)
         self.library = SongLibrary()
+        self.library_group_store = LibraryGroupStore(APP_PATHS.catalog_file)
+        self._library_group_song_ids: frozenset[str] = frozenset()
         self.work_song_store = work_song_store or WorkSongStore()
         self.work_song_session = WorkSongSession(self.work_song_store)
         self.work_convert_session = WorkConvertSession()
@@ -292,6 +309,8 @@ class MainWindow(QMainWindow):
         self.player = AudioPlayer()
         self.processing_queue = ProcessingQueue(diagnostics=get_job_diagnostics())
         self._workers: list[TaskWorker] = []
+        self._worker_task_ids: dict[TaskWorker, str] = {}
+        self._closing = False
         self._logger = get_logger()
         self._update_check_worker: TaskWorker | None = None
         self._update_dialog: UpdateDialog | None = None
@@ -329,6 +348,8 @@ class MainWindow(QMainWindow):
         self._studio_playback_prepare_request: (
             tuple[int, str, StudioSession, tuple[AudioMixSource, ...]] | None
         ) = None
+        self._studio_playback_autostart: tuple[str, int] | None = None
+        self._studio_playback_prepare_started_at = 0.0
         self._pitch_guide_worker: TaskWorker | None = None
         self._pitch_guide_generation = 0
         self._pitch_guide_pending_request: (
@@ -365,6 +386,11 @@ class MainWindow(QMainWindow):
         self._studio_playback_prepare_timer.setSingleShot(True)
         self._studio_playback_prepare_timer.setInterval(50)
         self._studio_playback_prepare_timer.timeout.connect(self._start_studio_playback_prepare)
+
+        self._studio_playback_prewarm_timer = QTimer(self)
+        self._studio_playback_prewarm_timer.setSingleShot(True)
+        self._studio_playback_prewarm_timer.setInterval(120)
+        self._studio_playback_prewarm_timer.timeout.connect(self._prewarm_studio_playback)
 
         self._pitch_guide_refresh_timer = QTimer(self)
         self._pitch_guide_refresh_timer.setSingleShot(True)
@@ -436,18 +462,31 @@ class MainWindow(QMainWindow):
             self.update_poll_timer.start(2500)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._closing = True
+        if not self._flush_studio_or_block("closing the app"):
+            self._closing = False
+            event.ignore()
+            return
+        if not self._cancel_and_wait_for_workers():
+            self._closing = False
+            self._logger.warning("Application close blocked by unfinished workers")
+            event.ignore()
+            return
         self.update_poll_timer.stop()
         self._studio_playback_prepare_timer.stop()
+        self._studio_playback_prewarm_timer.stop()
         self._pitch_guide_refresh_timer.stop()
         discard_vocal_cleanup_preview(self._vocal_cleanup_preview)
         self._vocal_cleanup_preview = None
         if hasattr(self, "studio_layout_save_timer"):
             self.studio_layout_save_timer.stop()
             self._save_studio_layout()
+        if hasattr(self, "library_group_layout_save_timer"):
+            self.library_group_layout_save_timer.stop()
+            self._save_library_group_panel_width()
         MainWindow._remember_studio_timeline_state(self)
         self.google_drive.shutdown()
         self.task_attention.close()
-        self.studio_session_autosave.flush()
         self.model_workspace_page.stop_preview()
         self.model_workspace_page.shutdown_training()
         self.player.stop()
@@ -457,6 +496,34 @@ class MainWindow(QMainWindow):
             application.removeEventFilter(self)
             self._workspace_shortcut_filter_installed = False
         super().closeEvent(event)
+
+    def _cancel_and_wait_for_workers(self, timeout_ms: int = 8000) -> bool:
+        workers = tuple(self._workers)
+        for worker in workers:
+            worker.request_cancel()
+        terminate_all_commands()
+        deadline = monotonic() + max(0, timeout_ms) / 1000
+        stopped = True
+        for worker in workers:
+            remaining_ms = max(0, round((deadline - monotonic()) * 1000))
+            if worker.isRunning() and not worker.wait(remaining_ms):
+                stopped = False
+                continue
+            task_id = self._worker_task_ids.get(worker, "")
+            if task_id:
+                self.processing_queue.cancel(task_id, tr("Stopped because the app is closing."))
+        return stopped
+
+    def _flush_studio_or_block(self, action: str) -> bool:
+        if self.studio_session_autosave.flush():
+            return True
+        message = tr(
+            "Studio project could not be saved. Fix the storage problem and try {action} again.",
+            action=action,
+        )
+        self._logger.error("Studio durability barrier blocked action | action=%s", action)
+        self.studio_editor.set_status(message)
+        return False
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if (
@@ -614,19 +681,22 @@ class MainWindow(QMainWindow):
         self.update_status_button.clicked.connect(self._open_available_update)
 
         self.processing_queue_panel = ProcessingQueuePanel(self.processing_queue, content_widget)
-        self.processing_queue_panel.geometry_changed.connect(self._position_processing_queue)
-        self.processing_queue_panel.log_requested.connect(self._open_log_drawer)
+        self.processing_queue_panel.geometry_changed.connect(
+            self._position_processing_queue
+        )
+        self.processing_queue_panel.diagnostics_requested.connect(
+            self._open_diagnostics_window
+        )
+        self.processing_queue_panel.task_requested.connect(
+            self._open_diagnostics_window
+        )
         self.processing_queue_panel.close_requested.connect(self._close_processing_queue_drawer)
         self.processing_queue_panel.hide()
 
         self.toast_stack = ToastStack(self.processing_queue, content_widget)
         self.toast_stack.geometry_changed.connect(self._position_processing_queue)
-        self.toast_stack.details_requested.connect(self._open_log_drawer)
-
-        self.log_drawer = LogDrawer(self.processing_queue, content_widget)
-        self.log_drawer.close_requested.connect(self._close_log_drawer)
-        self.log_drawer.queue_requested.connect(self._open_processing_queue_drawer)
-        self.log_drawer.open_location_requested.connect(self._open_log_location)
+        self.toast_stack.details_requested.connect(self._open_diagnostics_window)
+        self.diagnostics_window = self._build_diagnostics_window()
         QTimer.singleShot(0, self._position_update_status)
         QTimer.singleShot(0, self._position_processing_queue)
 
@@ -664,6 +734,9 @@ class MainWindow(QMainWindow):
         self.primary_navigation.page_requested.connect(self._navigate_to_page)
         self.primary_navigation.page_option_requested.connect(
             self._on_primary_page_option_requested
+        )
+        self.primary_navigation.management_requested.connect(
+            self._open_diagnostics_window
         )
         self.primary_navigation.settings_requested.connect(self._open_system_setup)
         self.primary_navigation.work_song_changed.connect(
@@ -716,8 +789,13 @@ class MainWindow(QMainWindow):
             parent=self.title_bar.action_widget,
         )
         self.processing_queue_button.clicked.connect(self._toggle_processing_queue_drawer)
+        self.management_button = self.primary_navigation.management_button
+        set_translated_tooltip(
+            self.management_button,
+            "Environment & Management",
+        )
         self.settings_button = self.primary_navigation.settings_button
-        set_translated_tooltip(self.settings_button, "System setup")
+        set_translated_tooltip(self.settings_button, "Settings")
         self.title_bar.add_action_widget(self.processing_queue_button)
         self.title_bar.add_action_widget(self.google_account_button)
         self.title_bar.add_action_widget(self.language_button)
@@ -770,6 +848,18 @@ class MainWindow(QMainWindow):
         import_layout.addWidget(self.drop_card, 1)
         import_layout.addWidget(self.quick_create_panel, 0)
 
+        import_target = QFrame()
+        import_target.setObjectName("LibraryImportTarget")
+        import_target_layout = QVBoxLayout(import_target)
+        import_target_layout.setContentsMargins(12, 10, 12, 10)
+        import_target_layout.setSpacing(7)
+        self.library_import_target_label = QLabel()
+        self.library_import_target_label.setObjectName("MutedText")
+        self.library_import_target_combo = ScrollSafeComboBox()
+        import_target_layout.addWidget(self.library_import_target_label)
+        import_target_layout.addWidget(self.library_import_target_combo)
+        import_layout.addWidget(import_target, 0)
+
         list_panel = QFrame()
         list_panel.setObjectName("Panel")
         list_layout = QVBoxLayout(list_panel)
@@ -777,12 +867,16 @@ class MainWindow(QMainWindow):
         list_layout.setSpacing(16)
 
         list_header = QHBoxLayout()
-        list_title = QLabel("Library")
-        list_title.setObjectName("SectionTitle")
+        self.library_title_label = QLabel("Library")
+        self.library_title_label.setObjectName("SectionTitle")
         self.library_count_label = QLabel("")
         self.library_count_label.setObjectName("MutedText")
-        list_header.addWidget(list_title, 0)
+        self.library_group_toggle_button = SvgIconButton("folder", size=30)
+        self.library_group_toggle_button.clicked.connect(self._toggle_library_group_panel)
+        set_translated_tooltip(self.library_group_toggle_button, "Show or hide groups")
+        list_header.addWidget(self.library_title_label, 0)
         list_header.addWidget(self.library_count_label, 1)
+        list_header.addWidget(self.library_group_toggle_button, 0)
 
         filter_layout = QHBoxLayout()
         filter_layout.setContentsMargins(0, 0, 0, 0)
@@ -799,6 +893,9 @@ class MainWindow(QMainWindow):
 
         self.song_list = QListWidget()
         self.song_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.song_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.song_list.setDragEnabled(True)
+        self.song_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.song_list.itemDoubleClicked.connect(lambda _item: self._open_selected_library_details())
 
         list_layout.addLayout(list_header)
@@ -820,8 +917,35 @@ class MainWindow(QMainWindow):
             self._seek_library_asset_preview
         )
 
+        self.library_group_panel = LibraryGroupPanel()
+        self.library_group_panel.group_selected.connect(self._on_library_group_selected)
+        self.library_group_panel.create_requested.connect(self._create_library_group)
+        self.library_group_panel.rename_requested.connect(self._rename_library_group)
+        self.library_group_panel.delete_requested.connect(self._delete_library_group)
+        self.library_group_panel.songs_move_requested.connect(self._move_library_songs)
+        self.library_group_panel.move_selection_requested.connect(
+            self._move_selected_library_songs
+        )
+        self.library_group_panel.expanded_groups_changed.connect(
+            self.library_group_store.set_expanded_group_ids
+        )
+        self.library_group_splitter = create_workspace_splitter(
+            (self.library_group_panel, list_panel),
+            object_name="LibraryGroupWorkspaceSplitter",
+            sizes=(self.library_group_store.group_panel_width(), 1000),
+            stretch_factors=(0, 1),
+            collapsible=(True, False),
+        )
+        self.library_group_layout_save_timer = QTimer(self)
+        self.library_group_layout_save_timer.setSingleShot(True)
+        self.library_group_layout_save_timer.setInterval(220)
+        self.library_group_layout_save_timer.timeout.connect(self._save_library_group_panel_width)
+        self.library_group_splitter.splitterMoved.connect(
+            lambda _position, _index: self.library_group_layout_save_timer.start()
+        )
+
         self.library_content_stack = QStackedWidget()
-        self.library_content_stack.addWidget(list_panel)
+        self.library_content_stack.addWidget(self.library_group_splitter)
         self.library_content_stack.addWidget(self.library_details_panel)
         self._populate_library_sort_combo()
 
@@ -1199,6 +1323,19 @@ class MainWindow(QMainWindow):
         self.export_page.remove_requested.connect(self._remove_export)
         return self.export_page
 
+    def _build_diagnostics_window(self) -> DiagnosticsWindow:
+        diagnostics = self.processing_queue.diagnostics or get_job_diagnostics()
+        window = DiagnosticsWindow(
+            self.processing_queue,
+            diagnostics,
+            self,
+            theme_mode=self.settings.theme_mode,
+        )
+        window.setWindowIcon(QIcon(str(APP_ICON_PATH)))
+        window.open_location_requested.connect(self._open_log_location)
+        window.system_setup_requested.connect(self._open_system_diagnostics)
+        return window
+
     def _build_models_page(self) -> QWidget:
         hardware_selection = recorded_hardware_selection(APP_PATHS)
         self.model_workspace_page = ModelWorkspacePage(
@@ -1216,7 +1353,7 @@ class MainWindow(QMainWindow):
         self.model_workspace_page.use_in_convert_requested.connect(self._use_model_in_convert)
         self.model_workspace_page.open_location_requested.connect(self._open_model_location)
         self.model_workspace_page.preview_started.connect(self._on_model_preview_started)
-        self.model_workspace_page.log_requested.connect(self._open_log_drawer)
+        self.model_workspace_page.log_requested.connect(self._open_diagnostics_window)
         self.model_workspace_page.system_setup_requested.connect(
             self._open_system_setup
         )
@@ -1463,6 +1600,7 @@ class MainWindow(QMainWindow):
         self.title_bar.set_theme_mode(self.settings.theme_mode)
         self.primary_navigation.set_theme_mode(self.settings.theme_mode)
         self.theme_button.set_theme_mode(self.settings.theme_mode)
+        self.management_button.set_theme_mode(self.settings.theme_mode)
         self.settings_button.set_theme_mode(self.settings.theme_mode)
         for transport_name in (
             "separation_transport_bar",
@@ -1479,8 +1617,8 @@ class MainWindow(QMainWindow):
             self.processing_queue_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "toast_stack"):
             self.toast_stack.set_theme_mode(self.settings.theme_mode)
-        if hasattr(self, "log_drawer"):
-            self.log_drawer.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "diagnostics_window"):
+            self.diagnostics_window.set_theme_mode(self.settings.theme_mode)
         for button_name in ("output_refresh_button", "browse_rvc_button", "refresh_rvc_button"):
             button = getattr(self, button_name, None)
             if button is not None:
@@ -1511,6 +1649,9 @@ class MainWindow(QMainWindow):
             self.vocal_results_panel.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "library_details_panel"):
             self.library_details_panel.set_theme_mode(self.settings.theme_mode)
+        if hasattr(self, "library_group_panel"):
+            self.library_group_panel.set_theme_mode(self.settings.theme_mode)
+            self.library_group_toggle_button.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "export_page"):
             self.export_page.set_theme_mode(self.settings.theme_mode)
         if hasattr(self, "video_preview_panel"):
@@ -1534,6 +1675,11 @@ class MainWindow(QMainWindow):
         set_translated_tooltip(self.language_button, "Language")
         self.google_account_button.apply_language()
         self.primary_navigation.apply_language()
+        set_translated_tooltip(
+            self.management_button,
+            "Environment & Management",
+        )
+        set_translated_tooltip(self.settings_button, "Settings")
         for language, action in self.language_actions.items():
             action.setChecked(language == self.settings.language)
         self.separation_transport_bar.apply_language()
@@ -1542,7 +1688,7 @@ class MainWindow(QMainWindow):
         self.processing_queue_panel.apply_language()
         self.processing_queue_button.apply_language()
         self.toast_stack.apply_language()
-        self.log_drawer.apply_language()
+        self.diagnostics_window.apply_language()
         self.model_workspace_page.apply_language()
         self.separation_results_panel.apply_language()
         self.separation_stem_pool.apply_language()
@@ -1563,6 +1709,14 @@ class MainWindow(QMainWindow):
         self.quick_create_panel.apply_language()
         self._populate_library_sort_combo()
         set_translated_tooltip(self.library_sort_combo, "Sort songs")
+        if hasattr(self, "library_group_panel"):
+            self.library_group_panel.apply_language()
+            self.library_import_target_label.setText(tr("Import to"))
+            set_translated_tooltip(
+                self.library_group_toggle_button,
+                "Show or hide groups",
+            )
+            self._refresh_library_groups(tuple(self._song_items_by_id.values()))
 
         if hasattr(self, "song_list"):
             self._sync_work_song_rows()
@@ -1644,44 +1798,32 @@ class MainWindow(QMainWindow):
     def _position_processing_queue(self) -> None:
         if not hasattr(self, "processing_queue_panel"):
             return
-        panel = self.processing_queue_panel
         parent = self._content_widget
-        player_top = parent.height() - 16
-        drawer_open = hasattr(self, "log_drawer") and self.log_drawer.isVisible()
-        queue_open = self._processing_queue_drawer_open
-
-        if drawer_open:
-            drawer = self.log_drawer
-            top_position = 16
-            drawer.setFixedHeight(max(260, player_top - top_position - 10))
-            self._move_content_overlay(
-                drawer,
-                max(16, parent.width() - drawer.width() - 16),
-                top_position,
+        page_rect = self.page_stack.geometry()
+        panel = self.processing_queue_panel
+        if self._processing_queue_drawer_open:
+            panel_height = max(
+                220,
+                min(panel.preferred_overlay_height(), parent.height() - 32),
             )
-            drawer.raise_()
-            panel.hide()
-        elif queue_open:
+            panel.setFixedHeight(panel_height)
+            panel_x = max(page_rect.left(), page_rect.right() - panel.width())
+            self._move_content_overlay(panel, panel_x, max(16, page_rect.top()))
             panel.show()
-            top_position = 16
-            panel.setFixedHeight(max(260, player_top - top_position - 10))
-            x_position = max(16, parent.width() - panel.width() - 16)
-            self._move_content_overlay(panel, x_position, top_position)
             panel.raise_()
         else:
             panel.hide()
 
         if hasattr(self, "toast_stack") and self.toast_stack.isVisible():
             toast = self.toast_stack
-            if drawer_open:
-                toast_x = max(16, self.log_drawer.x() - toast.width() - 10)
-                toast_y = max(16, player_top - toast.height() - 10)
-            elif queue_open:
-                toast_x = max(16, panel.x() - toast.width() - 10)
-                toast_y = max(16, player_top - toast.height() - 10)
+            if self._processing_queue_drawer_open:
+                toast_x = max(
+                    page_rect.left(),
+                    page_rect.right() - panel.width() - toast.width() - 10,
+                )
             else:
-                toast_x = max(16, parent.width() - toast.width() - 16)
-                toast_y = max(16, player_top - toast.height() - 10)
+                toast_x = max(page_rect.left(), page_rect.right() - toast.width())
+            toast_y = max(16, parent.height() - toast.height() - 16)
             toast.move(toast_x, toast_y)
             toast.raise_()
 
@@ -1704,21 +1846,13 @@ class MainWindow(QMainWindow):
         )
         self.size_grip.raise_()
 
-    def _open_log_drawer(self, task_id: str = "") -> None:
+    def _open_diagnostics_window(self, task_id: str = "") -> None:
         self.toast_stack.dismiss_all()
-        self._processing_queue_drawer_open = False
-        self.processing_queue_button.setChecked(False)
-        self.processing_queue_button.apply_language()
-        self.processing_queue_panel.hide()
-        self.log_drawer.show()
-        self.log_drawer.refresh_content()
-        if task_id:
-            self.log_drawer.select_task(task_id)
-        self._position_processing_queue()
+        self._close_processing_queue_drawer()
+        self.diagnostics_window.show_diagnostics(task_id)
 
-    def _close_log_drawer(self) -> None:
-        self.log_drawer.hide()
-        self._position_processing_queue()
+    def _close_diagnostics_window(self) -> None:
+        self.diagnostics_window.close()
 
     def _toggle_processing_queue_drawer(self, *_args) -> None:
         if self._processing_queue_drawer_open:
@@ -1728,9 +1862,9 @@ class MainWindow(QMainWindow):
 
     def _open_processing_queue_drawer(self) -> None:
         self._processing_queue_drawer_open = True
-        self.log_drawer.hide()
         self.processing_queue_button.setChecked(True)
         self.processing_queue_button.apply_language()
+        self.processing_queue_panel.refresh_history()
         self.processing_queue_panel.show()
         self._position_processing_queue()
 
@@ -1746,7 +1880,10 @@ class MainWindow(QMainWindow):
         try:
             open_in_file_browser(target)
         except Exception as exc:
-            self.log_drawer.application_log.setPlainText(f"Open failed: {_last_error_line(str(exc))}")
+            self._logger.warning(
+                "Open diagnostics location failed: %s",
+                _last_error_line(str(exc)),
+            )
 
     def _toggle_theme(self, *_args) -> None:
         self.settings = replace(self.settings, theme_mode=next_theme_mode(self.settings.theme_mode))
@@ -1754,11 +1891,18 @@ class MainWindow(QMainWindow):
         self._apply_theme()
 
     def _open_system_setup(self) -> None:
+        self._open_setup_dialog(diagnostics_only=False)
+
+    def _open_system_diagnostics(self) -> None:
+        self._open_setup_dialog(diagnostics_only=True)
+
+    def _open_setup_dialog(self, *, diagnostics_only: bool) -> None:
         dialog = InitialSetupDialog(
             APP_PATHS,
             APP_ICON_PATH,
             first_run=False,
             theme_mode=self.settings.theme_mode,
+            diagnostics_only=diagnostics_only,
         )
         if dialog.exec() != dialog.DialogCode.Accepted or not dialog.restart_required:
             return
@@ -1773,7 +1917,6 @@ class MainWindow(QMainWindow):
         if (
             not self._update_polling_enabled
             or self._update_check_worker is not None
-            or self._available_update_plan is not None
         ):
             return
         self.update_poll_timer.stop()
@@ -1795,21 +1938,7 @@ class MainWindow(QMainWindow):
             self._update_polling_policy.record_success(monotonic())
             if not isinstance(result, UpdateCheckOutcome):
                 return
-            self._update_manifest_etag = result.etag
-            self._update_manifest_last_modified = result.last_modified
-            plan = result.plan
-            if plan is not None:
-                self._apply_release_feature_policy(plan.release)
-            if plan is not None and plan.required:
-                self._available_update_plan = plan
-                self.update_status_button.set_available(
-                    plan.release.version,
-                    runtime_only=not plan.application_required,
-                )
-                self.update_status_button.show()
-                self._position_update_status()
-            elif plan is not None:
-                self.update_status_button.hide()
+            self._apply_update_check_outcome(result)
 
         def failed(error: str) -> None:
             self._update_polling_policy.record_failure(monotonic())
@@ -1834,12 +1963,32 @@ class MainWindow(QMainWindow):
             tr("Google Drive sharing is temporarily unavailable."),
         )
 
+    def _apply_update_check_outcome(self, result: UpdateCheckOutcome) -> None:
+        self._update_manifest_etag = result.etag
+        self._update_manifest_last_modified = result.last_modified
+        if result.not_modified:
+            return
+        plan = result.plan
+        if plan is not None:
+            self._apply_release_feature_policy(plan.release)
+        if plan is not None and plan.required:
+            self._available_update_plan = plan
+            self.update_status_button.set_available(
+                plan.release.version,
+                runtime_only=not plan.application_required,
+            )
+            self.update_status_button.show()
+            self._position_update_status()
+            return
+        self._available_update_plan = None
+        self.update_status_button.hide()
+
     def _set_google_drive_entry_points_enabled(self, is_enabled: bool) -> None:
         self.model_workspace_page.set_sharing_enabled(is_enabled)
         self.export_page.set_sharing_enabled(is_enabled)
 
     def _schedule_next_update_check(self) -> None:
-        if not self._update_polling_enabled or self._available_update_plan is not None:
+        if not self._update_polling_enabled:
             self.update_poll_timer.stop()
             return
         delay = self._update_polling_policy.next_delay_ms(
@@ -1849,7 +1998,7 @@ class MainWindow(QMainWindow):
         self.update_poll_timer.start(max(1, delay))
 
     def _on_application_state_changed(self, state: Qt.ApplicationState) -> None:
-        if not self._update_polling_enabled or self._available_update_plan is not None:
+        if not self._update_polling_enabled:
             return
         if self._update_polling_policy.last_checked_at is None:
             return
@@ -1945,6 +2094,24 @@ class MainWindow(QMainWindow):
         plan = self._downloaded_update_plan
         if plan is None:
             return
+        if plan.application_required and (
+            plan.runtime_required or plan.rvc_profile_required
+        ):
+            try:
+                stage_pending_component_update(
+                    APP_PATHS.cache_dir,
+                    plan,
+                    self._downloaded_update,
+                )
+            except Exception as exc:
+                if self._update_dialog is not None:
+                    self._set_update_download_failed(
+                        self._update_dialog,
+                        _last_error_line(str(exc)),
+                    )
+                return
+            self._launch_downloaded_installer_or_restart()
+            return
         runtime_packages = tuple(
             path for path in self._downloaded_update if path.suffix.lower() == ".zip"
         )
@@ -2036,7 +2203,7 @@ class MainWindow(QMainWindow):
             "/SUPPRESSMSGBOXES",
             "/NORESTART",
             "/CLOSEAPPLICATIONS",
-            "/RUN",
+            "/JJZEROUPDATE",
         )
         application = QApplication.instance()
         mutex_handle = getattr(application, "_jjzero_mutex_handle", None)
@@ -2052,7 +2219,12 @@ class MainWindow(QMainWindow):
                     tr("Could not start the update installer."),
                 )
             return
-        if plan is not None and not mark_update_cleanup_ready(
+        pending_runtime = bool(
+            plan is not None
+            and plan.application_required
+            and (plan.runtime_required or plan.rvc_profile_required)
+        )
+        if plan is not None and not pending_runtime and not mark_update_cleanup_ready(
             APP_PATHS.cache_dir,
             installer.parent,
             plan.release.version,
@@ -2081,7 +2253,9 @@ class MainWindow(QMainWindow):
         previous_index = self.page_stack.currentIndex()
         if previous_index == PAGE_STUDIO and index != PAGE_STUDIO:
             MainWindow._remember_studio_timeline_state(self)
-            self.studio_session_autosave.flush()
+            if not self._flush_studio_or_block("leaving Studio"):
+                self.primary_navigation.set_current_page(previous_index)
+                return
         workspace_pages = {PAGE_SEPARATION, PAGE_CONVERSION, PAGE_STUDIO}
         if previous_index != index and not ({previous_index, index} <= workspace_pages):
             self._suspend_playback()
@@ -2105,6 +2279,12 @@ class MainWindow(QMainWindow):
             self._sync_playback_queue_for_page(index, force=True)
         else:
             self._sync_playback_queue_for_page(index)
+        prewarm_timer = getattr(self, "_studio_playback_prewarm_timer", None)
+        if prewarm_timer is not None:
+            if index == PAGE_STUDIO:
+                prewarm_timer.start()
+            else:
+                prewarm_timer.stop()
         self._sync_playback_surfaces()
         self._sync_video_workspace()
         QTimer.singleShot(0, self._sync_playback_surfaces)
@@ -2175,6 +2355,7 @@ class MainWindow(QMainWindow):
             task_title="Import Media",
             task_detail=source.name,
             action_scope=lambda: scope.is_current(self.current_work_item),
+            resource_owner=("song", scope.song_id),
         )
 
     def _attach_video_url(self, url: str) -> None:
@@ -2209,6 +2390,7 @@ class MainWindow(QMainWindow):
             task_title="Download Video",
             task_detail=item.title,
             action_scope=lambda: scope.is_current(self.current_work_item),
+            resource_owner=("song", scope.song_id),
         )
 
     def _clear_video_source(self) -> None:
@@ -2267,7 +2449,9 @@ class MainWindow(QMainWindow):
             self.export_page.set_video_status("Select a song.")
             return
         self._queue_current_studio_session_save()
-        self.studio_session_autosave.flush()
+        if not self._flush_studio_or_block("rendering the video"):
+            self.export_page.set_video_status("Studio project save failed.")
+            return
         scope = WorkTaskScope(item.id)
         self.export_page.set_video_running(True)
         self.export_page.set_video_progress(1)
@@ -2283,6 +2467,7 @@ class MainWindow(QMainWindow):
             task_title="Render Video",
             task_detail=item.title,
             action_scope=lambda: self._is_export_song(scope.song_id),
+            resource_owner=("song", scope.song_id),
         )
 
     def _on_video_rendered(self, scope: WorkTaskScope, result: object) -> None:
@@ -2304,7 +2489,16 @@ class MainWindow(QMainWindow):
             self._open_library_details(song_id)
 
     def _add_songs(self, paths: list[Path]) -> None:
+        target_group_id = self._library_import_group_id()
         added = self.library.add_paths(paths)
+        if added:
+            self.library_group_store.assign_songs(
+                (song.id for song in added),
+                target_group_id,
+            )
+            self.library_group_store.set_selected_group_id(
+                target_group_id or UNGROUPED_SONGS_GROUP_ID
+            )
         self._refresh_song_list()
         if not added:
             _set_optional_label(self.library_status_label, "Unsupported file.")
@@ -2343,6 +2537,12 @@ class MainWindow(QMainWindow):
             download_result.title,
             download_result.url,
         )
+        if song is not None:
+            target_group_id = self._library_import_group_id()
+            self.library_group_store.assign_songs((song.id,), target_group_id)
+            self.library_group_store.set_selected_group_id(
+                target_group_id or UNGROUPED_SONGS_GROUP_ID
+            )
         self._refresh_song_list()
         if song is not None:
             self._select_library_song(song.id)
@@ -2363,6 +2563,7 @@ class MainWindow(QMainWindow):
         self.song_list.clear()
         items = self.library.items()
         self._song_items_by_id = {item.id: item for item in items}
+        self._refresh_library_groups(items)
         if self._library_preview_song_id not in self._song_items_by_id:
             if self._current_playback_context() == "library":
                 self._stop_playback(clear_queue=True)
@@ -2389,6 +2590,8 @@ class MainWindow(QMainWindow):
             row.preview_play_toggled.connect(self._toggle_library_preview_playback)
             row.preview_seek_requested.connect(self._seek_library_preview)
             row.preview_height_changed.connect(self._sync_library_row_height)
+            row.selection_requested.connect(self._select_library_row_for_grouping)
+            row.drag_requested.connect(self._start_library_song_drag)
             list_item = QListWidgetItem()
             list_item.setData(Qt.ItemDataRole.UserRole, item.id)
             attach_list_item_widget(self.song_list, list_item, row)
@@ -2419,6 +2622,41 @@ class MainWindow(QMainWindow):
                 self.song_list.setCurrentItem(item)
                 return True
         return False
+
+    def _select_library_row_for_grouping(self, song_id: str, extend: bool) -> None:
+        list_item, _row = self._library_row(song_id)
+        if list_item is None:
+            return
+        if extend:
+            list_item.setSelected(not list_item.isSelected())
+            if list_item.isSelected():
+                self.song_list.setCurrentItem(list_item)
+            return
+        self.song_list.clearSelection()
+        self.song_list.setCurrentItem(list_item)
+        list_item.setSelected(True)
+
+    def _start_library_song_drag(self, song_id: str) -> None:
+        list_item, _row = self._library_row(song_id)
+        if list_item is None:
+            return
+        if not list_item.isSelected():
+            self.song_list.clearSelection()
+            list_item.setSelected(True)
+        song_ids = tuple(
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.song_list.selectedItems()
+        )
+        if not song_ids:
+            return
+        mime_data = QMimeData()
+        mime_data.setData(
+            "application/x-jjzero-library-songs",
+            "\n".join(song_ids).encode("utf-8"),
+        )
+        drag = QDrag(self.song_list)
+        drag.setMimeData(mime_data)
+        drag.exec(Qt.DropAction.MoveAction)
 
     def _toggle_library_preview(self, song_id: str) -> None:
         if song_id == self._library_preview_song_id:
@@ -2497,6 +2735,182 @@ class MainWindow(QMainWindow):
         self.library_sort_combo.setCurrentIndex(index if index >= 0 else 0)
         self.library_sort_combo.blockSignals(False)
 
+    def _refresh_library_groups(self, items: tuple[SongItem, ...] | list[SongItem]) -> None:
+        if not hasattr(self, "library_group_panel"):
+            return
+        groups = self.library_group_store.groups()
+        display_paths = self.library_group_store.display_paths(groups)
+        song_ids = tuple(item.id for item in items)
+        selected_group_id = self.library_group_store.selected_group_id()
+        counts = self.library_group_store.group_counts(song_ids, groups)
+        self._library_group_song_ids = self.library_group_store.song_ids_for_group(
+            selected_group_id,
+            song_ids,
+        )
+        self.library_group_panel.set_groups(
+            groups,
+            counts,
+            selected_group_id,
+            self.library_group_store.expanded_group_ids(),
+        )
+        if selected_group_id == ALL_SONGS_GROUP_ID:
+            title = tr("Library")
+        elif selected_group_id == UNGROUPED_SONGS_GROUP_ID:
+            title = tr("Ungrouped")
+        else:
+            title = display_paths.get(selected_group_id, "")
+        self.library_title_label.setText(title)
+        self._populate_library_import_group_combo(groups, display_paths, selected_group_id)
+
+    def _populate_library_import_group_combo(
+        self,
+        groups,
+        display_paths: dict[str, str],
+        selected_group_id: str,
+    ) -> None:
+        combo = self.library_import_target_combo
+        current_data = combo.currentData() if combo.count() else (
+            None
+            if selected_group_id == ALL_SONGS_GROUP_ID
+            else selected_group_id
+        )
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(tr("Ungrouped"), None)
+        for group in groups:
+            combo.addItem(display_paths.get(group.group_id, group.name), group.group_id)
+        index = combo.findData(current_data)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _library_import_group_id(self) -> str | None:
+        if not hasattr(self, "library_import_target_combo"):
+            return None
+        value = self.library_import_target_combo.currentData()
+        return str(value) if value else None
+
+    def _on_library_group_selected(self, group_id: str) -> None:
+        self.library_group_store.set_selected_group_id(group_id)
+        self.song_list.clearSelection()
+        self._refresh_library_groups(tuple(self._song_items_by_id.values()))
+        self._apply_library_filters()
+
+    def _create_library_group(self, parent_group_id: str | None) -> None:
+        title = tr("New Subgroup") if parent_group_id else tr("New Group")
+        name, accepted = TextInputDialog.get_text(
+            self,
+            title,
+            tr("Group name"),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Create"),
+            cancel_label=tr("Cancel"),
+        )
+        if not accepted:
+            return
+        try:
+            group = self.library_group_store.create_group(name, parent_group_id)
+        except LibraryGroupError as exc:
+            _set_optional_label(self.library_status_label, str(exc))
+            return
+        self.library_group_store.set_selected_group_id(group.group_id)
+        if parent_group_id:
+            expanded = set(self.library_group_store.expanded_group_ids())
+            expanded.add(parent_group_id)
+            self.library_group_store.set_expanded_group_ids(expanded)
+        self._refresh_song_list()
+
+    def _rename_library_group(self, group_id: str) -> None:
+        group = next(
+            (item for item in self.library_group_store.groups() if item.group_id == group_id),
+            None,
+        )
+        if group is None:
+            return
+        name, accepted = TextInputDialog.get_text(
+            self,
+            tr("Rename Group"),
+            tr("Group name"),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Rename"),
+            cancel_label=tr("Cancel"),
+            initial_value=group.name,
+        )
+        if not accepted:
+            return
+        try:
+            self.library_group_store.rename_group(group_id, name)
+        except LibraryGroupError as exc:
+            _set_optional_label(self.library_status_label, str(exc))
+            return
+        self._refresh_song_list()
+
+    def _delete_library_group(self, group_id: str) -> None:
+        group = next(
+            (item for item in self.library_group_store.groups() if item.group_id == group_id),
+            None,
+        )
+        if group is None or not ConfirmationDialog.confirm(
+            self,
+            tr("Delete Group"),
+            tr(
+                "Delete the '{name}' group? Songs and files remain in the library and move to Ungrouped.",
+                name=group.name,
+            ),
+            APP_ICON_PATH,
+            theme_mode=self.settings.theme_mode,
+            accept_label=tr("Delete"),
+            cancel_label=tr("Cancel"),
+        ):
+            return
+        self.library_group_store.delete_group(group_id)
+        self.library_group_store.set_selected_group_id(ALL_SONGS_GROUP_ID)
+        self._refresh_song_list()
+
+    def _move_selected_library_songs(self, group_id: str | None) -> None:
+        song_ids = tuple(
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.song_list.selectedItems()
+        )
+        self._move_library_songs(song_ids, group_id)
+
+    def _move_library_songs(self, song_ids: tuple[str, ...], group_id: str | None) -> None:
+        if not song_ids:
+            _set_optional_label(self.library_status_label, tr("Select songs to move."))
+            return
+        try:
+            self.library_group_store.assign_songs(song_ids, group_id)
+        except LibraryGroupError as exc:
+            _set_optional_label(self.library_status_label, str(exc))
+            return
+        destination = (
+            self.library_group_store.display_path(group_id)
+            if group_id
+            else tr("Ungrouped")
+        )
+        _set_optional_label(
+            self.library_status_label,
+            tr("Moved {count} songs to {group}.", count=len(song_ids), group=destination),
+        )
+        self._refresh_song_list()
+
+    def _toggle_library_group_panel(self) -> None:
+        sizes = self.library_group_splitter.sizes()
+        if not sizes:
+            return
+        if sizes[0] <= 8:
+            self.library_group_splitter.setSizes((210, max(1, sum(sizes))))
+        else:
+            self.library_group_splitter.setSizes((0, max(1, sum(sizes))))
+        self._save_library_group_panel_width()
+
+    def _save_library_group_panel_width(self) -> None:
+        if hasattr(self, "library_group_splitter"):
+            sizes = self.library_group_splitter.sizes()
+            if sizes:
+                self.library_group_store.set_group_panel_width(sizes[0])
+
     def _apply_library_filters(self, *_args) -> None:
         query = self.library_search_edit.text().strip().casefold()
         visible_items = []
@@ -2505,7 +2919,7 @@ class MainWindow(QMainWindow):
             list_item = self.song_list.item(index)
             song_id = list_item.data(Qt.ItemDataRole.UserRole)
             song = self._song_items_by_id.get(song_id)
-            is_visible = song is not None and (
+            is_visible = song is not None and song_id in self._library_group_song_ids and (
                 not query or query in song.title.casefold() or query in song.path.name.casefold()
             )
             list_item.setHidden(not is_visible)
@@ -2522,7 +2936,9 @@ class MainWindow(QMainWindow):
             else:
                 self._library_preview_song_id = ""
 
-        self.library_count_label.setText(f"{len(visible_items)} / {self.song_list.count()}")
+        self.library_count_label.setText(
+            f"{len(visible_items)} / {len(self._library_group_song_ids)}"
+        )
         current = self.song_list.currentItem()
         if current is not None and current.isHidden():
             self.song_list.setCurrentItem(visible_items[0] if visible_items else None)
@@ -2727,6 +3143,12 @@ class MainWindow(QMainWindow):
         song = self._song_items_by_id.get(song_id)
         if song is None or not assets:
             return
+        if self._has_active_resource_worker("song", song_id):
+            _set_optional_label(
+                self.library_status_label,
+                tr("Wait for this song's current task to finish before deleting files."),
+            )
+            return
 
         queue = self.current_playback_queue
         affects_playback = queue is not None and any(
@@ -2740,6 +3162,9 @@ class MainWindow(QMainWindow):
         if affects_playback:
             self._stop_playback(clear_queue=True)
 
+        if any(asset.removal_scope == REMOVAL_STUDIO_SESSION for asset in assets):
+            self.studio_session_autosave.discard(song_id)
+
         try:
             results = self.library.remove_assets(
                 song_id,
@@ -2749,9 +3174,6 @@ class MainWindow(QMainWindow):
             _set_optional_label(self.library_status_label, f"Remove failed: {_last_error_line(str(exc))}")
             self._refresh_song_list()
             return
-
-        if any(asset.removal_scope == REMOVAL_STUDIO_SESSION for asset in assets):
-            self.studio_session_autosave.discard(song_id)
 
         preferred_output = None
         if self.current_work_item is not None and self.current_work_item.id == song_id:
@@ -2858,6 +3280,13 @@ class MainWindow(QMainWindow):
         if song is None:
             return
 
+        if self._has_active_resource_worker("song", song_id):
+            _set_optional_label(
+                self.library_status_label,
+                tr("Wait for this song's current task to finish before deleting it."),
+            )
+            return
+
         if not ConfirmationDialog.confirm(
             self,
             tr("Delete Song"),
@@ -2902,6 +3331,8 @@ class MainWindow(QMainWindow):
             return
         if not removed:
             return
+
+        self.library_group_store.assign_songs((song_id,), None)
 
         if was_current_song or was_work_item:
             self._set_current_song(None)
@@ -3449,6 +3880,7 @@ class MainWindow(QMainWindow):
         end_ms: int,
         effect: str,
         strength: str,
+        replace_region_id: str,
     ) -> None:
         try:
             project = self.vocal_cleanup_store.load(
@@ -3477,6 +3909,7 @@ class MainWindow(QMainWindow):
                 end_ms=end_ms,
                 effect=effect,
                 strength=strength,
+                replace_region_id=replace_region_id,
                 progress_callback=progress,
             )
         )
@@ -3497,6 +3930,7 @@ class MainWindow(QMainWindow):
             task_title="Preview Vocal Cleanup",
             task_detail=f"{version.label} / {start_ms / 1000:.1f}-{end_ms / 1000:.1f}s",
             action_scope=lambda: scope is None or scope.is_current(self.current_work_item),
+            resource_owner=("song", scope.song_id) if scope is not None else None,
         )
 
     def _on_vocal_cleanup_preview_succeeded(
@@ -3528,6 +3962,7 @@ class MainWindow(QMainWindow):
             preview.preview_path,
             preview.removed_preview_path,
         )
+        self.vocal_cleanup_workspace.refresh_asset_status()
         self.vocal_cleanup_workspace.set_preview_progress(100)
         self.vocal_cleanup_workspace.set_preview_status(
             "Preview ready. Compare before adding this range."
@@ -3578,6 +4013,7 @@ class MainWindow(QMainWindow):
                 strength=preview.strength,
                 processed_segment_path=preview.processed_segment_path,
                 removed_segment_path=preview.removed_segment_path,
+                replace_region_id=preview.replace_region_id,
             )
         except (OSError, VocalCleanupStoreError) as exc:
             self.vocal_cleanup_workspace.set_preview_status(
@@ -3588,7 +4024,11 @@ class MainWindow(QMainWindow):
         self._vocal_cleanup_preview = None
         self._vocal_cleanup_preview_generation += 1
         self.vocal_cleanup_workspace.set_project(project)
-        self.vocal_cleanup_workspace.set_preview_status("Cleanup region added")
+        self.vocal_cleanup_workspace.set_preview_status(
+            "Cleanup region updated"
+            if preview.replace_region_id
+            else "Cleanup region added"
+        )
         self._refresh_output_playback_queue(WorkspacePlaybackScope.SEPARATION)
 
     def _remove_vocal_cleanup_region(self, region_id: str) -> None:
@@ -3659,6 +4099,7 @@ class MainWindow(QMainWindow):
             task_title="Create Clean Vocal",
             task_detail=version.label,
             action_scope=lambda: scope is None or scope.is_current(self.current_work_item),
+            resource_owner=("song", scope.song_id) if scope is not None else None,
         )
 
     def _on_vocal_cleanup_render_succeeded(
@@ -3815,6 +4256,7 @@ class MainWindow(QMainWindow):
             task_title="Separate selected vocal",
             task_detail=f"{song.title} / {stem.label}",
             action_scope=lambda: scope.is_current(self.current_work_item),
+            resource_owner=("song", scope.song_id),
         )
 
     def _on_vocal_split_succeeded(
@@ -3988,6 +4430,7 @@ class MainWindow(QMainWindow):
             task_title="Quick Create",
             task_detail=song.title,
             action_scope=lambda: scope.is_current(self.current_work_item),
+            resource_owner=("song", scope.song_id),
         )
 
     def _on_quick_creation_succeeded(
@@ -4061,11 +4504,12 @@ class MainWindow(QMainWindow):
         self._run_worker(
             worker,
             lambda result: self._on_separation_succeeded(scope, result),
-            lambda error: self._on_separation_failed(scope, error),
+            lambda error: self._on_separation_failed(scope, error, output_root),
             self.separation_action,
             task_title="Separate Audio",
             task_detail=song.title,
             action_scope=lambda: scope.is_current(self.current_work_item),
+            resource_owner=("song", scope.song_id),
         )
 
     def _attach_separation_source(self, song: SongItem) -> None:
@@ -4098,18 +4542,30 @@ class MainWindow(QMainWindow):
                 self.separation_action.set_status("Failed")
             return
 
-        self.library.register_output(
-            scope.song_id,
-            separation_result.job_dir,
-            separation_result.recipe.label,
-        )
+        try:
+            self.library.register_output(
+                scope.song_id,
+                separation_result.job_dir,
+                separation_result.recipe.label,
+            )
+        except (OSError, KeyError, ValueError) as exc:
+            shutil.rmtree(separation_result.job_dir, ignore_errors=True)
+            self._on_separation_failed(scope, str(exc))
+            return
         self._refresh_output_sets_after_task(scope, separation_result.job_dir)
         if scope.is_current(self.current_work_item):
             self.separation_action.set_progress(100)
             self.separation_action.set_status("Done")
             self._sync_quick_create_panel()
 
-    def _on_separation_failed(self, scope: WorkTaskScope, error: str) -> None:
+    def _on_separation_failed(
+        self,
+        scope: WorkTaskScope,
+        error: str,
+        output_root: Path | None = None,
+    ) -> None:
+        if output_root is not None:
+            shutil.rmtree(output_root, ignore_errors=True)
         self.separation_recipe_selector.refresh_asset_status()
         if not scope.is_current(self.current_work_item):
             return
@@ -4353,10 +4809,13 @@ class MainWindow(QMainWindow):
         deferred: bool = False,
         completed: Callable[[], None] | None = None,
     ) -> None:
+        if not self._flush_studio_or_block("switching the vocal result"):
+            if completed is not None:
+                completed()
+            return
         state: dict[str, object] = {}
 
         def assign_session() -> None:
-            self.studio_session_autosave.flush()
             session = MainWindow._work_output_session(self)
             session.assign(sound_set)
             MainWindow._sync_work_output_session_state(self, session)
@@ -4593,6 +5052,7 @@ class MainWindow(QMainWindow):
             versions,
             projects=projects,
             preferred_path=context.selected_converted_path,
+            select_default=context.selected_converted_path is not None,
         )
         convert_session.select_converted_path(
             self.conversion_result_browser.selected_path()
@@ -4673,20 +5133,15 @@ class MainWindow(QMainWindow):
         self,
         version: SongVocalVersion | None,
         *,
-        selected_converted_path: Path | None = None,
+        selected_converted_path: Path | None,
     ) -> None:
         projects = self.conversion_result_browser.projects()
         takes = tuple(take for project in projects for take in project.takes)
-        selected_path = (
-            selected_converted_path
-            if selected_converted_path is not None
-            else self.conversion_result_browser.selected_path()
-        )
         self.vocal_results_panel.set_conversion_context(
             version,
             converted_paths=self.conversion_result_browser.converted_paths(),
             takes=takes,
-            selected_converted_path=selected_path,
+            selected_converted_path=selected_converted_path,
         )
         if self.page_stack.currentIndex() == PAGE_CONVERSION:
             self._refresh_output_playback_queue(WorkspacePlaybackScope.CONVERSION)
@@ -5058,6 +5513,14 @@ class MainWindow(QMainWindow):
             self.settings.rvc,
             RVC_RUNTIME_DIR,
         )
+        selected_choice_getter = getattr(
+            self.conversion_input_pool,
+            "selected_choice",
+            None,
+        )
+        input_choice = (
+            selected_choice_getter() if callable(selected_choice_getter) else None
+        )
         worker = TaskWorker(
             lambda progress: _convert_with_progress(
                 sound_set.vocals_path,
@@ -5068,12 +5531,18 @@ class MainWindow(QMainWindow):
         )
         self._run_worker(
             worker,
-            lambda result: self._on_rvc_succeeded(scope, sound_set.job_dir, result),
+            lambda result: self._on_rvc_succeeded(
+                scope,
+                sound_set.job_dir,
+                result,
+                input_choice=input_choice,
+            ),
             lambda error: self._on_rvc_failed(scope, error),
             self.rvc_action,
             task_title="Convert Vocal",
             task_detail=sound_set.label,
             action_scope=lambda: scope.is_current(self.current_work_item),
+            resource_owner=("song", scope.song_id),
         )
 
     def _conversion_input_sound_set(self) -> OutputSoundSet | None:
@@ -5113,6 +5582,7 @@ class MainWindow(QMainWindow):
         result: object,
         *,
         preferred_job_dir: Path | None = None,
+        input_choice: VocalInputChoice | None = None,
     ) -> None:
         output_path = getattr(result, "output_path", None)
         should_monitor = scope.is_current(self.current_work_item)
@@ -5130,6 +5600,11 @@ class MainWindow(QMainWindow):
                             effective_device=result.effective_device,
                             f0_method=result.f0_method,
                             inference=result.inference,
+                            input_source=_vocal_input_provenance(
+                                job_dir,
+                                result.input_path,
+                                input_choice,
+                            ),
                         ),
                     )
                     MainWindow._work_convert_session(self).remember_project(
@@ -5210,9 +5685,17 @@ class MainWindow(QMainWindow):
                 if self.player.has_prepared_audio():
                     duration_ms = queue.duration_ms
                 else:
-                    prepared = prepare_studio_playback_audio(self._studio_playback_sources)
-                    duration_ms = prepared.duration_ms
-                    queue = queue.with_duration(duration_ms)
+                    item = self.current_work_item or self.current_song
+                    if item is None:
+                        return
+                    self._studio_playback_autostart = (item.id, max(0, int(start_ms)))
+                    self.studio_editor.set_status(tr("Preparing Studio playback..."))
+                    self._queue_studio_playback_prepare(
+                        item.id,
+                        self.studio_editor.session(),
+                        self._studio_playback_sources,
+                    )
+                    return
             else:
                 preview_paths = tuple(prepare_preview_audio(path) for path in queue.paths)
                 duration_ms = max(self.player.duration_ms(path) for path in preview_paths)
@@ -5715,6 +6198,7 @@ class MainWindow(QMainWindow):
             return prepare_studio_playback_audio(sources)
 
         worker = TaskWorker(prepare)
+        self._studio_playback_prepare_started_at = monotonic()
         self._studio_playback_prepare_worker = worker
         self._workers.append(worker)
 
@@ -5726,6 +6210,13 @@ class MainWindow(QMainWindow):
                 return
             if not isinstance(result, PreparedPlaybackAudio):
                 return
+            self._logger.info(
+                "Studio playback prepared | song=%s | tracks=%s | duration_ms=%s | elapsed_ms=%.1f",
+                song_id,
+                len(result.tracks),
+                result.duration_ms,
+                (monotonic() - self._studio_playback_prepare_started_at) * 1000,
+            )
             self._apply_studio_playback_prepare(
                 song_id,
                 session,
@@ -5736,7 +6227,16 @@ class MainWindow(QMainWindow):
         def failed(error: str) -> None:
             if generation != self._studio_playback_prepare_generation:
                 return
-            self._logger.warning("Studio playback preparation failed: %s", _last_error_line(error))
+            if self._studio_playback_autostart is not None:
+                pending_song_id, _start_ms = self._studio_playback_autostart
+                if pending_song_id == song_id:
+                    self._studio_playback_autostart = None
+            self._logger.warning(
+                "Studio playback preparation failed | song=%s | elapsed_ms=%.1f | error=%s",
+                song_id,
+                (monotonic() - self._studio_playback_prepare_started_at) * 1000,
+                _last_error_line(error),
+            )
             self.studio_editor.set_status(_last_error_line(error))
 
         def cleanup() -> None:
@@ -5794,6 +6294,10 @@ class MainWindow(QMainWindow):
             self.player.set_prepared(prepared, refreshed_queue.volumes)
             self._refresh_playback_ui(is_playing=False)
             self._update_output_playheads(self._playback_position_ms, duration_ms)
+            pending = self._studio_playback_autostart
+            if pending is not None and pending[0] == song_id:
+                self._studio_playback_autostart = None
+                self._play_current_queue(min(pending[1], duration_ms))
         return True
 
     @staticmethod
@@ -5811,7 +6315,7 @@ class MainWindow(QMainWindow):
             source_id=f"studio:{song_id}",
             title=scope_label(WorkspacePlaybackScope.STUDIO),
             paths=tuple(source.path for source in sources),
-            volumes=tuple(source.volume for source in sources),
+            volumes=tuple(1.0 for _source in sources),
             duration_ms=duration_ms,
             scope=WorkspacePlaybackScope.STUDIO.value,
         )
@@ -5849,6 +6353,39 @@ class MainWindow(QMainWindow):
         MainWindow._restore_studio_timeline_state(self)
         self._sync_idle_studio_transport()
 
+    def _prewarm_studio_playback(self) -> None:
+        if self.page_stack.currentIndex() != PAGE_STUDIO or self.player.is_playing():
+            return
+        item = self.current_work_item or self.current_song
+        if item is None:
+            return
+        queue = self.current_playback_queue
+        if (
+            queue is None
+            or queue.scope != WorkspacePlaybackScope.STUDIO.value
+            or not self._studio_playback_sources
+        ):
+            self._sync_playback_queue_for_page(PAGE_STUDIO, force=True)
+            queue = self.current_playback_queue
+        if (
+            queue is None
+            or queue.scope != WorkspacePlaybackScope.STUDIO.value
+            or queue.source_id != f"studio:{item.id}"
+            or not self._studio_playback_sources
+            or self.player.has_prepared_audio()
+        ):
+            return
+        self._logger.info(
+            "Prewarming Studio playback | song=%s | sources=%s",
+            item.id,
+            len(self._studio_playback_sources),
+        )
+        self._queue_studio_playback_prepare(
+            item.id,
+            self.studio_editor.session(),
+            self._studio_playback_sources,
+        )
+
     def _sync_idle_studio_transport(self) -> None:
         duration_ms = session_duration_ms(self.studio_editor.session())
         position_ms = max(0, min(self._playback_position_ms, duration_ms))
@@ -5872,7 +6409,7 @@ class MainWindow(QMainWindow):
 
     def _show_studio_project_history(self) -> None:
         item = self.current_work_item or self.current_song
-        if item is None or self.studio_session_autosave.flush() is False:
+        if item is None or not self._flush_studio_or_block("opening project history"):
             return
         try:
             revisions = self.library.studio_revisions(item.id)
@@ -5959,6 +6496,7 @@ class MainWindow(QMainWindow):
             self._play_current_queue(self._playback_position_ms)
 
     def _stop_playback(self, update_player: bool = True, *, clear_queue: bool = False) -> None:
+        self._studio_playback_autostart = None
         queue = self.current_playback_queue
         if update_player:
             self.player.stop()
@@ -6452,7 +6990,9 @@ class MainWindow(QMainWindow):
             self.export_page.set_audio_status("Select a song.")
             return
 
-        self.studio_session_autosave.flush()
+        if not self._flush_studio_or_block("exporting the audio mix"):
+            self.export_page.set_audio_status("Studio project save failed.")
+            return
         self.export_page.set_audio_running(True)
         self.export_page.set_audio_progress(0)
         self.export_page.set_audio_status(f"Exporting {settings.output_label}")
@@ -6468,6 +7008,7 @@ class MainWindow(QMainWindow):
             task_title="Export Mix",
             task_detail=f"{song.title} / {settings.output_label}",
             action_scope=lambda: self._is_export_song(scope.song_id),
+            resource_owner=("song", scope.song_id),
         )
 
     def _on_audio_mix_export_succeeded(self, scope: WorkTaskScope, result: object) -> None:
@@ -6514,6 +7055,7 @@ class MainWindow(QMainWindow):
             None,
             task_title="Export Track",
             task_detail=path.name,
+            resource_owner=("song", scope.song_id),
         )
 
     def _on_track_export_succeeded(self, scope: WorkTaskScope, result: object) -> None:
@@ -6798,10 +7340,14 @@ class MainWindow(QMainWindow):
         task_detail: str = "",
         action_scope: Callable[[], bool] | None = None,
         cancelled_error: Callable[[str], bool] | None = None,
+        resource_owner: tuple[str, str] | None = None,
     ) -> None:
         task_id = self.processing_queue.start(task_title, task_detail)
         worker.set_diagnostic_task_id(task_id)
+        if resource_owner is not None:
+            worker.set_resource_owner(*resource_owner)
         self._workers.append(worker)
+        self._worker_task_ids[worker] = task_id
         action_key = id(action_widget) if action_widget is not None else None
         if action_key is not None:
             self._action_task_ids[action_key] = task_id
@@ -6819,13 +7365,31 @@ class MainWindow(QMainWindow):
             self._action_task_ids.pop(action_key, None)
 
         def handle_success(result: object) -> None:
+            if worker.isInterruptionRequested() or self._closing:
+                release_action()
+                self.processing_queue.cancel(task_id)
+                return
+            try:
+                on_success(result)
+            except Exception:
+                error = traceback.format_exc()
+                self._logger.exception(
+                    "Task result finalization failed | task=%s title=%s",
+                    task_id,
+                    task_title,
+                )
+                handle_failure(error)
+                return
             release_action()
             self.processing_queue.complete(task_id)
-            on_success(result)
 
         def handle_failure(error: str) -> None:
             release_action()
-            if cancelled_error is not None and cancelled_error(error):
+            if (
+                worker.isInterruptionRequested()
+                or self._closing
+                or (cancelled_error is not None and cancelled_error(error))
+            ):
                 self.processing_queue.cancel(task_id)
             else:
                 self.processing_queue.fail(task_id, error)
@@ -6834,6 +7398,7 @@ class MainWindow(QMainWindow):
         def cleanup() -> None:
             if worker in self._workers:
                 self._workers.remove(worker)
+            self._worker_task_ids.pop(worker, None)
             worker.deleteLater()
 
         if action_widget is not None:
@@ -6845,6 +7410,12 @@ class MainWindow(QMainWindow):
         worker.failed.connect(handle_failure)
         worker.finished.connect(cleanup)
         worker.start()
+
+    def _has_active_resource_worker(self, kind: str, resource_id: str) -> bool:
+        return any(
+            worker.owns_resource(kind, resource_id)
+            for worker in self._workers
+        )
 
 
 def _check_for_updates(
@@ -6978,6 +7549,30 @@ def _track_export_role(sound_set: OutputSoundSet | None, path: Path) -> str:
     if any(_same_path(path, converted) for converted in sound_set.converted_vocal_paths):
         return "Converted Vocal"
     return "Audio"
+
+
+def _vocal_input_provenance(
+    job_dir: Path,
+    input_path: Path,
+    choice: VocalInputChoice | None,
+) -> VocalInputProvenance | None:
+    root = job_dir.expanduser().resolve()
+    source = input_path.expanduser().resolve()
+    try:
+        relative = source.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    matches_choice = (
+        choice is not None
+        and choice.path.expanduser().resolve() == source
+        and choice.version.job_dir.expanduser().resolve() == root
+    )
+    return VocalInputProvenance(
+        kind=choice.kind if matches_choice else "original",
+        relative_path=relative,
+        source_id=choice.choice_id if matches_choice else "original",
+        label=choice.label if matches_choice else source.stem,
+    )
 
 
 def _active_vocal_take_path(project: VocalProject) -> Path | None:

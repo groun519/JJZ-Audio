@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jang_app.services.app_paths import discover_app_paths
 from jang_app.services.hardware_diagnostics_state import (
@@ -17,7 +18,11 @@ from jang_app.services.rvc_hardware import (
     RvcHardwareSelection,
     RvcSupportLevel,
 )
-from jang_app.services.system_diagnostics import SystemDiagnostics
+from jang_app.services.system_diagnostics import (
+    DiagnosticCheck,
+    DiagnosticStatus,
+    SystemDiagnostics,
+)
 
 
 class HardwareDiagnosticsStateTests(unittest.TestCase):
@@ -84,6 +89,71 @@ class HardwareDiagnosticsStateTests(unittest.TestCase):
             self.assertEqual(recorded.profile, "cu118")
             self.assertEqual(recorded.training_backend, RvcComputeBackend.CUDA)
             self.assertEqual(recorded.adapter, expected.adapter)
+
+    def test_recent_record_still_probes_for_a_hardware_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = discover_app_paths(
+                root / "src" / "jang_app",
+                environ={"LOCALAPPDATA": str(root / "data")},
+                frozen=True,
+                executable=root / "app" / "JJZero Audio.exe",
+            )
+            cpu = RvcHardwareSelection(
+                "cpu",
+                RvcComputeBackend.CPU,
+                RvcSupportLevel.CPU,
+            )
+            amd = RvcHardwareSelection(
+                "directml",
+                RvcComputeBackend.DIRECTML,
+                RvcSupportLevel.INFERENCE_GPU,
+                GraphicsAdapter("AMD Radeon RX 6800 XT", "amd"),
+            )
+            record_hardware_diagnostics(
+                paths,
+                SystemDiagnostics(()),
+                selection=cpu,
+            )
+
+            with patch(
+                "jang_app.services.hardware_diagnostics_state.detect_rvc_hardware",
+                return_value=amd,
+            ) as detect:
+                required = hardware_diagnostics_required(paths)
+
+            self.assertTrue(required)
+            detect.assert_called_once_with()
+
+    def test_failed_diagnostics_are_never_reused_as_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = discover_app_paths(
+                root / "src" / "jang_app",
+                environ={"LOCALAPPDATA": str(root / "data")},
+                frozen=True,
+                executable=root / "app" / "JJZero Audio.exe",
+            )
+            cpu = RvcHardwareSelection(
+                "cpu",
+                RvcComputeBackend.CPU,
+                RvcSupportLevel.CPU,
+            )
+            failed = SystemDiagnostics(
+                (
+                    DiagnosticCheck(
+                        "runtime",
+                        "RVC Runtime",
+                        DiagnosticStatus.FAIL,
+                        "Runtime failed",
+                    ),
+                )
+            )
+            record_hardware_diagnostics(paths, failed, selection=cpu)
+
+            self.assertTrue(
+                hardware_diagnostics_required(paths, selection=cpu)
+            )
 
 
 if __name__ == "__main__":

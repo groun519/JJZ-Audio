@@ -66,7 +66,7 @@ class VocalCleanupWorkspaceTests(unittest.TestCase):
             workspace = VocalCleanupWorkspace()
             workspace.set_versions((version,), version.job_dir)
             workspace.set_project(project)
-            requests: list[tuple[object, int, int, str, str]] = []
+            requests: list[tuple[object, int, int, str, str, str]] = []
             workspace.preview_requested.connect(
                 lambda *values: requests.append(values)
             )
@@ -79,7 +79,7 @@ class VocalCleanupWorkspaceTests(unittest.TestCase):
             self.assertEqual(workspace._playback_mode, PLAYBACK_PROCESSED)
             self.assertEqual(
                 requests,
-                [(version, 1_000, 1_750, "dereverb", "standard")],
+                [(version, 1_000, 1_750, "dereverb", "standard", "")],
             )
             workspace.close()
 
@@ -114,7 +114,7 @@ class VocalCleanupWorkspaceTests(unittest.TestCase):
             workspace.set_project(VocalCleanupProject(source, "fingerprint"))
             workspace._on_selection_changed(300, 1_100)
             workspace.set_preview_paths(processed, removed)
-            requests: list[tuple[object, int, int, str, str]] = []
+            requests: list[tuple[object, int, int, str, str, str]] = []
             invalidations: list[bool] = []
             workspace.preview_requested.connect(lambda *values: requests.append(values))
             workspace.preview_invalidated.connect(lambda: invalidations.append(True))
@@ -131,7 +131,16 @@ class VocalCleanupWorkspaceTests(unittest.TestCase):
             self.assertEqual(len(invalidations), 1)
             self.assertEqual(
                 requests,
-                [(version, 300, 1_100, VOCAL_CLEANUP_EFFECT_DENOISE, "standard")],
+                [
+                    (
+                        version,
+                        300,
+                        1_100,
+                        VOCAL_CLEANUP_EFFECT_DENOISE,
+                        "standard",
+                        "",
+                    )
+                ],
             )
             workspace.close()
 
@@ -160,6 +169,105 @@ class VocalCleanupWorkspaceTests(unittest.TestCase):
             self.assertEqual(committed, [True])
             workspace.clear_pending_preview()
             self.assertFalse(workspace.preview_action.preview_available())
+            self.assertEqual(workspace._playback_mode, PLAYBACK_ORIGINAL)
+            workspace.close()
+
+    def test_activating_region_requests_an_edit_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "vocals.wav"
+            processed = root / "processed.wav"
+            removed = root / "removed.wav"
+            for path in (source, processed, removed):
+                _write_wav(path)
+            version = _version(root, source)
+            region = VocalCleanupRegion(
+                "region-1",
+                250,
+                900,
+                VOCAL_CLEANUP_EFFECT_DENOISE,
+                "strong",
+                processed,
+                removed,
+                "2026-08-20T00:00:00+00:00",
+            )
+            workspace = VocalCleanupWorkspace()
+            workspace.set_versions((version,), version.job_dir)
+            workspace.set_project(
+                VocalCleanupProject(source, "fingerprint", regions=(region,))
+            )
+            requests = []
+            workspace.preview_requested.connect(lambda *values: requests.append(values))
+
+            workspace._on_region_activated(region.region_id)
+            workspace.preview_action.button.click()
+
+            self.assertEqual(
+                requests,
+                [
+                    (
+                        version,
+                        250,
+                        900,
+                        VOCAL_CLEANUP_EFFECT_DENOISE,
+                        "strong",
+                        region.region_id,
+                    )
+                ],
+            )
+            workspace.close()
+
+    def test_selecting_old_result_invalidates_pending_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "vocals.wav"
+            preview = root / "preview.wav"
+            removed = root / "removed.wav"
+            result_path = root / "result.wav"
+            for path in (source, preview, removed, result_path):
+                _write_wav(path)
+            result = VocalCleanupResult(
+                "result-1",
+                "Clean vocal 1",
+                result_path,
+                "2026-08-20T00:00:00+00:00",
+            )
+            workspace = VocalCleanupWorkspace()
+            workspace.set_project(
+                VocalCleanupProject(source, "fingerprint", results=(result,))
+            )
+            invalidations = []
+            workspace.preview_invalidated.connect(
+                lambda: invalidations.append(True)
+            )
+            workspace.set_preview_paths(preview, removed)
+
+            workspace._on_result_selected(result)
+
+            self.assertEqual(invalidations, [True])
+            self.assertFalse(workspace.preview_action.preview_available())
+            self.assertEqual(workspace.playback_tracks(), ((result_path, 1.0),))
+            workspace.close()
+
+    def test_missing_result_remains_visible_but_cannot_be_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "vocals.wav"
+            _write_wav(source)
+            missing = VocalCleanupResult(
+                "result-missing",
+                "Clean vocal 4",
+                root / "missing.wav",
+                "2026-08-20T00:00:00+00:00",
+            )
+            workspace = VocalCleanupWorkspace()
+
+            workspace.set_project(
+                VocalCleanupProject(source, "fingerprint", results=(missing,))
+            )
+
+            self.assertEqual(workspace.result_pool.count_label.text(), "1")
+            self.assertIsNone(workspace.result_pool.selected_result())
             self.assertEqual(workspace._playback_mode, PLAYBACK_ORIGINAL)
             workspace.close()
 

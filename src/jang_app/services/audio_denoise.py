@@ -127,7 +127,7 @@ def _render_denoised_audio(
             "-vn",
             *_denoise_filter_arguments(source_path, strength, sample_range, render_range),
             "-c:a",
-            "pcm_s16le",
+            "pcm_f32le",
             "-progress",
             "pipe:1",
             "-nostats",

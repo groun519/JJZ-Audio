@@ -41,6 +41,23 @@ def verify_component_release(
         json.loads(manifest_path.read_text(encoding="utf-8")),
         "https://example.invalid/releases/latest/download/latest.json",
     )
+    provenance_path = app_root / "build-provenance.json"
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Application build provenance is missing or invalid.") from exc
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("schema_version") != 1
+        or provenance.get("product") != "JJZero Audio"
+        or provenance.get("version") != manifest.version
+        or provenance.get("source_dirty") is not False
+        or provenance.get("source_revision") != manifest.source_revision
+        or not manifest.source_revision
+    ):
+        raise RuntimeError(
+            "Application build provenance does not match the release manifest."
+        )
     for component in manifest.components:
         for artifact in component.artifacts:
             path = release_root / artifact.name
@@ -53,6 +70,7 @@ def verify_component_release(
             if artifact.signature_required and not verify_authenticode_signature(
                 path,
                 artifact.publisher,
+                artifact.certificate_sha256,
             ):
                 raise RuntimeError(f"Release signature verification failed: {path.name}")
     _verify_cu128_package_layout(manifest, release_root)
