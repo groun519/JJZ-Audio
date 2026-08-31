@@ -30,4 +30,3 @@
 - Security verification: an executable checkpoint whose pickle payload attempted to
   create a marker file was rejected with `WeightsUnpickler`; the worker returned a
   failure and the marker was not created.
-
