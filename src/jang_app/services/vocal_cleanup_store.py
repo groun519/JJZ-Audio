@@ -6,7 +6,6 @@ import math
 import re
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
-from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
 from uuid import uuid4
@@ -25,7 +24,9 @@ from jang_app.services.managed_transaction import (
     ManagedTransactionError,
 )
 from jang_app.services.vocal_cleanup import (
+    VOCAL_CLEANUP_DIR,
     VOCAL_CLEANUP_EFFECTS,
+    VOCAL_CLEANUP_MANIFEST,
     VOCAL_CLEANUP_STRENGTHS,
     VocalCleanupProject,
     VocalCleanupRegion,
@@ -33,8 +34,6 @@ from jang_app.services.vocal_cleanup import (
 )
 
 
-VOCAL_CLEANUP_DIR = "cleanup"
-VOCAL_CLEANUP_MANIFEST = "cleanup.json"
 VOCAL_CLEANUP_SCHEMA = 2
 _LOGGER = logging.getLogger(__name__)
 _RESULT_LABEL_PATTERN = re.compile(r"^Clean vocal (\d+)$")
@@ -400,13 +399,10 @@ def _cleanup_root(job_dir: Path) -> Path:
 
 def _source_fingerprint(path: Path) -> str:
     stat = path.stat()
-    return _cached_source_fingerprint(str(path), stat.st_size, stat.st_mtime_ns)
-
-
-@lru_cache(maxsize=128)
-def _cached_source_fingerprint(path: str, size: int, modified_ns: int) -> str:
-    del modified_ns
-    return f"{size}:{file_sha256(Path(path))}"
+    # File timestamps are not content identity. Backup and sync tools can preserve
+    # mtime while replacing the bytes, so reusing a timestamp-keyed digest can apply
+    # old cleanup regions to a different vocal.
+    return f"{stat.st_size}:{file_sha256(path)}"
 
 
 def _fingerprints_match(stored: str, current: str) -> bool:

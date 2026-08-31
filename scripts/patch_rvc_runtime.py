@@ -29,6 +29,10 @@ def apply_rvc_runtime_patches(rvc_root: Path, adapter_source: Path) -> tuple[Pat
         "extract_feature_print.py": _patch_feature_extraction,
         "extract_f0_rmvpe.py": _patch_rmvpe_extraction,
         "train_nsf_sim_cache_sid_load_pretrain.py": _patch_training_visibility,
+        "lib/train/utils.py": _patch_training_checkpoint_loads,
+        "lib/train/process_ckpt.py": _patch_model_processing_loads,
+        "lib/train/data_utils.py": _patch_spectrogram_loads,
+        "lib/rmvpe.py": _patch_rmvpe_model_load,
     }
     for name, patcher in transformations.items():
         path = root / name
@@ -69,7 +73,14 @@ def _patch_infer_cli(source: str) -> str:
             '            i_device = int(str(self.device).split(":")[-1])',
             "infer_cli DirectML branch",
         )
-    return source
+    return _patch_required_loads(
+        source,
+        ((
+            'torch.load(model_path, map_location="cpu")',
+            'torch.load(model_path, map_location="cpu", weights_only=True)',
+        ),),
+        "inference model",
+    )
 
 
 def _patch_feature_extraction(source: str) -> str:
@@ -137,15 +148,90 @@ def _patch_rmvpe_extraction(source: str) -> str:
 
 
 def _patch_training_visibility(source: str) -> str:
-    if 'os.environ["HIP_VISIBLE_DEVICES"]' in source:
-        return source
-    return _replace_once(
+    if 'os.environ["HIP_VISIBLE_DEVICES"]' not in source:
+        source = _replace_once(
+            source,
+            'os.environ["CUDA_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")\n',
+            'os.environ["CUDA_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")\n'
+            'os.environ["HIP_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")\n',
+            "training HIP visibility",
+        )
+    return _patch_required_loads(
         source,
-        'os.environ["CUDA_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")\n',
-        'os.environ["CUDA_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")\n'
-        'os.environ["HIP_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")\n',
-        "training HIP visibility",
+        (
+            (
+                'torch.load(hps.pretrainG, map_location="cpu")',
+                'torch.load(hps.pretrainG, map_location="cpu", weights_only=True)',
+            ),
+            (
+                'torch.load(hps.pretrainD, map_location="cpu")',
+                'torch.load(hps.pretrainD, map_location="cpu", weights_only=True)',
+            ),
+        ),
+        "pretrained checkpoints",
     )
+
+
+def _patch_training_checkpoint_loads(source: str) -> str:
+    return _patch_required_loads(
+        source,
+        ((
+            'torch.load(checkpoint_path, map_location="cpu")',
+            'torch.load(checkpoint_path, map_location="cpu", weights_only=True)',
+        ),),
+        "training checkpoints",
+    )
+
+
+def _patch_model_processing_loads(source: str) -> str:
+    return _patch_required_loads(
+        source,
+        tuple(
+            (
+                f'torch.load({name}, map_location="cpu")',
+                f'torch.load({name}, map_location="cpu", weights_only=True)',
+            )
+            for name in ("path", "path1", "path2")
+        ),
+        "model processing checkpoints",
+    )
+
+
+def _patch_spectrogram_loads(source: str) -> str:
+    return _patch_required_loads(
+        source,
+        ((
+            "torch.load(spec_filename)",
+            "torch.load(spec_filename, weights_only=True)",
+        ),),
+        "spectrogram caches",
+    )
+
+
+def _patch_rmvpe_model_load(source: str) -> str:
+    return _patch_required_loads(
+        source,
+        ((
+            'torch.load(model_path, map_location="cpu")',
+            'torch.load(model_path, map_location="cpu", weights_only=True)',
+        ),),
+        "RMVPE model",
+    )
+
+
+def _patch_required_loads(
+    source: str,
+    replacements: tuple[tuple[str, str], ...],
+    label: str,
+) -> str:
+    for unsafe, safe in replacements:
+        if unsafe in source:
+            source = source.replace(unsafe, safe)
+        elif safe not in source:
+            raise RvcRuntimePatchError(
+                f"Could not secure {label}; upstream RVC source changed."
+            )
+    return source
 
 
 def _replace_once(source: str, old: str, new: str, label: str) -> str:

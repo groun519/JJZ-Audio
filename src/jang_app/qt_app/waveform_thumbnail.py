@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import atexit
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -42,6 +42,7 @@ class WaveformThumbnail(QFrame):
         self._did_attempt_load = False
         self._cache_key: tuple[str, int, int, int] | None = None
         self._path: Path | None = None
+        self._waveform_future: Future[list[float]] | None = None
         self._peaks_ready.connect(self._apply_peaks)
 
     def set_theme_mode(self, theme_mode: str) -> None:
@@ -49,6 +50,7 @@ class WaveformThumbnail(QFrame):
         self.update()
 
     def set_path(self, path: Path | None) -> None:
+        self._cancel_waveform_request()
         self._peaks = []
         self._is_available = False
         self._is_loading = False
@@ -107,6 +109,7 @@ class WaveformThumbnail(QFrame):
             self._path,
             self._point_count,
         )
+        self._waveform_future = future
         future.add_done_callback(
             lambda completed, key=self._cache_key: self._emit_peaks(key, completed)
         )
@@ -129,10 +132,21 @@ class WaveformThumbnail(QFrame):
         else:
             waveform_peak_cache.discard_normalized(cache_key)
         self._peaks = peaks
+        self._waveform_future = None
         self._is_available = bool(peaks)
         self._is_loading = False
         self._did_attempt_load = True
         self.update()
+
+    def _cancel_waveform_request(self) -> None:
+        future = self._waveform_future
+        self._waveform_future = None
+        if future is not None and not future.done():
+            future.cancel()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._cancel_waveform_request()
+        super().closeEvent(event)
 
 
 def _waveform_palette(theme_mode: str) -> dict[str, QColor]:

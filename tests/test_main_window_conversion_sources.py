@@ -444,6 +444,84 @@ class MainWindowConversionSourceTests(unittest.TestCase):
 
         self.assertEqual(selected, [])
 
+    def test_finished_conversion_for_a_previous_input_does_not_replace_preview(self) -> None:
+        version = _version("maximum")
+        started_choice = SimpleNamespace(
+            choice_id="original:maximum",
+            path=version.vocals_path,
+            version=version,
+        )
+        current_choice = SimpleNamespace(
+            choice_id="cleanup:maximum:clean-1",
+            path=version.job_dir / "clean.wav",
+            version=version,
+        )
+        selected: list[Path] = []
+        refreshed: list[dict[str, object]] = []
+        current_item = SimpleNamespace(id="song-1")
+        window = SimpleNamespace(
+            vocal_project_store=SimpleNamespace(),
+            current_output_set=SimpleNamespace(job_dir=version.job_dir),
+            current_work_item=current_item,
+            conversion_input_pool=SimpleNamespace(
+                selected_choice=lambda: current_choice,
+            ),
+            _refresh_output_sets=lambda **kwargs: refreshed.append(kwargs),
+            _activate_vocal_converted_version=selected.append,
+            rvc_action=SimpleNamespace(
+                set_progress=lambda _value: None,
+                set_status=lambda _value: None,
+            ),
+            _logger=SimpleNamespace(warning=lambda *_args: None),
+        )
+        scope = SimpleNamespace(is_current=lambda item: item is current_item)
+
+        MainWindow._on_rvc_succeeded(
+            window,
+            scope,
+            version.job_dir,
+            SimpleNamespace(output_path=version.job_dir / "vocals_rvc_old-input.wav"),
+            input_choice=started_choice,
+        )
+
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(selected, [])
+
+    def test_finished_conversion_for_the_current_input_selects_the_new_preview(self) -> None:
+        version = _version("maximum")
+        choice = SimpleNamespace(
+            choice_id="original:maximum",
+            path=version.vocals_path,
+            version=version,
+        )
+        selected: list[Path] = []
+        current_item = SimpleNamespace(id="song-1")
+        output_path = version.job_dir / "vocals_rvc_current-input.wav"
+        window = SimpleNamespace(
+            vocal_project_store=SimpleNamespace(),
+            current_output_set=SimpleNamespace(job_dir=version.job_dir),
+            current_work_item=current_item,
+            conversion_input_pool=SimpleNamespace(selected_choice=lambda: choice),
+            _refresh_output_sets=lambda **_kwargs: None,
+            _activate_vocal_converted_version=selected.append,
+            rvc_action=SimpleNamespace(
+                set_progress=lambda _value: None,
+                set_status=lambda _value: None,
+            ),
+            _logger=SimpleNamespace(warning=lambda *_args: None),
+        )
+        scope = SimpleNamespace(is_current=lambda item: item is current_item)
+
+        MainWindow._on_rvc_succeeded(
+            window,
+            scope,
+            version.job_dir,
+            SimpleNamespace(output_path=output_path),
+            input_choice=choice,
+        )
+
+        self.assertEqual(selected, [output_path])
+
 
 def _version(name: str, converted: tuple[Path, ...] = ()) -> SongVocalVersion:
     root = Path("output") / name

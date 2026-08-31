@@ -148,6 +148,53 @@ class MainWindowQuickCreateTests(unittest.TestCase):
             self.assertEqual(panel.status, "Done")
             self.assertEqual(navigation, [PAGE_STUDIO])
 
+    def test_failed_quick_conversion_discards_its_unregistered_separation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = Path(temporary) / "r_failed"
+            job_dir.mkdir()
+            (job_dir / "separation.json").write_text("{}", encoding="utf-8")
+            (job_dir / "vocals.wav").write_bytes(b"vocals")
+            work_song = SimpleNamespace(id="song-1")
+            panel = _PanelState()
+            window = SimpleNamespace(
+                current_work_item=work_song,
+                quick_create_panel=panel,
+            )
+
+            MainWindow._on_quick_creation_failed(
+                window,
+                WorkTaskScope(work_song.id),
+                "RVC failed",
+                job_dir,
+            )
+
+            self.assertFalse(job_dir.exists())
+            self.assertEqual(panel.status, "Failed")
+
+    def test_locked_failed_quick_run_loses_manifest_for_safe_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = Path(temporary) / "r_failed"
+            job_dir.mkdir()
+            manifest = job_dir / "separation.json"
+            manifest.write_text("{}", encoding="utf-8")
+            (job_dir / "vocals.wav").write_bytes(b"vocals")
+            work_song = SimpleNamespace(id="song-1")
+            window = SimpleNamespace(
+                current_work_item=work_song,
+                quick_create_panel=_PanelState(),
+            )
+
+            with patch("jang_app.qt_app.main_window.shutil.rmtree"):
+                MainWindow._on_quick_creation_failed(
+                    window,
+                    WorkTaskScope(work_song.id),
+                    "RVC failed",
+                    job_dir,
+                )
+
+            self.assertTrue(job_dir.is_dir())
+            self.assertFalse(manifest.exists())
+
 
 class _PanelState:
     def __init__(self) -> None:

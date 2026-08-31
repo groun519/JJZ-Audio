@@ -647,15 +647,12 @@ class GoogleDriveController(QObject):
             self._account_cancellation.set()
 
     def _cancel_shares(self, reason: str) -> None:
-        target_ids = tuple(
-            {*self._pending_shares, *self._pending_deletes, *self._active_shares}
-        )
+        pending_ids = tuple({*self._pending_shares, *self._pending_deletes})
         for cancellation in self._active_shares.values():
             cancellation.set()
         self._pending_shares.clear()
         self._pending_deletes.clear()
-        self._active_shares.clear()
-        for target_id in target_ids:
+        for target_id in pending_ids:
             self.share_failed.emit(target_id, reason)
 
     def _fail_pending_operations(self, reason: str) -> None:

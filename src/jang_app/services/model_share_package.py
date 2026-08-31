@@ -8,8 +8,17 @@ import tempfile
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
+from jang_app.services.archive_safety import (
+    ArchiveInventory,
+    ArchiveSafetyError,
+    archive_member,
+    extraction_target,
+    inspect_archive,
+    read_archive_member,
+    windows_destination_key,
+)
 from jang_app.services.file_names import safe_display_filename_stem
 from jang_app.services.rvc_model_workspace import (
     RvcModelRecord,
@@ -185,11 +194,14 @@ def inspect_model_share_package(package_path: Path) -> dict[str, object]:
         raise ModelSharePackageError(f"Model package not found: {package_path}")
     try:
         with zipfile.ZipFile(package_path, "r") as archive:
-            manifest = _read_manifest(archive)
-            _validate_archive(archive, manifest)
+            inventory = inspect_archive(archive)
+            manifest = _read_manifest(archive, inventory)
+            _validate_archive(inventory, manifest)
             return manifest
     except zipfile.BadZipFile as exc:
         raise ModelSharePackageError("The shared model is not a valid ZIP package.") from exc
+    except ArchiveSafetyError as exc:
+        raise ModelSharePackageError(str(exc)) from exc
 
 
 def _current_package_matches(package_path: Path, record: RvcModelRecord) -> bool:
@@ -255,31 +267,47 @@ def import_model_share_package(
     workspace.root.parent.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(package_path, "r") as archive:
-            if MODEL_SHARE_MANIFEST in archive.namelist():
-                manifest = _read_manifest(archive)
-                entries = _validate_archive(archive, manifest)
+            inventory = inspect_archive(archive)
+            if MODEL_SHARE_MANIFEST in inventory.files:
+                manifest = _read_manifest(archive, inventory)
+                entries = _validate_archive(inventory, manifest)
             else:
                 manifest = {}
-                entries = _legacy_archive_entries(archive)
+                entries = _legacy_archive_entries(inventory)
+            total = sum(int(entry["size"]) for entry in entries)
+            required = total * 2 + max(_MINIMUM_SPACE_BUFFER, total // 10)
+            available = shutil.disk_usage(workspace.root.parent).free
+            if available < required:
+                raise ModelShareStorageError(required, available)
             with tempfile.TemporaryDirectory(
                 prefix="jjzero-model-import-",
                 dir=workspace.root.parent,
             ) as temporary_directory:
                 extraction_root = Path(temporary_directory)
-                total = sum(entry["size"] for entry in entries)
                 extracted = 0
                 for entry in entries:
                     archive_path = str(entry["path"])
                     target_path = str(entry.get("target_path", archive_path))
-                    target = extraction_root / PurePosixPath(target_path)
+                    target = extraction_target(extraction_root, target_path)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     digest = hashlib.sha256()
-                    with archive.open(archive_path, "r") as source, target.open("wb") as output:
+                    entry_size = int(entry["size"])
+                    entry_extracted = 0
+                    with archive.open(entry["info"], "r") as source, target.open("wb") as output:
                         while chunk := source.read(_COPY_CHUNK_SIZE):
+                            entry_extracted += len(chunk)
+                            if entry_extracted > entry_size:
+                                raise ModelSharePackageError(
+                                    f"File size mismatch: {archive_path}"
+                                )
                             output.write(chunk)
                             digest.update(chunk)
                             extracted += len(chunk)
                             _report(progress, extracted, total, limit=48)
+                    if entry_extracted != entry_size:
+                        raise ModelSharePackageError(
+                            f"File size mismatch: {archive_path}"
+                        )
                     expected_digest = str(entry.get("sha256", ""))
                     if expected_digest and digest.hexdigest() != expected_digest:
                         raise ModelSharePackageError(f"Checksum mismatch: {archive_path}")
@@ -299,27 +327,25 @@ def import_model_share_package(
         raise ModelSharePackageError("The shared model is not a valid ZIP package.") from exc
     except RvcModelWorkspaceError as exc:
         raise ModelSharePackageError(str(exc)) from exc
+    except ArchiveSafetyError as exc:
+        raise ModelSharePackageError(str(exc)) from exc
     if progress is not None:
         progress(100)
     return ImportedSharedModel(package_path, imported)
 
 
-def _legacy_archive_entries(archive: zipfile.ZipFile) -> list[dict[str, object]]:
+def _legacy_archive_entries(inventory: ArchiveInventory) -> list[dict[str, object]]:
     """Build a safe import plan for plain RVC ZIPs created outside JJZero Audio."""
     entries: list[dict[str, object]] = []
     target_names: set[str] = set()
     has_inference_model = False
-    for info in archive.infolist():
-        if info.is_dir():
-            continue
-        archive_path = info.filename
-        if not _safe_legacy_archive_path(archive_path):
-            raise ModelSharePackageError("The shared model contains an unsafe path.")
-        name = PurePosixPath(archive_path).name
+    for archive_path, info in inventory.files.items():
+        name = archive_path.rsplit("/", 1)[-1]
         suffix = Path(name).suffix.casefold()
         if suffix not in {".pth", ".index"}:
             continue
-        target_key = name.casefold()
+        target_path = f"{MODEL_SHARE_DIRECTORY}/{name}"
+        target_key = windows_destination_key(target_path)
         if target_key in target_names:
             raise ModelSharePackageError(
                 f"The shared model contains duplicate artifact names: {name}"
@@ -332,24 +358,27 @@ def _legacy_archive_entries(archive: zipfile.ZipFile) -> list[dict[str, object]]
             {
                 "artifact": "legacy_model_file",
                 "path": archive_path,
-                "target_path": f"{MODEL_SHARE_DIRECTORY}/{name}",
+                "target_path": target_path,
                 "size": max(0, info.file_size),
                 "sha256": "",
+                "info": info,
             }
         )
     if not has_inference_model:
         raise ModelSharePackageError(
-            "The shared ZIP has no RVC inference PTH. Select a package containing a model .pth file."
+            "The shared ZIP has no RVC inference PTH. "
+            "Select a package containing a model .pth file."
         )
     return entries
 
 
-def _read_manifest(archive: zipfile.ZipFile) -> dict[str, object]:
+def _read_manifest(
+    archive: zipfile.ZipFile,
+    inventory: ArchiveInventory,
+) -> dict[str, object]:
     try:
-        raw = archive.read(MODEL_SHARE_MANIFEST)
+        raw = read_archive_member(archive, inventory, MODEL_SHARE_MANIFEST)
         manifest = json.loads(raw.decode("utf-8"))
-    except KeyError as exc:
-        raise ModelSharePackageError("The shared model manifest is missing.") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ModelSharePackageError("The shared model manifest is invalid.") from exc
     if not isinstance(manifest, dict):
@@ -363,15 +392,15 @@ def _read_manifest(archive: zipfile.ZipFile) -> dict[str, object]:
 
 
 def _validate_archive(
-    archive: zipfile.ZipFile,
+    inventory: ArchiveInventory,
     manifest: dict[str, object],
 ) -> list[dict[str, object]]:
     raw_files = manifest.get("files")
     if not isinstance(raw_files, list) or not raw_files:
         raise ModelSharePackageError("The shared model contains no artifacts.")
-    known_names = {info.filename: info for info in archive.infolist()}
     entries: list[dict[str, object]] = []
     artifact_names: set[str] = set()
+    expected_files = {MODEL_SHARE_MANIFEST}
     for raw in raw_files:
         if not isinstance(raw, dict):
             raise ModelSharePackageError("The shared model file list is invalid.")
@@ -384,25 +413,29 @@ def _validate_archive(
             raise ModelSharePackageError("The shared model file size is invalid.") from exc
         if artifact not in {"inference_model", "index_file"} or artifact in artifact_names:
             raise ModelSharePackageError("The shared model artifact list is invalid.")
-        if not _safe_archive_path(path):
+        normalized, info = archive_member(inventory, path)
+        if normalized.split("/", 1)[0] != MODEL_SHARE_DIRECTORY:
             raise ModelSharePackageError("The shared model contains an unsafe path.")
-        info = known_names.get(path)
-        if info is None or info.is_dir() or info.file_size != size:
+        if info.file_size != size:
             raise ModelSharePackageError(f"The shared model artifact is missing: {path}")
         if not re_full_sha256(sha256):
             raise ModelSharePackageError("The shared model checksum is invalid.")
         artifact_names.add(artifact)
+        expected_files.add(normalized)
         entries.append(
             {
                 "artifact": artifact,
-                "path": path,
+                "path": normalized,
                 "size": size,
                 "modified_ns": raw.get("modified_ns"),
                 "sha256": sha256,
+                "info": info,
             }
         )
     if "inference_model" not in artifact_names:
         raise ModelSharePackageError("The shared model has no inference PTH.")
+    if set(inventory.files) != expected_files:
+        raise ModelSharePackageError("The shared model contains unlisted files.")
     return entries
 
 
@@ -435,27 +468,6 @@ def _apply_shared_profile(
             default_pitch=pitch,
             default_device=record.default_device,
         )
-
-
-def _safe_archive_path(value: str) -> bool:
-    path = PurePosixPath(value)
-    return (
-        bool(value)
-        and not path.is_absolute()
-        and ".." not in path.parts
-        and path.parts[0] == MODEL_SHARE_DIRECTORY
-    )
-
-
-def _safe_legacy_archive_path(value: str) -> bool:
-    path = PurePosixPath(value)
-    return (
-        bool(value)
-        and "\\" not in value
-        and not path.is_absolute()
-        and ".." not in path.parts
-        and bool(path.name)
-    )
 
 
 def _is_training_checkpoint_name(name: str) -> bool:

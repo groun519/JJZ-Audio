@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from jang_app.services.model_share_package import (
     MODEL_SHARE_MANIFEST,
     ModelShareCancelled,
     ModelSharePackageError,
+    ModelShareStorageError,
     create_model_share_package,
     find_current_model_share_package,
     import_model_share_package,
@@ -167,6 +171,50 @@ class ModelSharePackageTests(unittest.TestCase):
 
             with self.assertRaises(ModelSharePackageError):
                 inspect_model_share_package(package)
+
+    def test_import_rejects_insufficient_workspace_space_before_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "voice.pth"
+            model.write_bytes(b"model-data")
+            package = create_model_share_package(
+                _record(model, None),
+                root / "packages",
+            )
+            workspace = RvcModelWorkspace(root / "workspace")
+
+            with patch(
+                "jang_app.services.model_share_package.shutil.disk_usage",
+                return_value=SimpleNamespace(free=0),
+            ):
+                with self.assertRaises(ModelShareStorageError):
+                    import_model_share_package(package.path, workspace)
+
+            self.assertEqual(workspace.records(), [])
+            self.assertFalse(workspace.library_dir.exists())
+
+    def test_import_rejects_stream_larger_than_validated_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "voice.pth"
+            model.write_bytes(b"model-data")
+            package = create_model_share_package(
+                _record(model, None),
+                root / "packages",
+            )
+            original_open = zipfile.ZipFile.open
+
+            def oversized_open(archive, member, *args, **kwargs):
+                if getattr(member, "filename", member) == "model/voice.pth":
+                    return io.BytesIO(b"model-data-extra")
+                return original_open(archive, member, *args, **kwargs)
+
+            with patch.object(zipfile.ZipFile, "open", oversized_open):
+                with self.assertRaisesRegex(ModelSharePackageError, "size mismatch"):
+                    import_model_share_package(
+                        package.path,
+                        RvcModelWorkspace(root / "workspace"),
+                    )
 
 
 def _record(model: Path, index: Path | None) -> RvcModelRecord:

@@ -7,7 +7,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from jang_app.services.drive_share_catalog import DriveShareCatalog
-from jang_app.services.google_drive import GoogleDriveError, GoogleDriveFile
+from jang_app.services.google_drive import (
+    GoogleDriveCancelled,
+    GoogleDriveError,
+    GoogleDriveFile,
+)
 from jang_app.services.google_drive_share import GoogleDriveShareService
 
 
@@ -84,6 +88,36 @@ class GoogleDriveShareServiceTests(unittest.TestCase):
                 ["new-id"],
             )
 
+    def test_cancellation_after_publication_rolls_back_remote_and_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "mix.wav"
+            source.write_bytes(b"audio")
+            catalog = DriveShareCatalog(root / "shares.json")
+            cancelled = False
+
+            def cancel_after_publish() -> None:
+                nonlocal cancelled
+                cancelled = True
+
+            service = GoogleDriveShareService(SimpleNamespace(), catalog)
+            client = _ShareClient(
+                "new-id",
+                after_publish=cancel_after_publish,
+            )
+
+            with patch.object(service, "_client", return_value=client):
+                with self.assertRaises(GoogleDriveCancelled):
+                    service.share_file(
+                        source,
+                        "exports",
+                        cancelled=lambda: cancelled,
+                    )
+
+            self.assertEqual(client.deleted, ["new-id"])
+            self.assertEqual(catalog.pending_remote_deletes(), ())
+            self.assertIsNone(catalog.find_target(source, "exports"))
+
     def test_replacing_a_changed_share_deletes_the_previous_remote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -132,6 +166,29 @@ class GoogleDriveShareServiceTests(unittest.TestCase):
             self.assertEqual(client.deleted, ["stale-id"])
             self.assertEqual(catalog.pending_remote_deletes(), ())
 
+    def test_connect_retries_remote_cleanup_left_by_cancelled_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = DriveShareCatalog(root / "shares.json")
+            catalog.remember_pending_remote(
+                GoogleDriveFile("stale-id", "old.wav", 5, "", ""),
+                "cancelled upload",
+            )
+            account = SimpleNamespace(email="user@example.com")
+            oauth = SimpleNamespace(
+                connect=lambda **_options: account,
+                access_token=lambda **_options: "token",
+            )
+            service = GoogleDriveShareService(oauth, catalog)
+            client = _ShareClient("unused-id")
+
+            with patch.object(service, "_client", return_value=client):
+                connected = service.connect()
+
+            self.assertIs(connected, account)
+            self.assertEqual(client.deleted, ["stale-id"])
+            self.assertEqual(catalog.pending_remote_deletes(), ())
+
 
 class _ShareClient:
     def __init__(
@@ -140,6 +197,7 @@ class _ShareClient:
         *,
         publish_error: Exception | None = None,
         delete_error: Exception | None = None,
+        after_publish=None,
     ) -> None:
         self.remote = GoogleDriveFile(
             file_id,
@@ -150,6 +208,7 @@ class _ShareClient:
         )
         self.publish_error = publish_error
         self.delete_error = delete_error
+        self.after_publish = after_publish
         self.deleted: list[str] = []
 
     def upload_file(self, _source, _category, *, uploaded=None, **_options):
@@ -160,6 +219,8 @@ class _ShareClient:
     def publish_file(self, _file_id: str) -> GoogleDriveFile:
         if self.publish_error is not None:
             raise self.publish_error
+        if self.after_publish is not None:
+            self.after_publish()
         return self.remote
 
     def delete_file(self, file_id: str) -> None:

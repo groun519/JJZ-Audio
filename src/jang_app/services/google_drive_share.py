@@ -8,7 +8,11 @@ from pathlib import Path
 
 from jang_app.services.app_paths import AppPaths
 from jang_app.services.drive_share_catalog import DriveShareCatalog, DriveShareRecord
-from jang_app.services.google_drive import GoogleDriveClient, GoogleDriveQuota
+from jang_app.services.google_drive import (
+    GoogleDriveCancelled,
+    GoogleDriveClient,
+    GoogleDriveQuota,
+)
 from jang_app.services.google_oauth import (
     GoogleAccount,
     GoogleAccountStateStore,
@@ -57,7 +61,9 @@ class GoogleDriveShareService:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> GoogleAccount:
-        return self._oauth.connect(cancelled=cancelled)
+        account = self._oauth.connect(cancelled=cancelled)
+        self._retry_pending_remote_deletes(self._client())
+        return account
 
     def disconnect(self) -> None:
         self._oauth.disconnect()
@@ -102,7 +108,9 @@ class GoogleDriveShareService:
             ),
         )
         try:
+            _raise_if_cancelled(cancelled)
             remote = client.publish_file(uploaded.file_id)
+            _raise_if_cancelled(cancelled)
             record = self._catalog.record(source, category, remote)
         except BaseException:
             self._rollback_uploaded_file(client, uploaded.file_id)
@@ -184,6 +192,11 @@ class GoogleDriveShareService:
                 force_refresh=force_refresh
             )
         )
+
+
+def _raise_if_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise GoogleDriveCancelled("Google Drive operation was cancelled.")
 
 
 def create_google_drive_share_service(

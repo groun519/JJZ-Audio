@@ -71,6 +71,28 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             with self.assertRaises(RvcModelWorkspaceError):
                 workspace.create_model("my voice", runtime)
 
+    def test_startup_recovery_removes_interrupted_new_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = _build_rvc_root(base / "runtime")
+            workspace = RvcModelWorkspace(base / "workspace")
+            existing = workspace.create_model("Existing Voice", runtime)
+
+            with patch.object(workspace, "_save_records", side_effect=SystemExit):
+                with self.assertRaises(SystemExit):
+                    workspace.create_model("Interrupted Voice", runtime)
+
+            self.assertEqual(len(tuple(workspace.library_dir.iterdir())), 2)
+            reports = recover_managed_transactions(workspace.root)
+            restored = RvcModelWorkspace(workspace.root).records()
+
+            self.assertEqual(reports[0].action, "rolled_back")
+            self.assertEqual([record.model_id for record in restored], [existing.model_id])
+            self.assertEqual(
+                [path.name for path in workspace.library_dir.iterdir()],
+                [existing.model_id],
+            )
+
     def test_discovers_one_model_per_experiment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = _build_rvc_root(Path(temporary))
@@ -156,6 +178,32 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertEqual(model_file.read_bytes(), b"inference")
             self.assertEqual(index_file.read_bytes(), b"index")
             self.assertEqual(unrelated.read_bytes(), b"unrelated")
+
+    def test_startup_recovery_removes_interrupted_model_import_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            model_file = base / "voice.pth"
+            model_file.write_bytes(b"inference")
+            workspace = RvcModelWorkspace(base / "workspace")
+
+            def interrupt_copy(files, _progress=None):
+                item = next(iter(files))
+                item.target.parent.mkdir(parents=True, exist_ok=True)
+                item.target.write_bytes(b"partial")
+                raise SystemExit
+
+            with patch(
+                "jang_app.services.rvc_model_workspace.copy_rvc_package_files",
+                side_effect=interrupt_copy,
+            ):
+                with self.assertRaises(SystemExit):
+                    workspace.import_inference_file(model_file)
+
+            reports = recover_managed_transactions(workspace.root)
+
+            self.assertEqual(reports[0].action, "rolled_back")
+            self.assertEqual(RvcModelWorkspace(workspace.root).records(), [])
+            self.assertFalse((workspace.root / ".jjzero-transactions").exists())
 
     def test_inference_file_in_weights_finds_index_in_webui_logs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -247,6 +295,28 @@ class RvcModelWorkspaceTests(unittest.TestCase):
                 b"preserve-existing-package",
             )
             self.assertFalse((workspace.root / ".jjzero-imports").exists())
+
+    def test_startup_recovery_removes_interrupted_first_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = _build_rvc_root(base / "source")
+            workspace = RvcModelWorkspace(base / "workspace")
+
+            with patch(
+                "jang_app.services.rvc_model_workspace._commit_transaction",
+                side_effect=SystemExit,
+            ):
+                with self.assertRaises(SystemExit):
+                    workspace.import_folder(source / "logs" / "voice-a")
+
+            self.assertTrue(workspace.catalog_path.is_file())
+            self.assertTrue(workspace.library_dir.is_dir())
+            reports = recover_managed_transactions(workspace.root)
+
+            self.assertEqual(reports[0].action, "rolled_back")
+            self.assertEqual(RvcModelWorkspace(workspace.root).records(), [])
+            self.assertFalse(workspace.catalog_path.exists())
+            self.assertEqual(tuple(workspace.library_dir.iterdir()), ())
 
     def test_remove_managed_model_deletes_package_and_training_work(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -361,6 +431,37 @@ class RvcModelWorkspaceTests(unittest.TestCase):
             self.assertEqual(record.notes, "Preferred revision")
             self.assertEqual(record.default_pitch, -12)
             self.assertEqual(record.default_device, "cpu")
+
+    def test_records_repairs_manifest_after_deferred_profile_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = _build_rvc_root(base / "runtime")
+            workspace = RvcModelWorkspace(base / "workspace")
+            record = workspace.create_model("Voice One", runtime)
+            manifest_path = workspace.library_dir / record.model_id / "model.json"
+
+            with patch(
+                "jang_app.services.rvc_model_workspace._write_model_manifest",
+                side_effect=OSError("manifest busy"),
+            ):
+                workspace.update_profile(
+                    record.model_id,
+                    display_name="Recovered Profile",
+                    tags=("recovered",),
+                    notes="Recovered after restart",
+                    default_pitch=3,
+                    default_device="cpu",
+                )
+
+            stale = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertNotEqual(stale["profile"]["display_name"], "Recovered Profile")
+
+            restored = RvcModelWorkspace(workspace.root).records()[0]
+            repaired = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(restored.display_name, "Recovered Profile")
+            self.assertEqual(repaired["profile"]["display_name"], "Recovered Profile")
+            self.assertEqual(repaired["profile"]["tags"], ["recovered"])
 
     def test_managed_artifact_repair_keeps_webui_relative_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -85,6 +86,42 @@ class StorageManagementTests(unittest.TestCase):
             report = execute_cleanup(plan)
 
         self.assertTrue(report.failed_paths)
+
+    def test_cleanup_rejects_a_reparse_quarantine_without_touching_external_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            allowed = root / "allowed"
+            outside = root / "outside"
+            candidate_path = allowed / "old.tmp"
+            quarantine = allowed / ".jjzero-cleanup"
+            allowed.mkdir()
+            outside.mkdir()
+            quarantine.mkdir()
+            _write(candidate_path, 7)
+            external = outside / "external.tmp"
+            _write(external, 11)
+
+            with patch(
+                "jang_app.services.storage_management._is_reparse",
+                side_effect=lambda path: Path(path) == quarantine,
+            ):
+                report = execute_cleanup(
+                    StorageCleanupPlan(
+                        (
+                            CleanupCandidate(
+                                "invalid quarantine",
+                                candidate_path,
+                                allowed,
+                                7,
+                                1,
+                            ),
+                        )
+                    )
+                )
+
+            self.assertTrue(report.failed_paths)
+            self.assertTrue(candidate_path.exists())
+            self.assertTrue(external.exists())
 
     def test_stale_transient_candidate_is_kept_when_a_job_starts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -191,6 +228,89 @@ class StorageManagementTests(unittest.TestCase):
             self.assertFalse(incomplete.exists())
             self.assertTrue((complete / "vocals.wav").is_file())
             self.assertFalse(report.failed_paths)
+
+    def test_safe_cleanup_collects_only_unreferenced_vocal_cleanup_media(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = _paths(Path(temporary))
+            run = (
+                paths.workspace_root
+                / "library"
+                / "songs"
+                / "song-1"
+                / "02_vocal"
+                / "separations"
+                / "r_complete"
+            )
+            cleanup = run / "cleanup"
+            referenced_segment = cleanup / "segments" / "kept.wav"
+            referenced_removed = cleanup / "segments" / "kept-removed.wav"
+            referenced_result = cleanup / "results" / "kept.wav"
+            orphan_segment = cleanup / "segments" / "orphan.wav"
+            orphan_result = cleanup / "results" / "orphan.rendering.wav"
+            _write(run / "separation.json", 2)
+            for path in (
+                referenced_segment,
+                referenced_removed,
+                referenced_result,
+                orphan_segment,
+                orphan_result,
+            ):
+                _write(path, 7)
+            (cleanup / "cleanup.json").write_text(
+                json.dumps(
+                    {
+                        "schema": 2,
+                        "source_path": "C:/media/vocals.wav",
+                        "source_fingerprint": "7:abc",
+                        "regions": [
+                            {
+                                "processed_segment_path": "segments/kept.wav",
+                                "removed_segment_path": "segments/kept-removed.wav",
+                            }
+                        ],
+                        "results": [{"path": "results/kept.wav"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_safe_cleanup_plan(paths, active_jobs=False)
+            candidate_paths = {candidate.path for candidate in plan.candidates}
+
+            self.assertIn(orphan_segment, candidate_paths)
+            self.assertIn(orphan_result, candidate_paths)
+            self.assertNotIn(referenced_segment, candidate_paths)
+            self.assertNotIn(referenced_removed, candidate_paths)
+            self.assertNotIn(referenced_result, candidate_paths)
+            report = execute_cleanup(plan, active_jobs=lambda: False)
+            self.assertFalse(report.failed_paths)
+            self.assertFalse(orphan_segment.exists())
+            self.assertFalse(orphan_result.exists())
+            self.assertTrue(referenced_segment.is_file())
+            self.assertTrue(referenced_removed.is_file())
+            self.assertTrue(referenced_result.is_file())
+
+    def test_safe_cleanup_preserves_media_when_cleanup_manifest_is_damaged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = _paths(Path(temporary))
+            run = (
+                paths.workspace_root
+                / "library"
+                / "songs"
+                / "song-1"
+                / "02_vocal"
+                / "separations"
+                / "r_complete"
+            )
+            cleanup = run / "cleanup"
+            media = cleanup / "segments" / "unknown.wav"
+            _write(run / "separation.json", 2)
+            _write(media, 7)
+            (cleanup / "cleanup.json").write_text("{broken", encoding="utf-8")
+
+            plan = build_safe_cleanup_plan(paths, active_jobs=False)
+
+            self.assertNotIn(media, {candidate.path for candidate in plan.candidates})
 
 
 def _write(path: Path, size: int) -> None:

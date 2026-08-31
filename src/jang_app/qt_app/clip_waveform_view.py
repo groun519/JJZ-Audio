@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import atexit
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +47,7 @@ class ClipWaveformView(QWidget):
         self._theme_mode = "white"
         self._peaks: list[float] = []
         self._waveform_key: tuple[str, int, int, int] | None = None
+        self._waveform_future: Future[list[float]] | None = None
         self._duration_ms = 0
         self._clips: tuple[ModelDatasetClip, ...] = ()
         self._suggestions: tuple[tuple[SpeechRegion, bool], ...] = ()
@@ -99,24 +100,32 @@ class ClipWaveformView(QWidget):
 
     def _load_waveform(self, path: Path | None) -> None:
         if path is None:
+            self._cancel_waveform_request()
             self._waveform_key = None
             self._peaks = []
             return
         try:
             cache_key = waveform_cache_key(path, _WAVEFORM_POINT_COUNT)
         except OSError:
+            self._cancel_waveform_request()
             self._waveform_key = None
             self._peaks = []
             return
         if cache_key == self._waveform_key:
             return
+        self._cancel_waveform_request()
         self._waveform_key = cache_key
         cached = waveform_peak_cache.normalized(cache_key)
         if cached is not None:
             self._peaks = cached
             return
         self._peaks = []
-        future = _WAVEFORM_EXECUTOR.submit(build_waveform_peaks, path, _WAVEFORM_POINT_COUNT)
+        future = _WAVEFORM_EXECUTOR.submit(
+            build_waveform_peaks,
+            path,
+            _WAVEFORM_POINT_COUNT,
+        )
+        self._waveform_future = future
         future.add_done_callback(lambda completed, key=cache_key: self._emit_peaks(key, completed))
 
     def _emit_peaks(self, cache_key: tuple[str, int, int, int], completed) -> None:
@@ -132,8 +141,19 @@ class ClipWaveformView(QWidget):
         else:
             waveform_peak_cache.discard_normalized(cache_key)
         if cache_key == self._waveform_key:
+            self._waveform_future = None
             self._peaks = peaks
             self.update()
+
+    def _cancel_waveform_request(self) -> None:
+        future = self._waveform_future
+        self._waveform_future = None
+        if future is not None and not future.done():
+            future.cancel()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._cancel_waveform_request()
+        super().closeEvent(event)
 
     def set_theme_mode(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode

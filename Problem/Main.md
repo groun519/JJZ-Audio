@@ -4,7 +4,7 @@
 
 - Status: unlocked
 - Owner: none
-- Since: 2026-08-24 01:35 KST
+- Since: 2026-08-27 17:07 KST
 - Rule: only the owner may edit `Main.md` while this status is `locked`.
 
 ## Collaboration protocol
@@ -28,6 +28,8 @@
   runtime installation safety, disk usage, and update lifecycle.
 - `Atlas.md`: release manifests, component/package identity, public asset
   integrity, updater recovery, and startup observability.
+- `Session-External-Input-Audit.md`: external input boundaries and conversion
+  result state consistency.
 
 ## Confirmed findings
 
@@ -281,6 +283,16 @@
 
 ### Medium
 
+- **UI-STATE-01 - Cleared RVC result selection was restored by refreshes.**
+  Session, result-pool, and timeline layers each treated an intentional `None`
+  selection as uninitialized and independently restored an old, active, or first
+  take. Input and audible result could disagree. Fixed in `f54e78a` with durable
+  cleared state and one selection owner.
+- **UI-STATE-02 - A late conversion from a previous input could replace the current
+  preview.** Completion ownership checked only the song ID, so changing from the
+  original vocal to a cleanup/split vocal while conversion ran still allowed the
+  old input's result to auto-select. The current worktree now verifies choice ID,
+  source path, and source result before monitoring while still registering the file.
 - **RLA-004 - Runtime ZIP validation ignores Windows-equivalent paths.** Archive
   members differing only by case passed duplicate checks although they overwrite
   the same Windows destination; trailing-dot/space and device aliases are likewise
@@ -323,7 +335,7 @@
 
 Full triggers, source paths, executable probes, impact, and recommended fixes are
 recorded in `VocalCleanupAudit.md`, `RuntimeLogicAudit.md`, `Atlas.md`,
-`Session-Architecture-Audit.md`, and `Sol.md`.
+`Session-Architecture-Audit.md`, `Session-External-Input-Audit.md`, and `Sol.md`.
 
 ## Cross-validation queue
 

@@ -15,6 +15,32 @@ from jang_app.services.song_package import SongPackageStore
 
 
 class SongPackageStoreTests(unittest.TestCase):
+    def test_startup_recovery_removes_interrupted_song_import_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            source = project / "source.wav"
+            source.write_bytes(b"audio")
+            root = project / "workspace" / "library" / "songs"
+            store = SongPackageStore(root, project)
+
+            def interrupt_copy(_source, target, *_args, **_kwargs):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"partial")
+                raise SystemExit
+
+            with patch(
+                "jang_app.services.song_package.copy_file_atomic",
+                side_effect=interrupt_copy,
+            ):
+                with self.assertRaises(SystemExit):
+                    store.import_audio(source, title="Interrupted Song")
+
+            reports = recover_managed_transactions(root)
+
+            self.assertEqual(reports[0].action, "rolled_back")
+            self.assertEqual(SongPackageStore(root, project).packages(), [])
+            self.assertFalse((root / ".jjzero-transactions").exists())
+
     def test_unchanged_manifests_are_loaded_once_and_reused_by_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)

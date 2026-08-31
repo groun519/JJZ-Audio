@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from threading import Event
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QWidget
@@ -11,6 +13,7 @@ from jang_app.qt_app.diagnostics_page import (
     DiagnosticsPage,
     DiagnosticsWindow,
 )
+from jang_app.qt_app.workers import TaskWorker
 from jang_app.services.i18n import tr
 from jang_app.services.job_diagnostics import JobDiagnostics
 from jang_app.services.processing_queue import ProcessingQueue
@@ -165,6 +168,30 @@ class DiagnosticsPageTests(unittest.TestCase):
 
             self.assertFalse(page._cleanup_plan.candidates)
             self.assertFalse(page.storage_panel.cleanup_button.isEnabled())
+            page.close()
+
+    def test_shutdown_cancels_and_waits_for_page_owned_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics = JobDiagnostics(Path(temporary), session_id="shutdown")
+            page = DiagnosticsPage(ProcessingQueue(diagnostics=diagnostics), diagnostics)
+            holder: dict[str, TaskWorker] = {}
+            cancellation_seen = Event()
+
+            def wait_for_cancellation(_progress) -> None:
+                while not holder["worker"].isInterruptionRequested():
+                    time.sleep(0.005)
+                cancellation_seen.set()
+
+            worker = TaskWorker(wait_for_cancellation)
+            holder["worker"] = worker
+            page._storage_worker = worker
+            worker.start()
+
+            page.shutdown()
+
+            self.assertTrue(cancellation_seen.is_set())
+            self.assertFalse(worker.isRunning())
+            self.assertIsNone(page._storage_worker)
             page.close()
 
 if __name__ == "__main__":

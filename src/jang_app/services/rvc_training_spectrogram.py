@@ -257,7 +257,7 @@ def valid_cache(torch, audio: Path, target: Path) -> bool:
     if target.stat().st_size < MIN_CACHE_BYTES or target.stat().st_mtime_ns < audio.stat().st_mtime_ns:
         return False
     try:
-        value = torch.load(str(target), map_location="cpu")
+        value = torch.load(str(target), map_location="cpu", weights_only=True)
         del value
         return True
     except Exception:

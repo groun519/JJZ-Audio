@@ -166,6 +166,12 @@ class JobDiagnosticsTests(unittest.TestCase):
             classify_error("RVC extraction outputs are incomplete: HuBERT=2/3").code,
             "RVC_EXTRACTION_INCOMPLETE",
         )
+        self.assertEqual(
+            classify_error(
+                "Weights only load failed. WeightsUnpickler error: Unsupported global nt.system"
+            ).code,
+            "RVC_MODEL_UNSAFE",
+        )
         self.assertEqual(classify_error("No module named 'lib.train'").code, "PYTHON_MODULE_MISSING")
         self.assertEqual(
             classify_error("ModuleNotFoundError: No module named 'lib.jjzero_device'").code,

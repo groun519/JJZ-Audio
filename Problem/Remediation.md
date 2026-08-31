@@ -403,31 +403,210 @@ Source-level verification is complete for `UI-STATE-01`.
 - 28 focused conversion session, browser, refresh, and main-window tests passed in
   the current completion audit.
 
+### Range 10 - Shared model ZIP import boundary
+
+#### Plan
+
+1. Validate every ZIP member and Windows extraction target before reading metadata.
+2. Enforce duplicate, link, encryption, size, count, and compression-ratio limits.
+3. Match manifest sizes to ZIP metadata and cap actual streamed extraction bytes.
+4. Preflight workspace space before extraction and final package installation.
+
+Source-level verification is complete for the shared model import boundary.
+
+- Model and model-work imports share one archive safety service that rejects mixed
+  separators, drive/UNC/device paths, duplicate and case-equivalent destinations,
+  symbolic links, encrypted members, and unlisted JJZero package files.
+- Per-file, total expanded-size, member-count, manifest-size, and compression-ratio
+  limits are checked before extraction. Streamed bytes are checked again while files
+  are written.
+- Both import paths reserve space for temporary extraction and managed installation.
+  Model-work identity is one safe path component and imported records use only their
+  managed runtime path rather than an untrusted sender path.
+- 35 archive, model/model-work share, and Google Drive controller regressions passed,
+  including executable Windows traversal, collision, compression, size, and disk
+  fault probes.
+
+### Range 11 - Song and model commit interruption recovery
+
+#### Plan
+
+1. Journal new catalog/package paths before their first write or copy.
+2. Keep partial song, model, and model-work imports inside recoverable transactions.
+3. Restore previous catalogs and remove promoted data after pre-commit termination.
+4. Reconcile deferred per-model manifests from the authoritative catalog on restart.
+
+Source-level verification is complete for song and model commit boundaries.
+
+- `ManagedPathTransaction` can persist an empty prepared journal and register a path
+  that a later metadata write is expected to create.
+- New-model creation, ordinary model import, model-work extraction/import, and song
+  import now stage partial data inside the transaction folder from the first copy.
+- Startup recovery removes partial or promoted new data and restores the previous
+  catalog after forced termination before commit. A deferred `model.json` write is
+  repaired from the authoritative model catalog on the next load.
+- 111 startup, transaction, song/model package, asset-removal, shared ZIP, and Drive
+  controller regressions passed, including forced termination during first copy,
+  extraction, catalog replacement, and final commit.
+
+### Range 12 - RVC checkpoint pair selection and recovery
+
+#### Plan
+
+1. Use one numeric G/D pair selector across training state, cleanup, and work import.
+2. Reject incomplete and similarly named checkpoint files from resume selection.
+3. Quarantine a checkpoint pair that fails to load without treating it as user cancel.
+4. Retry the previous complete pair in the same task when one is available.
+
+Source-level verification is complete for checkpoint pair compatibility and recovery.
+
+- Training state, checkpoint cleanup, model-work export/import, and workspace discovery
+  now share one exact `G_<step>.pth` / `D_<step>.pth` pair implementation.
+- Pair generations are compared numerically, and an incomplete G or D generation is
+  never combined with a checkpoint from another step.
+- A load failure quarantines the failed pair even when it is the only saved pair, so
+  later resume attempts cannot repeat the same permanent failure indefinitely.
+- When an older complete pair remains, training records a separate diagnostic attempt
+  and automatically retries that pair without requiring the user to restart the job.
+- 207 training pipeline, finalization, recovery, diagnostics, workspace, import, and
+  Qt offscreen regressions passed in one run.
+
+### Range 13 - Google Drive cancellation ownership
+
+#### Plan
+
+1. Retain controller ownership until each active share/delete callback completes.
+2. Recheck cancellation after remote upload and publication commit boundaries.
+3. Compensate a committed upload or retain its remote ID when deletion is unavailable.
+4. Retry retained remote cleanup immediately after account reconnection.
+
+Source-level verification is complete for Drive cancellation and disconnect recovery.
+
+- Cancelling or disconnecting no longer removes active controller records before the
+  worker reports whether the remote operation committed, failed, or was cancelled.
+- The share service checks cancellation after upload and after public permission
+  creation. A remotely committed file is deleted before cancellation is returned.
+- If disconnect removed credentials before compensation can finish, the pending
+  remote ID remains in the persistent cleanup journal and is retried on reconnect.
+- 62 Drive client, OAuth, catalog, controller, model-share, and model-work-share
+  regressions passed, including cancellation after publication and reconnect cleanup.
+
+### Range 14 - Release platform compatibility contract
+
+#### Plan
+
+1. Preserve release architecture and minimum Windows metadata in the parsed model.
+2. Reject malformed or unsupported platform declarations before download starts.
+3. Check both fetched manifests and manually constructed runtime-only update plans.
+4. Keep legacy manifests without platform metadata compatible.
+
+Source-level verification is complete for release platform constraints.
+
+- `architecture` and `minimum_windows` are no longer discarded by the release parser.
+- A release for another host architecture or a newer Windows build fails before any
+  application or multi-gigabyte runtime artifact is selected for download.
+- The compatibility gate also runs in `create_update_plan()`, preventing internal or
+  runtime-only callers from bypassing the parsed-manifest check.
+- 91 updater, component validation, runtime bootstrap/installation, transaction,
+  release-manifest, and distribution verification regressions passed in one run.
+
+### Range 15 - Canonical library and SQLite reconciliation
+
+#### Plan
+
+1. Serialize shared SQLite schema and read-modify-write operations across processes.
+2. Detect canonical song/model manifest changes during a catalog rebuild snapshot.
+3. Never mark a stale rebuilt index with the latest source signature.
+4. Preserve automatic rebuild after an interrupted manifest-to-index update.
+
+Source-level verification is complete for the canonical library catalog boundary.
+
+- Library catalog and virtual-group SQLite transactions now share the same
+  interprocess path lock, including first-run schema migration.
+- Rebuild captures a source signature before reading song/model records, rejects a
+  changing snapshot, and verifies the signature again after commit.
+- If sources continue changing, the fallback snapshot records its earlier signature
+  rather than falsely claiming the current files, preserving next-start reconciliation.
+- 104 managed-file, library/group, song/model package, import/share, deletion, and
+  work-song regressions passed, including a manifest mutation during rebuild.
+
+### Range 16 - Environment-management worker shutdown ownership
+
+#### Plan
+
+1. Re-audit direct `TaskWorker`, model worker, command, and executor creation sites.
+2. Preserve background work while the reusable management window is merely hidden.
+3. Cancel and join page-owned workers only when the application actually exits.
+4. Block late worker signals before the Qt object tree is destroyed.
+
+Source-level verification is complete for the remaining management-page worker gap.
+
+- Main-window direct workers remain registered in its shared shutdown list, and model
+  dataset, analysis, evaluation, training, and telemetry workers retain page ownership.
+- Diagnostics ZIP, PC/RVC checks, storage scan, and cleanup workers are now collected
+  by `DiagnosticsPage.shutdown()` on `aboutToQuit`.
+- Shutdown blocks late UI callbacks, terminates tracked child commands, and waits for
+  every page-owned thread before clearing references.
+- 33 diagnostics, environment panel, storage, support archive, generic worker, and
+  window-lifecycle regressions passed with RuntimeWarnings promoted to errors.
+
+### Range 17 - Waveform request cancellation under rapid navigation
+
+#### Plan
+
+1. Keep ownership of every deferred waveform `Future` at its widget or timeline.
+2. Cancel a request when its path, session, or owning widget is replaced or closed.
+3. Ignore late results from canceled or obsolete requests.
+4. Reuse one completed waveform for every timeline asset with the same cache key.
+
+Source-level verification is complete for the waveform executor backlog in the
+interactive waveform surfaces.
+
+- Dataset-editor, shared playback, thumbnail, and Studio timeline waveforms now retain
+  their submitted futures and cancel obsolete work on path/session changes and close.
+- Studio timeline requests are canceled when their asset or level-match key leaves the
+  current session, while late callbacks remain harmless through cache-key checks.
+- Duplicate Studio assets sharing one source key receive the completed peaks together,
+  avoiding redundant visible loads.
+- 74 waveform, Studio, and request-lifecycle regressions passed, including blocked
+  future cancellation for all four widget/timeline paths.
+
+### Range 18 - Safe Cleanup reparse-point boundary
+
+#### Plan
+
+1. Revalidate a cleanup candidate immediately before moving it into quarantine.
+2. Reject reparse points on the candidate, its allowed root, and their path chain.
+3. Refuse a pre-existing or newly created quarantine directory that is not a plain
+   child directory of the candidate's managed parent.
+4. Serialize each cleanup target while its move and removal are in progress.
+
+Source-level verification is complete for the Safe Cleanup reparse-point boundary.
+
+- Cleanup now rechecks the candidate and quarantine path after any idle-queue guard
+  and immediately before `os.replace`, so a changed path is reported as failed rather
+  than deleted.
+- Existing `.jjzero-cleanup` symlinks, junctions, and other reparse points are
+  rejected, and reparse points anywhere between a candidate and its allowed root are
+  not accepted as safe targets.
+- Cleanup target moves and removals now use the same managed path lock as other
+  destructive storage operations.
+- 12 storage-management regressions passed, including the reparse-quarantine guard,
+  stale idle candidates, failed deletion restoration, and quarantine rediscovery.
+
 ### Deferred investigation backlog
 
 These are recorded candidates, not confirmed defects. They require executable
 reproduction before promotion into a remediation range:
 
-- Shared ZIP containment and resource limits, especially mixed Windows separators,
-  drive/UNC/device names, duplicate members, compression ratio, and extracted size.
-- Crash recovery after every song/model file and metadata commit boundary.
-- Checkpoint semantic compatibility and recovery across corrupt or mismatched G/D
-  generations.
-- Cleanup time-of-check/time-of-use behavior with symlinks and Windows junctions.
-- Shutdown ownership across every command, training, analysis, Drive, storage, and
-  callback worker type.
-- Cross-process catalog/manifest/SQLite reconciliation and conflict policy.
-- Waveform and analysis executor backlog under rapid navigation.
+- Analysis executor backlog under rapid navigation.
 - Environment and diagnostics worker lifecycle while pages close or switch.
-- Drive cancellation/disconnect and local/remote reconciliation beyond the confirmed
-  ownership transaction.
 - Storage relocation interruption, locked files, insufficient space, and skipped-
   version legacy layouts.
 - Group/filter/active-song state under deletion, refresh, drag/drop, and two processes.
 - Large-library, long-log, preview-cache, signal, memory, and UI-starvation benchmarks.
 - `RLA-C01`: attribute main-window import cost and measure the frozen build before
   changing startup module boundaries.
-- Runtime-only handling of manifest `architecture` and `minimum_windows` constraints.
 
 ### Deferred live and packaged verification
 

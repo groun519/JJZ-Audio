@@ -19,6 +19,10 @@ from jang_app.services.command import (
 )
 from jang_app.services.managed_files import copy_file_atomic, file_sha256, write_json_atomic
 from jang_app.services.live_text_file import LiveTextFile
+from jang_app.services.rvc_checkpoint_pairs import (
+    checkpoint_identity,
+    checkpoint_pairs as discover_checkpoint_pairs,
+)
 from jang_app.services.rvc_environment import build_rvc_environment
 from jang_app.services.rvc_hardware import RvcComputeBackend
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
@@ -63,7 +67,6 @@ _WEIGHT_SAVE_PATTERN = re.compile(
     r"saving ckpt\s+.+_e(?P<epoch>\d+)_s(?P<step>\d+)",
     re.IGNORECASE,
 )
-_CHECKPOINT_PATTERN = re.compile(r"^(?P<kind>[GD])_(?P<step>\d+)\.pth$", re.IGNORECASE)
 _COMPLETE_MARKER = "training is done"
 _FINAL_CHECKPOINT_MARKER = "saving final ckpt:success"
 _TRAINER_EXIT_GRACE_SECONDS = 10.0
@@ -339,7 +342,7 @@ def train_rvc_model(
                 recent_output_set.discard(recent_output.popleft())
             if resumed and text.startswith("JJZERO_CHECKPOINT_LOAD_FAILED"):
                 resume_load_error = text
-                token.request_cancel()
+                token.terminate_current()
             if (
                 text.startswith("JJZERO_DATA_LOADER_WORKER_EXITED")
                 and not training_completed
@@ -369,6 +372,40 @@ def train_rvc_model(
             if output_callback is not None:
                 output_callback(text)
 
+    def run_training_command(command: list[str]) -> CommandResult:
+        nonlocal active_monitor
+        nonlocal attempt_log_offset
+        nonlocal completion_guard
+        nonlocal last_returncode
+        active_monitor = RvcTrainingAttemptMonitor(
+            training_diagnostics,
+            active_attempt,
+            activity_callback=handle_output,
+        )
+        active_monitor.start()
+        completion_guard = _TrainingProcessCompletionGuard(token)
+        attempt_log_offset = log_path.stat().st_size if log_path.is_file() else 0
+        try:
+            attempt_result = command_runner(
+                command,
+                cwd=layout.root,
+                env=build_rvc_environment(runtime),
+                output_callback=handle_output,
+                cancellation=token,
+            )
+        finally:
+            completion_guard.cancel()
+            active_monitor.stop()
+            active_monitor = None
+        last_returncode = attempt_result.returncode
+        if training_diagnostics is not None and active_attempt is not None:
+            training_diagnostics.capture_train_log(
+                active_attempt,
+                log_path,
+                attempt_log_offset,
+            )
+        return attempt_result
+
     try:
         if output_callback is not None:
             output_callback(
@@ -383,30 +420,58 @@ def train_rvc_model(
             accelerated=inspection.training_accelerated,
         )
         with LiveTextFile(log_path, log_offset, handle_output):
-            active_monitor = RvcTrainingAttemptMonitor(
-                training_diagnostics,
-                active_attempt,
-                activity_callback=handle_output,
-            )
-            active_monitor.start()
-            attempt_log_offset = log_path.stat().st_size if log_path.is_file() else 0
-            result = command_runner(
-                command,
-                cwd=layout.root,
-                env=build_rvc_environment(runtime),
-                output_callback=handle_output,
-                cancellation=token,
-            )
-            completion_guard.cancel()
-            last_returncode = result.returncode
-            active_monitor.stop()
-            active_monitor = None
-            if training_diagnostics is not None and active_attempt is not None:
-                training_diagnostics.capture_train_log(
-                    active_attempt,
-                    log_path,
-                    attempt_log_offset,
-                )
+            result = run_training_command(command)
+            if resume_load_error:
+                failed_resume_error = resume_load_error
+                failed_step = state_store.refresh_checkpoint_pair().checkpoint_step
+                _quarantine_failed_checkpoint_pair(layout, failed_step)
+                fallback_state = state_store.refresh_checkpoint_pair()
+                if fallback_state.can_resume:
+                    logger.warning(
+                        "RVC checkpoint load failed; retrying previous pair: "
+                        "model=%s failed_step=%s fallback_step=%s",
+                        model_id,
+                        failed_step,
+                        fallback_state.checkpoint_step,
+                    )
+                    handle_output(
+                        "JJZERO_CHECKPOINT_FALLBACK "
+                        f"failed={failed_step} "
+                        f"selected={fallback_state.checkpoint_step}"
+                    )
+                    if training_diagnostics is not None and active_attempt is not None:
+                        training_diagnostics.finish_attempt(
+                            active_attempt,
+                            status="failed",
+                            returncode=result.returncode,
+                            detail=failed_resume_error,
+                        )
+                    active_attempt = _begin_training_attempt(
+                        training_diagnostics,
+                        settings,
+                        data_loader_settings,
+                        reason="checkpoint_fallback",
+                    )
+                    prepare_rvc_script_launcher(
+                        launcher,
+                        runtime,
+                        runtime / "train_nsf_sim_cache_sid_load_pretrain.py",
+                        atomic_torch_saves=True,
+                        compact_rvc_checkpoints=True,
+                        data_loader_settings=data_loader_settings,
+                        rocm_single_process_training=True,
+                        legacy_i18n=True,
+                        diagnostic_directory=(
+                            active_attempt.folder if active_attempt else None
+                        ),
+                        diagnostic_attempt_id=(
+                            active_attempt.attempt_id if active_attempt else ""
+                        ),
+                    )
+                    resume_load_error = ""
+                    safe_retry_requested = False
+                    training_completed = False
+                    result = run_training_command(command)
             loader_diagnostics = (
                 f"returncode={result.returncode} "
                 f"windows_status=0x{result.returncode & 0xFFFFFFFF:08X}\n"
@@ -465,33 +530,7 @@ def train_rvc_model(
                         active_attempt.attempt_id if active_attempt else ""
                     ),
                 )
-                active_monitor = RvcTrainingAttemptMonitor(
-                    training_diagnostics,
-                    active_attempt,
-                    activity_callback=handle_output,
-                )
-                active_monitor.start()
-                completion_guard = _TrainingProcessCompletionGuard(token)
-                attempt_log_offset = (
-                    log_path.stat().st_size if log_path.is_file() else 0
-                )
-                result = command_runner(
-                    command,
-                    cwd=layout.root,
-                    env=build_rvc_environment(runtime),
-                    output_callback=handle_output,
-                    cancellation=token,
-                )
-                completion_guard.cancel()
-                last_returncode = result.returncode
-                active_monitor.stop()
-                active_monitor = None
-                if training_diagnostics is not None and active_attempt is not None:
-                    training_diagnostics.capture_train_log(
-                        active_attempt,
-                        log_path,
-                        attempt_log_offset,
-                    )
+                result = run_training_command(command)
         refreshed = state_store.refresh_checkpoint_pair()
         if resume_load_error:
             _quarantine_failed_checkpoint_pair(layout, refreshed.checkpoint_step)
@@ -704,15 +743,8 @@ def _keep_latest_checkpoint_pair(
     layout: RvcModelPackageLayout,
     preferred_step: int | None = None,
 ) -> None:
-    generators: dict[int, Path] = {}
-    discriminators: dict[int, Path] = {}
-    for path in layout.experiment_dir.glob("*.pth"):
-        match = _CHECKPOINT_PATTERN.fullmatch(path.name) if path.is_file() else None
-        if match is None:
-            continue
-        target = generators if match.group("kind").casefold() == "g" else discriminators
-        target[int(match.group("step"))] = path
-    shared_steps = generators.keys() & discriminators.keys()
+    pairs = discover_checkpoint_pairs(layout.experiment_dir)
+    shared_steps = pairs.keys()
     if preferred_step is None or preferred_step not in shared_steps:
         keep_steps = set(shared_steps)
     else:
@@ -720,7 +752,11 @@ def _keep_latest_checkpoint_pair(
         ordered_steps.remove(preferred_step)
         ordered_steps.insert(0, preferred_step)
         keep_steps = set(ordered_steps[:2])
-    for step, path in (*generators.items(), *discriminators.items()):
+    for path in layout.experiment_dir.glob("*.pth"):
+        identity = checkpoint_identity(path) if path.is_file() else None
+        if identity is None:
+            continue
+        _kind, step = identity
         if step not in keep_steps:
             path.unlink(missing_ok=True)
 
@@ -731,8 +767,8 @@ def _quarantine_failed_checkpoint_pair(
 ) -> Path | None:
     if failed_step <= 0:
         return None
-    pairs = _checkpoint_pairs(layout)
-    if failed_step not in pairs or not any(step != failed_step for step in pairs):
+    pairs = discover_checkpoint_pairs(layout.experiment_dir)
+    if failed_step not in pairs:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     archive = (
@@ -755,21 +791,6 @@ def _quarantine_failed_checkpoint_pair(
             archive.rmdir()
         raise
     return archive
-
-
-def _checkpoint_pairs(layout: RvcModelPackageLayout) -> dict[int, tuple[Path, Path]]:
-    generators: dict[int, Path] = {}
-    discriminators: dict[int, Path] = {}
-    for path in layout.experiment_dir.glob("*.pth"):
-        match = _CHECKPOINT_PATTERN.fullmatch(path.name) if path.is_file() else None
-        if match is None:
-            continue
-        target = generators if match.group("kind").casefold() == "g" else discriminators
-        target[int(match.group("step"))] = path
-    return {
-        step: (generators[step], discriminators[step])
-        for step in generators.keys() & discriminators.keys()
-    }
 
 
 def _backup_final_model(final_model: Path, layout: RvcModelPackageLayout) -> Path | None:

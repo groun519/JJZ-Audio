@@ -477,12 +477,9 @@ class SongPackageStore:
         source_url: str,
         content_hash: str,
     ) -> SongPackage:
-        import_root = (
-            self.root
-            / ".jjzero-imports"
-            / f"song-import-{uuid.uuid4().hex}"
-        )
-        staged_folder = import_root / "package"
+        transaction = ManagedPathTransaction(self.root, "import-song", song_id)
+        transaction.prepare()
+        staged_folder = transaction.folder / "incoming" / "package"
         self._create_stage_directories(staged_folder)
         staged_source = (
             staged_folder
@@ -490,7 +487,6 @@ class SongPackageStore:
             / "audio"
             / _managed_source_name(source)
         )
-        transaction = ManagedPathTransaction(self.root, "import-song", song_id)
         try:
             copy_file_atomic(source, staged_source)
             managed_source = (
@@ -528,12 +524,10 @@ class SongPackageStore:
                     raise
             self._commit_transaction(transaction)
             return package
-        finally:
-            shutil.rmtree(import_root, ignore_errors=True)
-            try:
-                import_root.parent.rmdir()
-            except OSError:
-                pass
+        except Exception:
+            if transaction.folder.exists():
+                transaction.rollback()
+            raise
 
     def _attach_managed_source(
         self,

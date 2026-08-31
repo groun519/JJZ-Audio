@@ -4,12 +4,16 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QWidget
 
-from jang_app.qt_app.google_drive_controller import GoogleDriveController
+from jang_app.qt_app.google_drive_controller import (
+    GoogleDriveController,
+    _DriveShareOutcome,
+)
 from jang_app.services.drive_share_catalog import DriveShareRecord
 from jang_app.services.google_drive import GoogleDriveQuota
 from jang_app.services.google_drive_share import GoogleDriveShareResult, drive_share_target_id
@@ -185,6 +189,57 @@ class GoogleDriveControllerTests(unittest.TestCase):
             self.assertEqual(len(workers), 1)
             self.assertEqual(started.count(), 1)
             controller.shutdown()
+            parent.close()
+
+    def test_cancelling_active_share_keeps_result_ownership_until_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "mix.wav"
+            source.write_bytes(b"audio")
+            target_id = drive_share_target_id(source)
+            link = "https://drive.google.com/file/d/committed/view"
+            record = DriveShareRecord(
+                source_path=str(source.resolve()),
+                source_size=source.stat().st_size,
+                source_modified_ns=source.stat().st_mtime_ns,
+                category="exports",
+                file_id="committed",
+                file_name=source.name,
+                share_link=link,
+                shared_at="2026-08-07T00:00:00+00:00",
+            )
+            parent = QWidget()
+            controller = GoogleDriveController(
+                parent,
+                paths=SimpleNamespace(cache_dir=root / "cache"),
+                oauth_asset=root / "oauth.json",
+                model_workspace=RvcModelWorkspace(root / "models"),
+                run_worker=lambda *_args, **_kwargs: None,
+                model_status=lambda _message: None,
+                models_imported=lambda _records: None,
+                logger=logging.getLogger("test.google-drive"),
+            )
+            target = controller._export_target(source)
+            cancellation = controller._active_shares[target_id] = Event()
+            failed = QSignalSpy(controller.share_failed)
+            succeeded = QSignalSpy(controller.share_succeeded)
+
+            controller._cancel_shares("cancel requested")
+
+            self.assertTrue(cancellation.is_set())
+            self.assertIn(target_id, controller._active_shares)
+            self.assertEqual(failed.count(), 0)
+
+            controller._on_share_succeeded(
+                target,
+                _DriveShareOutcome(
+                    result=GoogleDriveShareResult(record, reused=False),
+                    quota=None,
+                ),
+            )
+
+            self.assertEqual(succeeded.at(0), [target_id, link])
+            self.assertEqual(controller._active_shares, {})
             parent.close()
 
     def test_share_preflight_blocks_when_google_drive_space_is_too_small(self) -> None:

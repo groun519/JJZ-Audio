@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,10 @@ DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _FEATURE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40,64}$")
+_WINDOWS_VERSION_PATTERN = re.compile(
+    r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<build>\d+)$"
+)
+_SUPPORTED_MANIFEST_ARCHITECTURES = {"x64", "arm64"}
 
 
 class UpdateError(RuntimeError):
@@ -81,6 +87,8 @@ class ReleaseManifest:
     components: tuple[ReleaseComponent, ...]
     disabled_features: frozenset[str] = frozenset()
     source_revision: str = ""
+    architecture: str = ""
+    minimum_windows: str = ""
 
     def component(self, component_id: str) -> ReleaseComponent | None:
         return next(
@@ -281,8 +289,18 @@ def parse_release_manifest(data: object, manifest_url: str) -> ReleaseManifest:
         raise UpdateError("Release artifact names must be unique across components.")
     disabled_features = _parse_disabled_features(data.get("disabled_features"))
     source_revision = _parse_source_revision(data.get("source_revision"))
-    release = ReleaseManifest(version, components, disabled_features, source_revision)
+    architecture = _parse_manifest_architecture(data.get("architecture"))
+    minimum_windows = _parse_minimum_windows(data.get("minimum_windows"))
+    release = ReleaseManifest(
+        version,
+        components,
+        disabled_features,
+        source_revision,
+        architecture,
+        minimum_windows,
+    )
     release.application
+    _require_release_platform_compatibility(release)
     return release
 
 
@@ -300,6 +318,7 @@ def create_update_plan(
     installed_rvc_failed_fallback_profile: str = "",
     installed_rvc_failed_fallback_version: str = "",
 ) -> UpdatePlan:
+    _require_release_platform_compatibility(release)
     application_required = _version_tuple(release.version) > _version_tuple(current_version)
     if application_required:
         require_trusted_application_artifacts(release.application)
@@ -460,17 +479,21 @@ def download_artifact(
     if offset > artifact.size:
         partial.unlink()
         offset = 0
+    fresh_candidate = partial.with_suffix(f"{partial.suffix}.fresh")
+    fresh_candidate.unlink(missing_ok=True)
+    download_path = partial
+    appended_to_partial = False
     open_request = opener or _open_url
     request_offset = offset
-    for attempt in range(2):
-        request = Request(
-            artifact.url,
-            headers={
-                "User-Agent": f"JJZero-Audio/{__version__}",
-                **({"Range": f"bytes={request_offset}-"} if request_offset else {}),
-            },
-        )
-        try:
+    try:
+        for attempt in range(2):
+            request = Request(
+                artifact.url,
+                headers={
+                    "User-Agent": f"JJZero-Audio/{__version__}",
+                    **({"Range": f"bytes={request_offset}-"} if request_offset else {}),
+                },
+            )
             with open_request(request, timeout) as response:
                 status = getattr(response, "status", 200)
                 if request_offset:
@@ -479,9 +502,11 @@ def download_artifact(
                         request_offset,
                         artifact.size,
                     ):
+                        download_path = partial
+                        appended_to_partial = True
                         _write_download(
                             response,
-                            partial,
+                            download_path,
                             artifact.size,
                             request_offset,
                             True,
@@ -489,9 +514,10 @@ def download_artifact(
                         )
                         break
                     if status == 200:
+                        download_path = fresh_candidate
                         _write_download(
                             response,
-                            partial,
+                            download_path,
                             artifact.size,
                             0,
                             False,
@@ -514,20 +540,37 @@ def download_artifact(
                     )
                 _write_download(
                     response,
-                    partial,
+                    fresh_candidate if offset else partial,
                     artifact.size,
                     0,
                     False,
                     progress,
                 )
+                download_path = fresh_candidate if offset else partial
                 break
-        except OSError as exc:
-            raise UpdateError(f"Could not download {artifact.name}: {exc}") from exc
+    except OSError as exc:
+        if appended_to_partial:
+            _truncate_partial(partial, offset)
+        fresh_candidate.unlink(missing_ok=True)
+        raise UpdateError(f"Could not download {artifact.name}: {exc}") from exc
+    except UpdateError:
+        if appended_to_partial:
+            _truncate_partial(partial, offset)
+        fresh_candidate.unlink(missing_ok=True)
+        raise
 
-    if not _artifact_ready(partial, artifact):
-        partial.unlink(missing_ok=True)
+    if not _artifact_ready(download_path, artifact):
+        if download_path == partial:
+            if offset:
+                _truncate_partial(partial, offset)
+            else:
+                partial.unlink(missing_ok=True)
+        else:
+            fresh_candidate.unlink(missing_ok=True)
         raise UpdateError(f"Downloaded artifact verification failed: {artifact.name}")
-    os.replace(partial, destination)
+    os.replace(download_path, destination)
+    if download_path != partial:
+        partial.unlink(missing_ok=True)
     _report(progress, 100)
     return destination
 
@@ -648,6 +691,78 @@ def _parse_source_revision(data: object) -> str:
     if _SOURCE_REVISION_PATTERN.fullmatch(revision) is None:
         raise UpdateError("Invalid release source revision.")
     return revision
+
+
+def _parse_manifest_architecture(data: object) -> str:
+    if data is None:
+        return ""
+    if not isinstance(data, str):
+        raise UpdateError("Invalid release architecture.")
+    architecture = data.strip().casefold()
+    if architecture not in _SUPPORTED_MANIFEST_ARCHITECTURES:
+        raise UpdateError(f"Unsupported release architecture: {architecture or data!r}")
+    return architecture
+
+
+def _parse_minimum_windows(data: object) -> str:
+    if data is None:
+        return ""
+    if not isinstance(data, str):
+        raise UpdateError("Invalid minimum Windows version.")
+    version = data.strip()
+    if _WINDOWS_VERSION_PATTERN.fullmatch(version) is None:
+        raise UpdateError(f"Invalid minimum Windows version: {version!r}")
+    return version
+
+
+def _require_release_platform_compatibility(release: ReleaseManifest) -> None:
+    host_architecture = _host_architecture()
+    if (
+        release.architecture
+        and host_architecture
+        and release.architecture != host_architecture
+    ):
+        raise UpdateError(
+            "This release requires "
+            f"{release.architecture}, but this PC uses {host_architecture}."
+        )
+    required_windows = _windows_version_tuple(release.minimum_windows)
+    host_windows = _host_windows_version()
+    if required_windows and host_windows and host_windows < required_windows:
+        raise UpdateError(
+            "This release requires Windows "
+            f"{release.minimum_windows} or newer."
+        )
+
+
+def _host_architecture() -> str:
+    if os.name != "nt":
+        return ""
+    machine = platform.machine().strip().casefold()
+    if machine in {"amd64", "x86_64"}:
+        return "x64"
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    return machine
+
+
+def _host_windows_version() -> tuple[int, int, int] | None:
+    if os.name != "nt":
+        return None
+    get_version = getattr(sys, "getwindowsversion", None)
+    if get_version is None:
+        return None
+    version = get_version()
+    return int(version.major), int(version.minor), int(version.build)
+
+
+def _windows_version_tuple(value: str) -> tuple[int, int, int] | None:
+    if not value:
+        return None
+    match = _WINDOWS_VERSION_PATTERN.fullmatch(value)
+    if match is None:
+        return None
+    return tuple(int(match.group(name)) for name in ("major", "minor", "build"))
 
 
 def _parse_legacy_application(
@@ -806,6 +921,16 @@ def _write_download(
             target.write(chunk)
             downloaded += len(chunk)
             _report(progress, int(downloaded * 100 / expected_size))
+
+
+def _truncate_partial(path: Path, size: int) -> None:
+    try:
+        with path.open("r+b") as target:
+            target.truncate(size)
+    except OSError:
+        # Keep the primary download error. A later retry still verifies the file
+        # length and hash before using whatever Windows allowed us to preserve.
+        pass
 
 
 def _sha256(path: Path) -> str:

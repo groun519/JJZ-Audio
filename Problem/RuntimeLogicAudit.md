@@ -2,11 +2,28 @@
 
 ## Session status
 
-- Status: investigating
+- Status: source remediation reverified
 - Started: 2026-08-23 23:06 KST
+- Reverified: 2026-08-27 KST
 - Scope: installer/update downloads, runtime activation and fallback, startup cache
   cleanup, migration I/O, and packaged-user disk usage
 - Main.md lock: not held
+
+## Post-remediation verification
+
+- Rechecked `RLA-001` through `RLA-013` against the current implementation and their
+  original failure paths. Each confirmed source defect now has an inverted regression
+  test and the implementation matches the remediation ledger.
+- The complete repository suite passed: 1,579 tests in 154.325 seconds.
+- A second focused run covering the concurrently completed archive-safety, updater,
+  managed-transaction, model-share, storage, cleanup, and conversion-state changes
+  passed: 136 tests in 7.369 seconds.
+- `compileall` passed for `src` and `tests`; `git diff --check` reported no content
+  errors. Existing checkout line-ending warnings remain informational.
+- No additional source patch was required by this re-verification. Packaged
+  second-instance behavior, signed installer/update/uninstall, real Drive failure
+  recovery, bundled FFmpeg rendering, and supported GPU training remain live or
+  packaged integration gates rather than source-level closures.
 
 ## Method
 
@@ -329,6 +346,19 @@ trigger, ownership, and a suggested verification gate.
 - The splash remains visible, but `_load_main_window()` runs synchronously on the UI
   thread. The next step is import-time attribution and frozen-build measurement
   before proposing module boundaries.
+
+#### Follow-up measurement (2026-08-27)
+
+- With the current source tree and isolated interpreter, `-X importtime` measured
+  approximately 0.83 seconds cumulative for `jang_app.qt_app.main_window` and
+  approximately 0.24 seconds cumulative for `jang_app.qt_app.startup_coordinator`.
+- The largest application-local contribution was `jang_app.qt_app.model_workspace` at
+  approximately 79 ms cumulative, followed by `jang_app.qt_app.studio_editor` at
+  approximately 23 ms; this is not large enough to justify a risky module split by
+  itself.
+- No source split is justified by this development measurement alone. A frozen clean
+  launch measurement remains the required gate before changing startup module
+  boundaries.
 
 ## Cross-validation
 

@@ -4,13 +4,27 @@ import hashlib
 import json
 import os
 import shutil
-import tempfile
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
+from jang_app.services.archive_safety import (
+    ArchiveInventory,
+    ArchiveSafetyError,
+    archive_member,
+    extraction_target,
+    inspect_archive,
+    normalized_archive_path,
+    read_archive_member,
+    windows_destination_key,
+)
+from jang_app.services.managed_transaction import (
+    ManagedPathTransaction,
+    ManagedTransactionError,
+)
 from jang_app.services.model_dataset import ModelDatasetStore
+from jang_app.services.rvc_checkpoint_pairs import latest_checkpoint_pair
 from jang_app.services.rvc_model_workspace import (
     RvcModelRecord,
     RvcModelWorkspace,
@@ -188,13 +202,16 @@ def inspect_model_work_share_package(package_path: Path) -> dict[str, object]:
         raise ModelWorkSharePackageError(f"Model work package not found: {package_path}")
     try:
         with zipfile.ZipFile(package_path, "r") as archive:
-            manifest = _read_manifest(archive)
-            _validate_archive(archive, manifest)
+            inventory = inspect_archive(archive)
+            manifest = _read_manifest(archive, inventory)
+            _validate_archive(inventory, manifest)
             return manifest
     except zipfile.BadZipFile as exc:
         raise ModelWorkSharePackageError(
             "The shared model work is not a valid ZIP package."
         ) from exc
+    except ArchiveSafetyError as exc:
+        raise ModelWorkSharePackageError(str(exc)) from exc
 
 
 def import_model_work_share_package(
@@ -207,33 +224,61 @@ def import_model_work_share_package(
     workspace.root.parent.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(package_path, "r") as archive:
-            manifest = _read_manifest(archive)
-            entries = _validate_archive(archive, manifest)
+            inventory = inspect_archive(archive)
+            manifest = _read_manifest(archive, inventory)
+            entries = _validate_archive(inventory, manifest)
             model_payload = manifest.get("model")
             if not isinstance(model_payload, dict):
-                raise ModelWorkSharePackageError("The shared model work manifest is invalid.")
+                raise ModelWorkSharePackageError(
+                    "The shared model work manifest is invalid."
+                )
             model_id = str(model_payload.get("id", "")).strip()
             model_name = str(model_payload.get("name", "")).strip()
             if not model_id or not model_name:
-                raise ModelWorkSharePackageError("The shared model work manifest is missing model identity.")
-            with tempfile.TemporaryDirectory(
-                prefix="jjzero-model-work-import-",
-                dir=workspace.root.parent,
-            ) as temporary_directory:
-                extraction_root = Path(temporary_directory)
-                total = sum(entry["size"] for entry in entries)
+                raise ModelWorkSharePackageError(
+                    "The shared model work manifest is missing model identity."
+                )
+            normalized_model_id = normalized_archive_path(model_id)
+            if normalized_model_id != model_id or "/" in normalized_model_id:
+                raise ModelWorkSharePackageError(
+                    "The shared model work contains an unsafe model identity."
+                )
+            total = sum(int(entry["size"]) for entry in entries)
+            required = total * 2 + max(_MINIMUM_SPACE_BUFFER, total // 10)
+            available = shutil.disk_usage(workspace.root.parent).free
+            if available < required:
+                raise ModelWorkShareStorageError(required, available)
+            transaction = ManagedPathTransaction(
+                workspace.root,
+                "import-model-work",
+                model_id,
+            )
+            transaction.prepare()
+            extraction_root = transaction.folder / "incoming" / "archive"
+            try:
                 extracted = 0
                 for entry in entries:
                     archive_path = str(entry["path"])
-                    target = extraction_root / PurePosixPath(archive_path)
+                    target = extraction_target(extraction_root, archive_path)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     digest = hashlib.sha256()
-                    with archive.open(archive_path, "r") as source, target.open("wb") as output:
+                    entry_size = int(entry["size"])
+                    entry_extracted = 0
+                    with archive.open(entry["info"], "r") as source, target.open("wb") as output:
                         while chunk := source.read(_COPY_CHUNK_SIZE):
+                            entry_extracted += len(chunk)
+                            if entry_extracted > entry_size:
+                                raise ModelWorkSharePackageError(
+                                    f"File size mismatch: {archive_path}"
+                                )
                             output.write(chunk)
                             digest.update(chunk)
                             extracted += len(chunk)
                             _report(progress, extracted, total, limit=45)
+                    if entry_extracted != entry_size:
+                        raise ModelWorkSharePackageError(
+                            f"File size mismatch: {archive_path}"
+                        )
                     if digest.hexdigest() != entry["sha256"]:
                         raise ModelWorkSharePackageError(f"Checksum mismatch: {archive_path}")
 
@@ -242,13 +287,19 @@ def import_model_work_share_package(
                     extraction_root / MODEL_WORK_SHARE_MODEL_DIRECTORY,
                     extraction_root / MODEL_WORK_SHARE_DATASET_DIRECTORY,
                     model_payload,
-                    runtime_root=str(manifest.get("runtime_root", "")),
+                    transaction,
                 )
+            except Exception:
+                if transaction.folder.exists():
+                    transaction.rollback()
+                raise
     except zipfile.BadZipFile as exc:
         raise ModelWorkSharePackageError(
             "The shared model work is not a valid ZIP package."
         ) from exc
     except RvcModelWorkspaceError as exc:
+        raise ModelWorkSharePackageError(str(exc)) from exc
+    except ArchiveSafetyError as exc:
         raise ModelWorkSharePackageError(str(exc)) from exc
     if progress is not None:
         progress(100)
@@ -345,12 +396,13 @@ def _model_work_share_package_path(record: RvcModelRecord, output_dir: Path) -> 
     return output_dir / f"{title} - JJZero Model Work.zip"
 
 
-def _read_manifest(archive: zipfile.ZipFile) -> dict[str, object]:
+def _read_manifest(
+    archive: zipfile.ZipFile,
+    inventory: ArchiveInventory,
+) -> dict[str, object]:
     try:
-        raw = archive.read(MODEL_WORK_SHARE_MANIFEST)
+        raw = read_archive_member(archive, inventory, MODEL_WORK_SHARE_MANIFEST)
         manifest = json.loads(raw.decode("utf-8"))
-    except KeyError as exc:
-        raise ModelWorkSharePackageError("The shared model work manifest is missing.") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ModelWorkSharePackageError("The shared model work manifest is invalid.") from exc
     if not isinstance(manifest, dict):
@@ -364,34 +416,63 @@ def _read_manifest(archive: zipfile.ZipFile) -> dict[str, object]:
 
 
 def _validate_archive(
-    archive: zipfile.ZipFile,
+    inventory: ArchiveInventory,
     manifest: dict[str, object],
 ) -> list[dict[str, object]]:
     raw_files = manifest.get("files")
     if not isinstance(raw_files, list) or not raw_files:
         raise ModelWorkSharePackageError("The shared model work contains no files.")
-    archive_names = set(archive.namelist())
     validated: list[dict[str, object]] = []
+    expected_files = {MODEL_WORK_SHARE_MANIFEST}
+    destination_keys: set[str] = set()
     for raw_entry in raw_files:
         if not isinstance(raw_entry, dict):
             raise ModelWorkSharePackageError("The shared model work manifest is invalid.")
         archive_path = str(raw_entry.get("path", ""))
         if not archive_path:
             raise ModelWorkSharePackageError("The shared model work manifest is invalid.")
-        normalized = PurePosixPath(archive_path)
-        if normalized.is_absolute() or ".." in normalized.parts:
-            raise ModelWorkSharePackageError("The shared model work contains an unsafe path.")
-        if archive_path not in archive_names:
+        normalized, info = archive_member(inventory, archive_path)
+        if normalized.split("/", 1)[0] not in {
+            MODEL_WORK_SHARE_MODEL_DIRECTORY,
+            MODEL_WORK_SHARE_DATASET_DIRECTORY,
+        }:
             raise ModelWorkSharePackageError(
-                f"The shared model work is missing '{archive_path}'."
+                "The shared model work contains an unsafe package path."
             )
+        destination_key = windows_destination_key(normalized)
+        if destination_key in destination_keys:
+            raise ModelWorkSharePackageError(
+                "The shared model work contains duplicate file paths."
+            )
+        destination_keys.add(destination_key)
+        try:
+            size = int(raw_entry.get("size", -1))
+        except (TypeError, ValueError) as exc:
+            raise ModelWorkSharePackageError(
+                "The shared model work file size is invalid."
+            ) from exc
+        sha256 = str(raw_entry.get("sha256", "")).strip().casefold()
+        if size < 0 or info.file_size != size:
+            raise ModelWorkSharePackageError(
+                f"The shared model work file size is invalid: {normalized}"
+            )
+        if not _valid_sha256(sha256):
+            raise ModelWorkSharePackageError(
+                "The shared model work checksum is invalid."
+            )
+        expected_files.add(normalized)
         validated.append(
             {
-                "path": archive_path,
-                "size": int(raw_entry.get("size", 0)),
+                "path": normalized,
+                "size": size,
                 "modified_ns": int(raw_entry.get("modified_ns", 0)),
-                "sha256": str(raw_entry.get("sha256", "")),
+                "sha256": sha256,
+                "info": info,
             }
+        )
+    if set(inventory.files) != expected_files:
+        raise ModelWorkSharePackageError(
+            "The shared model work contains unlisted files."
         )
     return validated
 
@@ -401,8 +482,7 @@ def _install_imported_package(
     package_root: Path,
     dataset_root: Path,
     model_payload: dict[str, object],
-    *,
-    runtime_root: str,
+    transaction: ManagedPathTransaction,
 ) -> RvcModelRecord:
     model_id = str(model_payload["id"]).strip()
     model_name = str(model_payload["name"]).strip()
@@ -412,35 +492,36 @@ def _install_imported_package(
             f"A model with this work package already exists: {model_name}"
         )
     target_dataset_dir = ModelDatasetStore(workspace.root).root / model_id
-    target_model_dir.parent.mkdir(parents=True, exist_ok=True)
-    target_dataset_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(package_root, target_model_dir)
+    catalog_staged = False
     try:
-        shutil.copytree(dataset_root, target_dataset_dir)
-    except Exception:
-        shutil.rmtree(target_model_dir, ignore_errors=True)
-        raise
-    try:
+        if transaction.stage(workspace.catalog_path, "catalog") is None:
+            transaction.expect_created(workspace.catalog_path, "catalog")
+        catalog_staged = True
+        transaction.promote(package_root, target_model_dir, "model")
+        transaction.promote(dataset_root, target_dataset_dir, "dataset")
         ModelDatasetStore(workspace.root).load(model_id)
         record = _register_imported_record(
             workspace,
             target_model_dir,
             model_payload,
-            runtime_root=runtime_root,
         )
-        return record
-    except Exception:
-        shutil.rmtree(target_model_dir, ignore_errors=True)
-        shutil.rmtree(target_dataset_dir, ignore_errors=True)
+        transaction.mark_committed()
+    except Exception as exc:
+        if catalog_staged:
+            workspace.catalog_path.unlink(missing_ok=True)
+        try:
+            transaction.rollback()
+        except ManagedTransactionError as rollback_error:
+            raise ModelWorkSharePackageError(str(rollback_error)) from exc
         raise
+    transaction.purge()
+    return record
 
 
 def _register_imported_record(
     workspace: RvcModelWorkspace,
     model_dir: Path,
     model_payload: dict[str, object],
-    *,
-    runtime_root: str,
 ) -> RvcModelRecord:
     model_id = str(model_payload["id"]).strip()
     model_name = str(model_payload["name"]).strip()
@@ -451,7 +532,7 @@ def _register_imported_record(
     default_pitch = int(model_payload.get("default_pitch", 0))
     default_device = str(model_payload.get("default_device", "auto"))
     mode = str(model_payload.get("mode", "managed"))
-    runtime = Path(runtime_root).expanduser() if runtime_root else model_dir / "rvc"
+    runtime = model_dir / "rvc"
     manifest_path = model_dir / "model.json"
     inferred_name = _infer_rvc_name(manifest_path, model_name)
     package_root = model_dir / "rvc"
@@ -459,8 +540,9 @@ def _register_imported_record(
     weights_dir = package_root / "weights"
     inference_model = _first_existing_file(weights_dir, "*.pth")
     index_file = _first_existing_file(experiment_dir, "*.index")
-    generator_checkpoint = _first_existing_file(experiment_dir, "G_*.pth")
-    discriminator_checkpoint = _first_existing_file(experiment_dir, "D_*.pth")
+    generator_checkpoint, discriminator_checkpoint, _step = latest_checkpoint_pair(
+        experiment_dir
+    )
     return workspace.register_imported_managed_record(
         model_id=model_id,
         name=model_name,
@@ -505,6 +587,12 @@ def _profile_payload(record: RvcModelRecord) -> dict[str, object]:
         "mode": record.mode,
         "created_at": record.created_at,
     }
+
+
+def _valid_sha256(value: str) -> bool:
+    return len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 def _report(

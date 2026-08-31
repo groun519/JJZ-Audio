@@ -8,6 +8,10 @@ from enum import StrEnum
 from pathlib import Path
 
 from jang_app.services.managed_files import write_json_atomic
+from jang_app.services.rvc_checkpoint_pairs import (
+    checkpoint_step,
+    latest_checkpoint_pair,
+)
 from jang_app.services.rvc_model_package import RvcModelPackageLayout
 from jang_app.services.rvc_training_runtime import (
     RVC_TRAINING_F0_METHOD,
@@ -19,7 +23,6 @@ from jang_app.services.rvc_training_runtime import (
 TRAINING_STATE_VERSION = 1
 TRAINING_STATE_FILE_NAME = "training.json"
 DEFAULT_TARGET_EPOCH = 20
-_CHECKPOINT_PATTERN = re.compile(r"^(?P<kind>[GD])_(?P<step>\d+)\.pth$", re.IGNORECASE)
 _DATASET_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TRAIN_LOG_CHECKPOINT_PATTERN = re.compile(
     r"Saving (?:compact )?(?:model|discriminator)(?: and optimizer)? state "
@@ -128,7 +131,9 @@ class RvcTrainingStateStore:
 
     def refresh_checkpoint_pair(self) -> RvcTrainingState:
         state = self.load()
-        generator, discriminator, step = _latest_checkpoint_pair(self.layout.experiment_dir)
+        generator, discriminator, step = latest_checkpoint_pair(
+            self.layout.experiment_dir
+        )
         current_epoch = state.current_epoch
         target_epoch = state.target_epoch
         if step > 0:
@@ -290,8 +295,8 @@ class RvcTrainingStateStore:
             if checkpoint is not None and not _is_within(checkpoint, self.layout.experiment_dir):
                 raise RvcTrainingStateError("Training checkpoints must remain inside the model package.")
         if has_checkpoint_pair:
-            generator_step = _checkpoint_step(checkpoints[0], "G")
-            discriminator_step = _checkpoint_step(checkpoints[1], "D")
+            generator_step = checkpoint_step(checkpoints[0], "G")
+            discriminator_step = checkpoint_step(checkpoints[1], "D")
             if generator_step != state.checkpoint_step or discriminator_step != state.checkpoint_step:
                 raise RvcTrainingStateError("Checkpoint filenames do not match the stored step.")
 
@@ -368,24 +373,6 @@ class RvcTrainingStateStore:
         return resolved
 
 
-def _latest_checkpoint_pair(experiment_dir: Path) -> tuple[Path | None, Path | None, int]:
-    generators: dict[int, Path] = {}
-    discriminators: dict[int, Path] = {}
-    if experiment_dir.is_dir():
-        for path in experiment_dir.iterdir():
-            match = _CHECKPOINT_PATTERN.fullmatch(path.name) if path.is_file() else None
-            if match is None:
-                continue
-            step = int(match.group("step"))
-            target = generators if match.group("kind").casefold() == "g" else discriminators
-            target[step] = path.resolve()
-    shared_steps = generators.keys() & discriminators.keys()
-    if not shared_steps:
-        return None, None, 0
-    step = max(shared_steps)
-    return generators[step], discriminators[step], step
-
-
 def _infer_checkpoint_epoch(layout: RvcModelPackageLayout, checkpoint_step: int) -> int:
     epoch = _infer_epoch_from_weights(layout.weights_dir, checkpoint_step)
     if epoch > 0:
@@ -420,13 +407,6 @@ def _infer_epoch_from_weights(weights_dir: Path, checkpoint_step: int) -> int:
             continue
         epochs.append(int(match.group("epoch")))
     return max(epochs, default=0)
-
-
-def _checkpoint_step(path: Path | None, expected_kind: str) -> int:
-    match = _CHECKPOINT_PATTERN.fullmatch(path.name) if path is not None else None
-    if match is None or match.group("kind").casefold() != expected_kind.casefold():
-        return -1
-    return int(match.group("step"))
 
 
 def _is_within(path: Path, root: Path) -> bool:

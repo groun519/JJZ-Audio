@@ -492,6 +492,27 @@ class VocalCleanupStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(VocalCleanupStoreError, "source vocal changed"):
             self.store.load(self.job_dir, self.source)
 
+    def test_same_size_source_change_with_preserved_timestamp_is_reported(self) -> None:
+        project = self.store.load(self.job_dir, self.source)
+        self.store.save(self.job_dir, project)
+        original_stat = self.source.stat()
+
+        sf.write(
+            self.source,
+            np.ones((44_100, 2), dtype=np.float32) * 0.2,
+            44_100,
+            subtype="FLOAT",
+        )
+        os.utime(
+            self.source,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+
+        self.assertEqual(self.source.stat().st_size, original_stat.st_size)
+        self.assertEqual(self.source.stat().st_mtime_ns, original_stat.st_mtime_ns)
+        with self.assertRaisesRegex(VocalCleanupStoreError, "source vocal changed"):
+            self.store.load(self.job_dir, self.source)
+
     def test_malformed_or_non_finite_preview_segment_is_rejected(self) -> None:
         project = self.store.load(self.job_dir, self.source)
         short, removed = self._preview_segments("short", 100)

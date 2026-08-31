@@ -19,6 +19,11 @@ from jang_app.services.managed_transaction import (
     ManagedTransactionError,
 )
 from jang_app.services.library_catalog import LibraryCatalog, inferred_catalog_file
+from jang_app.services.rvc_checkpoint_pairs import (
+    checkpoint_identity,
+    checkpoint_step,
+    latest_checkpoint_pair,
+)
 from jang_app.services.rvc_model_package import (
     RvcModelPackageLayout,
     build_rvc_package_plan,
@@ -34,7 +39,6 @@ CATALOG_VERSION = 1
 CATALOG_FILE_NAME = "catalog.json"
 MANAGED_LIBRARY_DIR_NAME = "library"
 _EPOCH_WEIGHT_PATTERN = re.compile(r"^(?P<name>.+)_e(?P<epoch>\d+)_s(?P<step>\d+)$", re.IGNORECASE)
-_CHECKPOINT_PATTERN = re.compile(r"^[GD]_(?P<step>\d+)\.pth$", re.IGNORECASE)
 _MODEL_ID_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
 _LOGGER = logging.getLogger("jang_app")
 _CATALOG_CACHE_UNSET = object()
@@ -119,7 +123,7 @@ class RvcModelRecord:
         discriminator = self.discriminator_checkpoint
         if generator is None or discriminator is None or not generator.is_file() or not discriminator.is_file():
             return False
-        return _checkpoint_step(generator) == _checkpoint_step(discriminator)
+        return checkpoint_step(generator) == checkpoint_step(discriminator)
 
     @property
     def can_convert(self) -> bool:
@@ -263,27 +267,44 @@ class RvcModelWorkspace:
 
             model_id = _new_model_id(model_name)
             model_dir = self.library_dir / model_id
-            model_dir.mkdir(parents=True, exist_ok=False)
-            package = RvcModelPackageLayout(model_dir, model_name)
-            package.create()
-            record = RvcModelRecord(
-                model_id=model_id,
-                name=model_name,
-                mode="created",
-                runtime_root=runtime_root.expanduser().resolve(),
-                source_folder=package.experiment_dir,
-                inference_model=None,
-                index_file=None,
-                generator_checkpoint=None,
-                discriminator_checkpoint=None,
-                created_at=datetime.now(UTC).isoformat(),
+            transaction = ManagedPathTransaction(
+                self.root,
+                "create-model",
+                model_id,
             )
-            existing[model_id] = record
+            catalog_staged = False
             try:
+                transaction.prepare()
+                if transaction.stage(self.catalog_path, "catalog") is None:
+                    transaction.expect_created(self.catalog_path, "catalog")
+                catalog_staged = True
+                staged_model_dir = transaction.folder / "incoming" / model_id
+                RvcModelPackageLayout(staged_model_dir, model_name).create()
+                transaction.promote(staged_model_dir, model_dir, "model")
+                package = RvcModelPackageLayout(model_dir, model_name)
+                record = RvcModelRecord(
+                    model_id=model_id,
+                    name=model_name,
+                    mode="created",
+                    runtime_root=runtime_root.expanduser().resolve(),
+                    source_folder=package.experiment_dir,
+                    inference_model=None,
+                    index_file=None,
+                    generator_checkpoint=None,
+                    discriminator_checkpoint=None,
+                    created_at=datetime.now(UTC).isoformat(),
+                )
+                existing[model_id] = record
                 self._save_records(existing.values())
-            except Exception:
-                shutil.rmtree(model_dir, ignore_errors=True)
+            except Exception as exc:
+                if catalog_staged:
+                    self.catalog_path.unlink(missing_ok=True)
+                try:
+                    transaction.rollback()
+                except ManagedTransactionError as rollback_error:
+                    raise RvcModelWorkspaceError(str(rollback_error)) from exc
                 raise
+            _commit_transaction(transaction)
             return record
 
     def link_folder(self, folder: Path) -> list[RvcModelRecord]:
@@ -343,11 +364,13 @@ class RvcModelWorkspace:
         include_related_files: bool,
         progress: Callable[[int], None] | None,
     ) -> list[RvcModelRecord]:
-        import_root = (
-            self.root
-            / ".jjzero-imports"
-            / f"model-import-{uuid.uuid4().hex}"
+        transaction = ManagedPathTransaction(
+            self.root,
+            "import-model",
+            uuid.uuid4().hex,
         )
+        transaction.prepare()
+        import_root = transaction.folder / "incoming"
         package_plans: list[
             tuple[DiscoveredRvcModel, str, RvcModelPackageLayout, tuple]
         ] = []
@@ -392,32 +415,27 @@ class RvcModelWorkspace:
                 ),
                 progress,
             )
-            return self._commit_imported_packages(package_plans)
-        finally:
-            shutil.rmtree(import_root, ignore_errors=True)
-            try:
-                import_root.parent.rmdir()
-            except OSError:
-                pass
+            return self._commit_imported_packages(package_plans, transaction)
+        except Exception:
+            if transaction.folder.exists():
+                transaction.rollback()
+            raise
 
     def _commit_imported_packages(
         self,
         package_plans: list[
             tuple[DiscoveredRvcModel, str, RvcModelPackageLayout, tuple]
         ],
+        transaction: ManagedPathTransaction,
     ) -> list[RvcModelRecord]:
-        transaction = ManagedPathTransaction(
-            self.root,
-            "import-model",
-            uuid.uuid4().hex,
-        )
         with managed_path_lock(self.catalog_path):
             existing = {
                 record.model_id: record for record in self._records_unlocked()
             }
             imported: list[RvcModelRecord] = []
             try:
-                transaction.stage(self.catalog_path, "catalog")
+                if transaction.stage(self.catalog_path, "catalog") is None:
+                    transaction.expect_created(self.catalog_path, "catalog")
                 for model, model_id, staged_package, plan in package_plans:
                     final_model_dir = self.library_dir / model_id
                     final_package = RvcModelPackageLayout(
@@ -605,7 +623,7 @@ class RvcModelWorkspace:
         }
         for name, path in artifacts.items():
             _validate_replacement_artifact(name, path)
-        if _checkpoint_step(artifacts["generator_checkpoint"]) != _checkpoint_step(
+        if checkpoint_step(artifacts["generator_checkpoint"]) != checkpoint_step(
             artifacts["discriminator_checkpoint"]
         ):
             raise RvcModelWorkspaceError("Training checkpoint steps do not match.")
@@ -694,7 +712,7 @@ class RvcModelWorkspace:
                 "Generator and discriminator checkpoints must be stored as a pair."
             )
         if generator is not None and discriminator is not None:
-            if _checkpoint_step(generator) != _checkpoint_step(discriminator):
+            if checkpoint_step(generator) != checkpoint_step(discriminator):
                 raise RvcModelWorkspaceError(
                     "Training checkpoint steps do not match."
                 )
@@ -807,7 +825,10 @@ class RvcModelWorkspace:
             prepared: list[RvcModelRecord] = []
             for record in records:
                 if record.is_managed:
-                    record, _migrated = self._ensure_managed_package(record)
+                    record, _migrated = self._ensure_managed_package(
+                        record,
+                        reconcile_manifest=False,
+                    )
                 prepared.append(record)
             self._write_catalog(prepared)
             for record in prepared:
@@ -859,7 +880,12 @@ class RvcModelWorkspace:
         self._records_revision = revision
         return list(self._records_cache)
 
-    def _ensure_managed_package(self, record: RvcModelRecord) -> tuple[RvcModelRecord, bool]:
+    def _ensure_managed_package(
+        self,
+        record: RvcModelRecord,
+        *,
+        reconcile_manifest: bool = True,
+    ) -> tuple[RvcModelRecord, bool]:
         model_dir = self.library_dir / record.model_id
         package = RvcModelPackageLayout(model_dir, record.name)
         package.create()
@@ -883,7 +909,14 @@ class RvcModelWorkspace:
         }
         updated = replace(record, source_folder=package.experiment_dir, **updates)
         did_migrate = updated != record
-        if did_migrate or not package.manifest_path.is_file():
+        if (
+            did_migrate
+            or not package.manifest_path.is_file()
+            or (
+                reconcile_manifest
+                and not _model_manifest_matches(model_dir, updated)
+            )
+        ):
             _write_model_manifest(model_dir, updated)
         return updated, did_migrate
 
@@ -992,7 +1025,7 @@ def discover_rvc_inference_file(model_file: Path) -> DiscoveredRvcModel:
     selected = model_file.expanduser().resolve()
     if not selected.is_file() or selected.suffix.casefold() != ".pth":
         raise RvcModelWorkspaceError(f"RVC inference model does not exist: {selected}")
-    if _CHECKPOINT_PATTERN.match(selected.name):
+    if checkpoint_identity(selected) is not None:
         raise RvcModelWorkspaceError("G/D training checkpoints cannot be used as inference models.")
 
     runtime_root, _experiment_filter = _resolve_rvc_layout(selected.parent)
@@ -1058,7 +1091,7 @@ def _group_inference_weights(weights_dir: Path) -> dict[str, list[Path]]:
 def _group_paths_by_model_name(paths) -> dict[str, list[Path]]:
     groups: dict[str, list[Path]] = {}
     for path in paths:
-        if _CHECKPOINT_PATTERN.match(path.name):
+        if checkpoint_identity(path) is not None:
             continue
         match = _EPOCH_WEIGHT_PATTERN.match(path.stem)
         name = match.group("name") if match else path.stem
@@ -1117,20 +1150,22 @@ def _inference_index_candidates(model_folder: Path, runtime_root: Path) -> list[
 def _latest_checkpoint_pair(folder: Path) -> tuple[Path | None, Path | None]:
     if not folder.is_dir():
         return None, None
-    generators = {_checkpoint_step(path): path for path in folder.glob("G_*.pth") if _checkpoint_step(path) is not None}
-    discriminators = {_checkpoint_step(path): path for path in folder.glob("D_*.pth") if _checkpoint_step(path) is not None}
-    matching_steps = set(generators) & set(discriminators)
-    if matching_steps:
-        step = max(matching_steps)
-        return generators[step], discriminators[step]
+    generator, discriminator, step = latest_checkpoint_pair(folder)
+    if step > 0:
+        return generator, discriminator
+    generators = {
+        checkpoint_step(path): path
+        for path in folder.glob("G_*.pth")
+        if checkpoint_step(path) is not None
+    }
+    discriminators = {
+        checkpoint_step(path): path
+        for path in folder.glob("D_*.pth")
+        if checkpoint_step(path) is not None
+    }
     generator = generators[max(generators)] if generators else None
     discriminator = discriminators[max(discriminators)] if discriminators else None
     return generator, discriminator
-
-
-def _checkpoint_step(path: Path) -> int | None:
-    match = _CHECKPOINT_PATTERN.match(path.name)
-    return int(match.group("step")) if match else None
 
 
 def _model_id(mode: str, model: DiscoveredRvcModel) -> str:
@@ -1219,6 +1254,25 @@ def _record_artifact_items(record: RvcModelRecord):
 
 
 def _write_model_manifest(model_dir: Path, record: RvcModelRecord) -> None:
+    write_json_atomic(
+        RvcModelPackageLayout(model_dir, record.name).manifest_path,
+        _model_manifest_data(model_dir, record),
+    )
+
+
+def _model_manifest_matches(model_dir: Path, record: RvcModelRecord) -> bool:
+    manifest_path = RvcModelPackageLayout(model_dir, record.name).manifest_path
+    try:
+        current = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return current == _model_manifest_data(model_dir, record)
+
+
+def _model_manifest_data(
+    model_dir: Path,
+    record: RvcModelRecord,
+) -> dict[str, object]:
     package = RvcModelPackageLayout(model_dir, record.name)
 
     def relative(path: Path | None) -> str:
@@ -1226,7 +1280,7 @@ def _write_model_manifest(model_dir: Path, record: RvcModelRecord) -> None:
             return ""
         return relative_package_path(package, path)
 
-    data = {
+    return {
         "version": 1,
         "id": record.model_id,
         "name": record.name,
@@ -1253,7 +1307,6 @@ def _write_model_manifest(model_dir: Path, record: RvcModelRecord) -> None:
             "default_device": record.default_device,
         },
     }
-    write_json_atomic(package.manifest_path, data)
 
 
 def _existing_unique_paths(*paths: Path | None) -> tuple[Path, ...]:

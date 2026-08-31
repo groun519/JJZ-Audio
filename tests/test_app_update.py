@@ -860,6 +860,39 @@ class AppUpdateTests(unittest.TestCase):
 
             self.assertEqual(partial.read_bytes(), prefix)
 
+    def test_changed_remote_object_does_not_destroy_resumable_progress(self) -> None:
+        payload = b"verified update payload"
+        prefix = payload[:8]
+        artifact = ReleaseArtifact(
+            "app.exe",
+            len(payload),
+            hashlib.sha256(payload).hexdigest(),
+            "https://example.test/app.exe",
+        )
+
+        def opener(_request: Request, _timeout: float) -> _Response:
+            replacement_tail = b"x" * (len(payload) - len(prefix))
+            return _Response(
+                replacement_tail,
+                status=206,
+                headers={
+                    "Content-Range": (
+                        f"bytes {len(prefix)}-{len(payload) - 1}/{len(payload)}"
+                    )
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary)
+            partial = destination / "app.exe.part"
+            partial.write_bytes(prefix)
+
+            with self.assertRaisesRegex(UpdateError, "verification failed"):
+                download_artifact(artifact, destination, opener=opener)
+
+            self.assertEqual(partial.read_bytes(), prefix)
+            self.assertFalse((destination / "app.exe.part.fresh").exists())
+
     def test_download_rejects_bytes_beyond_declared_size(self) -> None:
         artifact = ReleaseArtifact(
             "app.exe",

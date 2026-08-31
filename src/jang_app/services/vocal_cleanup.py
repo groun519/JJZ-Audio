@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+VOCAL_CLEANUP_DIR = "cleanup"
+VOCAL_CLEANUP_MANIFEST = "cleanup.json"
 VOCAL_CLEANUP_EFFECT_DEREVERB = "dereverb"
 VOCAL_CLEANUP_EFFECT_DEECHO = "deecho"
 VOCAL_CLEANUP_EFFECT_DENOISE = "denoise"

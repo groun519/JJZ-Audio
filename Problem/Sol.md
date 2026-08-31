@@ -730,6 +730,8 @@ findings are fixed, and promote only with an executable reproduction.
      after `_candidate_is_safe()` but before rename/removal.
    - Verify startup restoration of `.jjzero-cleanup`, task-resource leases at execute
      time, and cancellation/power-loss behavior during recursive removal.
+   - Source-level reparse-point and execute-time revalidation is now covered by
+     Range 18; live Windows junction and power-loss probes remain open.
 5. **Application shutdown ownership**
    - Close during each generic command, training stage, telemetry, model analysis,
      Drive upload/download, storage scan/cleanup, waveform generation, and success
@@ -746,6 +748,8 @@ findings are fixed, and promote only with an executable reproduction.
    - Rapidly switch many songs/models while old analysis is blocked. Measure whether
      stale uncancellable jobs occupy all global executor slots and delay the newest
      visible result; verify deduplication and generation cancellation.
+   - Waveform requests are now owned and cancelable across the four interactive
+     waveform surfaces in Range 17; analysis-executor measurement remains open.
 8. **Diagnostics/environment page worker lifecycle**
    - Close or switch pages during PC/RVC/storage scans, cleanup, and ZIP generation;
      verify stale signals cannot update destroyed/new widgets and workers are joined.

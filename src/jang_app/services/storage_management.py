@@ -11,9 +11,14 @@ from typing import Callable
 from uuid import uuid4
 
 from jang_app.services.app_paths import AppPaths
+from jang_app.services.managed_files import managed_path_lock
 from jang_app.services.separation_recipe import SEPARATION_RUN_MANIFEST
 from jang_app.services.song_package import VOCAL_STAGE
 from jang_app.services.update_cache import UPDATE_CLEANUP_MARKER
+from jang_app.services.vocal_cleanup import (
+    VOCAL_CLEANUP_DIR,
+    VOCAL_CLEANUP_MANIFEST,
+)
 from jang_app.version import __version__
 
 
@@ -179,54 +184,64 @@ def execute_cleanup(
     skipped: list[Path] = []
     total = max(1, len(plan.candidates))
     for index, candidate in enumerate(plan.candidates):
-        if candidate.requires_idle and active_jobs is not None and active_jobs():
-            skipped.append(candidate.path)
-            if progress is not None:
-                progress(round((index + 1) * 100 / total))
-            continue
-        if not _candidate_is_safe(candidate):
-            failures.append(candidate.path)
-            continue
-        quarantine = (
-            candidate.path.parent
-            if candidate.quarantined
-            else candidate.path.parent / ".jjzero-cleanup"
-        )
-        staged = candidate.path
-        moved = False
-        try:
-            if not candidate.quarantined:
-                quarantine.mkdir(parents=True, exist_ok=True)
-                staged = quarantine / f"{uuid4().hex}-{candidate.path.name}"
-                move = lambda: os.replace(candidate.path, staged)
-                if (
-                    candidate.requires_idle
-                    and idle_guard is not None
-                    and not idle_guard(move)
-                ):
-                    skipped.append(candidate.path)
-                    try:
-                        quarantine.rmdir()
-                    except OSError:
-                        pass
-                    if progress is not None:
-                        progress(round((index + 1) * 100 / total))
-                    continue
-                if not candidate.requires_idle or idle_guard is None:
-                    move()
-                moved = True
-            _remove_path(staged)
-            removed += candidate.file_count
-            reclaimed += candidate.size_bytes
-        except OSError:
-            if moved and _restore_staged_candidate(staged, candidate.path):
+        with managed_path_lock(candidate.path):
+            if candidate.requires_idle and active_jobs is not None and active_jobs():
+                skipped.append(candidate.path)
+                if progress is not None:
+                    progress(round((index + 1) * 100 / total))
+                continue
+            if not _candidate_is_safe(candidate):
                 failures.append(candidate.path)
-            else:
-                failures.append(staged if staged.exists() else candidate.path)
-        try:
-            quarantine.rmdir()
-        except OSError:
-            pass
+                continue
+            quarantine = (
+                candidate.path.parent
+                if candidate.quarantined
+                else candidate.path.parent / ".jjzero-cleanup"
+            )
+            staged = candidate.path
+            moved = False
+            try:
+                if not candidate.quarantined:
+                    _prepare_cleanup_quarantine(quarantine, candidate.path.parent)
+                    staged = quarantine / f"{uuid4().hex}-{candidate.path.name}"
+
+                    def move() -> None:
+                        # Revalidate immediately before crossing into quarantine.
+                        if not _candidate_is_safe(candidate) or not _safe_child_path(
+                            quarantine,
+                            candidate.path.parent,
+                        ):
+                            raise OSError("Cleanup target changed during execution")
+                        os.replace(candidate.path, staged)
+
+                    if (
+                        candidate.requires_idle
+                        and idle_guard is not None
+                        and not idle_guard(move)
+                    ):
+                        skipped.append(candidate.path)
+                        try:
+                            quarantine.rmdir()
+                        except OSError:
+                            pass
+                        if progress is not None:
+                            progress(round((index + 1) * 100 / total))
+                        continue
+                    if not candidate.requires_idle or idle_guard is None:
+                        move()
+                    moved = True
+                _remove_path(staged)
+                removed += candidate.file_count
+                reclaimed += candidate.size_bytes
+            except OSError:
+                if moved and _restore_staged_candidate(staged, candidate.path):
+                    failures.append(candidate.path)
+                else:
+                    failures.append(staged if staged.exists() else candidate.path)
+            try:
+                quarantine.rmdir()
+            except OSError:
+                pass
         if progress is not None:
             progress(round((index + 1) * 100 / total))
     return StorageCleanupReport(
@@ -447,7 +462,91 @@ def _library_transient_candidates(songs_root: Path) -> list[CleanupCandidate]:
                     requires_idle=True,
                 )
             )
+            candidates.extend(_vocal_cleanup_orphan_candidates(run))
     return candidates
+
+
+def _vocal_cleanup_orphan_candidates(run: Path) -> list[CleanupCandidate]:
+    cleanup_root = run / VOCAL_CLEANUP_DIR
+    manifest = cleanup_root / VOCAL_CLEANUP_MANIFEST
+    referenced = _vocal_cleanup_referenced_paths(cleanup_root, manifest)
+    if referenced is None:
+        # A damaged manifest can still own every file below. Preserve its media
+        # until the project can be repaired instead of guessing what is unused.
+        return []
+
+    candidates: list[CleanupCandidate] = []
+    for media_root in (cleanup_root / "segments", cleanup_root / "results"):
+        try:
+            media_files = (
+                tuple(media_root.iterdir())
+                if media_root.is_dir() and not _is_reparse(media_root)
+                else ()
+            )
+        except OSError:
+            continue
+        for media_file in media_files:
+            if (
+                not media_file.is_file()
+                or _is_reparse(media_file)
+                or media_file.resolve() in referenced
+            ):
+                continue
+            size, count, _errors = _measure_path(media_file)
+            candidates.append(
+                CleanupCandidate(
+                    "Interrupted vocal cleanup media",
+                    media_file,
+                    media_root,
+                    size,
+                    count,
+                    requires_idle=True,
+                )
+            )
+    return candidates
+
+
+def _vocal_cleanup_referenced_paths(
+    cleanup_root: Path,
+    manifest: Path,
+) -> set[Path] | None:
+    if not manifest.is_file():
+        return set()
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        if (
+            not isinstance(data, dict)
+            or data.get("schema") not in {1, 2}
+            or not isinstance(data.get("source_path"), str)
+            or not data.get("source_path")
+            or not isinstance(data.get("source_fingerprint"), str)
+            or not data.get("source_fingerprint")
+        ):
+            return None
+        regions = data.get("regions", ())
+        results = data.get("results", ())
+        if not isinstance(regions, list) or not isinstance(results, list):
+            return None
+        references = (
+            *((item, "processed_segment_path") for item in regions),
+            *((item, "removed_segment_path") for item in regions),
+            *((item, "path") for item in results),
+        )
+        resolved_root = cleanup_root.resolve()
+        paths: set[Path] = set()
+        for item, key in references:
+            if not isinstance(item, dict):
+                return None
+            value = item.get(key)
+            if not isinstance(value, str) or not value:
+                return None
+            candidate = (resolved_root / value).resolve()
+            if candidate == resolved_root or resolved_root not in candidate.parents:
+                return None
+            paths.add(candidate)
+        return paths
+    except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _restore_staged_candidate(staged: Path, original: Path) -> bool:
@@ -515,8 +614,31 @@ def _candidate_is_safe(candidate: CleanupCandidate) -> bool:
         path != root
         and path.is_relative_to(root)
         and path.exists()
-        and not _is_reparse(candidate.path)
+        and _safe_child_path(candidate.path, candidate.allowed_root)
     )
+
+
+def _prepare_cleanup_quarantine(quarantine: Path, parent: Path) -> None:
+    if quarantine.exists() or quarantine.is_symlink():
+        if not quarantine.is_dir() or not _safe_child_path(quarantine, parent):
+            raise OSError("Cleanup quarantine is not a safe managed directory")
+        return
+    quarantine.mkdir(parents=True, exist_ok=False)
+    if not _safe_child_path(quarantine, parent):
+        raise OSError("Cleanup quarantine changed during creation")
+
+
+def _safe_child_path(path: Path, root: Path) -> bool:
+    """Reject reparse points on a lexical path from root through its child."""
+    current = path.expanduser().absolute()
+    boundary = root.expanduser().absolute()
+    if current == boundary or not current.is_relative_to(boundary):
+        return False
+    while current != boundary:
+        if _is_reparse(current):
+            return False
+        current = current.parent
+    return not _is_reparse(boundary)
 
 
 def _remove_path(path: Path) -> None:

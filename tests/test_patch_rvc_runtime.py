@@ -20,7 +20,7 @@ class PatchRvcRuntimeTests(unittest.TestCase):
             changed = apply_rvc_runtime_patches(runtime, adapter)
             repeated = apply_rvc_runtime_patches(runtime, adapter)
 
-            self.assertEqual(len(changed), 5)
+            self.assertEqual(len(changed), 9)
             self.assertEqual(repeated, ())
             self.assertEqual(
                 (runtime / "lib" / "jjzero_device.py").read_text(encoding="utf-8"),
@@ -42,6 +42,17 @@ class PatchRvcRuntimeTests(unittest.TestCase):
                 'os.environ["HIP_VISIBLE_DEVICES"]',
                 (runtime / "train_nsf_sim_cache_sid_load_pretrain.py").read_text(encoding="utf-8"),
             )
+            for path in (
+                runtime / "infer_cli.py",
+                runtime / "train_nsf_sim_cache_sid_load_pretrain.py",
+                runtime / "lib" / "train" / "utils.py",
+                runtime / "lib" / "train" / "process_ckpt.py",
+                runtime / "lib" / "train" / "data_utils.py",
+                runtime / "lib" / "rmvpe.py",
+            ):
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if "torch.load(" in line:
+                        self.assertIn("weights_only=True", line, path)
 
     def test_rejects_unknown_upstream_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -70,7 +81,8 @@ def _write_legacy_runtime(runtime: Path) -> None:
         "class Config:\n"
         "    def device_config(self):\n"
         '        if torch.cuda.is_available() and device != "cpu":\n'
-        '            i_device = int(self.device.split(":")[-1])\n',
+        '            i_device = int(self.device.split(":")[-1])\n'
+        'cpt = torch.load(model_path, map_location="cpu")\n',
         encoding="utf-8",
     )
     (runtime / "extract_feature_print.py").write_text(
@@ -96,7 +108,29 @@ def _write_legacy_runtime(runtime: Path) -> None:
         encoding="utf-8",
     )
     (runtime / "train_nsf_sim_cache_sid_load_pretrain.py").write_text(
-        'os.environ["CUDA_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")\n',
+        'os.environ["CUDA_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")\n'
+        'model_g = torch.load(hps.pretrainG, map_location="cpu")\n'
+        'model_d = torch.load(hps.pretrainD, map_location="cpu")\n',
+        encoding="utf-8",
+    )
+    train = runtime / "lib" / "train"
+    train.mkdir(parents=True)
+    (train / "utils.py").write_text(
+        'value = torch.load(checkpoint_path, map_location="cpu")\n',
+        encoding="utf-8",
+    )
+    (train / "process_ckpt.py").write_text(
+        'a = torch.load(path, map_location="cpu")\n'
+        'b = torch.load(path1, map_location="cpu")\n'
+        'c = torch.load(path2, map_location="cpu")\n',
+        encoding="utf-8",
+    )
+    (train / "data_utils.py").write_text(
+        "spec = torch.load(spec_filename)\n",
+        encoding="utf-8",
+    )
+    (runtime / "lib" / "rmvpe.py").write_text(
+        'ckpt = torch.load(model_path, map_location="cpu")\n',
         encoding="utf-8",
     )
 

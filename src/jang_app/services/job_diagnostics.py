@@ -175,6 +175,15 @@ def classify_error(error: str) -> ErrorClassification:
         ),
         (
             (
+                "weights only load failed",
+                "weightsunpickler error",
+                "unsupported global",
+            ),
+            "RVC_MODEL_UNSAFE",
+            "The RVC model contains data that cannot be loaded safely.",
+        ),
+        (
+            (
                 "param 'initial_lr' is not specified",
                 "jjzero_checkpoint_load_failed",
                 "could not restore the saved training checkpoint",

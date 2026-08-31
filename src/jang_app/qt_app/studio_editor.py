@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import atexit
 from bisect import bisect_left, bisect_right
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 import uuid
@@ -112,6 +113,7 @@ from jang_app.services.waveform import (
 
 _WAVEFORM_POINTS = 900
 _WAVEFORM_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="studio-waveform")
+atexit.register(lambda: _WAVEFORM_EXECUTOR.shutdown(wait=False, cancel_futures=True))
 _ROLE_COLORS = {
     "original_vocal": QColor("#d6a85f"),
     "instrumental": QColor("#58a88f"),
@@ -180,8 +182,16 @@ class StudioTimelineView(QWidget):
         ] = {}
         self._peaks: dict[str, list[float]] = {}
         self._pending_peak_keys: set[tuple[str, int, int, int]] = set()
+        self._peak_futures: dict[
+            tuple[str, int, int, int],
+            Future[list[float]],
+        ] = {}
         self._level_matched_peaks: dict[str, tuple[tuple[object, ...], list[float]]] = {}
         self._pending_level_matched_peak_keys: set[tuple[object, ...]] = set()
+        self._level_matched_peak_futures: dict[
+            tuple[object, ...],
+            Future[list[float]],
+        ] = {}
         self._pixels_per_second = 7
         self._horizontal_offset = 0
         self._vertical_offset = 0
@@ -250,6 +260,7 @@ class StudioTimelineView(QWidget):
         if self._hover_track_id and self._track(self._hover_track_id) is None:
             self._hover_track_id = ""
         self._update_extent()
+        self._cancel_obsolete_waveform_requests()
         self.update()
         if self.isVisible():
             self._queue_waveform_request()
@@ -2097,6 +2108,7 @@ class StudioTimelineView(QWidget):
                 asset.path,
                 _WAVEFORM_POINTS,
             )
+            self._peak_futures[key] = future
             future.add_done_callback(
                 lambda completed, cache_key=key, asset_id=asset.asset_id: self._emit_peaks(
                     cache_key,
@@ -2128,6 +2140,7 @@ class StudioTimelineView(QWidget):
                     _WAVEFORM_POINTS,
                     settings,
                 )
+                self._level_matched_peak_futures[key] = future
                 future.add_done_callback(
                     lambda completed, cache_key=key, clip_id=clip.clip_id: (
                         self._emit_level_matched_peaks(cache_key, clip_id, completed)
@@ -2150,9 +2163,16 @@ class StudioTimelineView(QWidget):
     def _apply_peaks(self, key_and_asset, peaks: list[float]) -> None:
         key, asset_id = key_and_asset
         self._pending_peak_keys.discard(key)
+        self._peak_futures.pop(key, None)
         if peaks:
             waveform_peak_cache.store_amplitude(key, peaks)
-            self._peaks[asset_id] = peaks
+            matching_assets = tuple(
+                current_asset_id
+                for current_asset_id, current_key in self._asset_waveform_keys.items()
+                if current_key == key
+            )
+            for current_asset_id in matching_assets or (asset_id,):
+                self._peaks[current_asset_id] = peaks
             self.update()
 
     def _emit_level_matched_peaks(self, key, clip_id: str, completed) -> None:
@@ -2168,6 +2188,7 @@ class StudioTimelineView(QWidget):
     def _apply_level_matched_peaks(self, key_and_clip, peaks: list[float]) -> None:
         key, clip_id = key_and_clip
         self._pending_level_matched_peak_keys.discard(key)
+        self._level_matched_peak_futures.pop(key, None)
         if peaks:
             waveform_peak_cache.store_level_matched(key, peaks)
             clip = self._clip(clip_id)
@@ -2175,6 +2196,37 @@ class StudioTimelineView(QWidget):
             if request is not None and request[0] == key:
                 self._level_matched_peaks[clip_id] = (key, peaks)
                 self.update()
+
+    def _cancel_obsolete_waveform_requests(self) -> None:
+        referenced_asset_ids = {
+            clip.asset.asset_id
+            for track in self._session.tracks
+            for clip in track.clips
+        }
+        valid_peak_keys = {
+            key
+            for asset_id, key in self._asset_waveform_keys.items()
+            if asset_id in referenced_asset_ids
+        }
+        for key, future in tuple(self._peak_futures.items()):
+            if key not in valid_peak_keys and not future.done():
+                future.cancel()
+        valid_level_keys = {
+            request[0] for request in self._level_match_requests.values()
+        }
+        for key, future in tuple(self._level_matched_peak_futures.items()):
+            if key not in valid_level_keys and not future.done():
+                future.cancel()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._waveform_request_timer.stop()
+        for future in (
+            *self._peak_futures.values(),
+            *self._level_matched_peak_futures.values(),
+        ):
+            if not future.done():
+                future.cancel()
+        super().closeEvent(event)
 
     def _waveform_peaks_for_clip(self, clip: StudioClip) -> list[float]:
         request = self._level_matched_waveform_request(clip)

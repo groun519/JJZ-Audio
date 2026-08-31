@@ -211,7 +211,11 @@ from jang_app.services.studio_realtime_audio import (
 )
 from jang_app.services.runtime_bootstrap import provision_update_runtime_components
 from jang_app.services.rvc_runtime_profile import detect_rvc_runtime_profile
-from jang_app.services.separation_recipe import FAST_RECIPE, SeparationRecipe
+from jang_app.services.separation_recipe import (
+    FAST_RECIPE,
+    SEPARATION_RUN_MANIFEST,
+    SeparationRecipe,
+)
 from jang_app.services.separation_assets import separation_recipe_asset_status
 from jang_app.services.settings import (
     RVC_DEVICE_OPTIONS,
@@ -4093,8 +4097,9 @@ class MainWindow(QMainWindow):
                 version,
                 project,
                 result,
+                target,
             ),
-            lambda error: self._on_vocal_cleanup_render_failed(scope, error),
+            lambda error: self._on_vocal_cleanup_render_failed(scope, error, target),
             self.vocal_cleanup_workspace.render_bar,
             task_title="Create Clean Vocal",
             task_detail=version.label,
@@ -4108,10 +4113,15 @@ class MainWindow(QMainWindow):
         version: SongVocalVersion,
         project: VocalCleanupProject,
         result: object,
+        expected_path: Path | None = None,
     ) -> None:
         path = result if isinstance(result, Path) else None
         if path is None:
-            self._on_vocal_cleanup_render_failed(scope, "Cleanup render returned no result.")
+            self._on_vocal_cleanup_render_failed(
+                scope,
+                "Cleanup render returned no result.",
+                expected_path,
+            )
             return
         try:
             updated = self.vocal_cleanup_store.register_result(
@@ -4120,8 +4130,7 @@ class MainWindow(QMainWindow):
                 path,
             )
         except (OSError, VocalCleanupStoreError) as exc:
-            path.unlink(missing_ok=True)
-            self._on_vocal_cleanup_render_failed(scope, str(exc))
+            self._on_vocal_cleanup_render_failed(scope, str(exc), path)
             return
         if scope is not None and not scope.is_current(self.current_work_item):
             return
@@ -4149,7 +4158,10 @@ class MainWindow(QMainWindow):
         self,
         scope: WorkTaskScope | None,
         error: str,
+        result_path: Path | None = None,
     ) -> None:
+        if result_path is not None:
+            _discard_unregistered_cleanup_result(result_path)
         if scope is not None and not scope.is_current(self.current_work_item):
             return
         self.vocal_cleanup_workspace.set_render_status(_last_error_line(error))
@@ -4424,8 +4436,16 @@ class MainWindow(QMainWindow):
         )
         self._run_worker(
             worker,
-            lambda result: self._on_quick_creation_succeeded(scope, result),
-            lambda error: self._on_quick_creation_failed(scope, error),
+            lambda result: self._on_quick_creation_succeeded(
+                scope,
+                result,
+                separation_output_root,
+            ),
+            lambda error: self._on_quick_creation_failed(
+                scope,
+                error,
+                separation_output_root,
+            ),
             self.quick_create_panel,
             task_title="Quick Create",
             task_detail=song.title,
@@ -4437,18 +4457,31 @@ class MainWindow(QMainWindow):
         self,
         scope: WorkTaskScope,
         result: object,
+        separation_output_root: Path | None = None,
     ) -> None:
         quick_result = result if isinstance(result, QuickProductionResult) else None
         if quick_result is None:
-            self._on_quick_creation_failed(scope, "Quick creation returned no result.")
+            self._on_quick_creation_failed(
+                scope,
+                "Quick creation returned no result.",
+                separation_output_root,
+            )
             return
 
         if quick_result.separation is not None:
-            updated_song = self.library.register_output(
-                scope.song_id,
-                quick_result.separation.job_dir,
-                FAST_RECIPE.label,
-            )
+            try:
+                updated_song = self.library.register_output(
+                    scope.song_id,
+                    quick_result.separation.job_dir,
+                    FAST_RECIPE.label,
+                )
+            except (OSError, KeyError, ValueError) as exc:
+                self._on_quick_creation_failed(
+                    scope,
+                    str(exc),
+                    quick_result.separation.job_dir,
+                )
+                return
             self._song_items_by_id[updated_song.id] = updated_song
 
         self._on_rvc_succeeded(
@@ -4466,7 +4499,14 @@ class MainWindow(QMainWindow):
         self._sync_quick_create_panel()
         self._navigate_to_page(PAGE_STUDIO)
 
-    def _on_quick_creation_failed(self, scope: WorkTaskScope, error: str) -> None:
+    def _on_quick_creation_failed(
+        self,
+        scope: WorkTaskScope,
+        error: str,
+        separation_output_root: Path | None = None,
+    ) -> None:
+        if separation_output_root is not None:
+            _discard_unregistered_separation_run(separation_output_root)
         if not scope.is_current(self.current_work_item):
             return
         self.quick_create_panel.set_status("Failed")
@@ -4503,7 +4543,7 @@ class MainWindow(QMainWindow):
         )
         self._run_worker(
             worker,
-            lambda result: self._on_separation_succeeded(scope, result),
+            lambda result: self._on_separation_succeeded(scope, result, output_root),
             lambda error: self._on_separation_failed(scope, error, output_root),
             self.separation_action,
             task_title="Separate Audio",
@@ -4534,10 +4574,17 @@ class MainWindow(QMainWindow):
         self._refresh_song_list()
         self.separation_action.set_status("Original audio linked. Ready to separate.")
 
-    def _on_separation_succeeded(self, scope: WorkTaskScope, result: object) -> None:
+    def _on_separation_succeeded(
+        self,
+        scope: WorkTaskScope,
+        result: object,
+        output_root: Path | None = None,
+    ) -> None:
         self.separation_recipe_selector.refresh_asset_status()
         separation_result = result if isinstance(result, SeparationResult) else None
         if separation_result is None:
+            if output_root is not None:
+                _discard_unregistered_separation_run(output_root)
             if scope.is_current(self.current_work_item):
                 self.separation_action.set_status("Failed")
             return
@@ -4549,8 +4596,7 @@ class MainWindow(QMainWindow):
                 separation_result.recipe.label,
             )
         except (OSError, KeyError, ValueError) as exc:
-            shutil.rmtree(separation_result.job_dir, ignore_errors=True)
-            self._on_separation_failed(scope, str(exc))
+            self._on_separation_failed(scope, str(exc), separation_result.job_dir)
             return
         self._refresh_output_sets_after_task(scope, separation_result.job_dir)
         if scope.is_current(self.current_work_item):
@@ -4565,7 +4611,7 @@ class MainWindow(QMainWindow):
         output_root: Path | None = None,
     ) -> None:
         if output_root is not None:
-            shutil.rmtree(output_root, ignore_errors=True)
+            _discard_unregistered_separation_run(output_root)
         self.separation_recipe_selector.refresh_asset_status()
         if not scope.is_current(self.current_work_item):
             return
@@ -5585,7 +5631,10 @@ class MainWindow(QMainWindow):
         input_choice: VocalInputChoice | None = None,
     ) -> None:
         output_path = getattr(result, "output_path", None)
-        should_monitor = scope.is_current(self.current_work_item)
+        should_monitor = (
+            scope.is_current(self.current_work_item)
+            and _conversion_input_choice_is_current(self, input_choice)
+        )
         if isinstance(output_path, Path):
             if isinstance(result, RvcConversionResult):
                 try:
@@ -7513,6 +7562,34 @@ def _resolved_path_key(path: Path | None) -> str:
     return str(path.expanduser().resolve()).casefold() if path is not None else ""
 
 
+def _discard_unregistered_separation_run(job_dir: Path) -> None:
+    root = job_dir.expanduser().resolve()
+    # Removing the manifest first keeps a partially locked directory discoverable
+    # by Safe Cleanup if Windows prevents the recursive delete from finishing.
+    try:
+        (root / SEPARATION_RUN_MANIFEST).unlink(missing_ok=True)
+    except OSError:
+        pass
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _discard_unregistered_cleanup_result(path: Path) -> None:
+    target = path.expanduser().resolve()
+    if target.parent.name != "results" or target.parent.parent.name != "cleanup":
+        return
+    companions = (
+        target,
+        target.with_suffix(".rendering.wav"),
+        target.with_name(f"{target.stem}-removed.wav"),
+        target.with_name(f"{target.stem}-removed.rendering.wav"),
+    )
+    for companion in companions:
+        try:
+            companion.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _convert_with_progress(input_path: Path, output_dir: Path, settings: RvcSettings, progress) -> object:
     progress(12)
     result = convert_vocal_with_rvc(
@@ -7572,6 +7649,28 @@ def _vocal_input_provenance(
         relative_path=relative,
         source_id=choice.choice_id if matches_choice else "original",
         label=choice.label if matches_choice else source.stem,
+    )
+
+
+def _conversion_input_choice_is_current(
+    window: object,
+    started_choice: VocalInputChoice | None,
+) -> bool:
+    if started_choice is None:
+        return True
+    pool = getattr(window, "conversion_input_pool", None)
+    selected_choice = getattr(pool, "selected_choice", None)
+    if not callable(selected_choice):
+        return True
+    current_choice = selected_choice()
+    return (
+        current_choice is not None
+        and current_choice.choice_id == started_choice.choice_id
+        and _same_path(current_choice.path, started_choice.path)
+        and _same_path(
+            current_choice.version.job_dir,
+            started_choice.version.job_dir,
+        )
     )
 
 

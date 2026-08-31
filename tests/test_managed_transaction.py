@@ -153,6 +153,21 @@ class ManagedPathTransactionTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(transaction.folder.exists())
 
+    def test_startup_recovery_removes_an_expected_created_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "catalog.json"
+            transaction = ManagedPathTransaction(root, "create", "catalog")
+            transaction.prepare()
+            transaction.expect_created(target, "catalog")
+            target.write_text("new catalog", encoding="utf-8")
+
+            reports = recover_managed_transactions(root)
+
+            self.assertEqual(reports[0].action, "rolled_back")
+            self.assertFalse(target.exists())
+            self.assertFalse(transaction.folder.exists())
+
     def test_startup_recovery_rejects_paths_outside_managed_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

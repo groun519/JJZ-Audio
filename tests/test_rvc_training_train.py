@@ -525,7 +525,10 @@ class RvcTrainingRunTests(unittest.TestCase):
 
             state = RvcTrainingStateStore(model_id, layout).load()
             self.assertEqual(state.phase, RvcTrainingPhase.FAILED)
-            self.assertTrue(state.can_resume)
+            self.assertFalse(state.can_resume)
+            rejected = layout.model_dir / "training" / "history"
+            self.assertEqual(len(tuple(rejected.rglob("G_100.pth"))), 1)
+            self.assertEqual(len(tuple(rejected.rglob("D_100.pth"))), 1)
 
     def test_corrupt_latest_resume_pair_is_quarantined_without_deleting_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -534,30 +537,41 @@ class RvcTrainingRunTests(unittest.TestCase):
             _checkpoint_pair(layout, 200)
             RvcTrainingStateStore(model_id, layout).refresh_checkpoint_pair()
 
-            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
-                self.assertTrue((layout.experiment_dir / "G_100.pth").is_file())
-                self.assertTrue((layout.experiment_dir / "G_200.pth").is_file())
-                output_callback(
-                    "JJZERO_CHECKPOINT_LOAD_FAILED "
-                    "file=G_200.pth type=RuntimeError detail=invalid checkpoint"
-                )
-                return CommandResult(args, 1, "", "load failed", cancelled=True)
+            calls = 0
 
-            with self.assertRaisesRegex(
-                RvcTrainingRunError,
-                "could not restore the saved training checkpoint",
-            ):
-                train_rvc_model(
-                    model_id,
+            def runner(args, cwd=None, env=None, output_callback=None, cancellation=None):
+                nonlocal calls
+                calls += 1
+                self.assertTrue((layout.experiment_dir / "G_100.pth").is_file())
+                if calls == 1:
+                    self.assertTrue((layout.experiment_dir / "G_200.pth").is_file())
+                    output_callback(
+                        "JJZERO_CHECKPOINT_LOAD_FAILED "
+                        "file=G_200.pth type=RuntimeError detail=invalid checkpoint"
+                    )
+                    return CommandResult(args, 1, "", "load failed", cancelled=True)
+                self.assertFalse((layout.experiment_dir / "G_200.pth").exists())
+                _write_training_success(
                     layout,
-                    runtime,
-                    RvcTrainingRunSettings(target_epoch=30),
-                    command_runner=runner,
-                    runtime_inspector=_ready_runtime,
+                    output_callback,
+                    target_epoch=30,
+                    step=300,
                 )
+                return CommandResult(args, 0, "Training is done.", "")
+
+            result = train_rvc_model(
+                model_id,
+                layout,
+                runtime,
+                RvcTrainingRunSettings(target_epoch=30),
+                command_runner=runner,
+                runtime_inspector=_ready_runtime,
+            )
 
             state = RvcTrainingStateStore(model_id, layout).load()
-            self.assertEqual(state.checkpoint_step, 100)
+            self.assertTrue(result.completed)
+            self.assertEqual(calls, 2)
+            self.assertEqual(state.checkpoint_step, 300)
             self.assertTrue(state.can_resume)
             self.assertTrue((layout.experiment_dir / "G_100.pth").is_file())
             rejected = layout.model_dir / "training" / "history"

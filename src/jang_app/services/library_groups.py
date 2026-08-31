@@ -11,6 +11,7 @@ from typing import Iterator
 from uuid import uuid4
 
 from jang_app.services.library_catalog import LibraryCatalog
+from jang_app.services.managed_files import managed_path_lock
 
 
 ALL_SONGS_GROUP_ID = "__all__"
@@ -290,14 +291,15 @@ class LibraryGroupStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=5)
-        try:
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA busy_timeout = 5000")
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+        with managed_path_lock(self.path):
+            connection = sqlite3.connect(self.path, timeout=5)
+            try:
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("PRAGMA busy_timeout = 5000")
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
 
 
 def _clean_group_name(name: str) -> str:

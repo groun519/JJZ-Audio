@@ -7,6 +7,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
+from jang_app.services.managed_files import managed_path_lock
+
 if TYPE_CHECKING:
     from jang_app.services.app_paths import AppPaths
     from jang_app.services.rvc_model_workspace import RvcModelRecord
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
 
 
 CATALOG_SCHEMA_VERSION = 2
+_REBUILD_RETRY_ATTEMPTS = 8
 
 
 class LibraryCatalog:
@@ -97,14 +100,15 @@ class LibraryCatalog:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=5)
-        try:
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA busy_timeout = 5000")
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+        with managed_path_lock(self.path):
+            connection = sqlite3.connect(self.path, timeout=5)
+            try:
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("PRAGMA busy_timeout = 5000")
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
 
 
 def rebuild_library_catalog(paths: AppPaths) -> LibraryCatalog:
@@ -120,11 +124,23 @@ def rebuild_library_catalog(paths: AppPaths) -> LibraryCatalog:
         paths.workspace_root / "models",
         catalog_file=paths.catalog_file,
     )
+    catalog = LibraryCatalog(paths.catalog_file)
+    for _attempt in range(_REBUILD_RETRY_ATTEMPTS):
+        source_signature = catalog_source_signature(paths)
+        songs = song_store.packages(include_removed=True)
+        models = model_store.records()
+        if catalog_source_signature(paths) != source_signature:
+            continue
+        catalog.rebuild(songs, models)
+        catalog.set_metadata("source_signature", source_signature)
+        if catalog_source_signature(paths) == source_signature:
+            return catalog
+
+    source_signature = catalog_source_signature(paths)
     songs = song_store.packages(include_removed=True)
     models = model_store.records()
-    catalog = LibraryCatalog(paths.catalog_file)
     catalog.rebuild(songs, models)
-    catalog.set_metadata("source_signature", catalog_source_signature(paths))
+    catalog.set_metadata("source_signature", source_signature)
     return catalog
 
 

@@ -69,6 +69,40 @@ class ManagedPathTransaction:
     def created(self) -> tuple[ManagedTransactionCreated, ...]:
         return tuple(self._created)
 
+    def prepare(self) -> None:
+        """Persist an empty journal before staging payload inside the transaction."""
+        self._write_journal(self._state)
+
+    def expect_created(self, target: Path, label: str) -> ManagedTransactionCreated:
+        """Journal a managed path that a later metadata write may create."""
+        resolved = target.expanduser().resolve()
+        if not _is_within(resolved, self.managed_root):
+            raise ManagedTransactionError(
+                f"Managed transaction path leaves its root: {resolved}"
+            )
+        if resolved.exists() or resolved.is_symlink():
+            raise ManagedTransactionError(
+                f"Managed transaction expected a new path: {resolved}"
+            )
+        safe_label = _safe_component(label, f"created-{len(self._created)}")
+        discarded = self.folder / "discard" / safe_label
+        if any(
+            item.path == resolved or item.discarded == discarded
+            for item in self._created
+        ):
+            raise ManagedTransactionError(
+                "Managed transaction created paths must be unique."
+            )
+        created = ManagedTransactionCreated(safe_label, resolved, discarded)
+        self._created.append(created)
+        self._state = "staged"
+        try:
+            self._write_journal(self._state)
+        except Exception:
+            self._created.pop()
+            raise
+        return created
+
     def stage(self, source: Path, label: str) -> ManagedTransactionMove | None:
         resolved = source.expanduser().resolve()
         if not resolved.exists() and not resolved.is_symlink():

@@ -40,6 +40,7 @@ from jang_app.qt_app.widgets import (
     attach_list_item_widget,
 )
 from jang_app.qt_app.workers import TaskWorker
+from jang_app.services.command import terminate_all_commands
 from jang_app.services.i18n import tr
 from jang_app.services.job_diagnostics import JobDiagnosticRecord, JobDiagnostics
 from jang_app.services.log_reader import read_log_tail
@@ -134,6 +135,9 @@ class DiagnosticsPage(QFrame):
 
         self._build_ui()
         self._queue.subscribe(self._on_queue_changed)
+        application = QApplication.instance()
+        if application is not None:
+            application.aboutToQuit.connect(self.shutdown)
         self.refresh()
 
     def _build_ui(self) -> None:
@@ -529,6 +533,34 @@ class DiagnosticsPage(QFrame):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._queue.unsubscribe(self._on_queue_changed)
         super().closeEvent(event)
+
+    def shutdown(self) -> None:
+        """Stop page-owned background work before the Qt object tree is destroyed."""
+        self._log_refresh_timer.stop()
+        workers = tuple(
+            worker
+            for worker in (
+                self._support_worker,
+                self._pc_worker,
+                self._rvc_worker,
+                self._storage_worker,
+                self._cleanup_worker,
+            )
+            if worker is not None
+        )
+        for worker in workers:
+            worker.request_cancel()
+            worker.blockSignals(True)
+        terminate_all_commands()
+        for worker in workers:
+            if worker.isRunning():
+                worker.wait()
+            worker.deleteLater()
+        self._support_worker = None
+        self._pc_worker = None
+        self._rvc_worker = None
+        self._storage_worker = None
+        self._cleanup_worker = None
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)

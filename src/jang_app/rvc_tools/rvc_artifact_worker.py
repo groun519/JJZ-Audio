@@ -96,7 +96,7 @@ def inspect_model(model_path: Path) -> dict[str, object]:
     import torch
 
     path = model_path.expanduser().resolve()
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict):
         raise RuntimeError("RVC inference model is not a mapping.")
     weights = checkpoint.get("weight")

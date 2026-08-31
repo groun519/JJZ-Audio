@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import atexit
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
@@ -832,6 +832,7 @@ class WaveformView(QWidget):
         self._error = ""
         self._is_loading = False
         self._cache_key: tuple[str, int, int, int] | None = None
+        self._waveform_future: Future[list[float]] | None = None
         self.setMinimumHeight(66)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -842,6 +843,7 @@ class WaveformView(QWidget):
         self.update()
 
     def set_path(self, path: Path | None) -> None:
+        self._cancel_waveform_request()
         self._path = path
         self._playhead_ratio = 0.0
         self._error = ""
@@ -873,6 +875,7 @@ class WaveformView(QWidget):
             path,
             point_count,
         )
+        self._waveform_future = future
         future.add_done_callback(
             lambda completed, key=cache_key: self._emit_loaded_peaks(key, completed)
         )
@@ -898,12 +901,23 @@ class WaveformView(QWidget):
     ) -> None:
         if cache_key != self._cache_key:
             return
+        self._waveform_future = None
         if peaks:
             waveform_peak_cache.store_normalized(cache_key, peaks)
         self._peaks = peaks
         self._error = error
         self._is_loading = False
         self.update()
+
+    def _cancel_waveform_request(self) -> None:
+        future = self._waveform_future
+        self._waveform_future = None
+        if future is not None and not future.done():
+            future.cancel()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._cancel_waveform_request()
+        super().closeEvent(event)
 
     def set_muted(self, is_muted: bool) -> None:
         self._muted = is_muted

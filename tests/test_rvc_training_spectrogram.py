@@ -50,6 +50,10 @@ class RvcTrainingSpectrogramTests(unittest.TestCase):
                 "os.replace(temporary, target)",
                 worker.read_text(encoding="utf-8"),
             )
+            self.assertIn(
+                'torch.load(str(target), map_location="cpu", weights_only=True)',
+                worker.read_text(encoding="utf-8"),
+            )
 
     def test_rejects_cache_that_was_damaged_after_preparation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
