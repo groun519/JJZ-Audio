@@ -25,10 +25,6 @@ class WindowsAppMutexTests(unittest.TestCase):
         self.assertIn("ShouldRelaunchAfterInternalUpdate", installer_script)
         self.assertIn("Flags: nowait skipifdoesntexist", installer_script)
         self.assertNotIn("HasCommandLineSwitch('/RUN')", installer_script)
-        self.assertNotIn("RemoveRuntimeRoot(ConfiguredRuntimeRoot)", installer_script)
-        self.assertIn("SamePath(ConfiguredCacheRoot, DefaultCacheRoot)", installer_script)
-        self.assertIn("PreservedExternalStorage := True", installer_script)
-        self.assertIn("function InitializeUninstall: Boolean;", installer_script)
 
     @unittest.skipUnless(os.name == "nt", "Windows mutex is only available on Windows")
     def test_creates_named_windows_mutex(self) -> None:

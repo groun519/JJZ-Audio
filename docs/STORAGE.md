@@ -55,14 +55,15 @@ Open **Windows Settings > Apps > Installed apps** (**Apps & features** on older 
 Normal uninstall removes:
 
 - application files;
-- the generated managed runtime;
-- downloaded cache data.
+- the application-owned runtime under the installation directory;
+- default managed cache data under `%LOCALAPPDATA%\JJZero Audio\cache`.
 
 Normal uninstall intentionally keeps:
 
 - songs, managed models, Studio projects, and exports under `Data` and `Output`;
 - bootstrap settings and diagnostic logs under `%LOCALAPPDATA%\JJZero Audio`;
-- personal RVC `weights` and `logs`.
+- personal RVC `weights` and `logs`;
+- Runtime and Cache folders explicitly configured outside the application-owned locations.
 
 Before a managed runtime is removed, personal RVC files are moved to:
 
@@ -70,7 +71,7 @@ Before a managed runtime is removed, personal RVC files are moved to:
 %LOCALAPPDATA%\JJZero Audio\preserved-runtime\<timestamp>
 ```
 
-Installer verification tests this preservation behavior against user-selected external storage roots.
+Installer verification separately tests cleanup of application-owned paths and preservation of user-selected external Runtime and Cache roots.
 
 ## Complete Reset
 
