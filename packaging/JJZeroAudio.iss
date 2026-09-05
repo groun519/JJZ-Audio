@@ -61,9 +61,18 @@ const
   FileAttributeDirectory = $10;
   FileAttributeReparsePoint = $400;
   InvalidFileAttributes = $FFFFFFFF;
+  CredentialTypeGeneric = 1;
+  ErrorNotFound = 1168;
+  GoogleCredentialTarget = 'JJZero Audio/Google Drive';
+#ifdef VerificationBuild
+  VerificationGoogleCredentialTarget = 'JJZero Audio/Google Drive Removal Verification';
+#endif
 
 function GetFileAttributesW(FileName: String): Cardinal;
   external 'GetFileAttributesW@kernel32.dll stdcall';
+
+function CredDeleteW(TargetName: String; CredentialType, Flags: Cardinal): Boolean;
+  external 'CredDeleteW@advapi32.dll stdcall';
 
 var
   ManagedRuntimeCanBeDeleted: Boolean;
@@ -72,6 +81,11 @@ var
   PreservedRuntimeData: Boolean;
   PreservedRuntimePath: String;
   PreservedExternalStorage: Boolean;
+  CompleteRemovalRequested: Boolean;
+  DeleteUserWorkRequested: Boolean;
+  CompleteRemovalPrepared: Boolean;
+  CompleteRemovalSucceeded: Boolean;
+  CompleteRemovalFailureDetails: String;
 
 function HasCommandLineSwitch(const SwitchName: String): Boolean;
 var
@@ -86,6 +100,32 @@ begin
       Exit;
     end;
   end;
+end;
+
+procedure SetCompleteRemovalOptions(
+  const Requested, DeleteUserWork: Boolean);
+begin
+  CompleteRemovalRequested := Requested;
+  DeleteUserWorkRequested := Requested and DeleteUserWork;
+end;
+
+procedure InitializeCompleteRemovalOptions;
+begin
+  SetCompleteRemovalOptions(False, False);
+#ifdef VerificationBuild
+  SetCompleteRemovalOptions(
+    HasCommandLineSwitch('/JJZEROCOMPLETEREMOVAL'),
+    HasCommandLineSwitch('/JJZERODELETEWORK'));
+#endif
+end;
+
+function CompleteRemovalCredentialTarget: String;
+begin
+#ifdef VerificationBuild
+  Result := VerificationGoogleCredentialTarget;
+#else
+  Result := GoogleCredentialTarget;
+#endif
 end;
 
 function InitializeSetup(): Boolean;
@@ -457,6 +497,75 @@ begin
   Result := False;
 end;
 
+function ExistingAncestorPath(const Candidate: String): String;
+var
+  CurrentPath: String;
+  ParentPath: String;
+begin
+  Result := '';
+  CurrentPath := NormalizePath(Candidate);
+  while CurrentPath <> '' do
+  begin
+    if DirExists(CurrentPath) then
+    begin
+      Result := CurrentPath;
+      Exit;
+    end;
+    ParentPath := ExtractFileDir(CurrentPath);
+    if (ParentPath = '') or SamePath(ParentPath, CurrentPath) then
+      Exit;
+    CurrentPath := ParentPath;
+  end;
+end;
+
+function ValidateSavedStoragePath(
+  const Candidate, Description: String;
+  const RequireExisting: Boolean;
+  var FailureReason: String): Boolean;
+var
+  NormalizedCandidate: String;
+  DriveRoot: String;
+  ExistingAncestor: String;
+begin
+  Result := False;
+  if not IsCanonicalAbsolutePath(Candidate) then
+  begin
+    FailureReason := Description + ' is not a canonical absolute path.';
+    Exit;
+  end;
+  if IsDangerousDeletionRoot(Candidate) then
+  begin
+    FailureReason := Description + ' points to a protected Windows or user folder.';
+    Exit;
+  end;
+
+  NormalizedCandidate := NormalizePath(Candidate);
+  DriveRoot := AddBackslash(ExtractFileDrive(NormalizedCandidate));
+  if (DriveRoot = '') or (not DirExists(DriveRoot)) then
+  begin
+    FailureReason := Description + ' is on an unavailable drive or share.';
+    Exit;
+  end;
+  if RequireExisting and (not DirExists(NormalizedCandidate)) then
+  begin
+    FailureReason := Description + ' is unavailable or does not exist.';
+    Exit;
+  end;
+
+  ExistingAncestor := ExistingAncestorPath(NormalizedCandidate);
+  if (ExistingAncestor = '') or PathHasReparsePoint(ExistingAncestor) then
+  begin
+    FailureReason := Description + ' has an unavailable or linked parent path.';
+    Exit;
+  end;
+  if DirExists(NormalizedCandidate) and TreeHasReparsePoint(NormalizedCandidate) then
+  begin
+    FailureReason := Description + ' contains a junction or symbolic link.';
+    Exit;
+  end;
+  Result := True;
+end;
+
 function ValidateConfiguredDeletionRoot(
   const Candidate, ExpectedRoot, Description: String;
   var FailureReason: String): Boolean;
@@ -521,23 +630,20 @@ begin
   if not TryReadStoragePath(Content, 'cache_root', CacheRoot, FailureReason) then
     Exit;
 
-  if not IsCanonicalAbsolutePath(StorageRoot) or
-     (not DirExists(NormalizePath(StorageRoot))) then
-  begin
-    FailureReason := 'The saved storage root is unavailable or invalid.';
+  if not ValidateSavedStoragePath(
+    StorageRoot, 'Storage root', True, FailureReason) then
     Exit;
-  end;
-  if not ValidateConfiguredDeletionRoot(
-    WorkspaceRoot, WorkspaceRoot, 'Data folder', FailureReason) then
+  if not ValidateSavedStoragePath(
+    WorkspaceRoot, 'Data folder', False, FailureReason) then
     Exit;
-  if not ValidateConfiguredDeletionRoot(
-    OutputRoot, OutputRoot, 'Output folder', FailureReason) then
+  if not ValidateSavedStoragePath(
+    OutputRoot, 'Output folder', False, FailureReason) then
     Exit;
-  if not ValidateConfiguredDeletionRoot(
-    RuntimeRoot, RuntimeRoot, 'Runtime folder', FailureReason) then
+  if not ValidateSavedStoragePath(
+    RuntimeRoot, 'Runtime folder', False, FailureReason) then
     Exit;
-  if not ValidateConfiguredDeletionRoot(
-    CacheRoot, CacheRoot, 'Cache folder', FailureReason) then
+  if not ValidateSavedStoragePath(
+    CacheRoot, 'Cache folder', False, FailureReason) then
     Exit;
 
   if PathsOverlap(WorkspaceRoot, OutputRoot) or
@@ -668,6 +774,182 @@ begin
     Result := DelTree(Source, True, True, True);
 end;
 
+procedure AppendCompleteRemovalFailure(
+  const Description, FailureReason: String);
+var
+  Detail: String;
+begin
+  CompleteRemovalSucceeded := False;
+  Detail := Description;
+  if FailureReason <> '' then
+    Detail := Detail + ': ' + FailureReason;
+  if CompleteRemovalFailureDetails = '' then
+    CompleteRemovalFailureDetails := Detail
+  else
+    CompleteRemovalFailureDetails :=
+      CompleteRemovalFailureDetails + Chr(13) + Chr(10) + Detail;
+  Log('Complete Removal could not remove ' + Detail);
+end;
+
+function DeleteVerifiedTree(
+  const Candidate, ExpectedRoot, Description: String): Boolean;
+var
+  FailureReason: String;
+begin
+  Result := True;
+  if not DirExists(Candidate) then
+    Exit;
+  if not ValidateConfiguredDeletionRoot(
+    Candidate, ExpectedRoot, Description, FailureReason) then
+  begin
+    AppendCompleteRemovalFailure(Description, FailureReason);
+    Result := False;
+    Exit;
+  end;
+  Result := DelTree(Candidate, True, True, True);
+  if not Result then
+    AppendCompleteRemovalFailure(Description, 'Files are locked or inaccessible.');
+end;
+
+function IsAllowedRuntimeDataRoot(const Candidate: String): Boolean;
+var
+  ExpectedRoot: String;
+begin
+  Result := False;
+#ifdef VerificationBuild
+  ExpectedRoot := RuntimeDataRoot;
+#else
+  ExpectedRoot := ExpandConstant('{localappdata}\JJZero Audio');
+#endif
+  if not IsCanonicalAbsolutePath(Candidate) or
+     (not SamePath(Candidate, ExpectedRoot)) or
+     IsDriveOrShareRoot(Candidate) or IsInsideSystemTree(Candidate) or
+     PathHasReparsePoint(Candidate) or TreeHasReparsePoint(Candidate) then
+    Exit;
+  Result := True;
+end;
+
+procedure DeleteKnownLocalState;
+var
+  DataRoot: String;
+begin
+  DataRoot := NormalizePath(RuntimeDataRoot);
+  if DataRoot = '' then
+  begin
+    AppendCompleteRemovalFailure(
+      'local application state', 'The application data path is invalid.');
+    Exit;
+  end;
+  DeleteVerifiedTree(
+    AddBackslash(DataRoot) + 'cache',
+    AddBackslash(DataRoot) + 'cache',
+    'local cache');
+  DeleteVerifiedTree(
+    AddBackslash(DataRoot) + 'logs',
+    AddBackslash(DataRoot) + 'logs',
+    'diagnostic logs');
+  DeleteVerifiedTree(
+    AddBackslash(DataRoot) + 'migrations',
+    AddBackslash(DataRoot) + 'migrations',
+    'migration state');
+  DeleteVerifiedTree(
+    AddBackslash(DataRoot) + 'preserved-runtime',
+    AddBackslash(DataRoot) + 'preserved-runtime',
+    'preserved RVC runtime');
+  DeleteVerifiedTree(
+    AddBackslash(DataRoot) + 'settings',
+    AddBackslash(DataRoot) + 'settings',
+    'application settings');
+end;
+
+procedure DeleteLocalApplicationState(
+  const LayoutReady, DeleteUserWork: Boolean;
+  const WorkspaceRoot, OutputRoot: String);
+var
+  DataRoot: String;
+  PreservedWorkInsideDataRoot: Boolean;
+begin
+  DataRoot := NormalizePath(RuntimeDataRoot);
+  PreservedWorkInsideDataRoot :=
+    LayoutReady and (not DeleteUserWork) and
+    (PathContains(DataRoot, WorkspaceRoot) or PathContains(DataRoot, OutputRoot));
+
+  if LayoutReady and (not PreservedWorkInsideDataRoot) then
+  begin
+    if not IsAllowedRuntimeDataRoot(DataRoot) then
+    begin
+      AppendCompleteRemovalFailure(
+        'local application state',
+        'The application data root failed its ownership or link check.');
+      Exit;
+    end;
+    if DirExists(DataRoot) and (not DelTree(DataRoot, True, True, True)) then
+      AppendCompleteRemovalFailure(
+        'local application state', 'Files are locked or inaccessible.');
+    Exit;
+  end;
+
+  DeleteKnownLocalState;
+end;
+
+function DeleteGoogleCredential: Boolean;
+var
+  TargetName: String;
+  ErrorCode: LongInt;
+begin
+  TargetName := CompleteRemovalCredentialTarget;
+  Result := CredDeleteW(TargetName, CredentialTypeGeneric, 0);
+  if Result then
+    Exit;
+  ErrorCode := DLLGetLastError;
+  Result := ErrorCode = ErrorNotFound;
+  if not Result then
+    AppendCompleteRemovalFailure(
+      'Google Drive credential', 'Windows error ' + IntToStr(ErrorCode));
+end;
+
+procedure PrepareCompleteRemoval;
+var
+  AppRuntimeRoot: String;
+  WorkspaceRoot: String;
+  OutputRoot: String;
+  RuntimeRoot: String;
+  CacheRoot: String;
+  FailureReason: String;
+  LayoutReady: Boolean;
+begin
+  if CompleteRemovalPrepared then
+    Exit;
+  CompleteRemovalPrepared := True;
+  CompleteRemovalSucceeded := True;
+  CompleteRemovalFailureDetails := '';
+
+  LayoutReady := TryLoadSafeStorageLayout(
+    WorkspaceRoot, OutputRoot, RuntimeRoot, CacheRoot, FailureReason);
+  if not LayoutReady then
+    AppendCompleteRemovalFailure('configured storage', FailureReason);
+
+  AppRuntimeRoot := ExpandConstant('{app}\runtime');
+  DeleteVerifiedTree(
+    AppRuntimeRoot, AppRuntimeRoot, 'application-owned Runtime');
+
+  if LayoutReady then
+  begin
+    if not SamePath(RuntimeRoot, AppRuntimeRoot) then
+      DeleteVerifiedTree(RuntimeRoot, RuntimeRoot, 'configured Runtime');
+    DeleteVerifiedTree(CacheRoot, CacheRoot, 'configured Cache');
+    if DeleteUserWorkRequested then
+    begin
+      DeleteVerifiedTree(WorkspaceRoot, WorkspaceRoot, 'Data');
+      DeleteVerifiedTree(OutputRoot, OutputRoot, 'Output');
+    end;
+  end;
+
+  DeleteGoogleCredential;
+  DeleteLocalApplicationState(
+    LayoutReady, DeleteUserWorkRequested, WorkspaceRoot, OutputRoot);
+end;
+
 procedure RemoveRuntimeRoot(const RuntimeRoot: String);
 var
   RvcRoot: String;
@@ -753,6 +1035,7 @@ end;
 
 function InitializeUninstall: Boolean;
 begin
+  InitializeCompleteRemovalOptions;
   Result := not CheckForMutexes('{#AppMutexName}');
   if not Result then
   begin
@@ -770,15 +1053,35 @@ begin
   PreservedRuntimeData := False;
   PreservedRuntimePath := '';
   PreservedExternalStorage := False;
+  CompleteRemovalPrepared := False;
+  CompleteRemovalSucceeded := True;
+  CompleteRemovalFailureDetails := '';
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
-    PrepareRuntimeRemoval
+  begin
+    if CompleteRemovalRequested then
+      PrepareCompleteRemoval
+    else
+      PrepareRuntimeRemoval;
+  end
   else if CurUninstallStep = usPostUninstall then
   begin
-    if ((not ManagedRuntimeCanBeDeleted) or (not ManagedCacheCanBeDeleted)) and
+    if CompleteRemovalRequested and (not CompleteRemovalSucceeded) and
+       (not UninstallSilent) then
+      MsgBox(
+        'JJZero Audio was removed, but Complete Removal could not remove every requested item:' +
+        Chr(13) + Chr(10) + Chr(13) + Chr(10) + CompleteRemovalFailureDetails,
+        mbError,
+        MB_OK)
+    else if CompleteRemovalRequested and (not UninstallSilent) then
+      MsgBox(
+        'JJZero Audio and the selected local state were completely removed.',
+        mbInformation,
+        MB_OK)
+    else if ((not ManagedRuntimeCanBeDeleted) or (not ManagedCacheCanBeDeleted)) and
        (not UninstallSilent) then
       MsgBox(
         'Some generated audio engine or cache files could not be removed. No song, model, or exported data was deleted.',

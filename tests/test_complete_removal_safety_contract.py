@@ -115,7 +115,7 @@ class CompleteRemovalSafetyContractTests(unittest.TestCase):
         self.assertIn("PathHasReparsePoint(Candidate)", validator)
         self.assertIn("TreeHasReparsePoint(Candidate)", validator)
 
-    def test_storage_layout_rejects_missing_and_overlapping_roots(self) -> None:
+    def test_storage_layout_requires_storage_root_and_rejects_overlaps(self) -> None:
         layout = _section(
             self.installer,
             "function TryLoadSafeStorageLayout",
@@ -130,10 +130,25 @@ class CompleteRemovalSafetyContractTests(unittest.TestCase):
             "cache_root",
         ):
             self.assertIn(f"TryReadStoragePath(Content, '{key}'", layout)
-        self.assertIn("DirExists(NormalizePath(StorageRoot))", layout)
-        self.assertEqual(layout.count("ValidateConfiguredDeletionRoot("), 4)
+        self.assertIn("StorageRoot, 'Storage root', True", layout)
+        self.assertIn("WorkspaceRoot, 'Data folder', False", layout)
+        self.assertIn("OutputRoot, 'Output folder', False", layout)
+        self.assertIn("RuntimeRoot, 'Runtime folder', False", layout)
+        self.assertIn("CacheRoot, 'Cache folder', False", layout)
         self.assertEqual(layout.count("PathsOverlap("), 6)
         self.assertIn("Saved storage folders overlap; removal was refused.", layout)
+
+    def test_missing_generated_folders_are_allowed_only_on_available_storage(self) -> None:
+        validator = _section(
+            self.installer,
+            "function ValidateSavedStoragePath",
+            "function ValidateConfiguredDeletionRoot",
+        )
+
+        self.assertIn("not DirExists(DriveRoot)", validator)
+        self.assertIn("RequireExisting and (not DirExists(NormalizedCandidate))", validator)
+        self.assertIn("ExistingAncestorPath(NormalizedCandidate)", validator)
+        self.assertIn("PathHasReparsePoint(ExistingAncestor)", validator)
 
     def test_normal_uninstall_uses_the_same_protected_root_guard(self) -> None:
         normal_guard = _section(
