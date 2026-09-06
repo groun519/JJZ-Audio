@@ -188,8 +188,13 @@ function Invoke-NormalUninstallScenario {
 
 try {
     if ($registrationExisted) {
-        & reg.exe export $uninstallRegistryKey $registryBackup /y *> $null
-        if ($LASTEXITCODE -ne 0) {
+        $registryExport = Start-Process `
+            -FilePath reg.exe `
+            -ArgumentList @("export", $uninstallRegistryKey, $registryBackup, "/y") `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+        if ($registryExport.ExitCode -ne 0) {
             throw "Could not back up the existing uninstall registration."
         }
     }
@@ -203,8 +208,13 @@ try {
 finally {
     Remove-Item -LiteralPath $uninstallRegistryPsPath -Recurse -Force -ErrorAction SilentlyContinue
     if ($registrationExisted -and (Test-Path -LiteralPath $registryBackup)) {
-        & reg.exe import $registryBackup *> $null
-        if ($LASTEXITCODE -ne 0) {
+        $registryImport = Start-Process `
+            -FilePath reg.exe `
+            -ArgumentList @("import", $registryBackup) `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+        if ($registryImport.ExitCode -ne 0) {
             Write-Warning "Could not restore the previous uninstall registration."
         }
     }

@@ -86,6 +86,16 @@ var
   CompleteRemovalPrepared: Boolean;
   CompleteRemovalSucceeded: Boolean;
   CompleteRemovalFailureDetails: String;
+  RemovalOptionsForm: TSetupForm;
+  NormalRemovalRadio: TNewRadioButton;
+  CompleteRemovalRadio: TNewRadioButton;
+  DeleteUserWorkCheckBox: TNewCheckBox;
+  RemovalOptionsPathsLabel: TNewStaticText;
+  RemovalOptionsFailureLabel: TNewStaticText;
+  RemovalOptionsLayoutReady: Boolean;
+  RemovalOptionsWorkspaceRoot: String;
+  RemovalOptionsOutputRoot: String;
+  RemovalOptionsFailureReason: String;
 
 function HasCommandLineSwitch(const SwitchName: String): Boolean;
 var
@@ -1033,6 +1043,229 @@ begin
     PreservedExternalStorage := True;
 end;
 
+procedure UpdateRemovalOptionsState;
+var
+  WorkDeletionAvailable: Boolean;
+begin
+  WorkDeletionAvailable :=
+    CompleteRemovalRadio.Checked and RemovalOptionsLayoutReady;
+  DeleteUserWorkCheckBox.Enabled := WorkDeletionAvailable;
+  RemovalOptionsPathsLabel.Enabled := CompleteRemovalRadio.Checked;
+  RemovalOptionsFailureLabel.Visible :=
+    CompleteRemovalRadio.Checked and (not RemovalOptionsLayoutReady);
+  if not WorkDeletionAvailable then
+    DeleteUserWorkCheckBox.Checked := False;
+end;
+
+procedure RemovalModeOnClick(Sender: TObject);
+begin
+  UpdateRemovalOptionsState;
+end;
+
+function ConfirmRemovalWorkDeletion: Boolean;
+var
+  ConfirmationText: String;
+begin
+  Result := True;
+  if not (CompleteRemovalRadio.Checked and DeleteUserWorkCheckBox.Checked) then
+    Exit;
+  ConfirmationText :=
+    '다음 작업물을 영구 삭제하시겠습니까?' + Chr(13) + Chr(10) +
+    Chr(13) + Chr(10) +
+    'Data: ' + RemovalOptionsWorkspaceRoot + Chr(13) + Chr(10) +
+    'Output: ' + RemovalOptionsOutputRoot + Chr(13) + Chr(10) +
+    Chr(13) + Chr(10) +
+    '곡, 모델, 프로젝트 및 출력 파일이 삭제되며 되돌릴 수 없습니다.';
+  Result := MsgBox(
+    ConfirmationText,
+    mbConfirmation,
+    MB_YESNO or MB_DEFBUTTON2) = idYes;
+end;
+
+function ShowRemovalOptionsDialog: Boolean;
+var
+  HeadingLabel: TNewStaticText;
+  IntroLabel: TNewStaticText;
+  NormalDescriptionLabel: TNewStaticText;
+  CompleteDescriptionLabel: TNewStaticText;
+  WorkHeadingLabel: TNewStaticText;
+  WorkDescriptionLabel: TNewStaticText;
+  ContinueButton: TNewButton;
+  CancelButton: TNewButton;
+  RuntimeRoot: String;
+  CacheRoot: String;
+  DialogAccepted: Boolean;
+begin
+  RemovalOptionsLayoutReady := TryLoadSafeStorageLayout(
+    RemovalOptionsWorkspaceRoot,
+    RemovalOptionsOutputRoot,
+    RuntimeRoot,
+    CacheRoot,
+    RemovalOptionsFailureReason);
+
+  RemovalOptionsForm := CreateCustomForm(ScaleX(640), ScaleY(560), False, True);
+  try
+    RemovalOptionsForm.Caption := 'JJZero Audio 제거';
+
+    HeadingLabel := TNewStaticText.Create(RemovalOptionsForm);
+    HeadingLabel.Parent := RemovalOptionsForm;
+    HeadingLabel.Left := ScaleX(24);
+    HeadingLabel.Top := ScaleY(20);
+    HeadingLabel.Width := ScaleX(592);
+    HeadingLabel.Height := ScaleY(28);
+    HeadingLabel.AutoSize := False;
+    HeadingLabel.Caption := '제거 방법을 선택하세요';
+    HeadingLabel.Font.Size := 14;
+    HeadingLabel.Font.Style := [fsBold];
+
+    IntroLabel := TNewStaticText.Create(RemovalOptionsForm);
+    IntroLabel.Parent := RemovalOptionsForm;
+    IntroLabel.Left := ScaleX(24);
+    IntroLabel.Top := ScaleY(54);
+    IntroLabel.Width := ScaleX(592);
+    IntroLabel.Height := ScaleY(34);
+    IntroLabel.AutoSize := False;
+    IntroLabel.WordWrap := True;
+    IntroLabel.Caption :=
+      '일반 제거는 작업물을 보존합니다. 이 PC의 JJZero 상태까지 지우려면 완전 제거를 선택하세요.';
+
+    NormalRemovalRadio := TNewRadioButton.Create(RemovalOptionsForm);
+    NormalRemovalRadio.Parent := RemovalOptionsForm;
+    NormalRemovalRadio.Left := ScaleX(24);
+    NormalRemovalRadio.Top := ScaleY(98);
+    NormalRemovalRadio.Width := ScaleX(592);
+    NormalRemovalRadio.Height := ScaleY(24);
+    NormalRemovalRadio.Caption := '일반 제거 (권장)';
+    NormalRemovalRadio.Checked := True;
+    NormalRemovalRadio.Font.Style := [fsBold];
+    NormalRemovalRadio.OnClick := @RemovalModeOnClick;
+
+    NormalDescriptionLabel := TNewStaticText.Create(RemovalOptionsForm);
+    NormalDescriptionLabel.Parent := RemovalOptionsForm;
+    NormalDescriptionLabel.Left := ScaleX(48);
+    NormalDescriptionLabel.Top := ScaleY(124);
+    NormalDescriptionLabel.Width := ScaleX(568);
+    NormalDescriptionLabel.Height := ScaleY(38);
+    NormalDescriptionLabel.AutoSize := False;
+    NormalDescriptionLabel.WordWrap := True;
+    NormalDescriptionLabel.Caption :=
+      '앱과 재생성 가능한 오디오 엔진 및 기본 캐시를 제거합니다. 곡, 모델, 프로젝트와 출력 파일은 유지합니다.';
+
+    CompleteRemovalRadio := TNewRadioButton.Create(RemovalOptionsForm);
+    CompleteRemovalRadio.Parent := RemovalOptionsForm;
+    CompleteRemovalRadio.Left := ScaleX(24);
+    CompleteRemovalRadio.Top := ScaleY(174);
+    CompleteRemovalRadio.Width := ScaleX(592);
+    CompleteRemovalRadio.Height := ScaleY(24);
+    CompleteRemovalRadio.Caption := '완전 제거';
+    CompleteRemovalRadio.Font.Style := [fsBold];
+    CompleteRemovalRadio.OnClick := @RemovalModeOnClick;
+
+    CompleteDescriptionLabel := TNewStaticText.Create(RemovalOptionsForm);
+    CompleteDescriptionLabel.Parent := RemovalOptionsForm;
+    CompleteDescriptionLabel.Left := ScaleX(48);
+    CompleteDescriptionLabel.Top := ScaleY(200);
+    CompleteDescriptionLabel.Width := ScaleX(568);
+    CompleteDescriptionLabel.Height := ScaleY(54);
+    CompleteDescriptionLabel.AutoSize := False;
+    CompleteDescriptionLabel.WordWrap := True;
+    CompleteDescriptionLabel.Caption :=
+      'Runtime, Cache, 설정, 로그, 보존된 RVC 런타임과 Google Drive 로그인 정보를 제거합니다. 작업물은 아래에서 별도로 선택하기 전까지 유지합니다.';
+
+    WorkHeadingLabel := TNewStaticText.Create(RemovalOptionsForm);
+    WorkHeadingLabel.Parent := RemovalOptionsForm;
+    WorkHeadingLabel.Left := ScaleX(24);
+    WorkHeadingLabel.Top := ScaleY(274);
+    WorkHeadingLabel.Width := ScaleX(592);
+    WorkHeadingLabel.Height := ScaleY(24);
+    WorkHeadingLabel.AutoSize := False;
+    WorkHeadingLabel.Caption := '작업물';
+    WorkHeadingLabel.Font.Style := [fsBold];
+
+    DeleteUserWorkCheckBox := TNewCheckBox.Create(RemovalOptionsForm);
+    DeleteUserWorkCheckBox.Parent := RemovalOptionsForm;
+    DeleteUserWorkCheckBox.Left := ScaleX(24);
+    DeleteUserWorkCheckBox.Top := ScaleY(304);
+    DeleteUserWorkCheckBox.Width := ScaleX(592);
+    DeleteUserWorkCheckBox.Height := ScaleY(24);
+    DeleteUserWorkCheckBox.Caption := '저장된 작업물도 함께 삭제';
+    DeleteUserWorkCheckBox.Checked := False;
+
+    WorkDescriptionLabel := TNewStaticText.Create(RemovalOptionsForm);
+    WorkDescriptionLabel.Parent := RemovalOptionsForm;
+    WorkDescriptionLabel.Left := ScaleX(48);
+    WorkDescriptionLabel.Top := ScaleY(332);
+    WorkDescriptionLabel.Width := ScaleX(568);
+    WorkDescriptionLabel.Height := ScaleY(36);
+    WorkDescriptionLabel.AutoSize := False;
+    WorkDescriptionLabel.WordWrap := True;
+    WorkDescriptionLabel.Caption :=
+      '선택하면 곡, 모델, 프로젝트 및 출력 파일을 영구 삭제합니다. 이 작업은 되돌릴 수 없습니다.';
+
+    RemovalOptionsPathsLabel := TNewStaticText.Create(RemovalOptionsForm);
+    RemovalOptionsPathsLabel.Parent := RemovalOptionsForm;
+    RemovalOptionsPathsLabel.Left := ScaleX(48);
+    RemovalOptionsPathsLabel.Top := ScaleY(376);
+    RemovalOptionsPathsLabel.Width := ScaleX(568);
+    RemovalOptionsPathsLabel.Height := ScaleY(54);
+    RemovalOptionsPathsLabel.AutoSize := False;
+    RemovalOptionsPathsLabel.WordWrap := True;
+    if RemovalOptionsLayoutReady then
+      RemovalOptionsPathsLabel.Caption :=
+        'Data: ' + RemovalOptionsWorkspaceRoot + Chr(13) + Chr(10) +
+        'Output: ' + RemovalOptionsOutputRoot
+    else
+      RemovalOptionsPathsLabel.Caption := 'Data/Output 경로를 확인할 수 없습니다.';
+
+    RemovalOptionsFailureLabel := TNewStaticText.Create(RemovalOptionsForm);
+    RemovalOptionsFailureLabel.Parent := RemovalOptionsForm;
+    RemovalOptionsFailureLabel.Left := ScaleX(48);
+    RemovalOptionsFailureLabel.Top := ScaleY(438);
+    RemovalOptionsFailureLabel.Width := ScaleX(568);
+    RemovalOptionsFailureLabel.Height := ScaleY(44);
+    RemovalOptionsFailureLabel.AutoSize := False;
+    RemovalOptionsFailureLabel.WordWrap := True;
+    RemovalOptionsFailureLabel.Caption :=
+      '작업물 삭제를 사용할 수 없습니다: ' + RemovalOptionsFailureReason;
+    RemovalOptionsFailureLabel.Font.Style := [fsBold];
+
+    ContinueButton := TNewButton.Create(RemovalOptionsForm);
+    ContinueButton.Parent := RemovalOptionsForm;
+    ContinueButton.Left := ScaleX(408);
+    ContinueButton.Top := ScaleY(510);
+    ContinueButton.Width := ScaleX(100);
+    ContinueButton.Height := ScaleY(30);
+    ContinueButton.Caption := '계속';
+    ContinueButton.Default := True;
+    ContinueButton.ModalResult := mrOk;
+
+    CancelButton := TNewButton.Create(RemovalOptionsForm);
+    CancelButton.Parent := RemovalOptionsForm;
+    CancelButton.Left := ScaleX(516);
+    CancelButton.Top := ScaleY(510);
+    CancelButton.Width := ScaleX(100);
+    CancelButton.Height := ScaleY(30);
+    CancelButton.Caption := '취소';
+    CancelButton.Cancel := True;
+    CancelButton.ModalResult := mrCancel;
+
+    UpdateRemovalOptionsState;
+    RemovalOptionsForm.ActiveControl := NormalRemovalRadio;
+    repeat
+      DialogAccepted := RemovalOptionsForm.ShowModal = mrOk;
+      Result := DialogAccepted;
+      if DialogAccepted then
+        Result := ConfirmRemovalWorkDeletion;
+    until Result or (not DialogAccepted);
+    if Result then
+      SetCompleteRemovalOptions(
+        CompleteRemovalRadio.Checked,
+        DeleteUserWorkCheckBox.Checked);
+  finally
+    RemovalOptionsForm.Free;
+  end;
+end;
+
 function InitializeUninstall: Boolean;
 begin
   InitializeCompleteRemovalOptions;
@@ -1056,6 +1289,8 @@ begin
   CompleteRemovalPrepared := False;
   CompleteRemovalSucceeded := True;
   CompleteRemovalFailureDetails := '';
+  if Result and (not UninstallSilent) and (not CompleteRemovalRequested) then
+    Result := ShowRemovalOptionsDialog;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

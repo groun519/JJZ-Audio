@@ -83,6 +83,11 @@ class NormalUninstallContractTests(unittest.TestCase):
         self.assertIn('Assert-Exists -LiteralPath $cacheSentinel', self.verifier)
         self.assertIn('Join-Path $dataRoot "preserved-runtime"', self.verifier)
 
+    def test_registry_restore_uses_process_exit_code_instead_of_stderr(self) -> None:
+        self.assertIn("$registryImport = Start-Process", self.verifier)
+        self.assertIn("$registryImport.ExitCode -ne 0", self.verifier)
+        self.assertNotIn("& reg.exe import", self.verifier)
+
 
 if __name__ == "__main__":
     unittest.main()

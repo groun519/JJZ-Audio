@@ -7,6 +7,9 @@ from pathlib import Path
 INSTALLER_SCRIPT = (
     Path(__file__).resolve().parents[1] / "packaging" / "JJZeroAudio.iss"
 )
+VERIFICATION_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts" / "verify_complete_uninstall.ps1"
+)
 
 
 def _section(source: str, start: str, end: str) -> str:
@@ -19,6 +22,7 @@ class CompleteRemovalEngineContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.installer = INSTALLER_SCRIPT.read_text(encoding="utf-8")
+        cls.verifier = VERIFICATION_SCRIPT.read_text(encoding="utf-8-sig")
 
     def test_automation_switches_exist_only_in_verification_builds(self) -> None:
         options = _section(
@@ -100,6 +104,11 @@ class CompleteRemovalEngineContractTests(unittest.TestCase):
         self.assertIn("if CompleteRemovalRequested then", uninstall)
         self.assertIn("PrepareCompleteRemoval", uninstall)
         self.assertIn("else\n      PrepareRuntimeRemoval", uninstall)
+
+    def test_registry_restore_uses_process_exit_code_instead_of_stderr(self) -> None:
+        self.assertIn("$registryImport = Start-Process", self.verifier)
+        self.assertIn("$registryImport.ExitCode -ne 0", self.verifier)
+        self.assertNotIn("& reg.exe import", self.verifier)
 
 
 if __name__ == "__main__":
