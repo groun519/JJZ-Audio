@@ -1,4 +1,11 @@
-param([switch]$SkipTests)
+param(
+    [switch]$SkipTests,
+
+    [Parameter(Mandatory = $true)]
+    [string]$PreviousInstallerPath,
+
+    [string]$RuntimePackageIndex = ""
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -83,6 +90,16 @@ try {
             throw "Unexpected Authenticode certificate: $path"
         }
     }
+
+    $installationGateArguments = @{
+        InstallerPath = Join-Path $releaseDir $installer.name
+        PreviousInstallerPath = $PreviousInstallerPath
+    }
+    if ($RuntimePackageIndex) {
+        $installationGateArguments.RuntimePackageIndex = $RuntimePackageIndex
+    }
+    & (Join-Path $PSScriptRoot "verify_release_installation.ps1") `
+        @installationGateArguments
 }
 finally {
     Pop-Location

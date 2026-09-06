@@ -18,7 +18,11 @@ $baselineInstaller = if ($PreviousInstallerPath) {
     $installer
 }
 $testId = [guid]::NewGuid().ToString("N").Substring(0, 8)
-$testRoot = Join-Path $env:TEMP ("jz-" + $testId)
+$tempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')
+$testRoot = [IO.Path]::GetFullPath((Join-Path $tempRoot ("jz-" + $testId)))
+if (-not $testRoot.StartsWith("$tempRoot\", [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Unsafe installer verification root: $testRoot"
+}
 $installDir = Join-Path $testRoot "app"
 $dataRoot = Join-Path $testRoot "data"
 $sentinel = Join-Path $dataRoot "settings\preserve.txt"
@@ -95,12 +99,52 @@ function Invoke-DistributionVerification {
     }
 }
 
+function Get-Sha256Hex([string]$Path) {
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "")
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Stop-InstalledAppRelaunch(
+    [string]$ExecutablePath,
+    [int]$WaitMilliseconds = 5000
+) {
+    $expectedPath = [IO.Path]::GetFullPath($ExecutablePath)
+    $processName = [IO.Path]::GetFileNameWithoutExtension($expectedPath)
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($WaitMilliseconds)
+    do {
+        foreach ($process in @(Get-Process -Name $processName -ErrorAction SilentlyContinue)) {
+            try {
+                $actualPath = [IO.Path]::GetFullPath($process.Path)
+            } catch {
+                continue
+            }
+            if (-not $actualPath.Equals(
+                $expectedPath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                continue
+            }
+            Stop-Process -Id $process.Id -Force
+            [void]$process.WaitForExit(5000)
+            Write-Output "Stopped update relaunch used by installer verification: $actualPath"
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+}
+
 function Assert-PreservedFiles([hashtable]$ExpectedHashes, [string]$Stage) {
     foreach ($path in $ExpectedHashes.Keys) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "User data disappeared during ${Stage}: $path"
         }
-        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        $actual = Get-Sha256Hex $path
         if ($actual -ne $ExpectedHashes[$path]) {
             throw "User data changed during ${Stage}: $path"
         }
@@ -114,8 +158,13 @@ function Write-Utf8NoBom([string]$Path, [string]$Content) {
 
 $registrationExisted = $false
 if (Test-Path -LiteralPath $uninstallRegistryPsPath) {
-    & reg.exe export $uninstallRegistryKey $registryBackup /y *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $registryExport = Start-Process `
+        -FilePath reg.exe `
+        -ArgumentList @("export", $uninstallRegistryKey, $registryBackup, "/y") `
+        -Wait `
+        -PassThru `
+        -WindowStyle Hidden
+    if ($registryExport.ExitCode -ne 0) {
         throw "Could not back up the existing JJZero Audio uninstall registration."
     }
     $registrationExisted = $true
@@ -231,10 +280,12 @@ foreach ($path in @(
     $legacyModelCatalog,
     $externalInferenceModel
 )) {
-    $preservedFiles[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    $preservedFiles[$path] = Get-Sha256Hex $path
 }
 $immutableSourceFiles = $preservedFiles.Clone()
 $immutableSourceFiles.Remove($storageFile)
+$previousQtPlatform = $env:QT_QPA_PLATFORM
+$env:QT_QPA_PLATFORM = "offscreen"
 $updateMutex = [System.Threading.Mutex]::new($false, $AppMutexName)
 try {
     $logPath = Join-Path $testRoot "update-$targetVersion.log"
@@ -247,14 +298,21 @@ try {
         "/DIR=`"$installDir`"",
         "/LOG=`"$logPath`""
     )
-    $updateProcess = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+    $updateProcess = Start-Process `
+        -FilePath $installer `
+        -ArgumentList $arguments `
+        -PassThru `
+        -WindowStyle Hidden
+    [void]$updateProcess.WaitForExit()
     if ($updateProcess.ExitCode -ne 0) {
         throw "Internal update installer failed with exit code $($updateProcess.ExitCode). Log: $logPath"
     }
 }
 finally {
     $updateMutex.Dispose()
+    $env:QT_QPA_PLATFORM = $previousQtPlatform
 }
+Stop-InstalledAppRelaunch (Join-Path $installDir "JJZero Audio.exe")
 Assert-InstalledVersion $targetVersion
 Assert-PreservedFiles $preservedFiles "application update"
 if ((Get-Content -LiteralPath $runtimeSentinel -Raw).Trim() -ne "preserve-runtime-model") {
@@ -290,7 +348,7 @@ foreach ($path in $managedFiles) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Managed storage file was not created: $path"
     }
-    $managedHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    $managedHashes[$path] = Get-Sha256Hex $path
 }
 $managedUserHashes = $managedHashes.Clone()
 $managedUserHashes.Remove((Join-Path $managedStorageRoot "Runtime\rvc\weights\preserve-runtime-model.pth"))
@@ -416,8 +474,13 @@ if (-not (Test-Path -LiteralPath (Join-Path $managedStorageRoot "Cache"))) {
 finally {
     Remove-Item -LiteralPath $uninstallRegistryPsPath -Recurse -Force -ErrorAction SilentlyContinue
     if ($registrationExisted) {
-        & reg.exe import $registryBackup *> $null
-        if ($LASTEXITCODE -ne 0) {
+        $registryImport = Start-Process `
+            -FilePath reg.exe `
+            -ArgumentList @("import", $registryBackup) `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+        if ($registryImport.ExitCode -ne 0) {
             Write-Warning "Could not restore the previous JJZero Audio uninstall registration: $registryBackup"
         }
     }

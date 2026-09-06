@@ -2,7 +2,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InstallerPath,
 
-    [ValidateSet("All", "PreserveWork", "DeleteWork", "MissingGenerated")]
+    [ValidateSet(
+        "All",
+        "PreserveWork",
+        "DeleteWork",
+        "MissingGenerated",
+        "ProtectedAppState",
+        "OverlappingRoots",
+        "BrokenSettings"
+    )]
     [string]$Scenario = "All"
 )
 
@@ -149,7 +157,14 @@ function Remove-VerificationCredential {
 function Invoke-CompleteUninstallScenario {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet("PreserveWork", "DeleteWork", "MissingGenerated")]
+        [ValidateSet(
+            "PreserveWork",
+            "DeleteWork",
+            "MissingGenerated",
+            "ProtectedAppState",
+            "OverlappingRoots",
+            "BrokenSettings"
+        )]
         [string]$Name
     )
 
@@ -162,6 +177,11 @@ function Invoke-CompleteUninstallScenario {
     $runtimeRoot = Join-Path $storageRoot "Runtime"
     $cacheRoot = Join-Path $storageRoot "Cache"
     $storageSentinel = Join-Path $storageRoot "keep-user-file.txt"
+    $unsafeLayout = $Name -in @(
+        "ProtectedAppState",
+        "OverlappingRoots",
+        "BrokenSettings"
+    )
 
     New-Item -ItemType Directory -Path $scenarioRoot -Force | Out-Null
     $install = Start-Process `
@@ -213,16 +233,33 @@ function Invoke-CompleteUninstallScenario {
     Set-Content -LiteralPath (Join-Path $dataRoot "session.state") -Value "local-state"
     Set-Content -LiteralPath $storageSentinel -Value "keep"
 
-    $layout = @{
-        version = 3
-        mode = "linked"
-        storage_root = $storageRoot
-        workspace_root = $workspaceRoot
-        workspace_anchor = $storageRoot
-        output_root = $outputRoot
-        runtime_root = $runtimeRoot
-        cache_root = $cacheRoot
-    } | ConvertTo-Json
+    $savedWorkspaceRoot = if ($Name -eq "ProtectedAppState") {
+        $dataRoot
+    }
+    else {
+        $workspaceRoot
+    }
+    $savedRuntimeRoot = if ($Name -eq "OverlappingRoots") {
+        Join-Path $workspaceRoot "Runtime"
+    }
+    else {
+        $runtimeRoot
+    }
+    $layout = if ($Name -eq "BrokenSettings") {
+        '{"version":3,"storage_root":'
+    }
+    else {
+        @{
+            version = 3
+            mode = "linked"
+            storage_root = $storageRoot
+            workspace_root = $savedWorkspaceRoot
+            workspace_anchor = $storageRoot
+            output_root = $outputRoot
+            runtime_root = $savedRuntimeRoot
+            cache_root = $cacheRoot
+        } | ConvertTo-Json
+    }
     [IO.File]::WriteAllText(
         (Join-Path $dataRoot "settings\storage.json"),
         $layout,
@@ -235,7 +272,8 @@ function Invoke-CompleteUninstallScenario {
         "/VERYSILENT",
         "/SUPPRESSMSGBOXES",
         "/NORESTART",
-        "/JJZEROCOMPLETEREMOVAL"
+        "/JJZEROCOMPLETEREMOVAL",
+        "/LOG=`"$(Join-Path $scenarioRoot 'uninstall.log')`""
     )
     if ($Name -ne "PreserveWork") {
         $arguments += "/JJZERODELETEWORK"
@@ -253,19 +291,37 @@ function Invoke-CompleteUninstallScenario {
 
     Assert-Removed -LiteralPath (Join-Path $installRoot "JJZero Audio.exe") -Message "Application executable remained"
     Assert-Removed -LiteralPath (Join-Path $installRoot "runtime") -Message "Application Runtime remained"
-    Assert-Removed -LiteralPath $runtimeRoot -Message "Configured Runtime remained"
-    Assert-Removed -LiteralPath $cacheRoot -Message "Configured Cache remained"
-    Assert-Removed -LiteralPath $dataRoot -Message "Local application state remained"
     Assert-Exists -LiteralPath $storageSentinel -Message "Unowned storage-root file was removed"
     if (Test-VerificationCredential) {
         throw "Google Drive verification credential remained after Complete Removal."
     }
 
-    if ($Name -ne "PreserveWork") {
+    if ($unsafeLayout) {
+        Assert-Exists -LiteralPath $runtimeRoot -Message "Runtime was removed after storage validation failed"
+        Assert-Exists -LiteralPath $cacheRoot -Message "Cache was removed after storage validation failed"
+        Assert-Exists -LiteralPath $dataSentinel -Message "Data was removed after storage validation failed"
+        Assert-Exists -LiteralPath $outputSentinel -Message "Output was removed after storage validation failed"
+        Assert-Exists -LiteralPath (Join-Path $dataRoot "session.state") -Message "Unknown local state was removed after storage validation failed"
+        Assert-Removed -LiteralPath (Join-Path $dataRoot "settings") -Message "Known settings remained after Complete Removal"
+        Assert-Removed -LiteralPath (Join-Path $dataRoot "logs") -Message "Known logs remained after Complete Removal"
+        Assert-Removed -LiteralPath (Join-Path $dataRoot "migrations") -Message "Known migration state remained after Complete Removal"
+        Assert-Removed -LiteralPath (Join-Path $dataRoot "preserved-runtime") -Message "Preserved Runtime remained after Complete Removal"
+        $uninstallLog = Get-Content -LiteralPath (Join-Path $scenarioRoot "uninstall.log") -Raw
+        if ($uninstallLog -notlike "*Complete Removal could not remove configured storage:*") {
+            throw "$Name did not record the refused storage layout."
+        }
+    }
+    elseif ($Name -ne "PreserveWork") {
+        Assert-Removed -LiteralPath $runtimeRoot -Message "Configured Runtime remained"
+        Assert-Removed -LiteralPath $cacheRoot -Message "Configured Cache remained"
+        Assert-Removed -LiteralPath $dataRoot -Message "Local application state remained"
         Assert-Removed -LiteralPath $workspaceRoot -Message "Data remained after explicit work deletion"
         Assert-Removed -LiteralPath $outputRoot -Message "Output remained after explicit work deletion"
     }
     else {
+        Assert-Removed -LiteralPath $runtimeRoot -Message "Configured Runtime remained"
+        Assert-Removed -LiteralPath $cacheRoot -Message "Configured Cache remained"
+        Assert-Removed -LiteralPath $dataRoot -Message "Local application state remained"
         Assert-Exists -LiteralPath $dataSentinel -Message "Data was removed without explicit consent"
         Assert-Exists -LiteralPath $outputSentinel -Message "Output was removed without explicit consent"
     }
@@ -287,7 +343,14 @@ try {
     }
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
     $scenarios = if ($Scenario -eq "All") {
-        @("PreserveWork", "DeleteWork", "MissingGenerated")
+        @(
+            "PreserveWork",
+            "DeleteWork",
+            "MissingGenerated",
+            "ProtectedAppState",
+            "OverlappingRoots",
+            "BrokenSettings"
+        )
     }
     else {
         @($Scenario)
