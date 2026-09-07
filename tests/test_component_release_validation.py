@@ -100,6 +100,48 @@ class ComponentReleaseValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "RVC profile file"):
                 _verify_split_runtime_package_layout(manifest, root)
 
+    def test_split_runtime_layout_uses_complete_local_index_for_mixed_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            local_manifest = _split_manifest(root)
+            shared = root / "shared.zip"
+            (root / "runtime-packages.json").write_text(
+                json.dumps(
+                    {
+                        "artifacts": [
+                            {
+                                "name": shared.name,
+                                "size": shared.stat().st_size,
+                                "sha256": "0" * 64,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mixed_manifest = ReleaseManifest(
+                local_manifest.version,
+                (
+                    local_manifest.components[0],
+                    ReleaseComponent(
+                        "ai-runtime",
+                        "4",
+                        "extract",
+                        (
+                            ReleaseArtifact(
+                                "remote-runtime.zip",
+                                shared.stat().st_size,
+                                "0" * 64,
+                                "https://example.invalid/remote-runtime.zip",
+                            ),
+                        ),
+                    ),
+                    local_manifest.components[2],
+                ),
+            )
+
+            _verify_split_runtime_package_layout(mixed_manifest, root)
+
     def test_accepts_runtime_compatible_with_legacy_updater(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

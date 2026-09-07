@@ -99,6 +99,12 @@ def create_release_manifest(
             _validated_index_artifact(resolved_release, artifact)
             for artifact in runtime_artifacts
         ]
+        if runtime_manifest_path is not None:
+            runtime_artifacts = _reuse_matching_component_artifacts(
+                runtime_artifacts,
+                runtime_manifest_path,
+                "ai-runtime",
+            )
         runtime_artifacts = _with_release_urls(runtime_artifacts, runtime_tag)
         components.append(
             {
@@ -125,8 +131,6 @@ def create_release_manifest(
             )
 
     if runtime_manifest_path is not None:
-        if not runtime_tag:
-            raise ValueError("A runtime release tag is required with a reused runtime manifest.")
         components.extend(
             _reused_runtime_components(
                 runtime_manifest_path,
@@ -278,6 +282,50 @@ def _validated_remote_artifact(data: object) -> dict[str, object]:
     return artifact
 
 
+def _reuse_matching_component_artifacts(
+    local_artifacts: list[dict[str, object]],
+    manifest_path: Path,
+    component_id: str,
+) -> list[dict[str, object]]:
+    """Reuse immutable remote archives when their complete package metadata matches."""
+    data = json.loads(manifest_path.expanduser().resolve().read_text(encoding="utf-8"))
+    if data.get("product") != "JJZero Audio" or data.get("architecture") != "x64":
+        raise ValueError("Reused runtime manifest does not belong to JJZero Audio x64.")
+    source_components = data.get("components")
+    if not isinstance(source_components, list):
+        raise ValueError("Reused runtime manifest has no components.")
+    source = next(
+        (
+            component
+            for component in source_components
+            if isinstance(component, dict) and component.get("id") == component_id
+        ),
+        None,
+    )
+    if source is None:
+        return local_artifacts
+    raw_artifacts = source.get("artifacts")
+    if not isinstance(raw_artifacts, list):
+        raise ValueError(f"Reused {component_id} has no artifacts.")
+    remote_artifacts = [
+        _validated_remote_artifact(artifact) for artifact in raw_artifacts
+    ]
+    metadata_keys = ("size", "unpacked_size", "file_count", "sha256")
+    result: list[dict[str, object]] = []
+    for local in local_artifacts:
+        match = next(
+            (
+                remote
+                for remote in remote_artifacts
+                if remote.get("url")
+                and all(local.get(key) == remote.get(key) for key in metadata_keys)
+            ),
+            None,
+        )
+        result.append(match if match is not None else local)
+    return result
+
+
 def _artifact_data(
     path: Path,
     *,
@@ -346,7 +394,9 @@ def _with_release_urls(
     if not release_tag:
         return artifacts
     return [
-        {
+        artifact
+        if artifact.get("url")
+        else {
             **artifact,
             "url": (
                 f"{GITHUB_RELEASE_DOWNLOAD_ROOT}/{quote(release_tag, safe='')}/"
@@ -366,6 +416,10 @@ def _with_fallback_release_urls(
     for artifact in artifacts:
         if artifact.get("url"):
             result.append(artifact)
+        elif not release_tag:
+            raise ValueError(
+                f"Reused runtime package has no immutable release URL: {artifact['name']}"
+            )
         else:
             result.extend(_with_release_urls([artifact], release_tag))
     return result

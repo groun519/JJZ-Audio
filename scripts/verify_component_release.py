@@ -222,12 +222,18 @@ def _verify_split_runtime_package_layout(manifest, release_root: Path) -> None:
     cu118 = manifest.rvc_runtime_profile("cu118")
     if runtime is None or cu118 is None:
         return
-    if _component_is_remote_only(runtime, release_root) or _component_is_remote_only(
-        cu118, release_root
-    ):
+    runtime_index = release_root / "runtime-packages.json"
+    if (
+        not runtime_index.is_file()
+        and _component_is_remote_only(runtime, release_root)
+    ) or _component_is_remote_only(cu118, release_root):
         return
 
-    shared_names = _archive_names(runtime, release_root)
+    shared_names = (
+        _archive_names_from_index(runtime_index, release_root)
+        if runtime_index.is_file()
+        else _archive_names(runtime, release_root)
+    )
     embedded = next(
         (name for name in sorted(shared_names) if name.startswith("rvc/runtime/")),
         "",
@@ -273,10 +279,15 @@ def _verify_legacy_runtime_package_layout(manifest, release_root: Path) -> None:
     runtime = manifest.ai_runtime
     if runtime is None or manifest.rvc_runtime_profile("cu118") is not None:
         return
-    if _component_is_remote_only(runtime, release_root):
+    runtime_index = release_root / "runtime-packages.json"
+    if not runtime_index.is_file() and _component_is_remote_only(runtime, release_root):
         return
 
-    names = _archive_names(runtime, release_root)
+    names = (
+        _archive_names_from_index(runtime_index, release_root)
+        if runtime_index.is_file()
+        else _archive_names(runtime, release_root)
+    )
     required = {
         "ffmpeg/bin/ffmpeg.exe",
         "ffmpeg/bin/ffprobe.exe",
@@ -304,6 +315,26 @@ def _archive_names(component, release_root: Path) -> set[str]:
     names: set[str] = set()
     for artifact in component.artifacts:
         with zipfile.ZipFile(release_root / artifact.name) as package:
+            names.update(package.namelist())
+    return names
+
+
+def _archive_names_from_index(index_path: Path, release_root: Path) -> set[str]:
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    artifacts = data.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise RuntimeError(f"Runtime package index has no artifacts: {index_path.name}")
+    names: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise RuntimeError(f"Runtime package index is invalid: {index_path.name}")
+        package_name = artifact.get("name")
+        if not isinstance(package_name, str) or Path(package_name).name != package_name:
+            raise RuntimeError(f"Runtime package index is invalid: {index_path.name}")
+        package_path = release_root / package_name
+        if not package_path.is_file():
+            raise RuntimeError(f"Runtime package was not found: {package_name}")
+        with zipfile.ZipFile(package_path) as package:
             names.update(package.namelist())
     return names
 

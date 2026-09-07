@@ -61,9 +61,13 @@ When the base RVC runtime changed but acceleration-profile dependencies did not,
 
 ```powershell
 .\scripts\build_release.ps1 -SkipRuntimeProfileBuild -RequireCodeSigning `
-  -RuntimeReleaseTag vX.Y.Z `
   -RuntimeManifestPath release\vPREVIOUS-latest.json
 ```
+
+The prior manifest's immutable URLs are preserved. Within the changed base runtime,
+archives with identical size, unpacked size, file count, and SHA-256 are also reused;
+only changed archives are uploaded under the new release. `-RuntimeReleaseTag` is a
+fallback for legacy manifests without artifact URLs, not the new release tag.
 
 ## Verify
 

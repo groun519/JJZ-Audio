@@ -58,11 +58,10 @@ When RVC application code changes but the CUDA, DirectML, and Windows ROCm depen
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 `
   -SkipRuntimeProfileBuild `
-  -RuntimeReleaseTag vX.Y.Z `
   -RuntimeManifestPath release\vPREVIOUS-latest.json
 ```
 
-The base runtime version must be incremented. Reused profiles are accepted only when their declared versions match the current profile versions; a mismatched or missing profile fails manifest creation.
+The base runtime version must be incremented. The previous manifest must contain immutable release URLs. Reused profiles are accepted only when their declared versions match the current profile versions, and byte-identical base-runtime archives are reused by complete package metadata. Changed archives remain local release assets. A mismatched, missing, or URL-less reused component fails manifest creation. Use `-RuntimeReleaseTag` only as a fallback for an older manifest that lacks release URLs.
 
 ## Local Verification Build
 
