@@ -85,14 +85,23 @@ def main() -> int:
                 "QT_QPA_PLATFORM": "offscreen",
             }
         )
-        completed = subprocess.run(
-            [str(executable), "--startup-smoke-test"],
-            cwd=distribution,
-            env=environment,
-            check=False,
-            timeout=90,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        try:
+            completed = subprocess.run(
+                [str(executable), "--startup-smoke-test"],
+                cwd=distribution,
+                env=environment,
+                check=False,
+                timeout=90,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except subprocess.TimeoutExpired:
+            trace = temporary_root / "local-data" / "startup-smoke-trace.log"
+            trace_text = trace.read_text(encoding="utf-8") if trace.is_file() else "missing"
+            print(
+                f"Packaged startup timed out after 90 seconds. Early trace:\n{trace_text}",
+                file=sys.stderr,
+            )
+            return 1
         if completed.returncode != 0:
             print(f"Packaged startup failed with exit code {completed.returncode}", file=sys.stderr)
             return 1

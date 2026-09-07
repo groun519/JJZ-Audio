@@ -35,6 +35,25 @@ class MainStartupPhaseTests(unittest.TestCase):
             source.index("recover_runtime_installations(setup_paths.runtime_root)"),
         )
 
+    def test_smoke_test_records_early_startup_stages_before_logging(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "jang_app"
+            / "qt_app"
+            / "main.py"
+        ).read_text(encoding="utf-8")
+
+        for stage in (
+            "entry",
+            "mutex_checked",
+            "qt_imported",
+            "application_created",
+            "setup_services_imported",
+            "paths_discovered",
+        ):
+            self.assertIn(f'_write_smoke_trace(smoke_test, "{stage}")', source)
+
 
 if __name__ == "__main__":
     unittest.main()
