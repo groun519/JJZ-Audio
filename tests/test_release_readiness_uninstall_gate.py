@@ -73,6 +73,12 @@ class ReleaseReadinessUninstallGateTests(unittest.TestCase):
         self.assertNotIn("SkipInstaller", self.gate)
         self.assertNotIn("SkipUninstall", self.gate)
 
+    def test_readiness_allows_only_release_evidence_after_the_build(self) -> None:
+        self.assertIn("git merge-base --is-ancestor", self.readiness)
+        self.assertIn('"docs/releases/$version-preflight.md"', self.readiness)
+        self.assertIn('"docs/plans/$version.md"', self.readiness)
+        self.assertIn("Release source changed after the verified build", self.readiness)
+
     def test_installer_verification_is_module_and_window_independent(self) -> None:
         self.assertIn("function Get-Sha256Hex", self.installer)
         self.assertNotIn("Get-FileHash", self.installer)

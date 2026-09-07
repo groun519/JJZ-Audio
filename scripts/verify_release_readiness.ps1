@@ -32,16 +32,33 @@ try {
 
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $headRevision = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
+    $sourceRevision = ([string]$manifest.source_revision).Trim().ToLowerInvariant()
     $provenancePath = Join-Path $distribution "build-provenance.json"
     if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) {
         throw "Application build provenance is missing: $provenancePath"
     }
     $provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
-    if ([string]$manifest.source_revision -ne $headRevision -or
-        [string]$provenance.source_revision -ne $headRevision -or
+    if ($sourceRevision -notmatch '^[0-9a-f]{40,64}$' -or
+        [string]$provenance.source_revision -ne $sourceRevision -or
         [string]$provenance.version -ne [string]$manifest.version -or
         $provenance.source_dirty -ne $false) {
-        throw "Release artifacts do not match the clean current source revision."
+        throw "Release artifacts do not match the clean build source revision."
+    }
+    & git merge-base --is-ancestor $sourceRevision $headRevision
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release build source revision is not an ancestor of HEAD."
+    }
+    $version = [string]$manifest.version
+    $allowedFinalizationPaths = @(
+        "docs/releases/$version-preflight.md",
+        "docs/plans/$version.md"
+    )
+    $postBuildChanges = @(& git diff --name-only "$sourceRevision..$headRevision")
+    $unexpectedPostBuildChanges = @(
+        $postBuildChanges | Where-Object { $_ -and $_ -notin $allowedFinalizationPaths }
+    )
+    if ($unexpectedPostBuildChanges.Count -ne 0) {
+        throw "Release source changed after the verified build: $($unexpectedPostBuildChanges -join ', ')"
     }
     $componentIds = @($manifest.components | Select-Object -ExpandProperty id)
     foreach ($requiredProfile in @("cu128", "directml", "rocm-win")) {
