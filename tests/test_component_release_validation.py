@@ -10,6 +10,7 @@ from jang_app.services.app_update import ReleaseArtifact, ReleaseComponent, Rele
 from scripts.verify_component_release import (
     _accelerator_metadata_matches,
     _verify_cu128_package_layout,
+    _verify_cu128_profile,
     _verify_legacy_runtime_package_layout,
     _verify_split_runtime_package_layout,
 )
@@ -84,6 +85,25 @@ class ComponentReleaseValidationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "audio_separator"):
                 _verify_cu128_package_layout(_manifest(package), root)
+
+    def test_skips_local_install_for_remote_only_cu128_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = ReleaseArtifact(
+                "not-downloaded.zip",
+                10,
+                "0" * 64,
+                "https://example.invalid/not-downloaded.zip",
+            )
+            manifest = ReleaseManifest(
+                "0.3.11",
+                (
+                    ReleaseComponent("application", "0.3.11", "installer", ()),
+                    ReleaseComponent("rvc-runtime-cu128", "1", "extract", (artifact,)),
+                ),
+            )
+
+            _verify_cu128_profile(manifest, root, root / "runtime")
 
     def test_accepts_runtime_with_separate_cu118_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

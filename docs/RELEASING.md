@@ -69,6 +69,10 @@ archives with identical size, unpacked size, file count, and SHA-256 are also re
 only changed archives are uploaded under the new release. `-RuntimeReleaseTag` is a
 fallback for legacy manifests without artifact URLs, not the new release tag.
 
+The installer and manifest are locked to their build source revision. A later release
+finalization commit may change only `docs/releases/<version>-preflight.md` and
+`docs/plans/<version>.md`; the publisher rejects any other post-build source change.
+
 ## Verify
 
 Require valid Authenticode metadata and signatures for a public release:

@@ -23,6 +23,10 @@ class ReleasePublicationContractTests(unittest.TestCase):
         )
 
         self.assertIn("HEAD does not match origin/main", source)
+        self.assertIn("git merge-base --is-ancestor", source)
+        self.assertIn('"docs/releases/$version-preflight.md"', source)
+        self.assertIn('"docs/plans/$version.md"', source)
+        self.assertIn("Release source changed after the verified build", source)
         self.assertIn("release download", source)
         self.assertIn("Get-AuthenticodeSignature", source)
         self.assertIn("releases/latest", source)

@@ -134,7 +134,7 @@ def verify_component_release(
 
 def _verify_cu128_profile(manifest, release_root: Path, runtime_root: Path) -> None:
     component = manifest.rvc_runtime_profile("cu128")
-    if component is None:
+    if component is None or _component_is_remote_only(component, release_root):
         return
     packages = tuple(release_root / artifact.name for artifact in component.artifacts)
     install_rvc_runtime_profile_packages(

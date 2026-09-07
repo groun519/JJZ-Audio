@@ -61,8 +61,24 @@ try {
     $version = [string]$manifest.version
     $tag = "v$version"
     $headRevision = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
-    if ([string]$manifest.source_revision -ne $headRevision) {
-        throw "Release manifest source revision does not match HEAD."
+    $sourceRevision = ([string]$manifest.source_revision).Trim().ToLowerInvariant()
+    if ($sourceRevision -notmatch '^[0-9a-f]{40,64}$') {
+        throw "Release manifest source revision is missing or invalid."
+    }
+    & git merge-base --is-ancestor $sourceRevision $headRevision
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release manifest source revision is not an ancestor of HEAD."
+    }
+    $allowedFinalizationPaths = @(
+        "docs/releases/$version-preflight.md",
+        "docs/plans/$version.md"
+    )
+    $postBuildChanges = @(& git diff --name-only "$sourceRevision..$headRevision")
+    $unexpectedPostBuildChanges = @(
+        $postBuildChanges | Where-Object { $_ -and $_ -notin $allowedFinalizationPaths }
+    )
+    if ($unexpectedPostBuildChanges.Count -ne 0) {
+        throw "Release source changed after the verified build: $($unexpectedPostBuildChanges -join ', ')"
     }
     & git fetch origin main --tags
     if ($LASTEXITCODE -ne 0) {
@@ -217,7 +233,7 @@ try {
         ($_ -split "`t")[0]
     }).Trim().ToLowerInvariant()
     if ($remoteTagRevision -ne $headRevision) {
-        throw "Published release tag does not resolve to the verified source revision."
+        throw "Published release tag does not resolve to the finalization commit."
     }
     Write-Output "GitHub Release published and independently re-downloaded: $tag"
 }
