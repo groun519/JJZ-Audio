@@ -34,6 +34,17 @@ def main() -> int:
         for path in missing:
             print(f"Missing distribution file: {path}", file=sys.stderr)
         return 1
+    contaminated = (
+        distribution / "_internal" / "ucrtbase.dll",
+        *tuple((distribution / "_internal").glob("api-ms-win-*.dll")),
+    )
+    if any(path.is_file() for path in contaminated):
+        path = next(path for path in contaminated if path.is_file())
+        print(
+            f"Distribution contains a host Windows runtime DLL: {path}",
+            file=sys.stderr,
+        )
+        return 1
     try:
         provenance = json.loads(
             (distribution / "build-provenance.json").read_text(encoding="utf-8")

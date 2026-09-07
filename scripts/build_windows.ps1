@@ -29,9 +29,30 @@ try {
         }
     }
 
-    & $python -m PyInstaller --noconfirm --clean $spec
-    if ($LASTEXITCODE -ne 0) {
-        throw "PyInstaller failed with exit code $LASTEXITCODE"
+    $pythonBase = (& $python -c "import sys; print(sys.base_prefix)").Trim()
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pythonBase -PathType Container)) {
+        throw "Could not determine the base Python directory."
+    }
+    $originalPath = $env:PATH
+    $isolatedBuildPath = @(
+        (Split-Path -Parent $python),
+        $pythonBase,
+        (Join-Path $pythonBase "DLLs"),
+        (Join-Path $env:SystemRoot "System32"),
+        $env:SystemRoot
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } |
+        Select-Object -Unique
+    try {
+        # PyInstaller searches PATH for dependent DLLs. Keep unrelated host tools
+        # from leaking newer UCRT and API-set files into the Windows 10 build.
+        $env:PATH = $isolatedBuildPath -join [IO.Path]::PathSeparator
+        & $python -m PyInstaller --noconfirm --clean $spec
+        if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        $env:PATH = $originalPath
     }
 
     $sourceRevision = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
