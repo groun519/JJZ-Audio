@@ -4,7 +4,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PreviousInstallerPath,
 
-    [string]$RuntimePackageIndex = ""
+    [string]$RuntimePackageIndex = "",
+
+    [string]$SystemFootprintEvidencePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -98,7 +100,10 @@ try {
     if ($RuntimePackageIndex) {
         $installationGateArguments.RuntimePackageIndex = $RuntimePackageIndex
     }
-    & (Join-Path $PSScriptRoot "verify_release_installation.ps1") `
+    if ($SystemFootprintEvidencePath) {
+        $installationGateArguments.EvidencePath = $SystemFootprintEvidencePath
+    }
+    & (Join-Path $PSScriptRoot "verify_system_footprint.ps1") `
         @installationGateArguments
 }
 finally {

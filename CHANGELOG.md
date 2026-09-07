@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.3.11 - 2026-09-08
+
+### Added
+
+- Added hierarchical library groups with multi-song moves, import destinations, and persisted navigation state.
+- Added an Environment & Management workspace for job history, app logs, PC and RVC diagnostics, support archives, and safe storage cleanup.
+- Added an explicit Complete Removal flow with independent consent for deleting user work.
+
+### Changed
+
+- Prepared Studio video and waveform assets lazily, kept playback updates responsive, and moved autosaves off the UI thread.
+- Made updates and managed-file changes transactional so interrupted work preserves the previous usable state.
+- Hardened model, song, Drive, and archive imports against malformed or unsafe external data.
+- Updated the managed AI Runtime to version 5 for restricted RVC checkpoint loading while reusing unchanged GPU acceleration profiles.
+
+### Fixed
+
+- Preserved current logging while rotating files and retained failed Studio autosaves for retry.
+- Recovered validated RVC training outputs after final registration failures and rejected incomplete checkpoints.
+- Removed only verified JJZero-owned storage, cache, credentials, and runtime paths during uninstall.
+- Prevented stale media workers, playback rebuilds, and hidden waveform requests from blocking or mutating current UI state.
+
+### Quality
+
+- Added fault-injection and regression coverage for update recovery, managed transactions, diagnostics, storage cleanup, external imports, Studio lifecycle, RVC recovery, and uninstall safety.
+- Added mandatory install, 0.3.10-to-0.3.11 update, Normal Uninstall, Complete Removal, and protected Windows system-footprint release gates.
+
 ## 0.3.10 - 2026-08-21
 
 ### Added

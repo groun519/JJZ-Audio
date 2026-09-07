@@ -1,6 +1,7 @@
 param(
     [switch]$SkipTests,
     [switch]$SkipRuntimeBuild,
+    [switch]$SkipRuntimeProfileBuild,
     [switch]$SkipAppBuild,
     [switch]$RequireCodeSigning,
     [string]$RuntimeReleaseTag = $env:JJZERO_RUNTIME_RELEASE_TAG,
@@ -16,7 +17,7 @@ $installerBuild = Join-Path $PSScriptRoot "build_installer.ps1"
 Push-Location $projectRoot
 try {
     if (-not $SkipRuntimeBuild) {
-        & $runtimeBuild
+        & $runtimeBuild -SkipProfileBuild:$SkipRuntimeProfileBuild
         if ($LASTEXITCODE -ne 0) {
             throw "Runtime package build failed with exit code $LASTEXITCODE"
         }

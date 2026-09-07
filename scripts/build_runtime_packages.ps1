@@ -1,5 +1,6 @@
 param(
-    [long]$PartLimit = 1782579200
+    [long]$PartLimit = 1782579200,
+    [switch]$SkipProfileBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,40 +42,42 @@ try {
         throw "Runtime package build failed with exit code $LASTEXITCODE"
     }
 
-    $profileVersions = & $python -c "import json; from jang_app.runtime_version import RVC_RUNTIME_PROFILE_VERSIONS; print(json.dumps(RVC_RUNTIME_PROFILE_VERSIONS))" | ConvertFrom-Json
-    $precisionProfileRoots = @(
-        $profileVersions.PSObject.Properties.Name |
-            Where-Object { $_ -ne "cu118" } |
-            ForEach-Object { Join-Path $runtimeRoot "rvc_profiles\$_" }
-    )
-    & $python scripts\sync_rvc_precision_packages.py @precisionProfileRoots
-    if ($LASTEXITCODE -ne 0) {
-        throw "RVC precision runtime synchronization failed with exit code $LASTEXITCODE"
-    }
-    $baseProfile = "cu118"
-    $baseProfileVersion = [string]$profileVersions.$baseProfile
-    Get-ChildItem -LiteralPath $releaseDir -Filter "JJZero-RVC-$baseProfile-$baseProfileVersion-part*.zip" -File |
-        Remove-Item -Force
-    Remove-Item -LiteralPath (Join-Path $releaseDir "rvc-runtime-$baseProfile-packages.json") `
-        -Force -ErrorAction SilentlyContinue
-
-    foreach ($profile in $profileVersions.PSObject.Properties.Name | Where-Object { $_ -ne $baseProfile }) {
-        $profileRoot = Join-Path $runtimeRoot "rvc_profiles\$profile"
-        if (-not (Test-Path -LiteralPath $profileRoot -PathType Container)) {
-            throw "Required RVC $profile runtime profile was not found: $profileRoot"
-        }
-        $profileVersion = [string]$profileVersions.$profile
-        Get-ChildItem -LiteralPath $releaseDir -Filter "JJZero-RVC-$profile-$profileVersion-part*.zip" -File |
-            Remove-Item -Force
-        & $python scripts\build_runtime_packages.py $profileRoot $releaseDir $profileVersion `
-            --part-limit $PartLimit `
-            --component "rvc-runtime-$profile" `
-            --package-prefix "JJZero-RVC-$profile-$profileVersion" `
-            --index-name "rvc-runtime-$profile-packages.json" `
-            --exclude-directory "__pycache__" `
-            --exclude-suffix ".map"
+    if (-not $SkipProfileBuild) {
+        $profileVersions = & $python -c "import json; from jang_app.runtime_version import RVC_RUNTIME_PROFILE_VERSIONS; print(json.dumps(RVC_RUNTIME_PROFILE_VERSIONS))" | ConvertFrom-Json
+        $precisionProfileRoots = @(
+            $profileVersions.PSObject.Properties.Name |
+                Where-Object { $_ -ne "cu118" } |
+                ForEach-Object { Join-Path $runtimeRoot "rvc_profiles\$_" }
+        )
+        & $python scripts\sync_rvc_precision_packages.py @precisionProfileRoots
         if ($LASTEXITCODE -ne 0) {
-            throw "RVC $profile runtime package build failed with exit code $LASTEXITCODE"
+            throw "RVC precision runtime synchronization failed with exit code $LASTEXITCODE"
+        }
+        $baseProfile = "cu118"
+        $baseProfileVersion = [string]$profileVersions.$baseProfile
+        Get-ChildItem -LiteralPath $releaseDir -Filter "JJZero-RVC-$baseProfile-$baseProfileVersion-part*.zip" -File |
+            Remove-Item -Force
+        Remove-Item -LiteralPath (Join-Path $releaseDir "rvc-runtime-$baseProfile-packages.json") `
+            -Force -ErrorAction SilentlyContinue
+
+        foreach ($profile in $profileVersions.PSObject.Properties.Name | Where-Object { $_ -ne $baseProfile }) {
+            $profileRoot = Join-Path $runtimeRoot "rvc_profiles\$profile"
+            if (-not (Test-Path -LiteralPath $profileRoot -PathType Container)) {
+                throw "Required RVC $profile runtime profile was not found: $profileRoot"
+            }
+            $profileVersion = [string]$profileVersions.$profile
+            Get-ChildItem -LiteralPath $releaseDir -Filter "JJZero-RVC-$profile-$profileVersion-part*.zip" -File |
+                Remove-Item -Force
+            & $python scripts\build_runtime_packages.py $profileRoot $releaseDir $profileVersion `
+                --part-limit $PartLimit `
+                --component "rvc-runtime-$profile" `
+                --package-prefix "JJZero-RVC-$profile-$profileVersion" `
+                --index-name "rvc-runtime-$profile-packages.json" `
+                --exclude-directory "__pycache__" `
+                --exclude-suffix ".map"
+            if ($LASTEXITCODE -ne 0) {
+                throw "RVC $profile runtime package build failed with exit code $LASTEXITCODE"
+            }
         }
     }
 }

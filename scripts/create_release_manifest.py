@@ -84,20 +84,7 @@ def create_release_manifest(
     runtime_requires_rvc_profile = False
     runtime_embeds_base_profile = False
     runtime_index = resolved_release / RUNTIME_INDEX_NAME
-    if runtime_manifest_path is not None:
-        if not runtime_tag:
-            raise ValueError("A runtime release tag is required with a reused runtime manifest.")
-        components.extend(
-            _reused_runtime_components(
-                runtime_manifest_path,
-                runtime_tag,
-                runtime_version,
-            )
-        )
-        runtime_embeds_base_profile = not any(
-            component.get("id") == "rvc-runtime-cu118" for component in components
-        )
-    elif runtime_index.is_file():
+    if runtime_index.is_file():
         runtime_data = json.loads(runtime_index.read_text(encoding="utf-8"))
         runtime_requires_rvc_profile = runtime_data.get("requires_rvc_profile") is True
         runtime_embeds_base_profile = not runtime_requires_rvc_profile
@@ -122,21 +109,32 @@ def create_release_manifest(
             }
         )
 
-    if runtime_manifest_path is None:
-        for profile, profile_version in RVC_RUNTIME_PROFILE_VERSIONS.items():
-            if profile == "cu118" and runtime_embeds_base_profile:
-                continue
-            component = f"rvc-runtime-{profile}"
-            profile_index = resolved_release / f"{component}-packages.json"
-            if profile_index.is_file():
-                _append_component_index(
-                    components,
-                    resolved_release,
-                    profile_index,
-                    expected_component=component,
-                    expected_version=profile_version,
-                    release_tag=runtime_tag,
-                )
+    for profile, profile_version in RVC_RUNTIME_PROFILE_VERSIONS.items():
+        if profile == "cu118" and runtime_embeds_base_profile:
+            continue
+        component = f"rvc-runtime-{profile}"
+        profile_index = resolved_release / f"{component}-packages.json"
+        if profile_index.is_file():
+            _append_component_index(
+                components,
+                resolved_release,
+                profile_index,
+                expected_component=component,
+                expected_version=profile_version,
+                release_tag=runtime_tag,
+            )
+
+    if runtime_manifest_path is not None:
+        if not runtime_tag:
+            raise ValueError("A runtime release tag is required with a reused runtime manifest.")
+        components.extend(
+            _reused_runtime_components(
+                runtime_manifest_path,
+                runtime_tag,
+                runtime_version,
+                excluded_components={str(component["id"]) for component in components},
+            )
+        )
 
     component_ids = {str(component.get("id", "")) for component in components}
     if runtime_requires_rvc_profile and "rvc-runtime-cu118" not in component_ids:
@@ -197,6 +195,7 @@ def _reused_runtime_components(
     manifest_path: Path,
     release_tag: str,
     runtime_version: str,
+    excluded_components: set[str] | None = None,
 ) -> list[dict[str, object]]:
     data = json.loads(manifest_path.expanduser().resolve().read_text(encoding="utf-8"))
     if data.get("product") != "JJZero Audio" or data.get("architecture") != "x64":
@@ -212,12 +211,15 @@ def _reused_runtime_components(
             for profile, version in RVC_RUNTIME_PROFILE_VERSIONS.items()
         },
     }
+    excluded = excluded_components or set()
     reused: list[dict[str, object]] = []
     for source in source_components:
         if not isinstance(source, dict):
             continue
         component_id = source.get("id")
         if component_id not in expected_versions:
+            continue
+        if component_id in excluded:
             continue
         expected_version = expected_versions[str(component_id)]
         if source.get("version") != expected_version:
@@ -246,7 +248,7 @@ def _reused_runtime_components(
         "rvc-runtime-cu128",
         "rvc-runtime-directml",
         "rvc-runtime-rocm-win",
-    }
+    } - excluded
     missing = sorted(required - component_ids)
     if missing:
         raise ValueError(f"Reused runtime manifest is missing: {missing[0]}")

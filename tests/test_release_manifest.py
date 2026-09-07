@@ -226,6 +226,90 @@ class ReleaseManifestTests(unittest.TestCase):
             self.assertTrue(remote_urls)
             self.assertTrue(all("/download/v0.3.0/" in url for url in remote_urls))
 
+    def test_manifest_combines_new_base_runtime_with_reused_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "JJZero-Audio-0.3.11-Setup.exe").write_bytes(b"installer")
+            runtime = release / "JJZero-Runtime-5-part01.zip"
+            runtime.write_bytes(b"runtime-5")
+            (release / "runtime-packages.json").write_text(
+                json.dumps(
+                    {
+                        "component": "ai-runtime",
+                        "version": "5",
+                        "requires_rvc_profile": False,
+                        "artifacts": [
+                            {
+                                "name": runtime.name,
+                                "size": runtime.stat().st_size,
+                                "sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            prior_components = [
+                {
+                    "id": "ai-runtime",
+                    "version": "4",
+                    "install_mode": "extract",
+                    "artifacts": [
+                        {
+                            "name": "JJZero-Runtime-4-part01.zip",
+                            "size": 10,
+                            "sha256": "a" * 64,
+                        }
+                    ],
+                }
+            ]
+            for profile in ("cu128", "directml", "rocm-win"):
+                component_id = f"rvc-runtime-{profile}"
+                prior_components.append(
+                    {
+                        "id": component_id,
+                        "version": RVC_RUNTIME_PROFILE_VERSIONS[profile],
+                        "install_mode": "extract",
+                        "artifacts": [
+                            {
+                                "name": f"{component_id}.zip",
+                                "size": 10,
+                                "sha256": "b" * 64,
+                            }
+                        ],
+                    }
+                )
+            prior = release / "v0.3.10-latest.json"
+            prior.write_text(
+                json.dumps(
+                    {
+                        "product": "JJZero Audio",
+                        "architecture": "x64",
+                        "components": prior_components,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = create_release_manifest(
+                release,
+                "0.3.11",
+                "5",
+                runtime_release_tag="v0.3.11",
+                runtime_manifest_path=prior,
+            )
+
+            components = {
+                component["id"]: component
+                for component in json.loads(manifest.read_text(encoding="utf-8"))["components"]
+            }
+            self.assertEqual(components["ai-runtime"]["version"], "5")
+            self.assertIn("/download/v0.3.11/", components["ai-runtime"]["artifacts"][0]["url"])
+            for profile in ("cu128", "directml", "rocm-win"):
+                artifact = components[f"rvc-runtime-{profile}"]["artifacts"][0]
+                self.assertIn("/download/v0.3.11/", artifact["url"])
+            self.assertNotIn("JJZero-Runtime-4-part01.zip", str(components))
+
     def test_rejects_reused_runtime_url_from_another_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             release = Path(temporary)

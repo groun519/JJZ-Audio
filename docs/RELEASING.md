@@ -22,7 +22,7 @@ Publishing refuses to continue from a dirty worktree.
 
 ## Code Signing
 
-Public releases should configure either a certificate thumbprint or a certificate file:
+Public releases must configure either a certificate thumbprint or a certificate file:
 
 ```powershell
 $env:JJZERO_SIGN_CERT_THUMBPRINT = "CERTIFICATE_THUMBPRINT"
@@ -57,12 +57,22 @@ Reuse runtime components from an existing release for an application-only update
 
 The reused manifest must be the published `latest.json` from the referenced release. Its component versions, artifact names, sizes, hashes, and release URLs are validated without downloading the multi-gigabyte archives again.
 
+When the base RVC runtime changed but acceleration-profile dependencies did not, increment `AI_RUNTIME_VERSION`, build the base runtime, and reuse the unchanged profiles:
+
+```powershell
+.\scripts\build_release.ps1 -SkipRuntimeProfileBuild -RequireCodeSigning `
+  -RuntimeReleaseTag vX.Y.Z `
+  -RuntimeManifestPath release\vPREVIOUS-latest.json
+```
+
 ## Verify
 
 Require valid Authenticode metadata and signatures for a public release:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1
+powershell -ExecutionPolicy Bypass -File scripts\verify_release_readiness.ps1 `
+  -PreviousInstallerPath release\JJZero-Audio-PREVIOUS-Setup.exe `
+  -SystemFootprintEvidencePath build\verification\system-footprint.json
 ```
 
 There is no unsigned public-release bypass. Readiness verification checks the test
@@ -81,10 +91,12 @@ gh auth login
 Publish a verified release:
 
 ```powershell
-.\scripts\publish_github_release.ps1
+.\scripts\publish_github_release.ps1 `
+  -PreviousInstallerPath release\JJZero-Audio-PREVIOUS-Setup.exe `
+  -SystemFootprintEvidencePath build\verification\system-footprint.json
 ```
 
-Use `-Draft` when the uploaded release requires manual inspection before becoming public. The publisher creates and pushes the version tag, uploads the installer, update manifest, and component archives, and marks the release as latest.
+Use `-Draft` when the uploaded release requires manual inspection before becoming public. The publisher requires `HEAD` to match `origin/main`, creates and pushes the version tag without replacing an existing release, uploads the installer, update manifest, and changed component archives, then downloads every uploaded asset again and verifies its size, SHA-256, installer signature, tag revision, and latest-release status.
 
 ## Post-Release Check
 

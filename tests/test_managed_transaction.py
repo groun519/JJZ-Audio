@@ -114,6 +114,32 @@ class ManagedPathTransactionTests(unittest.TestCase):
             self.assertFalse(incoming.exists())
             self.assertFalse(transaction.folder.exists())
 
+    def test_promote_retries_a_transient_windows_access_denial(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            incoming = root / "incoming" / "model"
+            incoming.mkdir(parents=True)
+            destination = root / "library" / "model"
+            transaction = ManagedPathTransaction(root, "create", "model")
+            original_replace = __import__("os").replace
+            calls = 0
+
+            def replace(source, target):
+                nonlocal calls
+                calls += 1
+                if calls < 3:
+                    raise PermissionError("scanner still holds the directory")
+                return original_replace(source, target)
+
+            with patch(
+                "jang_app.services.managed_transaction.os.replace",
+                side_effect=replace,
+            ):
+                transaction.promote(incoming, destination, "model")
+
+            self.assertGreaterEqual(calls, 3)
+            self.assertTrue(destination.is_dir())
+
     def test_startup_recovery_rolls_back_replacement_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

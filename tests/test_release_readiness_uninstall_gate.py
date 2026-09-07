@@ -16,6 +16,9 @@ class ReleaseReadinessUninstallGateTests(unittest.TestCase):
         cls.gate = (ROOT / "scripts" / "verify_release_installation.ps1").read_text(
             encoding="utf-8-sig"
         )
+        cls.footprint = (ROOT / "scripts" / "verify_system_footprint.ps1").read_text(
+            encoding="utf-8-sig"
+        )
         cls.complete = (ROOT / "scripts" / "verify_complete_uninstall.ps1").read_text(
             encoding="utf-8-sig"
         )
@@ -26,7 +29,8 @@ class ReleaseReadinessUninstallGateTests(unittest.TestCase):
     def test_readiness_requires_a_previous_installer(self) -> None:
         self.assertIn("[Parameter(Mandatory = $true)]", self.readiness)
         self.assertIn("[string]$PreviousInstallerPath", self.readiness)
-        self.assertIn("verify_release_installation.ps1", self.readiness)
+        self.assertIn("verify_system_footprint.ps1", self.readiness)
+        self.assertIn("verify_release_installation.ps1", self.footprint)
 
     def test_gate_rejects_same_or_newer_baselines(self) -> None:
         self.assertIn(

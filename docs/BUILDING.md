@@ -51,6 +51,19 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 `
 
 The referenced release must contain every runtime component required by the generated manifest. Release verification checks component names, hashes, sizes, and profile coverage before publishing.
 
+## Base Runtime-Only Build
+
+When RVC application code changes but the CUDA, DirectML, and Windows ROCm dependency profiles do not, build the new base runtime and reuse only the unchanged profiles:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1 `
+  -SkipRuntimeProfileBuild `
+  -RuntimeReleaseTag vX.Y.Z `
+  -RuntimeManifestPath release\vPREVIOUS-latest.json
+```
+
+The base runtime version must be incremented. Reused profiles are accepted only when their declared versions match the current profile versions; a mismatched or missing profile fails manifest creation.
+
 ## Local Verification Build
 
 Unsigned artifacts can be inspected locally, but they cannot pass the public release

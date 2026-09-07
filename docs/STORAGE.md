@@ -73,16 +73,13 @@ Before a managed runtime is removed, personal RVC files are moved to:
 
 Installer verification separately tests cleanup of application-owned paths and preservation of user-selected external Runtime and Cache roots.
 
-## Complete Reset
+## Complete Removal
 
-To remove every JJZero Audio file:
+The uninstaller defaults to **Normal Uninstall**. Choose **Complete Removal** only when application state, configured Runtime and Cache roots, preserved RVC files, logs, settings, and the local Google Drive credential should also be removed.
 
-1. back up any songs, models, outputs, or RVC files that should be retained;
-2. uninstall JJZero Audio normally;
-3. remove the selected JJZero storage root;
-4. remove `%LOCALAPPDATA%\JJZero Audio`.
+Songs, models, Studio projects, and exports remain protected unless the separate **Delete Data and Output** option is selected. That option is off by default and requires another confirmation because the deletion is permanent.
 
-This permanently deletes remaining songs, models, exports, settings, logs, credentials, and preserved RVC files.
+Complete Removal accepts only canonical paths recorded by JJZero Audio. It refuses drive roots, Windows and user profile folders, disconnected storage, damaged settings, overlapping roots, and paths that traverse symbolic links or junctions. Unrelated files in a shared storage parent are never removed.
 
 ## Diagnostics
 

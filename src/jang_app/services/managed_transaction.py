@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,8 @@ from jang_app.services.managed_files import managed_path_lock, write_json_atomic
 
 TRANSACTION_DIRECTORY_NAME = ".jjzero-transactions"
 TRANSACTION_JOURNAL_NAME = "transaction.json"
+_REPLACE_ATTEMPTS = 5
+_REPLACE_RETRY_DELAY_SECONDS = 0.02
 
 
 class ManagedTransactionError(RuntimeError):
@@ -120,7 +123,7 @@ class ManagedPathTransaction:
         self._write_journal("preparing")
         try:
             staged.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(resolved, staged)
+            _replace_with_retry(resolved, staged)
         except Exception:
             self._moves.pop()
             self._write_journal(self._state)
@@ -160,7 +163,7 @@ class ManagedPathTransaction:
                 "Managed transaction created paths must be unique."
             )
         target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(source, target)
+        _replace_with_retry(source, target)
         created = ManagedTransactionCreated(safe_label, target, discarded)
         self._created.append(created)
         self._state = "staged"
@@ -169,7 +172,7 @@ class ManagedPathTransaction:
         except Exception:
             self._created.pop()
             source.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(target, source)
+            _replace_with_retry(target, source)
             raise
         return created
 
@@ -186,7 +189,7 @@ class ManagedPathTransaction:
                 if created.discarded.exists() or created.discarded.is_symlink():
                     raise FileExistsError(created.discarded)
                 created.discarded.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(created.path, created.discarded)
+                _replace_with_retry(created.path, created.discarded)
             except OSError as exc:
                 failures.append(f"{created.label}: {exc}")
         for move in reversed(self._moves):
@@ -196,7 +199,7 @@ class ManagedPathTransaction:
                 if move.source.exists() or move.source.is_symlink():
                     raise FileExistsError(move.source)
                 move.source.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(move.staged, move.source)
+                _replace_with_retry(move.staged, move.source)
             except OSError as exc:
                 failures.append(f"{move.label}: {exc}")
         self._state = "rolled_back" if not failures else "rollback_failed"
@@ -400,7 +403,7 @@ def _rollback_journal(
             replacement = folder / "recovery-discard" / label
             _move_for_recovery(source, replacement, label)
         source.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staged, source)
+        _replace_with_retry(staged, source)
 
 
 def _move_for_recovery(source: Path, target: Path, label: str) -> None:
@@ -409,7 +412,18 @@ def _move_for_recovery(source: Path, target: Path, label: str) -> None:
             f"Recovery target already exists for {label}: {target}"
         )
     target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(source, target)
+    _replace_with_retry(source, target)
+
+
+def _replace_with_retry(source: Path, target: Path) -> None:
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt + 1 >= _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_REPLACE_RETRY_DELAY_SECONDS * (2**attempt))
 
 
 def _purge_folder(folder: Path) -> bool:
