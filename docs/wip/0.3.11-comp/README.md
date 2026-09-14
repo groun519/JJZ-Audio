@@ -7,11 +7,11 @@
 
 ## 1. Goal
 
-이번 목업의 핵심은 기능 추가 자체가 아니라 **기존 0.3.12 시도에서 과도하게 단순화되거나 불필요하게 분리된 온보딩 UI를 다시 설계하는 것**이다.
+이번 목업의 핵심은 기능 추가 자체가 아니라 **기존 온보딩 시도에서 과도하게 단순화되거나 불필요하게 분리된 UI를 다시 설계하는 것**이다.
 
 최종 방향:
 
-- `빠른 시작` 개념 제거
+- 온보딩의 `빠른 시작(Quick Start)` 개념 제거
 - 페이지별 튜토리얼
 - 전역 진행률 없음
 - 완료 상태 없음
@@ -20,6 +20,8 @@
 - 사용자의 실제 작업 결과를 감시하지 않음
 - 실제 데이터에 영향을 주지 않음
 - 사용자가 원하는 페이지 튜토리얼을 언제든 다시 실행 가능
+
+> **중요:** Library의 실제 제작 기능인 `Quick Create`는 `Quick Start` 온보딩과 별개다. 별도 제품 결정이 없는 한 제거 대상으로 취급하지 않는다.
 
 ## 2. Help flow
 
@@ -33,7 +35,7 @@
 → 이전 / 다음 / 종료
 ```
 
-튜토리얼 실행 상태는 현재 세션의 임시 UI 상태일 뿐 영구 저장하지 않는다.
+튜토리얼 실행 상태는 현재 실행 중인 임시 UI 상태일 뿐 영구 저장하지 않는다.
 
 ## 3. Help panel layout
 
@@ -85,16 +87,14 @@
 
 - Step ID
 - 설명
-- 실제 UI Highlight Target
-- 사용자가 눌러야 하는지 여부
-- 실제 데이터 변경 여부
-- 대상 부재 fallback
-- 페이지 이동 필요 여부
+- semantic Highlight Target ID
+- 현재 실제 QWidget / 컨테이너 매핑
+- 대상이 숨김/부재/비활성일 때 fallback
+- 튜토리얼이 임시로 바꿔도 되는 UI 상태
+- 실제 데이터 변경 금지 여부
 - 이전 / 다음 동작
 
 ## 5. Current page scope
-
-현재 코드 기준 주요 범위:
 
 ### Library
 
@@ -108,8 +108,7 @@
 - 작업곡 지정
 - 곡 상세
 - 파일/자산 관리
-
-기존 Quick Create는 최종 설계에서 제거 대상으로 본다.
+- Quick Create (실제 제작 기능, 온보딩 Quick Start와 별개)
 
 ### Models
 
@@ -153,7 +152,7 @@ Model Workspace:
 - Advanced Settings
 - Index
 - Device
-- Inference Controls
+- Conversion Quality
 - Convert
 - Result Browser
 - Vocal Results
@@ -163,7 +162,7 @@ Model Workspace:
 
 - Sound Pool
 - FX Pool
-- Video Preview
+- Media Preview
 - Transport
 - Timeline
 - Track
@@ -180,7 +179,7 @@ Model Workspace:
 
 - Export Song
 - Audio / Video 모드
-- Export 설정
+- Preset / 세부 Export 설정
 - 실행
 - Exports 결과
 - 미리듣기
@@ -202,14 +201,14 @@ Model Workspace:
 - 튜토리얼 전용 데이터 변경
 - Help 기능 때문에 기존 페이지 구조를 크게 재배치
 - 페이지마다 별도 신고 패널 생성
+- 튜토리얼 타깃을 맞추기 위한 중복 UI 생성
+- 좌표를 하드코딩한 Highlight
 
 기본 원칙:
 
 > 기존 실제 작업 UI 위에 설명과 Highlight만 얹는다.
 
 ## 7. Planned documents
-
-작성 순서:
 
 1. `01_TutorialSystem.md`
 2. `02_HelpPanel.md`
@@ -222,15 +221,13 @@ Model Workspace:
 9. `09_ProblemReporting.md`
 10. `10_ImplementationPlan.md`
 
-페이지별 문서는 실제 코드를 다시 읽고 Highlight 대상까지 확정한 뒤 작성한다.
-
 ## 8. Completion gate
 
 0.3.11-comp 목업 완료 조건:
 
 - 모든 페이지 도움말 내용 확정
 - 모든 페이지 튜토리얼 단계 확정
-- 실제 Highlight Target 확정
+- semantic Highlight Target과 실제 UI 매핑 확정
 - 대상 부재 fallback 확정
 - 기존 Quick Start/온보딩 제거 범위 확정
 - 문제 신고 UX 확정
